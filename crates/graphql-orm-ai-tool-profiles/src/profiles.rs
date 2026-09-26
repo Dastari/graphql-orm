@@ -67,7 +67,7 @@ pub trait AiGraphqlToolManifestCatalog {
 pub enum AiGraphqlRootType {
     /// Query root.
     Query,
-    /// Mutation root, available only through an explicit supervised profile.
+    /// Mutation root, available only through an explicit reviewed write profile.
     Mutation,
 }
 
@@ -393,6 +393,7 @@ impl AiGraphqlSelection {
 enum ProfileExecution {
     ReadOnly,
     SupervisedMutation,
+    AutomaticMutation,
 }
 
 /// Reviewed policy profile used to generate one immutable GraphQL tool.
@@ -492,6 +493,53 @@ impl AiGraphqlToolProfile {
             idempotent,
             browser_result_preview: None,
         })
+    }
+
+    /// Creates an explicitly reviewed automatic application mutation profile.
+    ///
+    /// This emits an immutable `AutonomousWrite`/`None` descriptor. It does not
+    /// enable the tool, authorize execution, or bypass current-principal policy.
+    /// Runtime policy may require exact one-shot approval for particular arguments.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error unless risk is `LowRiskWrite` or
+    /// `NonIdempotentWrite`. High-impact and secret operations cannot be given
+    /// an automatic profile.
+    #[allow(clippy::too_many_arguments)]
+    pub fn automatic_mutation(
+        profile_id: impl Into<String>,
+        field_name: impl Into<String>,
+        description: impl Into<String>,
+        selections: Vec<AiGraphqlSelection>,
+        disclosure_schema: AiDisclosureSchema,
+        maximum_result_bytes: u64,
+        maximum_result_records: u32,
+        risk: AiToolRisk,
+        idempotent: bool,
+    ) -> Result<Self, AiError> {
+        if !matches!(
+            risk,
+            AiToolRisk::LowRiskWrite | AiToolRisk::NonIdempotentWrite
+        ) {
+            return Err(configuration_error(
+                "automatic mutations require a reviewed ordinary write risk",
+            ));
+        }
+        let mut profile = Self::supervised_mutation(
+            profile_id,
+            field_name,
+            description,
+            selections,
+            disclosure_schema,
+            maximum_result_bytes,
+            maximum_result_records,
+            risk,
+            idempotent,
+        )?;
+        profile.execution = ProfileExecution::AutomaticMutation;
+        profile.approval = AiApprovalRule::None;
+        Ok(profile)
     }
 
     /// Replaces the closed set of model-facing inputs.
@@ -1033,6 +1081,7 @@ impl AiGraphqlToolManifestBuilder {
         .with_maturity(match profile.execution {
             ProfileExecution::ReadOnly => ToolMaturity::ReadOnly,
             ProfileExecution::SupervisedMutation => ToolMaturity::SupervisedWrite,
+            ProfileExecution::AutomaticMutation => ToolMaturity::AutonomousWrite,
         })
         .with_risk(profile.risk, profile.approval)
         .with_idempotent(profile.idempotent);
@@ -1546,6 +1595,14 @@ fn validate_profile_shape(profile: &AiGraphqlToolProfile) -> Result<(), AiError>
         {
             Ok(())
         }
+        (ProfileExecution::AutomaticMutation, AiGraphqlRootType::Mutation)
+            if matches!(
+                profile.risk,
+                AiToolRisk::LowRiskWrite | AiToolRisk::NonIdempotentWrite
+            ) && profile.approval == AiApprovalRule::None =>
+        {
+            Ok(())
+        }
         (ProfileExecution::SupervisedMutation, AiGraphqlRootType::Mutation)
             if matches!(
                 profile.risk,
@@ -1574,6 +1631,13 @@ fn validate_compiled_descriptor(entry: &AiGraphqlToolManifestEntry) -> Result<()
             AiToolRisk::LowRiskWrite | AiToolRisk::NonIdempotentWrite | AiToolRisk::HighImpact
         )
         && descriptor.approval == AiApprovalRule::OneShot;
+    let automatic_write = entry.root_type == AiGraphqlRootType::Mutation
+        && descriptor.maturity == ToolMaturity::AutonomousWrite
+        && matches!(
+            descriptor.risk,
+            AiToolRisk::LowRiskWrite | AiToolRisk::NonIdempotentWrite
+        )
+        && descriptor.approval == AiApprovalRule::None;
     if !descriptor.has_valid_fingerprint()
         || descriptor.operation_domain != AiToolOperationDomain::Application
         || descriptor.maximum_result_bytes == 0
@@ -1586,7 +1650,7 @@ fn validate_compiled_descriptor(entry: &AiGraphqlToolManifestEntry) -> Result<()
                 || preview.maximum_classification > descriptor.maximum_classification
                 || preview.maximum_classification == DataClassification::Secret
         })
-        || !(safe_read || supervised_write)
+        || !(safe_read || supervised_write || automatic_write)
     {
         return Err(configuration_error(
             "compiled GraphQL tool descriptor has unsafe execution semantics",

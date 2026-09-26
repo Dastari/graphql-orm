@@ -3,7 +3,7 @@ title: "Supervised Mutation and Approval Execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-09-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -11,8 +11,8 @@ supersedes: []
 # Supervised Mutation and Approval Execution
 
 The [canonical ordering and history proof](ordering-history.md) defines the
-phase order and explains why multi-call, partial, stateless, and parallel
-consequential adoption remain closed.
+phase order and explains the distinct native mixed-turn proof. Generic partial,
+stateless, and parallel consequential adoption remain closed.
 
 The supervised path is deliberately separate from the read-only coordinator.
 It enables a host to expose a reviewed application mutation to a model without
@@ -43,6 +43,15 @@ constructors govern model-visible exposure only; they grant no execution
 authority.
 
 ## Host preview contract
+
+Static automatic mutations use the separate
+`AiGraphqlToolProfile::automatic_mutation` profile and classified provider-plan
+constructors. They bind `AutonomousWrite`/`None`, ordinary write risk, the exact
+registered document and current host policy. A host can return
+`AiToolAuthorizationDecision::require_one_shot` for selected validated arguments.
+The automatic path then refuses execution until the exact fresh preview and
+policy evidence are approved. A read-only descriptor cannot acquire mutation
+authority through this decision.
 
 Implement `AiCanonicalActionPreviewBuilder` using trusted current application
 state or a server-owned dry-run/projection service. The builder receives a
@@ -80,6 +89,45 @@ must not perform the mutation.
 The human reads and decides the request through the authenticated approval
 GraphQL lifecycle. Recent MFA remains a server-owned per-request choice. The UI
 must render the decrypted canonical preview, not model-written explanation.
+The approval service applies coarse access before decrypting and then calls
+`AiApprovalAccessPolicy::can_access_bound_approval` with verified
+`AiApprovalAccessEvidence` for requests, reads, decisions, revocation and
+consumption. Hosts enforce current session ownership and exact resource
+authority there. The compatible default delegates to the coarse hook. Preview
+details are bounded to 2 MiB of serialized JSON, including escaping.
+
+## Explicit mixed native turns
+
+`AiSupervisedAgentTurnPlan::new_classified_native` with the coordinator's
+`with_classified_native_tools` integration permits sequential read, automatic
+mutation and approval-required callbacks in one trusted retained provider turn.
+The corresponding classified plan constructors bind every exact descriptor.
+Ordinary read-only and supervised constructors do not enable this mode.
+
+A callback that needs approval first stores a protected, non-executable
+candidate under the active run fence. Its separately egress-authorized
+`ApprovalPending` control receipt says that no effect ran and retry is not
+allowed. Later mutations in that same turn receive durable
+`ConsequentialCallsPaused` receipts; reads can continue through current policy.
+No approval is available for human consumption while the provider turn is
+still active or its usage is uncertain.
+
+After authoritative usage settles, `native_approval_provider_turn_persisted`
+binds every ordered callback, prior completed result, control receipt, budget,
+route and rule fact. Only then can the exact candidate become an ordinary
+parked one-shot approval. Cancellation, failure and retention preserve completed
+effects while abandoning non-executable pending preparation.
+
+Approved reclaim moves only the pending call and step to the fresh generation.
+The original provider budget and earlier callbacks retain their original
+coordinates. Fresh policy and preview must still match the approval. A complete
+approved effect is protected as `native_approved_outcome_persisted`, containing
+only that new result plus the original source proof. A separately authorized
+`FrameworkApprovedToolOutcome` JSON input continues the retained provider; it
+does not reuse the native call ID that already received `ApprovalPending`.
+Historical callbacks and settled provider usage are counted once and never
+replayed. A source checkpoint alone is not a completed adoptable outcome.
+Uncertainty after approval consumption remains `RecoveryRequired`.
 
 ## Consumption and resolver execution
 
@@ -91,6 +139,9 @@ service:
    bindings.
 2. Verifies the exact provider-turn budget reservation is committed,
    reconciled, and bound to this session/run/attempt/generation/provider/model.
+   Native approved reclaim instead proves the original settled budget through
+   the finalized candidate, immutable source, confirmed parked session and
+   exact fresh-generation approval claim; no generic old-budget exemption exists.
 3. Rehydrates current access, opens and re-hashes the protected arguments,
    preauthorizes current host tool policy, and rebuilds the canonical preview.
 4. Atomically consumes the exact unexpired one-shot approval, returns the
@@ -238,11 +289,33 @@ An exact complete provider-retained result can be requeued after lease loss,
 reopened under current principal/rule/protection authority, and consumed once
 before later transport without executing the resolver again. The coordinator
 checks provider-turn capacity before consuming that evidence and refuses to
-stage an approval on the final allowed turn. Multi-call, mixed read/write, and
-stateless (including Ollama/local-harness) supervised adoption remain closed;
-incomplete or ambiguous process loss is `RecoveryRequired`.
+stage an approval on the final allowed turn. This ordinary supervised checkpoint
+does not admit mixed or multi-call adoption. Explicit retained native turns use
+the distinct source/outcome proof described above. Stateless consequential
+adoption (including Ollama/local-harness) remains closed; incomplete or ambiguous
+process loss is `RecoveryRequired`.
 
 `AiReadOnlyAgentCoordinator` remains read-only. Deployments must not route
 supervised descriptors through it, reconstruct provider state from an
 approval/tool row, or infer mutation replay authority after a resumed-worker
 crash.
+
+## Capability delivery in native turns
+
+Use the classified capability-surface initial/continuation constructors when
+mixing the crate-owned discovery broker with exact static mutation bootstrap
+definitions. Attach the same exact surface to the native turn using
+`with_capability_delivery`; its session-binding fingerprint must match the
+retained provider descriptor. Swapped definitions, partial surfaces and changes
+to the retained definition binding fail closed.
+
+Native broker reads dispatch through the existing durable read-only broker,
+including after a mutation has become pending. The broker cannot execute a
+mutation. Application mutation callbacks continue through classification and
+conditional approval. Source checkpoints retain each completed broker read
+alongside the prior application effects; approved resumption does not replay
+any prior callback. Loaded broker references stay bound to their original
+attempt. After approval reclaim, use a fresh broker turn under the same session
+binding and rediscover reads; the old references do not gain authority in the
+new attempt. Native delivery rejects client-deferred mode because in-flight callbacks cannot
+install definitions; existing read-only deferred continuation behavior is unchanged.

@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AiRunId, AiScope, AiToolAuthorizationDecision, AiToolAuthorizationPolicy, AiToolCallId,
-    AiToolDescriptor, AiToolId, AiToolOperationKind, GraphqlExecutionTargetId,
+    AiApprovalRule, AiRunId, AiScope, AiToolAuthorizationDecision, AiToolAuthorizationPolicy,
+    AiToolCallId, AiToolDescriptor, AiToolId, AiToolOperationKind, GraphqlExecutionTargetId,
     GraphqlOperationContract, ToolExecutionError,
 };
 
@@ -144,6 +144,224 @@ pub struct GraphqlRequestContext {
     inner: Arc<dyn Any + Send + Sync>,
 }
 
+/// Crate-authored non-secret provenance of a durable application tool invocation.
+///
+/// The tool lifecycle derives this value from its trusted run, provider result,
+/// and registered request. It contains no prompt, command source, credential or
+/// role snapshot and grants no authority. Hosts can inspect it when issuing
+/// exact delegation without reading private runtime tables. Deserialized values
+/// alone are not proof; only the registered execution binding can attach them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiToolExecutionProvenance {
+    session_id: crate::AiSessionId,
+    run_id: AiRunId,
+    tool_call_id: AiToolCallId,
+    attempt_id: uuid::Uuid,
+    lease_generation: i64,
+    provider_kind: crate::ProviderKind,
+    provider_model: String,
+    provider_profile_id: String,
+    provider_call_id: String,
+    provider_response_id: Option<String>,
+    budget_reservation_id: crate::AiBudgetReservationId,
+    execution_selection: Option<crate::AiSessionExecutionSelection>,
+    provider_registration_fingerprint: Option<String>,
+    tool_fingerprint: String,
+    argument_hash: String,
+    approval_id: Option<crate::AiApprovalId>,
+    approval_binding_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    authorization_state_digest: Option<String>,
+}
+
+impl AiToolExecutionProvenance {
+    /// AI session owning the invocation.
+    pub fn session_id(&self) -> crate::AiSessionId {
+        self.session_id
+    }
+
+    /// Run owning the invocation.
+    pub fn run_id(&self) -> AiRunId {
+        self.run_id
+    }
+
+    /// Exact durable application tool call.
+    pub fn tool_call_id(&self) -> AiToolCallId {
+        self.tool_call_id
+    }
+
+    /// Provider execution attempt that produced the call.
+    pub fn attempt_id(&self) -> uuid::Uuid {
+        self.attempt_id
+    }
+
+    /// Provider execution fencing generation.
+    pub fn lease_generation(&self) -> i64 {
+        self.lease_generation
+    }
+
+    /// Actual provider family.
+    pub fn provider_kind(&self) -> &crate::ProviderKind {
+        &self.provider_kind
+    }
+
+    /// Actual provider model.
+    pub fn provider_model(&self) -> &str {
+        &self.provider_model
+    }
+
+    /// Exact provider profile from the authorized inference manifest.
+    pub fn provider_profile_id(&self) -> &str {
+        &self.provider_profile_id
+    }
+
+    /// Opaque provider-native call identifier.
+    pub fn provider_call_id(&self) -> &str {
+        &self.provider_call_id
+    }
+
+    /// Opaque provider response identifier, when available.
+    pub fn provider_response_id(&self) -> Option<&str> {
+        self.provider_response_id.as_deref()
+    }
+
+    /// Provider accounting correlation.
+    pub fn budget_reservation_id(&self) -> crate::AiBudgetReservationId {
+        self.budget_reservation_id
+    }
+
+    /// Immutable admitted session routing selection, when present.
+    pub fn execution_selection(&self) -> Option<&crate::AiSessionExecutionSelection> {
+        self.execution_selection.as_ref()
+    }
+
+    /// Exact retained-provider registration fingerprint, when present.
+    pub fn provider_registration_fingerprint(&self) -> Option<&str> {
+        self.provider_registration_fingerprint.as_deref()
+    }
+
+    /// Exact compiled registered tool fingerprint.
+    pub fn tool_fingerprint(&self) -> &str {
+        &self.tool_fingerprint
+    }
+
+    /// Canonical hash of the exact GraphQL variables.
+    pub fn argument_hash(&self) -> &str {
+        &self.argument_hash
+    }
+
+    /// Consumed one-shot approval, only for approved execution.
+    pub fn approval_id(&self) -> Option<crate::AiApprovalId> {
+        self.approval_id
+    }
+
+    /// Exact consumed approval envelope hash, when present.
+    pub fn approval_binding_hash(&self) -> Option<&str> {
+        self.approval_binding_hash.as_deref()
+    }
+
+    /// Policy version recomputed by the bridge immediately before execution.
+    /// Absent in the earlier durable origin record.
+    pub fn policy_version(&self) -> Option<&str> {
+        self.policy_version.as_deref()
+    }
+
+    /// Safe current authorization digest recomputed immediately before execution.
+    pub fn authorization_state_digest(&self) -> Option<&str> {
+        self.authorization_state_digest.as_deref()
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn from_provider_call(
+        lease: &crate::AiRunLease,
+        provider: &crate::AiProviderCallResult,
+        provider_call_id: &str,
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+        execution_selection: Option<crate::AiSessionExecutionSelection>,
+    ) -> Result<Self, ToolExecutionError> {
+        if provider.session_id() != lease.session_id()
+            || provider.run_id() != lease.run_id()
+            || provider.attempt_id() != lease.attempt_id()
+            || provider.lease_generation() != lease.lease_generation()
+            || request.invocation.run_id != lease.run_id()
+            || execution_selection.as_ref().is_some_and(|selection| {
+                selection.provider_kind() != *provider.provider_kind()
+                    || selection.model() != provider.provider_model()
+            })
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        let mut calls = provider
+            .tool_calls()
+            .iter()
+            .filter(|call| call.call_id() == provider_call_id);
+        let call = calls.next().ok_or(ToolExecutionError::StaleContract)?;
+        if calls.next().is_some()
+            || call.tool_id() != &descriptor.id
+            || call.tool_fingerprint() != descriptor.fingerprint
+            || call.arguments() != &request.variables
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        Ok(Self {
+            session_id: lease.session_id(),
+            run_id: lease.run_id(),
+            tool_call_id: request.invocation.tool_call_id,
+            attempt_id: lease.attempt_id(),
+            lease_generation: lease.lease_generation(),
+            provider_kind: provider.provider_kind().clone(),
+            provider_model: provider.provider_model().to_owned(),
+            provider_profile_id: provider
+                .model_inference_manifest()
+                .provider_profile_id
+                .clone(),
+            provider_call_id: call.call_id().to_owned(),
+            provider_response_id: provider.provider_response_id().map(str::to_owned),
+            budget_reservation_id: provider.budget_reservation_id(),
+            execution_selection,
+            provider_registration_fingerprint: provider
+                .provider_session_claim()
+                .map(|claim| claim.descriptor().registration_fingerprint().to_owned()),
+            tool_fingerprint: descriptor.fingerprint.clone(),
+            argument_hash: crate::tools::canonical_json_digest(&request.variables),
+            approval_id: None,
+            approval_binding_hash: None,
+            policy_version: None,
+            authorization_state_digest: None,
+        })
+    }
+
+    pub(crate) fn with_consumed_approval(
+        mut self,
+        approval: &crate::ConsumedAiApproval,
+        binding: &crate::AiApprovalBinding,
+    ) -> Result<Self, ToolExecutionError> {
+        if approval.binding_hash() != binding.stable_hash()
+            || self.session_id != binding.session_id
+            || self.tool_call_id != binding.tool_call_id
+            || self.tool_fingerprint != binding.tool_fingerprint
+            || self.argument_hash != binding.argument_hash
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        self.approval_id = Some(approval.approval_id());
+        self.approval_binding_hash = Some(approval.binding_hash().to_owned());
+        Ok(self)
+    }
+
+    fn matches_request(&self, fingerprint: &str, request: &ToolGraphqlRequest) -> bool {
+        self.run_id == request.invocation.run_id
+            && self.tool_call_id == request.invocation.tool_call_id
+            && self.tool_fingerprint == fingerprint
+            && self.argument_hash == crate::tools::canonical_json_digest(&request.variables)
+            && self.approval_id.is_some() == self.approval_binding_hash.is_some()
+    }
+}
+
 /// Crate-authored identity of the exact registered tool contract reaching an
 /// authenticated GraphQL execution boundary.
 ///
@@ -159,6 +377,8 @@ pub struct AiRegisteredToolExecutionBinding {
     tool_fingerprint: String,
     operation_kind: AiToolOperationKind,
     generated_capability_fingerprint: Option<String>,
+    operation_contract: GraphqlOperationContract,
+    provenance: Option<AiToolExecutionProvenance>,
 }
 
 /// Closed origin of a crate-authored registered tool execution binding.
@@ -168,12 +388,20 @@ pub enum AiRegisteredToolExecutionKind {
     StaticOperation,
     /// Exact generated query capability admitted by active target policy.
     GeneratedQuery,
-    /// Exact generated mutation capability. Remote delegated execution denies
-    /// this kind unless a later separately reviewed contract admits it.
+    /// Exact generated mutation capability. Remote delegated execution admits
+    /// it only when the host explicitly enables registered mutations.
     GeneratedMutation,
 }
 
 impl AiRegisteredToolExecutionBinding {
+    fn with_current_authorization(mut self, decision: &AiToolAuthorizationDecision) -> Self {
+        if let Some(provenance) = self.provenance.as_mut() {
+            provenance.policy_version = Some(decision.policy_version.clone());
+            provenance.authorization_state_digest =
+                Some(decision.authorization_state_digest.clone());
+        }
+        self
+    }
     /// Returns whether the execution came from the static descriptor path or
     /// the generated-query capability path.
     pub const fn kind(&self) -> AiRegisteredToolExecutionKind {
@@ -202,6 +430,33 @@ impl AiRegisteredToolExecutionBinding {
         self.generated_capability_fingerprint.as_deref()
     }
 
+    /// Trusted durable lifecycle provenance, when execution originated there.
+    pub fn provenance(&self) -> Option<&AiToolExecutionProvenance> {
+        self.provenance.as_ref()
+    }
+
+    pub(crate) fn with_provenance(
+        mut self,
+        provenance: AiToolExecutionProvenance,
+        request: &ToolGraphqlRequest,
+    ) -> Result<Self, ToolExecutionError> {
+        if !provenance.matches_request(&self.tool_fingerprint, request) {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        self.provenance = Some(provenance);
+        Ok(self)
+    }
+
+    pub(crate) fn matches_request(&self, request: &ToolGraphqlRequest) -> bool {
+        self.provenance
+            .as_ref()
+            .is_none_or(|provenance| provenance.matches_request(&self.tool_fingerprint, request))
+            && self.operation_contract == request.contract
+            && request.operation_name == self.operation_contract.operation_name
+            && crate::stable_graphql_document_hash(&request.document)
+                == self.operation_contract.document_hash
+    }
+
     pub(crate) fn static_operation(
         descriptor: &AiToolDescriptor,
         request: &ToolGraphqlRequest,
@@ -213,6 +468,8 @@ impl AiRegisteredToolExecutionBinding {
             tool_fingerprint: descriptor.fingerprint.clone(),
             operation_kind: descriptor.operation_kind,
             generated_capability_fingerprint: None,
+            operation_contract: request.contract.clone(),
+            provenance: None,
         })
     }
 
@@ -241,6 +498,8 @@ impl AiRegisteredToolExecutionBinding {
             tool_fingerprint: descriptor.fingerprint.clone(),
             operation_kind: AiToolOperationKind::Query,
             generated_capability_fingerprint: Some(capability_fingerprint.to_owned()),
+            operation_contract: request.contract.clone(),
+            provenance: None,
         })
     }
 
@@ -269,6 +528,8 @@ impl AiRegisteredToolExecutionBinding {
             tool_fingerprint: descriptor.fingerprint.clone(),
             operation_kind: AiToolOperationKind::Mutation,
             generated_capability_fingerprint: Some(capability_fingerprint.to_owned()),
+            operation_contract: request.contract.clone(),
+            provenance: None,
         })
     }
 }
@@ -464,7 +725,7 @@ impl AuthenticatedToolBridge {
             .await
     }
 
-    async fn execute_with_binding(
+    pub(crate) async fn execute_with_binding(
         &self,
         principal_reference: &PrincipalReference,
         descriptor: &AiToolDescriptor,
@@ -491,9 +752,12 @@ impl AuthenticatedToolBridge {
                 &request.variables,
             )
             .await;
-        if !authorization.is_complete_allow() {
+        if !authorization.is_complete_allow()
+            || authorization.approval_requirement() != AiApprovalRule::None
+        {
             return Err(ToolExecutionError::Authorization);
         }
+        let binding = binding.with_current_authorization(&authorization);
         let context = self
             .context_factory
             .build_registered(&principal, target, &binding, &request)
@@ -542,6 +806,7 @@ impl AuthenticatedToolBridge {
     /// Executes only when a newly recomputed host policy decision still
     /// matches the policy version and safe authorization-state digest bound to
     /// a consumed one-shot approval.
+    #[cfg(test)]
     pub(crate) async fn execute_bound(
         &self,
         principal_reference: &PrincipalReference,
@@ -549,15 +814,17 @@ impl AuthenticatedToolBridge {
         request: ToolGraphqlRequest,
         expected_policy_version: &str,
         expected_authorization_state_digest: &str,
+        required_approval: Option<AiApprovalRule>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         let binding = AiRegisteredToolExecutionBinding::static_operation(descriptor, &request)?;
-        self.execute_registered_bound(
+        self.execute_registered_bound_requiring(
             principal_reference,
             descriptor,
             request,
             binding,
             expected_policy_version,
             expected_authorization_state_digest,
+            required_approval,
         )
         .await
     }
@@ -571,17 +838,43 @@ impl AuthenticatedToolBridge {
         expected_policy_version: &str,
         expected_authorization_state_digest: &str,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
+        self.execute_registered_bound_requiring(
+            principal_reference,
+            descriptor,
+            request,
+            binding,
+            expected_policy_version,
+            expected_authorization_state_digest,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn execute_registered_bound_requiring(
+        &self,
+        principal_reference: &PrincipalReference,
+        descriptor: &AiToolDescriptor,
+        request: ToolGraphqlRequest,
+        binding: AiRegisteredToolExecutionBinding,
+        expected_policy_version: &str,
+        expected_authorization_state_digest: &str,
+        required_approval: Option<AiApprovalRule>,
+    ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
         let (principal, authorization) = self
             .preauthorize(principal_reference, descriptor, &request)
             .await?;
         if authorization.policy_version != expected_policy_version
             || authorization.authorization_state_digest != expected_authorization_state_digest
+            || required_approval
+                .is_some_and(|required| authorization.approval_requirement() != required)
         {
             return Err(ToolExecutionError::Authorization);
         }
         let target = self
             .targets
             .validate_contract(&request.contract, &request.document)?;
+        let binding = binding.with_current_authorization(&authorization);
         let context = self
             .context_factory
             .build_registered(&principal, target, &binding, &request)

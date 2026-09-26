@@ -3,7 +3,7 @@ title: "Private Remote GraphQL Execution"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-14
+last_reviewed: 2026-09-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -24,7 +24,7 @@ reviewed schema fingerprint. The registry contains no URL or credential. The
 tool's `GraphqlOperationContract` separately binds the exact server-authored
 document, operation name, result projection, and static disclosure schema.
 `AiRemoteGraphqlCapabilityBinding` identifies whether that validated request
-came from an exact static read descriptor or an automatic generated query. A
+came from an exact static descriptor or a registered generated capability. A
 host cannot construct that identity independently of the authenticated bridge.
 
 The ordinary `AuthenticatedToolBridge` remains responsible for current
@@ -63,8 +63,8 @@ boundary. It receives the freshly resolved principal and complete redacted
 delegation request, but no incoming bearer token. It must:
 
 - inspect `request.capability_binding()` rather than an operation-name prefix;
-- require the exact static descriptor ID/fingerprint or generated-query
-  capability ID/fingerprint and, for generated queries, the target, finished
+- require the exact static descriptor ID/fingerprint and operation contract or
+  generated capability ID/fingerprint and, for generated operations, the target, finished
   schema, semantic catalogue/operation and root-field binding;
 - preserve the original human actor for on-behalf-of work;
 - mint authority no broader than the requested audience, resource, scope, and
@@ -92,11 +92,32 @@ The application resolver remains authoritative for roles, row/field policy,
 tenant/resource boundaries, assurance, rate limits, and current object state.
 Delegation and AI approval do not bypass those checks.
 
-The remote adapter admits only read bindings. Static/generated mutations,
-subscriptions, internal operations and a generated-looking static operation
-name fail before authority issuance. Initial, provider-retained and stateless
-mixed-read plans retain the same exact registered IDs and fingerprints; hosts
-do not reconstruct a tool-result route or add a continuation-side binding.
+The adapter's `AiRemoteGraphqlOperationPolicy` defaults to `QueriesOnly`.
+Explicit `RegisteredQueriesAndMutations` admits only exact registered mutation
+contracts after current runtime authorization. Subscriptions, internal
+operations, document/kind substitution and a generated-looking static operation
+name still fail before authority issuance. Mutation contexts are single-use
+and are consumed before transport; an ambiguous failure never permits reuse.
+Initial, provider-retained and stateless mixed-read plans retain the same exact
+registered IDs and fingerprints; hosts do not reconstruct a tool-result route
+or add a continuation-side binding.
+
+The compatible default `AiRemoteGraphqlAuthorityIssuer::issue_for_request`
+forwards to `issue`. Hosts can override it to inspect the actual validated
+`ToolGraphqlRequest` variables after the adapter has verified its exact static
+contract. `AiToolExecutionProvenance`, when present, comes from the durable
+tool lifecycle and binds the run, attempt, callback, argument hash, provider,
+budget and optional consumed approval. Current policy version and authorization
+state are refreshed at invocation. A direct bridge call need not have durable
+provenance; a host that requires this proof must deny its absence.
+
+A federation router may rewrite documents and variables. This adapter does not
+prove that custom delegation claims survive or are enforced by that router.
+Where exact target arguments must be bound, the host must derive an authenticated
+logical argument binding from the registered mapping and actual request, then
+verify the resolver's resolved arguments. Model metadata is never its source.
+Neither the opaque provenance nor a delegation credential replaces current
+target resolver authorization.
 
 ## What the adapter does not prove
 

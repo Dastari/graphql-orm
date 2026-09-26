@@ -998,7 +998,7 @@ impl AiCodexAppServerTurnInput {
         request.validate()?;
         let web_search = codex_web_search_turn_config(&request)?;
         if request.tools.is_empty()
-            || request.continuation.is_some()
+            || (request.continuation.is_some() && request.native_approved_outcome_hash().is_none())
             || request.continuation_mode != ModelContinuationMode::ProviderRetained
             || request.reasoning_summary != ModelReasoningSummaryRequest::Disabled
             || request.output_schema.is_some()
@@ -1438,6 +1438,14 @@ impl AiProvider for AiCodexAppServerProvider {
         validate_registration_web_search(&self.registration, &request)?;
         let binding = context.run_binding().ok_or(ProviderError::Rejected)?;
         let retained = context.provider_session().cloned();
+        if request.native_approved_outcome_hash().is_some()
+            && retained.as_ref().is_none_or(|session| {
+                session.activation() != crate::AiProviderSessionActivation::ExistingRetained
+            })
+        {
+            return Err(ProviderError::Rejected);
+        }
+
         if retained.as_ref().is_some_and(|session| {
             !retained_session_matches_effort(&self.registration, session, request.reasoning_effort)
         }) {
@@ -9395,6 +9403,30 @@ pub(crate) mod tests {
             tools: vec![dynamic_tool()],
             ..model_request()
         }
+    }
+
+    #[test]
+    fn native_approved_outcome_continues_as_new_json_input_without_duplicate_callback() {
+        let value = json!({"formatVersion":1,"kind":"FrameworkApprovedToolOutcome","toolCallId":uuid::Uuid::new_v4(),"providerCallId":"consumed-call","toolId":"records.update","state":"completed","output":{"changed":true}});
+        let mut request = dynamic_model_request();
+        request.continuation = Some(crate::ModelContinuation::ProviderResponse {
+            response_id: "settled-turn".to_owned(),
+        });
+        request.input = vec![ModelInputBlock::Json {
+            value: value.clone(),
+        }];
+        let input = AiCodexAppServerTurnInput::try_from_dynamic_request(request.clone()).unwrap();
+        assert_eq!(input.input(), &[value.to_string()]);
+        request.input = vec![ModelInputBlock::ToolResult {
+            call_id: "consumed-call".to_owned(),
+            tool_id: "records.update".to_owned(),
+            output: json!({"changed":true}),
+        }];
+        assert!(AiCodexAppServerTurnInput::try_from_dynamic_request(request.clone()).is_err());
+        request.input = vec![ModelInputBlock::Json {
+            value: json!({"kind":"FrameworkApprovedToolOutcome","output":{"changed":true}}),
+        }];
+        assert!(AiCodexAppServerTurnInput::try_from_dynamic_request(request).is_err());
     }
 
     fn web_search_model_request(

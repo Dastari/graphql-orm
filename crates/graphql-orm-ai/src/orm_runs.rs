@@ -18,6 +18,10 @@ use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::orm_inbox::{PreparedAiInboxEvent, append_inbox_event};
+use crate::orm_native_approvals::{
+    AiPreparedNativeApproval, PreparedNativeApprovalCandidate, PreparedNativeApprovalReceipt,
+    PreparedNativeBlockedReceipt,
+};
 use crate::orm_provider_session::AiProviderSessionBindingRecord;
 use crate::persistence::*;
 use crate::{
@@ -25,6 +29,8 @@ use crate::{
     AiRunId, AiRunRetryEvidence, AiRunState, AiRunTerminalEvent, AiScope, AiSessionId,
     AiSessionWakeup, AiToolCallId, ProtectedContentEnvelope, classify_run_retry,
 };
+
+pub(crate) mod native_checkpoints;
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
 const MAXIMUM_SAFE_CODE_BYTES: usize = 200;
@@ -413,6 +419,20 @@ pub(crate) struct PreparedCoordinatorCheckpointTool {
     pub result_egress_manifest_hash: String,
 }
 
+pub(crate) enum PreparedNativeCheckpointBinding {
+    Source {
+        candidate_id: Uuid,
+        pending_call_index: usize,
+        callback_count: usize,
+    },
+    Outcome {
+        candidate_id: Uuid,
+        source_checkpoint_id: Uuid,
+        pending_call_index: usize,
+        callback_count: usize,
+    },
+}
+
 pub(crate) struct PreparedCoordinatorCheckpoint {
     pub id: Uuid,
     pub checkpoint_kind: String,
@@ -423,6 +443,7 @@ pub(crate) struct PreparedCoordinatorCheckpoint {
     pub protected_state: serde_json::Value,
     pub checkpoint_hash: String,
     pub completed_tools: Vec<PreparedCoordinatorCheckpointTool>,
+    pub native_binding: Option<PreparedNativeCheckpointBinding>,
 }
 
 pub(crate) struct PreparedLiveDeltaEvent {
@@ -606,6 +627,7 @@ pub(crate) struct PreparedToolCallStart {
     pub tool_call_index: i64,
     pub tool_id: String,
     pub tool_fingerprint: String,
+    pub execution_provenance: Option<crate::AiToolExecutionProvenance>,
     pub protected_arguments: serde_json::Value,
     pub argument_hash: String,
     pub risk: String,
@@ -619,6 +641,12 @@ pub(crate) struct PreparedToolCallStart {
     pub expected_scope_kind: String,
     pub expected_scope_id: String,
     pub expected_tenant_id: Option<String>,
+}
+
+struct NativeBlockedCall {
+    candidate_id: AiToolCallId,
+    receipt: PreparedNativeApprovalReceipt,
+    disclosure_schema_fingerprint: String,
 }
 
 pub(crate) struct PreparedToolLifecycleEvent {
@@ -1188,10 +1216,15 @@ impl OrmAiRunService {
                                 (Some(checkpoint.provider_response_id), false)
                             } else if matches!(
                                 checkpoint.checkpoint_kind.as_str(),
-                                "tool_batch_persisted" | "supervised_tool_batch_persisted"
+                                "tool_batch_persisted"
+                                    | "supervised_tool_batch_persisted"
+                                    | native_checkpoints::OUTCOME_KIND
                             ) {
-                                let supervised =
-                                    checkpoint.checkpoint_kind == "supervised_tool_batch_persisted";
+                                let native_outcome =
+                                    checkpoint.checkpoint_kind == native_checkpoints::OUTCOME_KIND;
+                                let supervised = native_outcome
+                                    || checkpoint.checkpoint_kind
+                                        == "supervised_tool_batch_persisted";
                                 let provider_response_id =
                                     checkpoint.provider_response_id.as_deref();
                                 if provider_response_id
@@ -1225,8 +1258,10 @@ impl OrmAiRunService {
                                     })?;
                                 if reservation.session_id != current.session_id
                                     || reservation.run_id != current.id
-                                    || reservation.attempt_id != lease.attempt_id
-                                    || reservation.lease_generation != lease.lease_generation
+                                    || (!native_outcome
+                                        && (reservation.attempt_id != lease.attempt_id
+                                            || reservation.lease_generation
+                                                != lease.lease_generation))
                                     || reservation.state != "committed"
                                     || reservation.actual_runs != Some(1)
                                     || reservation.reconciled_at.is_none()
@@ -1288,6 +1323,20 @@ impl OrmAiRunService {
                                     })
                                 {
                                     return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                                }
+                                if native_outcome {
+                                    native_checkpoints::outcome(
+                                        tx,
+                                        current.id,
+                                        current.session_id,
+                                        lease.lease_generation,
+                                        &reservation,
+                                        provider_response_id,
+                                        relevant[0].id,
+                                        None,
+                                        None,
+                                    )
+                                    .await?;
                                 }
                                 for call in relevant {
                                     let authorization_matches = if supervised {
@@ -1867,9 +1916,25 @@ impl OrmAiRunService {
                         "provider_turn_persisted" => checkpoint.completed_tools.is_empty(),
                         "tool_batch_persisted" => !checkpoint.completed_tools.is_empty(),
                         "supervised_tool_batch_persisted" => checkpoint.completed_tools.len() == 1,
+                        native_checkpoints::SOURCE_KIND => matches!(
+                            checkpoint.native_binding,
+                            Some(PreparedNativeCheckpointBinding::Source { .. })
+                        ),
+                        native_checkpoints::OUTCOME_KIND => {
+                            checkpoint.completed_tools.len() == 1
+                                && matches!(
+                                    checkpoint.native_binding,
+                                    Some(PreparedNativeCheckpointBinding::Outcome { .. })
+                                )
+                        }
                         _ => false,
                     };
-                    if persisted_state(&current)? != AiRunState::Running
+                    if (checkpoint.native_binding.is_some()
+                        && !matches!(
+                            checkpoint.checkpoint_kind.as_str(),
+                            native_checkpoints::SOURCE_KIND | native_checkpoints::OUTCOME_KIND
+                        ))
+                        || persisted_state(&current)? != AiRunState::Running
                         || !valid_kind
                         || checkpoint.provider_kind.trim().is_empty()
                         || checkpoint.provider_model.trim().is_empty()
@@ -1882,10 +1947,92 @@ impl OrmAiRunService {
                         .await
                         .map_err(OrmPublicError::from)?
                         .ok_or_else(OrmPublicError::not_found)?;
+                    let native_outcome =
+                        checkpoint.checkpoint_kind == native_checkpoints::OUTCOME_KIND;
+                    if let Some(binding) = &checkpoint.native_binding {
+                        let expected_ids = checkpoint
+                            .completed_tools
+                            .iter()
+                            .map(|tool| tool.id)
+                            .collect::<BTreeSet<_>>();
+                        if expected_ids.len() != checkpoint.completed_tools.len()
+                            || coordinator_checkpoint_hash(
+                                lease.run_id,
+                                lease.attempt_id,
+                                lease.lease_generation,
+                                checkpoint.id,
+                                &checkpoint.checkpoint_kind,
+                                &checkpoint.provider_kind,
+                                &checkpoint.provider_model,
+                                checkpoint.provider_response_id.as_deref(),
+                                checkpoint.budget_reservation_id,
+                                &checkpoint.protected_state,
+                            )
+                            .map_err(|_| OrmPublicError::new(OrmErrorCode::Conflict))?
+                                != checkpoint.checkpoint_hash
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        match binding {
+                            PreparedNativeCheckpointBinding::Source {
+                                candidate_id,
+                                pending_call_index,
+                                callback_count,
+                            } => {
+                                let candidate =
+                                    native_checkpoints::candidate(tx, *candidate_id).await?;
+                                let ordinary = native_checkpoints::cohort(
+                                    tx,
+                                    native_checkpoints::NativeTurn {
+                                        run_id: lease.run_id.0,
+                                        attempt_id: lease.attempt_id,
+                                        generation: lease.lease_generation,
+                                        response_id: checkpoint
+                                            .provider_response_id
+                                            .as_deref()
+                                            .ok_or_else(|| {
+                                                OrmPublicError::new(OrmErrorCode::Conflict)
+                                            })?,
+                                        budget: &reservation,
+                                    },
+                                    &candidate,
+                                    native_checkpoints::PendingPhase::Prepared,
+                                    Some((*pending_call_index, *callback_count)),
+                                )
+                                .await?;
+                                if ordinary != expected_ids {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                            }
+                            PreparedNativeCheckpointBinding::Outcome {
+                                candidate_id,
+                                source_checkpoint_id,
+                                pending_call_index,
+                                callback_count,
+                            } => {
+                                if expected_ids != BTreeSet::from([*candidate_id]) {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                                native_checkpoints::outcome(
+                                    tx,
+                                    lease.run_id.0,
+                                    lease.session_id.0,
+                                    lease.lease_generation,
+                                    &reservation,
+                                    checkpoint.provider_response_id.as_deref(),
+                                    *candidate_id,
+                                    Some(*source_checkpoint_id),
+                                    Some((*pending_call_index, *callback_count)),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
                     if reservation.session_id != lease.session_id.0
                         || reservation.run_id != lease.run_id.0
-                        || reservation.attempt_id != lease.attempt_id
-                        || reservation.lease_generation != lease.lease_generation
+                        || (!native_outcome
+                            && (reservation.attempt_id != lease.attempt_id
+                                || reservation.lease_generation != lease.lease_generation))
                         || reservation.provider_kind != checkpoint.provider_kind
                         || reservation.provider_model != checkpoint.provider_model
                         || reservation.state != "committed"
@@ -1909,7 +2056,14 @@ impl OrmAiRunService {
                             "tool_batch_persisted" => {
                                 call.risk == "read_only" && call.approval_id.is_none()
                             }
-                            "supervised_tool_batch_persisted" => {
+                            native_checkpoints::SOURCE_KIND => {
+                                matches!(
+                                    call.risk.as_str(),
+                                    "read_only" | "low_risk_write" | "non_idempotent_write"
+                                ) && call.approval_id.is_none()
+                            }
+                            "supervised_tool_batch_persisted"
+                            | native_checkpoints::OUTCOME_KIND => {
                                 let Some(approval_id) = call.approval_id else {
                                     return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                                 };
@@ -2050,7 +2204,9 @@ impl OrmAiRunService {
     ) -> Result<AiRunLease, AiError> {
         if !matches!(
             expected_kind,
-            "tool_batch_persisted" | "supervised_tool_batch_persisted"
+            "tool_batch_persisted"
+                | "supervised_tool_batch_persisted"
+                | native_checkpoints::OUTCOME_KIND
         ) {
             return Err(AiError::Conflict);
         }
@@ -2636,6 +2792,111 @@ impl OrmAiRunService {
         lease: &AiRunLease,
         call: PreparedToolCallStart,
     ) -> Result<AiRunLease, AiError> {
+        self.begin_tool_call_inner(lease, call, None, None).await
+    }
+
+    pub(crate) async fn prepare_native_approval(
+        &self,
+        lease: &AiRunLease,
+        mut call: PreparedToolCallStart,
+        candidate: PreparedNativeApprovalCandidate,
+    ) -> Result<AiPreparedNativeApproval, AiError> {
+        if !candidate.valid() || call.risk == "read_only" || call.started_event.is_some() {
+            return Err(AiError::InvalidInput(
+                "invalid native approval preparation".to_owned(),
+            ));
+        }
+        let tool_call_id = AiToolCallId(call.id);
+        let provider_call_id = call.provider_call_id.clone();
+        let PreparedNativeApprovalCandidate {
+            binding_hash,
+            preview_hash,
+            protected_preparation,
+            prepared_event,
+        } = candidate;
+        call.started_event = Some(prepared_event);
+        let lease = self
+            .begin_tool_call_inner(
+                lease,
+                call,
+                Some((binding_hash, preview_hash, protected_preparation)),
+                None,
+            )
+            .await?;
+        Ok(AiPreparedNativeApproval {
+            tool_call_id,
+            provider_call_id,
+            lease,
+        })
+    }
+
+    pub(crate) async fn persist_blocked_native_call(
+        &self,
+        lease: &AiRunLease,
+        mut call: PreparedToolCallStart,
+        blocked: PreparedNativeBlockedReceipt,
+    ) -> Result<AiRunLease, AiError> {
+        if call.risk == "read_only"
+            || call.started_event.is_some()
+            || blocked.candidate_id.0 == call.id
+            || !valid_digest(&blocked.disclosure_schema_fingerprint)
+            || blocked.receipt.egress_decision_id.is_nil()
+            || !valid_digest(&blocked.receipt.receipt_hash)
+            || !valid_digest(&blocked.receipt.egress_manifest_hash)
+            || !blocked.receipt.protected_receipt.is_object()
+            || serde_json::to_vec(&blocked.receipt.protected_receipt)
+                .map_or(true, |bytes| bytes.len() > 256 * 1024)
+        {
+            return Err(AiError::Conflict);
+        }
+        call.started_event = Some(blocked.event);
+        self.begin_tool_call_inner(
+            lease,
+            call,
+            None,
+            Some(NativeBlockedCall {
+                candidate_id: blocked.candidate_id,
+                receipt: blocked.receipt,
+                disclosure_schema_fingerprint: blocked.disclosure_schema_fingerprint,
+            }),
+        )
+        .await
+    }
+
+    async fn begin_tool_call_inner(
+        &self,
+        lease: &AiRunLease,
+        call: PreparedToolCallStart,
+        native: Option<(String, String, serde_json::Value)>,
+        blocked: Option<NativeBlockedCall>,
+    ) -> Result<AiRunLease, AiError> {
+        if call
+            .execution_provenance
+            .as_ref()
+            .is_some_and(|provenance| {
+                provenance.session_id() != lease.session_id()
+                    || provenance.run_id() != lease.run_id()
+                    || provenance.tool_call_id().0 != call.id
+                    || provenance.attempt_id() != lease.attempt_id()
+                    || provenance.lease_generation() != lease.lease_generation()
+                    || provenance.provider_kind().as_str() != call.provider_kind
+                    || provenance.provider_model() != call.provider_model
+                    || provenance.provider_call_id() != call.provider_call_id
+                    || provenance.provider_response_id() != call.provider_response_id.as_deref()
+                    || provenance.budget_reservation_id().0 != call.budget_reservation_id
+                    || provenance.tool_fingerprint() != call.tool_fingerprint
+                    || provenance.argument_hash() != call.argument_hash
+                    || provenance.approval_id().is_some()
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        let execution_provenance = call
+            .execution_provenance
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| AiError::PersistenceFailed)?;
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
@@ -2654,6 +2915,82 @@ impl OrmAiRunService {
                     if !session_matches_tool_start(&session, &call) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
+                    if call.risk != "read_only" {
+                        let pending = tx
+                            .query::<AiNativeApprovalCandidateRecord>()
+                            .filter(AiNativeApprovalCandidateRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    eq: Some(lease.run_id.0),
+                                    ..Default::default()
+                                }),
+                                state: Some(StringFilter {
+                                    eq: Some("prepared".to_owned()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(2)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        if let Some(blocked) = &blocked {
+                            if pending.len() != 1 || pending[0].id != blocked.candidate_id.0 {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            let candidate =
+                                load_native_candidate(tx, &lease, blocked.candidate_id).await?;
+                            if candidate.budget_reservation_id != call.budget_reservation_id
+                                || candidate.protected_control_receipt.is_none()
+                            {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        } else if !pending.is_empty() {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
+                    if native.is_some() || blocked.is_some() {
+                        let budget = tx
+                            .find_by_id::<AiBudgetReservationRecord>(&call.budget_reservation_id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if budget.state != "uncertain"
+                            || budget.run_id != current.id
+                            || budget.session_id != session.id
+                            || budget.attempt_id != lease.attempt_id
+                            || budget.lease_generation != lease.lease_generation
+                            || budget.principal_kind != session.owner_principal_kind
+                            || budget.principal_subject != lease.principal_reference.subject
+                            || budget.provider_kind != call.provider_kind
+                            || budget.provider_model != call.provider_model
+                            || budget.scope_kind != session.scope_kind
+                            || budget.scope_id != session.scope_id
+                            || budget.tenant_id != session.tenant_id
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    }
+                    let lifecycle_kind = if blocked.is_some() {
+                        "native_tool_control"
+                    } else if native.is_some() {
+                        "native_approval_prepared"
+                    } else {
+                        "application_tool_started"
+                    };
+                    let call_state = if blocked.is_some() {
+                        "control_blocked"
+                    } else if native.is_some() {
+                        "approval_prepared"
+                    } else {
+                        "executing"
+                    };
+                    let step_state = if blocked.is_some() {
+                        "control_blocked"
+                    } else if native.is_some() {
+                        "approval_prepared"
+                    } else {
+                        "running"
+                    };
                     let (updated_run, event_sequence) = if call.started_event.is_some() {
                         let event_sequence = session
                             .stream_head
@@ -2712,10 +3049,10 @@ impl OrmAiRunService {
                             .and_then(|value| value.checked_add(call.tool_call_index))
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?,
                         step_kind: "application_tool".to_owned(),
-                        state: "running".to_owned(),
+                        state: step_state.to_owned(),
                         lease_generation: lease.lease_generation,
                         started_at: Some(now.unix_timestamp()),
-                        finished_at: None,
+                        finished_at: blocked.as_ref().map(|_| now.unix_timestamp()),
                         error_code: None,
                     })
                     .await
@@ -2733,18 +3070,29 @@ impl OrmAiRunService {
                         tool_call_index: call.tool_call_index,
                         tool_id: call.tool_id,
                         tool_fingerprint: call.tool_fingerprint,
+                        execution_provenance,
                         protected_arguments: Some(call.protected_arguments),
                         argument_hash: call.argument_hash,
-                        protected_result: None,
+                        protected_result: blocked
+                            .as_ref()
+                            .map(|blocked| blocked.receipt.protected_receipt.clone()),
                         payload_purged_at: None,
                         risk: call.risk,
-                        authorization_code: None,
+                        authorization_code: blocked
+                            .as_ref()
+                            .map(|_| "native_consequential_paused".to_owned()),
                         authorization_policy_version: None,
                         authorization_state_digest: None,
-                        disclosure_schema_fingerprint: None,
-                        result_classification: None,
-                        result_egress_decision_id: None,
-                        result_egress_manifest_hash: None,
+                        disclosure_schema_fingerprint: blocked
+                            .as_ref()
+                            .map(|blocked| blocked.disclosure_schema_fingerprint.clone()),
+                        result_classification: blocked.as_ref().map(|_| "internal".to_owned()),
+                        result_egress_decision_id: blocked
+                            .as_ref()
+                            .map(|blocked| blocked.receipt.egress_decision_id),
+                        result_egress_manifest_hash: blocked
+                            .as_ref()
+                            .map(|blocked| blocked.receipt.egress_manifest_hash.clone()),
                         application_audit_ref: None,
                         approval_id: None,
                         idempotency_key: call.idempotency_key,
@@ -2752,11 +3100,36 @@ impl OrmAiRunService {
                         causation_id: Some(call.causation_id),
                         delegation_reference: call.delegation_reference,
                         lease_generation: lease.lease_generation,
-                        state: "executing".to_owned(),
-                        completed_at: None,
+                        state: call_state.to_owned(),
+                        completed_at: blocked.as_ref().map(|_| now.unix_timestamp()),
                     })
                     .await
                     .map_err(OrmPublicError::from)?;
+                    if let Some((binding_hash, preview_hash, protected_preparation)) = native {
+                        tx.insert::<AiNativeApprovalCandidateRecord>(
+                            CreateAiNativeApprovalCandidateRecordInput {
+                                id: call.id,
+                                run_id: lease.run_id.0,
+                                attempt_id: lease.attempt_id,
+                                lease_generation: lease.lease_generation,
+                                budget_reservation_id: call.budget_reservation_id,
+                                binding_hash,
+                                preview_hash,
+                                protected_preparation: Some(protected_preparation),
+                                protected_control_receipt: None,
+                                control_receipt_hash: None,
+                                control_egress_decision_id: None,
+                                control_egress_manifest_hash: None,
+                                state: "prepared".to_owned(),
+                                final_approval_id: None,
+                                settled_checkpoint_id: None,
+                                payload_purged_at: None,
+                                finalized_at: None,
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
                     if let (Some(event), Some(event_sequence)) =
                         (call.started_event, event_sequence)
                     {
@@ -2764,7 +3137,7 @@ impl OrmAiRunService {
                             id: event.event_id,
                             session_id: lease.session_id.0,
                             sequence: event_sequence,
-                            event_type: "application_tool_started".to_owned(),
+                            event_type: lifecycle_kind.to_owned(),
                             run_id: Some(lease.run_id.0),
                             causation_id: Some(call.id.to_string()),
                             correlation_id: call.correlation_id.clone(),
@@ -2784,7 +3157,7 @@ impl OrmAiRunService {
                                     tenant_id: call.expected_tenant_id,
                                 },
                                 session_id: lease.session_id.0,
-                                event_type: "application_tool_started".to_owned(),
+                                event_type: lifecycle_kind.to_owned(),
                                 protected_payload: event.protected_inbox_event,
                                 created_at: now.unix_timestamp(),
                             },
@@ -2796,6 +3169,121 @@ impl OrmAiRunService {
                         });
                     }
                     lease_from_record(&updated_run)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    pub(crate) async fn load_prepared_native_approval(
+        &self,
+        lease: &AiRunLease,
+        id: AiToolCallId,
+    ) -> Result<AiNativeApprovalCandidateRecord, AiError> {
+        let now = canonical_second(self.clock.now());
+        let lease = lease.clone();
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let run = load_and_validate_active_lease(tx, &lease, now).await?;
+                    if run.state != "running" {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    load_native_candidate(tx, &lease, id).await
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
+    pub(crate) async fn persist_native_approval_receipt(
+        &self,
+        lease: &AiRunLease,
+        id: AiToolCallId,
+        receipt: PreparedNativeApprovalReceipt,
+    ) -> Result<AiRunLease, AiError> {
+        if receipt.egress_decision_id.is_nil()
+            || !valid_digest(&receipt.receipt_hash)
+            || !valid_digest(&receipt.egress_manifest_hash)
+            || !receipt.protected_receipt.is_object()
+            || serde_json::to_vec(&receipt.protected_receipt)
+                .map_or(true, |bytes| bytes.len() > 256 * 1024)
+        {
+            return Err(AiError::InvalidInput(
+                "invalid native control receipt".to_owned(),
+            ));
+        }
+        let now = canonical_second(self.clock.now());
+        let lease = lease.clone();
+        let ttl = self.limits.lease_ttl;
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                    if current.state != "running" {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let candidate = load_native_candidate(tx, &lease, id).await?;
+                    if let Some(hash) = candidate.control_receipt_hash {
+                        if hash == receipt.receipt_hash
+                            && candidate.control_egress_decision_id
+                                == Some(receipt.egress_decision_id)
+                            && candidate.control_egress_manifest_hash.as_deref()
+                                == Some(receipt.egress_manifest_hash.as_str())
+                            && candidate.protected_control_receipt.as_ref()
+                                == Some(&receipt.protected_receipt)
+                        {
+                            return lease_from_record(&current);
+                        }
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    if candidate.protected_control_receipt.is_some()
+                        || candidate.control_egress_decision_id.is_some()
+                        || candidate.control_egress_manifest_hash.is_some()
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    if !matches!(
+                        tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
+                            &candidate.id,
+                            candidate.row_version,
+                            AiNativeApprovalCandidateRecordWhereInput::default(),
+                            UpdateAiNativeApprovalCandidateRecordInput {
+                                protected_control_receipt: Some(Some(receipt.protected_receipt)),
+                                control_receipt_hash: Some(Some(receipt.receipt_hash)),
+                                control_egress_decision_id: Some(Some(receipt.egress_decision_id)),
+                                control_egress_manifest_hash: Some(Some(
+                                    receipt.egress_manifest_hash
+                                )),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?,
+                        ConditionalUpdateOutcome::Updated(_)
+                    ) {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    let expiry = now
+                        .checked_add(ttl)
+                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    match tx
+                        .compare_and_swap::<AiRunRecord>(
+                            &current.id,
+                            current.row_version,
+                            exact_state("running"),
+                            UpdateAiRunRecordInput {
+                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(run) => lease_from_record(&run),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
                 })
             })
             .await
@@ -2924,6 +3412,28 @@ impl OrmAiRunService {
         lease: &AiRunLease,
         approval: PreparedApprovalRequest,
     ) -> Result<AiRunLease, AiError> {
+        self.request_approval_inner(lease, approval, None).await
+    }
+
+    pub(crate) async fn request_prepared_native_approval(
+        &self,
+        lease: &AiRunLease,
+        approval: PreparedApprovalRequest,
+        candidate_id: AiToolCallId,
+    ) -> Result<AiRunLease, AiError> {
+        if approval.parked_provider_wait.is_none() {
+            return Err(AiError::Conflict);
+        }
+        self.request_approval_inner(lease, approval, Some(candidate_id))
+            .await
+    }
+
+    async fn request_approval_inner(
+        &self,
+        lease: &AiRunLease,
+        approval: PreparedApprovalRequest,
+        native_candidate_id: Option<AiToolCallId>,
+    ) -> Result<AiRunLease, AiError> {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
@@ -2958,7 +3468,12 @@ impl OrmAiRunService {
                         .ok_or_else(OrmPublicError::not_found)?;
                     if call.run_id != lease.run_id.0
                         || call.lease_generation != lease.lease_generation
-                        || call.state != "executing"
+                        || call.state
+                            != if native_candidate_id.is_some() {
+                                "approval_prepared"
+                            } else {
+                                "executing"
+                            }
                         || call.approval_id.is_some()
                         || call.argument_hash != approval.argument_hash
                         || call.tool_fingerprint != approval.tool_fingerprint
@@ -2966,6 +3481,92 @@ impl OrmAiRunService {
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
+                    let native_candidate = if let Some(id) = native_candidate_id {
+                        if id.0 != call.id {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        let candidate = load_native_candidate(tx, &lease, id).await?;
+                        let checkpoint_id = current
+                            .latest_checkpoint_id
+                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?;
+                        let checkpoint = tx
+                            .query::<AiRunCheckpointRecord>()
+                            .filter(AiRunCheckpointRecordWhereInput {
+                                id: Some(UuidFilter {
+                                    eq: Some(checkpoint_id),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_one()
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        let budget = tx
+                            .find_by_id::<AiBudgetReservationRecord>(
+                                &candidate.budget_reservation_id,
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if candidate.binding_hash != approval.binding_hash
+                            || candidate.preview_hash != approval.action_preview_hash
+                            || candidate.protected_control_receipt.is_none()
+                            || candidate
+                                .control_receipt_hash
+                                .as_deref()
+                                .is_none_or(|hash| !valid_digest(hash))
+                            || candidate
+                                .control_egress_decision_id
+                                .is_none_or(|id| id.is_nil())
+                            || candidate
+                                .control_egress_manifest_hash
+                                .as_deref()
+                                .is_none_or(|hash| !valid_digest(hash))
+                            || checkpoint.run_id != current.id
+                            || checkpoint.attempt_id != lease.attempt_id
+                            || checkpoint.lease_generation != lease.lease_generation
+                            || checkpoint.checkpoint_kind
+                                != "native_approval_provider_turn_persisted"
+                            || checkpoint.budget_reservation_id
+                                != Some(candidate.budget_reservation_id)
+                            || checkpoint.provider_response_id != call.provider_response_id
+                            || checkpoint.protected_state.is_none()
+                            || !valid_digest(&checkpoint.checkpoint_hash)
+                            || budget.state != "committed"
+                            || budget.run_id != current.id
+                            || budget.session_id != session.id
+                            || budget.attempt_id != lease.attempt_id
+                            || budget.lease_generation != lease.lease_generation
+                            || budget.principal_kind != session.owner_principal_kind
+                            || budget.principal_subject != lease.principal_reference.subject
+                            || Some(budget.provider_kind.as_str()) != call.provider_kind.as_deref()
+                            || Some(budget.provider_model.as_str())
+                                != call.provider_model.as_deref()
+                            || budget.scope_kind != session.scope_kind
+                            || budget.scope_id != session.scope_id
+                            || budget.tenant_id != session.tenant_id
+                            || budget.reconciled_at.is_none()
+                            || budget.actual_runs != Some(1)
+                            || [
+                                budget.actual_input_tokens,
+                                budget.actual_cached_input_tokens,
+                                budget.actual_output_tokens,
+                                budget.actual_tool_units,
+                                budget.actual_image_units,
+                                budget.actual_cost_microunits,
+                            ]
+                            .iter()
+                            .any(|amount| amount.is_none_or(|value| value < 0))
+                            || budget.actual_cached_input_tokens > budget.actual_input_tokens
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        Some((candidate, checkpoint_id))
+                    } else {
+                        None
+                    };
                     let parked_provider_wait = if let Some(parked) =
                         approval.parked_provider_wait.clone()
                     {
@@ -3001,7 +3602,12 @@ impl OrmAiRunService {
                             || source.run_id != current.id
                             || source.attempt_id != lease.attempt_id
                             || source.lease_generation != lease.lease_generation
-                            || source.checkpoint_kind != "provider_turn_persisted"
+                            || source.checkpoint_kind
+                                != if native_candidate_id.is_some() {
+                                    "native_approval_provider_turn_persisted"
+                                } else {
+                                    "provider_turn_persisted"
+                                }
                             || source.checkpoint_hash != parked.source_checkpoint_fingerprint
                             || source.provider_response_id != parked.provider_response_id
                             || source.budget_reservation_id != Some(parked.budget_reservation_id)
@@ -3037,6 +3643,55 @@ impl OrmAiRunService {
                         .map_err(OrmPublicError::from)?;
                     if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    if let Some((candidate, checkpoint_id)) = native_candidate {
+                        let step = tx
+                            .find_by_id::<AiRunStepRecord>(&candidate.id)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if step.run_id != current.id
+                            || step.lease_generation != lease.lease_generation
+                            || step.state != "approval_prepared"
+                            || step.finished_at.is_some()
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiRunStepRecord>(
+                                &step.id,
+                                step.row_version,
+                                AiRunStepRecordWhereInput::default(),
+                                UpdateAiRunStepRecordInput {
+                                    state: Some("running".to_owned()),
+                                    ..Default::default()
+                                }
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                        if !matches!(
+                            tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
+                                &candidate.id,
+                                candidate.row_version,
+                                AiNativeApprovalCandidateRecordWhereInput::default(),
+                                UpdateAiNativeApprovalCandidateRecordInput {
+                                    state: Some("finalized".to_owned()),
+                                    final_approval_id: Some(Some(approval.id)),
+                                    settled_checkpoint_id: Some(Some(checkpoint_id)),
+                                    finalized_at: Some(Some(now.unix_timestamp())),
+                                    ..Default::default()
+                                }
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?,
+                            ConditionalUpdateOutcome::Updated(_)
+                        ) {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
                     }
                     let call_update = tx
                         .compare_and_swap::<AiToolCallRecord>(
@@ -3898,6 +4553,27 @@ impl OrmAiRunService {
                                 return Err(OrmPublicError::new(OrmErrorCode::InternalError));
                             }
                         }
+                        if let Some(candidate) = tx.find_by_id::<AiNativeApprovalCandidateRecord>(&call.id)
+                            .await.map_err(OrmPublicError::from)?
+                        {
+                            if !parked_wait || candidate.final_approval_id != Some(approval.id)
+                                || candidate.binding_hash != approval.binding_hash
+                                || candidate.preview_hash != approval.action_preview_hash
+                            { return Err(OrmPublicError::new(OrmErrorCode::Conflict)); }
+                            let reservation = tx.find_by_id::<AiBudgetReservationRecord>(
+                                &call.budget_reservation_id.ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?)
+                                .await.map_err(OrmPublicError::from)?.ok_or_else(OrmPublicError::not_found)?;
+                            let source = native_checkpoints::source(tx, &candidate, &reservation,
+                                call.provider_response_id.as_deref()).await?;
+                            if source.lease_generation != run.lease_generation || source.run_id != run.id
+                                || reservation.session_id != run.session_id
+                            { return Err(OrmPublicError::new(OrmErrorCode::Conflict)); }
+                            native_checkpoints::cohort(tx, native_checkpoints::NativeTurn {
+                                run_id: run.id, attempt_id: source.attempt_id, generation: source.lease_generation,
+                                response_id: source.provider_response_id.as_deref().ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?,
+                                budget: &reservation,
+                            }, &candidate, native_checkpoints::PendingPhase::Waiting, None).await?;
+                        }
                         let expiry = now
                             .checked_add(limits.lease_ttl)
                             .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
@@ -4305,10 +4981,44 @@ impl OrmAiRunService {
                                     }
                                     _ => false,
                                 };
+                            let native_source =
+                                checkpoint.checkpoint_kind == native_checkpoints::SOURCE_KIND;
+                            if native_source {
+                                let candidate = native_checkpoints::candidate(tx, call.id).await?;
+                                let source = native_checkpoints::source(
+                                    tx,
+                                    &candidate,
+                                    &reservation,
+                                    Some(provider_response_id),
+                                )
+                                .await?;
+                                if source.id != checkpoint.id
+                                    || candidate.final_approval_id != Some(approval.id)
+                                    || candidate.binding_hash != approval.binding_hash
+                                    || candidate.preview_hash != approval.action_preview_hash
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                                native_checkpoints::cohort(
+                                    tx,
+                                    native_checkpoints::NativeTurn {
+                                        run_id: current.id,
+                                        attempt_id: checkpoint.attempt_id,
+                                        generation: checkpoint.lease_generation,
+                                        response_id: provider_response_id,
+                                        budget: &reservation,
+                                    },
+                                    &candidate,
+                                    native_checkpoints::PendingPhase::Waiting,
+                                    None,
+                                )
+                                .await?;
+                            }
                             if !parked_graph_valid
                                 || checkpoint.run_id != current.id
                                 || checkpoint.lease_generation != current.lease_generation
-                                || checkpoint.checkpoint_kind != "provider_turn_persisted"
+                                || (!native_source
+                                    && checkpoint.checkpoint_kind != "provider_turn_persisted")
                                 || checkpoint.assistant_message_id.is_some()
                                 || checkpoint.checkpoint_hash != expected_hash
                                 || reservation.session_id != session.id
@@ -4326,8 +5036,8 @@ impl OrmAiRunService {
                                 || reservation.actual_runs != Some(1)
                                 || reservation.reconciled_at.is_none()
                                 || calls.len() >= 4_097
-                                || relevant.len() != 1
-                                || relevant[0].id != call.id
+                                || (!native_source
+                                    && (relevant.len() != 1 || relevant[0].id != call.id))
                                 || call.run_id != current.id
                                 || call.lease_generation != current.lease_generation
                                 || call.provider_kind.as_deref()
@@ -4337,7 +5047,7 @@ impl OrmAiRunService {
                                 || call.provider_response_id.as_deref()
                                     != Some(provider_response_id)
                                 || call.budget_reservation_id != Some(budget_reservation_id)
-                                || call.tool_call_index != 0
+                                || (!native_source && call.tool_call_index != 0)
                                 || call.state != "waiting_approval"
                                 || call.completed_at.is_some()
                                 || call.protected_result.is_some()
@@ -4616,6 +5326,148 @@ impl OrmAiRunService {
 enum LeaseUpdate {
     Heartbeat,
     Start,
+}
+
+pub(crate) async fn abandon_native_approval_candidates(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    run_id: Uuid,
+    final_state: AiRunState,
+    now: i64,
+) -> Result<(), OrmPublicError> {
+    let candidates = tx
+        .query::<AiNativeApprovalCandidateRecord>()
+        .filter(AiNativeApprovalCandidateRecordWhereInput {
+            run_id: Some(UuidFilter {
+                eq: Some(run_id),
+                ..Default::default()
+            }),
+            state: Some(StringFilter {
+                eq: Some("prepared".to_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(2)
+        .fetch_all()
+        .await
+        .map_err(OrmPublicError::from)?;
+    if candidates.len() > 1 || (!candidates.is_empty() && final_state == AiRunState::Completed) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    for candidate in candidates {
+        let call = tx
+            .find_by_id::<AiToolCallRecord>(&candidate.id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        let step = tx
+            .find_by_id::<AiRunStepRecord>(&candidate.id)
+            .await
+            .map_err(OrmPublicError::from)?
+            .ok_or_else(OrmPublicError::not_found)?;
+        if call.run_id != run_id
+            || step.run_id != run_id
+            || call.lease_generation != candidate.lease_generation
+            || step.lease_generation != candidate.lease_generation
+            || call.state != "approval_prepared"
+            || step.state != "approval_prepared"
+            || call.approval_id.is_some()
+            || candidate.final_approval_id.is_some()
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        if !matches!(
+            tx.compare_and_swap::<AiToolCallRecord>(
+                &call.id,
+                call.row_version,
+                AiToolCallRecordWhereInput::default(),
+                UpdateAiToolCallRecordInput {
+                    state: Some("cancelled".to_owned()),
+                    authorization_code: Some(Some("native_approval_abandoned".to_owned())),
+                    completed_at: Some(Some(now)),
+                    ..Default::default()
+                }
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        ) || !matches!(
+            tx.compare_and_swap::<AiRunStepRecord>(
+                &step.id,
+                step.row_version,
+                AiRunStepRecordWhereInput::default(),
+                UpdateAiRunStepRecordInput {
+                    state: Some("cancelled".to_owned()),
+                    finished_at: Some(Some(now)),
+                    error_code: Some(Some("native_approval_abandoned".to_owned())),
+                    ..Default::default()
+                }
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        ) || !matches!(
+            tx.compare_and_swap::<AiNativeApprovalCandidateRecord>(
+                &candidate.id,
+                candidate.row_version,
+                AiNativeApprovalCandidateRecordWhereInput::default(),
+                UpdateAiNativeApprovalCandidateRecordInput {
+                    state: Some("abandoned".to_owned()),
+                    ..Default::default()
+                }
+            )
+            .await
+            .map_err(OrmPublicError::from)?,
+            ConditionalUpdateOutcome::Updated(_)
+        ) {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+    }
+    Ok(())
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+async fn load_native_candidate(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    lease: &AiRunLease,
+    id: AiToolCallId,
+) -> Result<AiNativeApprovalCandidateRecord, OrmPublicError> {
+    let candidate = tx
+        .find_by_id::<AiNativeApprovalCandidateRecord>(&id.0)
+        .await
+        .map_err(OrmPublicError::from)?
+        .ok_or_else(OrmPublicError::not_found)?;
+    let call = tx
+        .find_by_id::<AiToolCallRecord>(&id.0)
+        .await
+        .map_err(OrmPublicError::from)?
+        .ok_or_else(OrmPublicError::not_found)?;
+    if candidate.run_id != lease.run_id.0
+        || candidate.attempt_id != lease.attempt_id
+        || candidate.lease_generation != lease.lease_generation
+        || candidate.state != "prepared"
+        || candidate.protected_preparation.is_none()
+        || candidate.payload_purged_at.is_some()
+        || candidate.final_approval_id.is_some()
+        || candidate.settled_checkpoint_id.is_some()
+        || candidate.finalized_at.is_some()
+        || call.run_id != lease.run_id.0
+        || call.lease_generation != lease.lease_generation
+        || call.state != "approval_prepared"
+        || call.approval_id.is_some()
+        || call.protected_arguments.is_none()
+        || call.payload_purged_at.is_some()
+        || call.budget_reservation_id != Some(candidate.budget_reservation_id)
+    {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    Ok(candidate)
 }
 
 fn session_matches_tool_start(session: &AiSessionRecord, call: &PreparedToolCallStart) -> bool {
@@ -4955,6 +5807,7 @@ pub(crate) async fn append_terminal_run_event(
     outcome_code: Option<&str>,
     now: OffsetDateTime,
 ) -> Result<(), OrmPublicError> {
+    abandon_native_approval_candidates(tx, run.id, final_state, now.unix_timestamp()).await?;
     let terminal = AiRunTerminalEvent::from_run_state(final_state)
         .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InvalidInput))?;
     let principal_reference: PrincipalReference =
@@ -5798,6 +6651,7 @@ mod tests {
                 tool_call_index: 0,
                 tool_id: "records.read".to_owned(),
                 tool_fingerprint: "tool-fingerprint".to_owned(),
+                execution_provenance: None,
                 protected_arguments: Some(serde_json::json!({"protected": true})),
                 argument_hash: "argument-hash".to_owned(),
                 protected_result: Some(serde_json::json!({"protected": true})),
@@ -5854,6 +6708,7 @@ mod tests {
                     budget_reservation_id: reservation.id,
                     protected_state,
                     checkpoint_hash,
+                    native_binding: None,
                     completed_tools: vec![PreparedCoordinatorCheckpointTool {
                         id: tool_call_id,
                         provider_call_id: "call-tool-checkpoint".to_owned(),
@@ -6129,6 +6984,891 @@ mod tests {
         assert_eq!(retry.run_id(), run_id);
         assert_eq!(retry.retry_count(), 1);
         assert_eq!(retry.lease_generation(), 2);
+    }
+    async fn native_checkpoint_fixture() -> (Fixture, AiRunLease, Uuid, Uuid) {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let claim = fixture
+            .service
+            .claim_next("native-checkpoint-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = fixture.service.start(&claim).await.unwrap();
+        let budget = native_budget(&fixture, &lease).await;
+        let prepared = fixture
+            .service
+            .prepare_native_approval(
+                &lease,
+                native_call(budget, "non_idempotent_write"),
+                native_candidate(),
+            )
+            .await
+            .unwrap();
+        let id = prepared.tool_call_id().0;
+        let decision_id = Uuid::new_v4();
+        AiEgressEventRecord::insert(
+            &fixture.database,
+            CreateAiEgressEventRecordInput {
+                id: decision_id,
+                run_id: Some(lease.run_id().0),
+                principal_subject: "run-user".to_owned(),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                manifest_hash: "d".repeat(64),
+                destination: "provider".to_owned(),
+                capability: "tool_result".to_owned(),
+                classification: "internal".to_owned(),
+                outcome: "allow".to_owned(),
+                reason_code: "fixture".to_owned(),
+                policy_version: "fixture-v1".to_owned(),
+                estimated_bytes: 16,
+                estimated_tokens: 4,
+            },
+        )
+        .await
+        .unwrap();
+        let renewed = fixture
+            .service
+            .persist_native_approval_receipt(
+                prepared.lease(),
+                prepared.tool_call_id(),
+                PreparedNativeApprovalReceipt {
+                    receipt_hash: "e".repeat(64),
+                    protected_receipt: serde_json::json!({"protected":"receipt"}),
+                    egress_decision_id: decision_id,
+                    egress_manifest_hash: "d".repeat(64),
+                },
+            )
+            .await
+            .unwrap();
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiBudgetReservationRecord>(
+                        &budget,
+                        UpdateAiBudgetReservationRecordInput {
+                            state: Some("committed".to_owned()),
+                            actual_input_tokens: Some(Some(1)),
+                            actual_cached_input_tokens: Some(Some(0)),
+                            actual_output_tokens: Some(Some(1)),
+                            actual_tool_units: Some(Some(1)),
+                            actual_image_units: Some(Some(0)),
+                            actual_cost_microunits: Some(Some(1)),
+                            actual_runs: Some(Some(1)),
+                            reconciled_at: Some(Some(1_700_000_000)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        (fixture, renewed, id, budget)
+    }
+
+    fn native_source_checkpoint(
+        lease: &AiRunLease,
+        candidate_id: Uuid,
+        budget: Uuid,
+    ) -> PreparedCoordinatorCheckpoint {
+        let id = Uuid::new_v4();
+        let protected_state = serde_json::json!({"protected":"native-source-fixture"});
+        let checkpoint_hash = coordinator_checkpoint_hash(
+            lease.run_id(),
+            lease.attempt_id(),
+            lease.lease_generation(),
+            id,
+            native_checkpoints::SOURCE_KIND,
+            "openai",
+            "reviewed-model",
+            Some("native-response"),
+            budget,
+            &protected_state,
+        )
+        .unwrap();
+        PreparedCoordinatorCheckpoint {
+            id,
+            checkpoint_kind: native_checkpoints::SOURCE_KIND.to_owned(),
+            provider_kind: "openai".to_owned(),
+            provider_model: "reviewed-model".to_owned(),
+            provider_response_id: Some("native-response".to_owned()),
+            budget_reservation_id: budget,
+            protected_state,
+            checkpoint_hash,
+            completed_tools: vec![],
+            native_binding: Some(PreparedNativeCheckpointBinding::Source {
+                candidate_id,
+                pending_call_index: 0,
+                callback_count: 1,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn native_source_checkpoint_is_never_generic_recovery_or_consumption_work() {
+        let (fixture, lease, candidate_id, budget) = native_checkpoint_fixture().await;
+        let source = native_source_checkpoint(&lease, candidate_id, budget);
+        let id = source.id;
+        let checkpointed = fixture
+            .service
+            .append_coordinator_checkpoint(&lease, source)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .service
+                .consume_adoption_checkpoint(&checkpointed, id, native_checkpoints::SOURCE_KIND)
+                .await,
+            Err(AiError::Conflict)
+        ));
+        fixture.clock.advance_seconds(61);
+        let report = fixture.service.recover_expired_leases().await.unwrap();
+        assert_eq!(report.checkpoint_requeued, 0);
+        assert_eq!(report.recovery_required, 1);
+        assert_eq!(
+            run_record(&fixture, lease.run_id()).await.state,
+            "recovery_required"
+        );
+        assert!(
+            fixture
+                .service
+                .claim_next("must-not-replay")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let candidate =
+            AiNativeApprovalCandidateRecord::find_by_id(&fixture.database, &candidate_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(candidate.state, "abandoned");
+        assert!(candidate.final_approval_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn native_source_append_rejects_changed_receipt_candidate_and_callback_shape() {
+        let (fixture, lease, candidate_id, budget) = native_checkpoint_fixture().await;
+        for (id, index, count) in [
+            (Uuid::new_v4(), 0, 1),
+            (candidate_id, 1, 1),
+            (candidate_id, 0, 2),
+        ] {
+            let mut source = native_source_checkpoint(&lease, candidate_id, budget);
+            source.native_binding = Some(PreparedNativeCheckpointBinding::Source {
+                candidate_id: id,
+                pending_call_index: index,
+                callback_count: count,
+            });
+            assert!(
+                fixture
+                    .service
+                    .append_coordinator_checkpoint(&lease, source)
+                    .await
+                    .is_err()
+            );
+        }
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiNativeApprovalCandidateRecord>(
+                        &candidate_id,
+                        UpdateAiNativeApprovalCandidateRecordInput {
+                            control_receipt_hash: Some(None),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .service
+                .append_coordinator_checkpoint(
+                    &lease,
+                    native_source_checkpoint(&lease, candidate_id, budget)
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            run_record(&fixture, lease.run_id())
+                .await
+                .latest_checkpoint_id
+                .is_none()
+        );
+        assert_eq!(
+            AiRunCheckpointRecord::query(fixture.database.pool())
+                .limit(2)
+                .fetch_all()
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn native_cancel_or_archive_before_finalization_keeps_completed_effect_evidence() {
+        for archive in [false, true] {
+            let (fixture, lease, candidate_id, budget) = native_checkpoint_fixture().await;
+            // A completed application result is durable evidence, not work to replay.
+            let mut prior = native_call(budget, "read_only");
+            prior.tool_call_index = 1;
+            let prior_id = prior.id;
+            let key = prior.provider_call_key.clone();
+            let fingerprint = prior.tool_fingerprint.clone();
+            let lease = fixture
+                .service
+                .begin_tool_call(&lease, prior)
+                .await
+                .unwrap();
+            let lease = fixture
+                .service
+                .finish_tool_call(
+                    &lease,
+                    PreparedToolCallFinish {
+                        id: prior_id,
+                        state: "completed".to_owned(),
+                        protected_result: serde_json::json!({"protected":"prior-result"}),
+                        authorization_code: "allowed".to_owned(),
+                        authorization_policy_version: Some("policy-v1".to_owned()),
+                        authorization_state_digest: Some("f".repeat(64)),
+                        disclosure_schema_fingerprint: "a".repeat(64),
+                        result_classification: "internal".to_owned(),
+                        result_egress_decision_id: Some(Uuid::new_v4()),
+                        result_egress_manifest_hash: Some("b".repeat(64)),
+                        application_audit_ref: Some("prior-effect".to_owned()),
+                        event_id: Uuid::new_v4(),
+                        inbox_event_id: Uuid::new_v4(),
+                        protected_event: serde_json::json!({"protected":true}),
+                        protected_inbox_event: serde_json::json!({"protected":true}),
+                        correlation_id: "fixture".to_owned(),
+                        expected_provider_call_key: key,
+                        expected_tool_fingerprint: fingerprint,
+                        expected_owner_principal_kind: "user".to_owned(),
+                        expected_owner_subject: "run-user".to_owned(),
+                        expected_scope_kind: "tenant".to_owned(),
+                        expected_scope_id: "tenant-run".to_owned(),
+                        expected_tenant_id: Some("tenant-run".to_owned()),
+                    },
+                )
+                .await
+                .unwrap();
+            let before = AiToolCallRecord::find_by_id(&fixture.database, &prior_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if archive {
+                let session_id = lease.session_id().0;
+                fixture
+                    .database
+                    .transaction(TransactionMode::StateMachine, move |tx| {
+                        Box::pin(async move {
+                            tx.update_by_id::<AiSessionRecord>(
+                                &session_id,
+                                UpdateAiSessionRecordInput {
+                                    state: Some("archived".to_owned()),
+                                    archived_at: Some(Some(1_700_000_000)),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            Ok(())
+                        })
+                    })
+                    .await
+                    .unwrap();
+            }
+            let completion = AiRunCompletion::new(
+                if archive {
+                    AiRunState::RecoveryRequired
+                } else {
+                    AiRunState::Cancelled
+                },
+                if archive {
+                    "session_archived"
+                } else {
+                    "owner_cancelled"
+                },
+                None,
+                None,
+            )
+            .unwrap();
+            fixture.service.finish(&lease, completion).await.unwrap();
+            assert_eq!(
+                AiToolCallRecord::find_by_id(&fixture.database, &prior_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                before
+            );
+            let candidate =
+                AiNativeApprovalCandidateRecord::find_by_id(&fixture.database, &candidate_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(candidate.state, "abandoned");
+            assert!(candidate.final_approval_id.is_none());
+            assert!(
+                fixture
+                    .service
+                    .append_coordinator_checkpoint(
+                        &lease,
+                        native_source_checkpoint(&lease, candidate_id, budget)
+                    )
+                    .await
+                    .is_err()
+            );
+            assert!(
+                fixture
+                    .service
+                    .claim_next_approved("must-not-execute")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    async fn native_budget(fixture: &Fixture, lease: &AiRunLease) -> Uuid {
+        AiBudgetReservationRecord::insert(
+            &fixture.database,
+            CreateAiBudgetReservationRecordInput {
+                budget_counter_ids: serde_json::json!([]),
+                scope_kind: "tenant".to_owned(),
+                scope_id: "tenant-run".to_owned(),
+                tenant_id: Some("tenant-run".to_owned()),
+                principal_kind: "user".to_owned(),
+                principal_subject: "run-user".to_owned(),
+                session_id: lease.session_id().0,
+                run_id: lease.run_id().0,
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                provider_kind: "openai".to_owned(),
+                provider_model: "reviewed-model".to_owned(),
+                reasoning_effort: "unspecified".to_owned(),
+                pricing_policy_version: "pricing-v1".to_owned(),
+                reserved_input_tokens: 10,
+                reserved_output_tokens: 10,
+                reserved_tool_units: 3,
+                reserved_image_units: 0,
+                reserved_cost_microunits: 10,
+                reserved_runs: 1,
+                actual_input_tokens: None,
+                actual_cached_input_tokens: None,
+                actual_output_tokens: None,
+                actual_tool_units: None,
+                actual_image_units: None,
+                actual_cost_microunits: None,
+                actual_runs: None,
+                idempotency_key: Uuid::new_v4().to_string(),
+                state: "uncertain".to_owned(),
+                expires_at: (fixture.clock.now() + Duration::minutes(1)).unix_timestamp(),
+                reconciled_at: None,
+            },
+        )
+        .await
+        .expect("budget")
+        .id
+    }
+
+    fn native_call(budget: Uuid, risk: &str) -> PreparedToolCallStart {
+        let id = Uuid::new_v4();
+        PreparedToolCallStart {
+            id,
+            provider_call_key: id.to_string(),
+            provider_call_id: id.to_string(),
+            provider_kind: "openai".to_owned(),
+            provider_model: "reviewed-model".to_owned(),
+            provider_response_id: Some("native-response".to_owned()),
+            budget_reservation_id: budget,
+            provider_turn_index: 0,
+            tool_call_index: 0,
+            tool_id: "reviewed-action".to_owned(),
+            tool_fingerprint: "descriptor-v1".to_owned(),
+            execution_provenance: None,
+            protected_arguments: serde_json::json!({"ciphertext":"arguments"}),
+            argument_hash: "b".repeat(64),
+            risk: risk.to_owned(),
+            idempotency_key: None,
+            correlation_id: "native-test".to_owned(),
+            causation_id: "native-test".to_owned(),
+            delegation_reference: None,
+            started_event: None,
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: Some("tenant-run".to_owned()),
+        }
+    }
+
+    fn native_candidate() -> PreparedNativeApprovalCandidate {
+        PreparedNativeApprovalCandidate {
+            binding_hash: "a".repeat(64),
+            preview_hash: "c".repeat(64),
+            protected_preparation: serde_json::json!({"ciphertext":"preparation"}),
+            prepared_event: PreparedToolLifecycleEvent {
+                event_id: Uuid::new_v4(),
+                inbox_event_id: Uuid::new_v4(),
+                protected_event: serde_json::json!({"ciphertext":"prepared-event"}),
+                protected_inbox_event: serde_json::json!({"ciphertext":"prepared-inbox"}),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn native_preparation_keeps_lease_and_blocks_later_effect_admission() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let original = fixture
+            .service
+            .claim_next("native-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let original = fixture.service.start(&original).await.unwrap();
+        let budget = native_budget(&fixture, &original).await;
+        let call = native_call(budget, "consequential");
+        let id = call.id;
+        let prepared = fixture
+            .service
+            .prepare_native_approval(&original, call, native_candidate())
+            .await
+            .unwrap();
+        assert_eq!(prepared.lease().state(), AiRunState::Running);
+        assert_eq!(prepared.lease().attempt_id(), original.attempt_id());
+        assert!(prepared.lease().row_version > original.row_version);
+        let record = AiToolCallRecord::find_by_id(&fixture.database, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "approval_prepared");
+        assert!(record.approval_id.is_none());
+        assert!(record.protected_result.is_none());
+        let run = run_record(&fixture, original.run_id()).await;
+        assert!(run.lease_owner.is_some());
+        assert!(matches!(
+            fixture
+                .service
+                .prepare_native_approval(
+                    &original,
+                    native_call(budget, "consequential"),
+                    native_candidate()
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            fixture
+                .service
+                .begin_tool_call(prepared.lease(), native_call(budget, "consequential"))
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            fixture
+                .service
+                .prepare_native_approval(
+                    prepared.lease(),
+                    native_call(budget, "consequential"),
+                    native_candidate()
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+        let mut read = native_call(budget, "read_only");
+        read.tool_call_index = 1;
+        assert!(
+            fixture
+                .service
+                .begin_tool_call(prepared.lease(), read)
+                .await
+                .is_ok()
+        );
+        let events = session_events(&fixture).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "native_approval_prepared")
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "application_tool_started")
+        );
+    }
+
+    #[tokio::test]
+    async fn native_preparation_requires_exact_live_provider_budget_and_rolls_back() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("native-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = fixture.service.start(&lease).await.unwrap();
+        let call = native_call(Uuid::new_v4(), "consequential");
+        let id = call.id;
+        assert!(
+            fixture
+                .service
+                .prepare_native_approval(&lease, call, native_candidate())
+                .await
+                .is_err()
+        );
+        assert!(
+            AiToolCallRecord::find_by_id(&fixture.database, &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            AiNativeApprovalCandidateRecord::find_by_id(&fixture.database, &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            run_record(&fixture, lease.run_id()).await.row_version,
+            lease.row_version
+        );
+    }
+
+    #[tokio::test]
+    async fn native_receipt_is_exactly_idempotent_and_remains_non_approvable() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("native-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = fixture.service.start(&lease).await.unwrap();
+        let budget = native_budget(&fixture, &lease).await;
+        let prepared = fixture
+            .service
+            .prepare_native_approval(
+                &lease,
+                native_call(budget, "consequential"),
+                native_candidate(),
+            )
+            .await
+            .unwrap();
+        let egress = Uuid::new_v4();
+        let receipt = || PreparedNativeApprovalReceipt {
+            protected_receipt: serde_json::json!({"ciphertext":"closed-control-receipt"}),
+            receipt_hash: "d".repeat(64),
+            egress_decision_id: egress,
+            egress_manifest_hash: "e".repeat(64),
+        };
+        let renewed = fixture
+            .service
+            .persist_native_approval_receipt(prepared.lease(), prepared.tool_call_id(), receipt())
+            .await
+            .unwrap();
+        let retried = fixture
+            .service
+            .persist_native_approval_receipt(&renewed, prepared.tool_call_id(), receipt())
+            .await
+            .unwrap();
+        assert_eq!(renewed, retried);
+        let mut wrong = receipt();
+        wrong.receipt_hash = "f".repeat(64);
+        assert!(matches!(
+            fixture
+                .service
+                .persist_native_approval_receipt(&renewed, prepared.tool_call_id(), wrong)
+                .await,
+            Err(AiError::Conflict)
+        ));
+        let candidate = fixture
+            .service
+            .load_prepared_native_approval(&renewed, prepared.tool_call_id())
+            .await
+            .unwrap();
+        assert_eq!(candidate.state, "prepared");
+        assert!(candidate.final_approval_id.is_none());
+        assert!(candidate.settled_checkpoint_id.is_none());
+        assert_eq!(run_record(&fixture, lease.run_id()).await.state, "running");
+    }
+    #[tokio::test]
+    async fn native_later_mutation_records_closed_control_without_approval_or_execution() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let claimed = fixture
+            .service
+            .claim_next("native-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = fixture.service.start(&claimed).await.unwrap();
+        let budget = native_budget(&fixture, &lease).await;
+        let prepared = fixture
+            .service
+            .prepare_native_approval(
+                &lease,
+                native_call(budget, "consequential"),
+                native_candidate(),
+            )
+            .await
+            .unwrap();
+        let receipt = || PreparedNativeApprovalReceipt {
+            protected_receipt: serde_json::json!({"ciphertext":"control"}),
+            receipt_hash: "d".repeat(64),
+            egress_decision_id: Uuid::new_v4(),
+            egress_manifest_hash: "e".repeat(64),
+        };
+        let renewed = fixture
+            .service
+            .persist_native_approval_receipt(prepared.lease(), prepared.tool_call_id(), receipt())
+            .await
+            .unwrap();
+        let mut call = native_call(budget, "consequential");
+        call.tool_call_index = 1;
+        let id = call.id;
+        let blocked = PreparedNativeBlockedReceipt {
+            candidate_id: prepared.tool_call_id(),
+            receipt: receipt(),
+            disclosure_schema_fingerprint: "f".repeat(64),
+            event: native_candidate().prepared_event,
+        };
+        let renewed = fixture
+            .service
+            .persist_blocked_native_call(&renewed, call, blocked)
+            .await
+            .unwrap();
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        let step = AiRunStepRecord::find_by_id(&fixture.database, &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(call.state, "control_blocked");
+        assert_eq!(step.state, "control_blocked");
+        assert!(call.approval_id.is_none());
+        assert!(call.protected_result.is_some());
+        assert!(call.completed_at.is_some() && step.finished_at.is_some());
+        assert_eq!(
+            call.authorization_code.as_deref(),
+            Some("native_consequential_paused")
+        );
+        assert!(
+            fixture
+                .service
+                .begin_tool_call(&renewed, native_call(budget, "consequential"))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fixture
+                .service
+                .load_prepared_native_approval(&renewed, prepared.tool_call_id())
+                .await
+                .unwrap()
+                .state,
+            "prepared"
+        );
+        assert_eq!(renewed.state(), AiRunState::Running);
+    }
+
+    fn native_approval_request(fixture: &Fixture, id: AiToolCallId) -> PreparedApprovalRequest {
+        PreparedApprovalRequest {
+            id: Uuid::new_v4(),
+            tool_call_id: id.0,
+            principal_subject: "run-user".to_owned(),
+            principal_reference_fingerprint: "1".repeat(64),
+            delegated_actor_subject: None,
+            delegation_reference: None,
+            argument_hash: "b".repeat(64),
+            tool_fingerprint: "descriptor-v1".to_owned(),
+            binding_hash: "a".repeat(64),
+            execution_target_id: "local-graphql".to_owned(),
+            target_schema_fingerprint: "2".repeat(64),
+            operation_name: "UpdateRecord".to_owned(),
+            operation_document_hash: "3".repeat(64),
+            result_projection_fingerprint: "4".repeat(64),
+            disclosure_schema_fingerprint: "5".repeat(64),
+            policy_version: "policy-v1".to_owned(),
+            authorization_state_digest: "6".repeat(64),
+            protected_resource_bindings: serde_json::json!({"ciphertext":"resources"}),
+            protected_action_preview: serde_json::json!({"ciphertext":"preview"}),
+            action_preview_hash: "c".repeat(64),
+            recent_mfa_required: false,
+            expires_at: (fixture.clock.now() + Duration::minutes(10)).unix_timestamp(),
+            event_id: Uuid::new_v4(),
+            protected_event: serde_json::json!({"ciphertext":"approval"}),
+            correlation_id: "native-test".to_owned(),
+            expected_owner_principal_kind: "user".to_owned(),
+            expected_owner_subject: "run-user".to_owned(),
+            expected_scope_kind: "tenant".to_owned(),
+            expected_scope_id: "tenant-run".to_owned(),
+            expected_tenant_id: Some("tenant-run".to_owned()),
+            parked_provider_wait: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn native_candidate_cannot_bypass_settlement_or_provider_parking() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let lease = fixture
+            .service
+            .claim_next("native-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = fixture.service.start(&lease).await.unwrap();
+        let budget = native_budget(&fixture, &lease).await;
+        let prepared = fixture
+            .service
+            .prepare_native_approval(
+                &lease,
+                native_call(budget, "consequential"),
+                native_candidate(),
+            )
+            .await
+            .unwrap();
+        let id = prepared.tool_call_id();
+        assert!(matches!(
+            fixture
+                .service
+                .request_approval(prepared.lease(), native_approval_request(&fixture, id))
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert!(matches!(
+            fixture
+                .service
+                .request_prepared_native_approval(
+                    prepared.lease(),
+                    native_approval_request(&fixture, id),
+                    id
+                )
+                .await,
+            Err(AiError::Conflict)
+        ));
+        let mut unproven = native_approval_request(&fixture, id);
+        unproven.parked_provider_wait = Some(PreparedApprovalProviderWait {
+            source_checkpoint_id: Uuid::new_v4(),
+            source_checkpoint_fingerprint: "1".repeat(64),
+            parked_checkpoint_id: Uuid::new_v4(),
+            parked_checkpoint_fingerprint: "2".repeat(64),
+            protected_parked_checkpoint: serde_json::json!({"ciphertext":"unproven"}),
+            provider_kind: "openai".to_owned(),
+            provider_model: "reviewed-model".to_owned(),
+            provider_response_id: Some("native-response".to_owned()),
+            budget_reservation_id: budget,
+        });
+        let rejected_approval_id = unproven.id;
+        assert!(matches!(
+            fixture
+                .service
+                .request_prepared_native_approval(prepared.lease(), unproven, id)
+                .await,
+            Err(AiError::Conflict)
+        ));
+        assert!(
+            AiApprovalRecord::find_by_id(&fixture.database, &rejected_approval_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let stored = fixture
+            .service
+            .load_prepared_native_approval(prepared.lease(), id)
+            .await
+            .unwrap();
+        assert_eq!(stored.state, "prepared");
+        assert!(stored.final_approval_id.is_none());
+        assert_eq!(
+            run_record(&fixture, lease.run_id()).await.row_version,
+            prepared.lease().row_version
+        );
+    }
+    #[tokio::test]
+    async fn native_pending_action_blocks_success_and_abandons_on_failed_owner() {
+        let fixture = fixture().await;
+        seed_queued(&fixture).await;
+        let claimed = fixture
+            .service
+            .claim_next("native-worker")
+            .await
+            .unwrap()
+            .unwrap();
+        let lease = fixture.service.start(&claimed).await.unwrap();
+        let budget = native_budget(&fixture, &lease).await;
+        let prepared = fixture
+            .service
+            .prepare_native_approval(
+                &lease,
+                native_call(budget, "consequential"),
+                native_candidate(),
+            )
+            .await
+            .unwrap();
+        let success = AiRunCompletion::new(AiRunState::Completed, "done", None, None).unwrap();
+        assert!(matches!(
+            fixture.service.finish(prepared.lease(), success).await,
+            Err(AiError::Conflict)
+        ));
+        assert_eq!(run_record(&fixture, lease.run_id()).await.state, "running");
+        let failure = AiRunCompletion::new(
+            AiRunState::RecoveryRequired,
+            "native_provider_unsettled",
+            Some("native_provider_unsettled".to_owned()),
+            None,
+        )
+        .unwrap();
+        fixture
+            .service
+            .finish(prepared.lease(), failure)
+            .await
+            .unwrap();
+        let candidate = AiNativeApprovalCandidateRecord::find_by_id(
+            &fixture.database,
+            &prepared.tool_call_id().0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &prepared.tool_call_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.state, "abandoned");
+        assert!(candidate.final_approval_id.is_none());
+        assert_eq!(call.state, "cancelled");
+        assert_eq!(
+            call.authorization_code.as_deref(),
+            Some("native_approval_abandoned")
+        );
+        assert!(call.approval_id.is_none());
+        assert!(call.protected_result.is_none());
+        assert!(
+            fixture
+                .service
+                .load_prepared_native_approval(prepared.lease(), prepared.tool_call_id())
+                .await
+                .is_err()
+        );
     }
 }
 

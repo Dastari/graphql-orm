@@ -148,6 +148,7 @@ mod service {
     };
     use crate::persistence::{
         AiApprovalRecord, AiAuditEventRecord, AiMessageRecord, AiMessageRecordWhereInput,
+        AiNativeApprovalCandidateRecord, AiNativeApprovalCandidateRecordWhereInput,
         AiRunCheckpointRecord, AiRunCheckpointRecordWhereInput, AiRunRecord, AiSessionEventRecord,
         AiSessionRecord, AiSessionRecordWhereInput, AiSubscriptionWaitAdoptionRecord,
         AiSubscriptionWaitAdoptionRecordWhereInput, AiSubscriptionWaiterRecord, AiToolCallRecord,
@@ -1395,6 +1396,7 @@ mod service {
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
+                        validate_native_wait_source(tx, &checkpoint, wait, false).await?;
                         validate_provider_turn_checkpoint(&checkpoint, &binding, &lease, &request)?;
                         let park_generation = binding
                             .park_generation
@@ -1524,11 +1526,17 @@ mod service {
                             .await
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
+                        validate_native_wait_source(tx, &source_checkpoint, parked.wait, true)
+                            .await?;
                         if source_checkpoint.run_id != run.id
                             || source_checkpoint.attempt_id != parked.source_attempt_id
                             || source_checkpoint.lease_generation
                                 != parked.source_run_lease_generation
-                            || source_checkpoint.checkpoint_kind != "provider_turn_persisted"
+                            || !matches!(
+                                source_checkpoint.checkpoint_kind.as_str(),
+                                "provider_turn_persisted"
+                                    | "native_approval_provider_turn_persisted"
+                            )
                             || source_checkpoint.checkpoint_hash
                                 != parked.source_checkpoint_fingerprint
                             || run.lease_owner.is_some()
@@ -2820,6 +2828,78 @@ mod service {
         Ok(())
     }
 
+    async fn validate_native_wait_source(
+        tx: &mut MutationContext<'_, DefaultWriteBackend>,
+        checkpoint: &AiRunCheckpointRecord,
+        wait: AiProviderSessionWaitIdentity,
+        finalized: bool,
+    ) -> Result<(), OrmPublicError> {
+        if checkpoint.checkpoint_kind != "native_approval_provider_turn_persisted" {
+            return Ok(());
+        }
+        if wait.kind() != AiProviderSessionWaitKind::Approval {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        let candidate = if finalized {
+            let approval = tx
+                .find_by_id::<AiApprovalRecord>(&wait.wait_id())
+                .await
+                .map_err(OrmPublicError::from)?
+                .ok_or_else(OrmPublicError::not_found)?;
+            tx.find_by_id::<AiNativeApprovalCandidateRecord>(&approval.tool_call_id)
+                .await
+                .map_err(OrmPublicError::from)?
+                .ok_or_else(OrmPublicError::not_found)?
+        } else {
+            let mut candidates = tx
+                .query::<AiNativeApprovalCandidateRecord>()
+                .filter(AiNativeApprovalCandidateRecordWhereInput {
+                    run_id: Some(UuidFilter {
+                        eq: Some(checkpoint.run_id),
+                        ..Default::default()
+                    }),
+                    state: Some(StringFilter {
+                        eq: Some("prepared".to_owned()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .limit(2)
+                .fetch_all()
+                .await
+                .map_err(OrmPublicError::from)?;
+            if candidates.len() != 1 {
+                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+            }
+            candidates.remove(0)
+        };
+        if candidate.run_id != checkpoint.run_id
+            || candidate.attempt_id != checkpoint.attempt_id
+            || candidate.lease_generation != checkpoint.lease_generation
+            || Some(candidate.budget_reservation_id) != checkpoint.budget_reservation_id
+            || candidate.protected_preparation.is_none()
+            || candidate.protected_control_receipt.is_none()
+            || candidate.control_egress_decision_id.is_none()
+            || candidate
+                .control_egress_manifest_hash
+                .as_deref()
+                .is_none_or(|hash| !crate::valid_sha256(hash))
+            || candidate.payload_purged_at.is_some()
+            || if finalized {
+                candidate.state != "finalized"
+                    || candidate.final_approval_id != Some(wait.wait_id())
+                    || candidate.settled_checkpoint_id != Some(checkpoint.id)
+            } else {
+                candidate.state != "prepared"
+                    || candidate.final_approval_id.is_some()
+                    || candidate.settled_checkpoint_id.is_some()
+            }
+        {
+            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+        }
+        Ok(())
+    }
+
     fn validate_provider_turn_checkpoint(
         checkpoint: &AiRunCheckpointRecord,
         binding: &AiProviderSessionBindingRecord,
@@ -2831,7 +2911,10 @@ mod service {
             || checkpoint.run_id != lease.run_id().0
             || checkpoint.attempt_id != lease.attempt_id()
             || checkpoint.lease_generation != lease.lease_generation()
-            || checkpoint.checkpoint_kind != "provider_turn_persisted"
+            || !matches!(
+                checkpoint.checkpoint_kind.as_str(),
+                "provider_turn_persisted" | "native_approval_provider_turn_persisted"
+            )
             || checkpoint.provider_response_id.is_none()
             || checkpoint.budget_reservation_id.is_none()
             || checkpoint.assistant_message_id.is_some()
@@ -4452,6 +4535,7 @@ mod service {
                     tool_call_index: 0,
                     tool_id: "records.update".to_owned(),
                     tool_fingerprint: "e".repeat(64),
+                    execution_provenance: None,
                     protected_arguments: Some(serde_json::json!({"protected": true})),
                     argument_hash: "f".repeat(64),
                     protected_result: None,

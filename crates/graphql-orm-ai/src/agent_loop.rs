@@ -65,6 +65,7 @@ pub struct AiAgentContinuation {
     input: Vec<ModelInputBlock>,
     transfers: Vec<AiEgressManifest>,
     replay_transfers: Vec<AiEgressManifest>,
+    native_outcome: bool,
 }
 
 pub(crate) struct AiStatelessToolEvidence {
@@ -85,6 +86,23 @@ pub(crate) struct AiStatelessConversationEvidence {
 }
 
 impl AiAgentContinuation {
+    pub(crate) fn from_native_approved_outcome(
+        continuation: ModelContinuation,
+        reasoning_effort: ModelReasoningEffort,
+        value: serde_json::Value,
+        transfer: AiEgressManifest,
+    ) -> Result<Self, AiError> {
+        let candidate = Self {
+            continuation,
+            reasoning_effort,
+            input: vec![ModelInputBlock::Json { value }],
+            transfers: vec![transfer],
+            replay_transfers: Vec::new(),
+            native_outcome: true,
+        };
+        Self::from_checkpoint_value(candidate.checkpoint_value())
+    }
+
     pub(crate) fn from_subscription_result(
         continuation: ModelContinuation,
         reasoning_effort: ModelReasoningEffort,
@@ -104,6 +122,7 @@ impl AiAgentContinuation {
             }],
             transfers: vec![transfer],
             replay_transfers,
+            native_outcome: false,
         };
         Self::from_checkpoint_value(candidate.checkpoint_value())
     }
@@ -143,13 +162,14 @@ impl AiAgentContinuation {
             input,
             transfers,
             replay_transfers,
+            native_outcome: false,
         };
         Self::from_checkpoint_value(candidate.checkpoint_value())
     }
 
     pub(crate) fn checkpoint_value(&self) -> serde_json::Value {
         serde_json::json!({
-            "formatVersion": 3,
+            "formatVersion": if self.native_outcome { 4 } else { 3 },
             "continuation": self.continuation,
             "reasoningEffort": self.reasoning_effort,
             "input": self.input,
@@ -174,28 +194,55 @@ impl AiAgentContinuation {
 
         let snapshot: Snapshot =
             serde_json::from_value(value).map_err(|_| AiError::PersistenceFailed)?;
-        if !matches!(snapshot.format_version, 1..=3)
+        if !matches!(snapshot.format_version, 1..=4)
             || snapshot.input.is_empty()
             || snapshot.input.len() > 256
             || snapshot.input.len() != snapshot.transfers.len()
         {
             return Err(AiError::Conflict);
         }
-        let mut call_ids = BTreeSet::new();
-        for (input, transfer) in snapshot.input.iter().zip(&snapshot.transfers) {
-            let ModelInputBlock::ToolResult {
-                call_id, tool_id, ..
-            } = input
-            else {
-                return Err(AiError::Conflict);
-            };
-            if !valid_provider_reference(call_id)
-                || tool_id.trim().is_empty()
-                || tool_id.len() > 1_024
-                || !call_ids.insert(call_id)
-                || transfer.capability != crate::AiEgressCapability::ToolResult
+        if snapshot.format_version == 4 {
+            if snapshot.input.len() != 1
+                || !snapshot.replay_transfers.is_empty()
+                || !matches!(
+                    snapshot.continuation,
+                    ModelContinuation::ProviderResponse { .. }
+                )
             {
                 return Err(AiError::Conflict);
+            }
+            let ModelInputBlock::Json { value } = &snapshot.input[0] else {
+                return Err(AiError::Conflict);
+            };
+            crate::provider::native_approved_outcome_hash(value).ok_or(AiError::Conflict)?;
+            let transfer = &snapshot.transfers[0];
+            let fingerprint = crate::orm_native_approvals::native_receipt_hash(value)?;
+            if transfer.capability != crate::AiEgressCapability::ToolResult
+                || !transfer.sources.iter().any(|source| {
+                    source.kind == "native_approved_outcome"
+                        && source.reference == fingerprint
+                        && source.trust == crate::AiSourceTrust::TrustedRuntime
+                })
+            {
+                return Err(AiError::Conflict);
+            }
+        } else {
+            let mut call_ids = BTreeSet::new();
+            for (input, transfer) in snapshot.input.iter().zip(&snapshot.transfers) {
+                let ModelInputBlock::ToolResult {
+                    call_id, tool_id, ..
+                } = input
+                else {
+                    return Err(AiError::Conflict);
+                };
+                if !valid_provider_reference(call_id)
+                    || tool_id.trim().is_empty()
+                    || tool_id.len() > 1_024
+                    || !call_ids.insert(call_id)
+                    || transfer.capability != crate::AiEgressCapability::ToolResult
+                {
+                    return Err(AiError::Conflict);
+                }
             }
         }
         match &snapshot.continuation {
@@ -231,6 +278,7 @@ impl AiAgentContinuation {
             input: snapshot.input,
             transfers: snapshot.transfers,
             replay_transfers: snapshot.replay_transfers,
+            native_outcome: snapshot.format_version == 4,
         };
         if let Some(evidence) = continuation.stateless_evidence()? {
             let historical_count = evidence
@@ -576,8 +624,10 @@ impl AiAgentLoopGuard {
             .provider_turns
             .checked_add(1)
             .ok_or(AiError::Conflict)?;
-        if !result.interactive_tool_results().is_empty() {
-            if result.interactive_tool_results().len() != result.tool_calls().len() {
+        if !result.interactive_tool_results().is_empty()
+            || !result.native_control_receipts().is_empty()
+        {
+            if !result.completes_interactive_tool_calls() {
                 return Err(AiError::Conflict);
             }
             let call_count =
@@ -587,24 +637,6 @@ impl AiAgentLoopGuard {
                 .checked_add(call_count)
                 .filter(|count| *count <= self.limits.maximum_total_tool_calls)
                 .ok_or(AiError::Conflict)?;
-            let mut call_ids = BTreeSet::new();
-            for (call, persisted) in result
-                .tool_calls()
-                .iter()
-                .zip(result.interactive_tool_results())
-            {
-                if !call_ids.insert(call.call_id())
-                    || persisted.provider_call_id() != call.call_id()
-                    || persisted.egress_manifest().is_none()
-                    || !matches!(
-                        persisted.model_input(),
-                        Some(ModelInputBlock::ToolResult { call_id, tool_id, .. })
-                            if call_id == call.call_id() && tool_id == call.tool_id().as_str()
-                    )
-                {
-                    return Err(AiError::Conflict);
-                }
-            }
             self.provider_turns = next_provider_turns;
             self.total_tool_calls = next_total_tool_calls;
             self.terminal = true;
@@ -726,6 +758,7 @@ impl AiAgentLoopGuard {
             input,
             transfers,
             replay_transfers: std::mem::take(&mut self.replay_transfers),
+            native_outcome: false,
         };
         self.expected_previous_reference = Some(next.chain_reference()?);
         Ok(next)
@@ -800,6 +833,51 @@ mod tests {
             output_schema: None,
             maximum_output_tokens: Some(128),
         }
+    }
+
+    #[test]
+    fn native_approved_outcome_is_distinct_from_consumed_callback_and_binds_exact_wrapper() {
+        let value = serde_json::json!({"formatVersion":1,"kind":"FrameworkApprovedToolOutcome","toolCallId":uuid::Uuid::new_v4(),"providerCallId":"consumed-call","toolId":"records.update","state":"completed","output":{"changed":true}});
+        let mut manifest = transfer();
+        manifest.sources.push(crate::AiDataSourceRef {
+            kind: "native_approved_outcome".to_owned(),
+            reference: crate::orm_native_approvals::native_receipt_hash(&value).unwrap(),
+            classification: crate::DataClassification::Internal,
+            trust: crate::AiSourceTrust::TrustedRuntime,
+        });
+        let continuation = AiAgentContinuation::from_native_approved_outcome(
+            ModelContinuation::ProviderResponse {
+                response_id: "settled-turn".to_owned(),
+            },
+            ModelReasoningEffort::Low,
+            value,
+            manifest,
+        )
+        .unwrap();
+        let mut request = empty_request(ModelReasoningEffort::Low);
+        continuation
+            .clone()
+            .apply_with_transfers(&mut request)
+            .unwrap();
+        assert!(matches!(
+            request.input.as_slice(),
+            [ModelInputBlock::Json { .. }]
+        ));
+        assert!(
+            !request
+                .input
+                .iter()
+                .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+        );
+        let mut altered = continuation.checkpoint_value();
+        altered["input"][0]["value"]["output"] = serde_json::json!({"changed":false});
+        assert!(AiAgentContinuation::from_checkpoint_value(altered).is_err());
+        let mut legacy = continuation.checkpoint_value();
+        legacy["formatVersion"] = serde_json::json!(3);
+        assert!(AiAgentContinuation::from_checkpoint_value(legacy).is_err());
+        let mut invented = continuation.checkpoint_value();
+        invented["input"][0]["value"]["extra"] = serde_json::json!(true);
+        assert!(AiAgentContinuation::from_checkpoint_value(invented).is_err());
     }
 
     #[test]
