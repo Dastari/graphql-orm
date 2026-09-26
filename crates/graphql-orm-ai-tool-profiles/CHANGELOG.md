@@ -12,6 +12,8 @@ supersedes: []
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-26
+
 ### Added
 
 - `AiGraphqlToolProfile::automatic_mutation` compiles an exact static application

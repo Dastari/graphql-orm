@@ -20,6 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.102.0] - 2026-09-26
+
 ### Added
 
 - Exact registered remote mutation binding behind the opt-in
