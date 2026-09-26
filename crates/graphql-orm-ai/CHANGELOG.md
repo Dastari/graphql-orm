@@ -24,6 +24,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
+- Classified capability-surface constructors and native turn delivery binding
+  preserve the crate-owned read-only discovery/describe/execute broker alongside
+  exact static mutation bootstrap tools. Native broker reads use the existing
+  durable service, including after an approval becomes pending. Retained-session
+  fingerprints bind the delivery configuration across approved resumption.
+
 - Exact registered remote mutation binding behind the opt-in
   `RegisteredQueriesAndMutations` adapter policy; query-only remains the
   default. Mutation transport contexts are single-use, including ambiguous

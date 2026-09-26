@@ -740,6 +740,83 @@ impl AiProviderCallPlan {
         )
     }
 
+    /// Creates an explicitly classified native call using one exact crate-owned delivery surface.
+    ///
+    /// Frozen discovery/describe/execute broker definitions remain read-only. Every other
+    /// definition must match a currently enabled registered read or classified mutation.
+    /// This admits discovery only; current runtime policy and resolver authorization still apply.
+    ///
+    /// # Errors
+    /// Rejects client-deferred or swapped surfaces, unknown/stale definitions, denied policy, and initial continuations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_classified_capability_surface(
+        provider_kind: ProviderKind,
+        request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        surface: &crate::AiCapabilityDeliverySurface,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        if request.continuation.is_some()
+            || request
+                .input
+                .iter()
+                .any(|block| matches!(block, ModelInputBlock::ToolResult { .. }))
+        {
+            return Err(AiError::Forbidden);
+        }
+        Self::new_with_bound_capability_surface(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            surface,
+            catalog,
+            static_policy,
+            generated_targets,
+            true,
+        )
+    }
+
+    /// Continues a classified native call with the exact current crate-owned delivery surface.
+    ///
+    /// The opaque continuation binds prior results and their egress proofs. Frozen broker
+    /// definitions remain read-only, while static bootstrap mutations retain their exact policy.
+    ///
+    /// # Errors
+    /// Rejects client-deferred surfaces, invalid continuations, swapped definitions, or denied current policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_continuation_with_classified_capability_surface(
+        provider_kind: ProviderKind,
+        mut request: ModelRequest,
+        budget: AiBudgetReservationRequest,
+        mut transfers: Vec<AiEgressManifest>,
+        correlation_id: impl Into<String>,
+        continuation: crate::AiAgentContinuation,
+        surface: &crate::AiCapabilityDeliverySurface,
+        catalog: &crate::AiToolCatalog,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<Self, AiError> {
+        transfers.extend(continuation.apply_with_transfers(&mut request)?);
+        Self::new_with_bound_capability_surface(
+            provider_kind,
+            request,
+            budget,
+            transfers,
+            correlation_id,
+            surface,
+            catalog,
+            static_policy,
+            generated_targets,
+            true,
+        )
+    }
+
     /// Creates an initial provider call exposing exactly one crate-owned
     /// capability delivery surface.
     ///
@@ -788,6 +865,7 @@ impl AiProviderCallPlan {
             catalog,
             static_policy,
             generated_targets,
+            false,
         )
     }
 
@@ -828,6 +906,7 @@ impl AiProviderCallPlan {
             catalog,
             static_policy,
             generated_targets,
+            false,
         )
     }
 
@@ -842,30 +921,44 @@ impl AiProviderCallPlan {
         catalog: &crate::AiToolCatalog,
         static_policy: &AiToolPolicySet,
         generated_targets: &crate::AiGeneratedGraphqlTargetPolicySet,
+        classified: bool,
     ) -> Result<Self, AiError> {
-        if request.tools.is_empty() || request.tools.as_slice() != surface.tools() {
+        if request.tools.is_empty()
+            || request.tools.as_slice() != surface.tools()
+            || (classified && surface.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred)
+        {
             return Err(AiError::Forbidden);
-        }
-        for definition in &request.tools {
-            let id = crate::AiToolId::parse(definition.tool_id.clone())?;
-            if crate::AiCapabilityBrokerOperation::from_tool_id(&id).is_some() {
-                continue;
-            }
-            catalog.validate_read_capability_model_definition(
-                definition,
-                static_policy,
-                generated_targets,
-            )?;
         }
         let bindings = request
             .tools
             .iter()
-            .map(|definition| AiPlanToolRuleBinding {
-                fingerprint: definition.fingerprint.clone(),
-                maturity: ToolMaturity::ReadOnly,
-                approval: AiApprovalRule::None,
+            .map(|definition| {
+                let id = crate::AiToolId::parse(definition.tool_id.clone())?;
+                let (maturity, approval) =
+                    if crate::AiCapabilityBrokerOperation::from_tool_id(&id).is_some() {
+                        // Exact surface equality above proves the crate-owned broker definition.
+                        (ToolMaturity::ReadOnly, AiApprovalRule::None)
+                    } else if classified {
+                        catalog.validate_classified_model_definition(
+                            definition,
+                            static_policy,
+                            generated_targets,
+                        )?
+                    } else {
+                        catalog.validate_read_capability_model_definition(
+                            definition,
+                            static_policy,
+                            generated_targets,
+                        )?;
+                        (ToolMaturity::ReadOnly, AiApprovalRule::None)
+                    };
+                Ok(AiPlanToolRuleBinding {
+                    fingerprint: definition.fingerprint.clone(),
+                    maturity,
+                    approval,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AiError>>()?;
         let mut plan = Self::new_internal(
             provider_kind,
             request,
@@ -875,6 +968,7 @@ impl AiProviderCallPlan {
             true,
         )?;
         plan.tool_rule_bindings = bindings;
+        plan.classified_native = classified;
         Ok(plan)
     }
 

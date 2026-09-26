@@ -44,7 +44,22 @@ Use `AiProviderCallPlan::new_with_classified_tools` and its continuation
 constructor, `AiSupervisedAgentTurnPlan::new_classified_native`, and the
 coordinator's explicit `with_classified_native_tools` integration for mixed
 native turns. Legacy constructors do not enable native control receipts. This
-mode requires a trusted retained provider session. Preparation holds the run
+mode requires a trusted retained provider session. Hosts using capability delivery
+should use `new_with_classified_capability_surface` and
+`new_continuation_with_classified_capability_surface`, then attach the exact
+`AiCapabilityDeliveryTurn` with `AiSupervisedAgentTurnPlan::with_capability_delivery`.
+The retained-session registration fingerprint must equal the delivery session
+binding fingerprint. Fixed broker discovery/describe/execute remain generated-read
+only; static mutation tools use the frozen bootstrap set and classified execution.
+Approval reclaim changes the run fence, so previously loaded broker references do
+not acquire authority in the new attempt. The host supplies a fresh broker turn
+under the same retained-session definition binding; the model must rediscover
+reads after reclaim. No additional data migration is required for this delivery
+integration. Existing read-only constructors and coordinator remain unchanged.
+This native mode keeps definitions fixed during each retained provider turn and
+rejects client-deferred delivery; existing read-only deferred installation remains
+available through the read-only coordinator.
+Preparation holds the run
 lease and creates no usable approval; authoritative provider usage settlement
 and the exact ordered native source checkpoint precede finalization and lease
 release. A pending or paused control response never means the action executed.

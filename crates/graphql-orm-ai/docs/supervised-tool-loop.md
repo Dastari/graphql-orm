@@ -299,3 +299,23 @@ process loss is `RecoveryRequired`.
 supervised descriptors through it, reconstruct provider state from an
 approval/tool row, or infer mutation replay authority after a resumed-worker
 crash.
+
+## Capability delivery in native turns
+
+Use the classified capability-surface initial/continuation constructors when
+mixing the crate-owned discovery broker with exact static mutation bootstrap
+definitions. Attach the same exact surface to the native turn using
+`with_capability_delivery`; its session-binding fingerprint must match the
+retained provider descriptor. Swapped definitions, partial surfaces and changes
+to the retained definition binding fail closed.
+
+Native broker reads dispatch through the existing durable read-only broker,
+including after a mutation has become pending. The broker cannot execute a
+mutation. Application mutation callbacks continue through classification and
+conditional approval. Source checkpoints retain each completed broker read
+alongside the prior application effects; approved resumption does not replay
+any prior callback. Loaded broker references stay bound to their original
+attempt. After approval reclaim, use a fresh broker turn under the same session
+binding and rediscover reads; the old references do not gain authority in the
+new attempt. Native delivery rejects client-deferred mode because in-flight callbacks cannot
+install definitions; existing read-only deferred continuation behavior is unchanged.

@@ -12,6 +12,7 @@ enum CallbackScenario {
     MixedApproval,
     InvalidReadFirst,
     InvalidMutation,
+    FixedBroker,
 }
 
 #[derive(Default)]
@@ -35,7 +36,12 @@ impl AiProvider for MixedRetainedProvider {
             streaming: true,
             custom_tools: true,
             provider_retained_continuation: true,
-            capability_delivery_modes: [AiCapabilityDeliveryMode::EagerExact].into_iter().collect(),
+            capability_delivery_modes: [
+                AiCapabilityDeliveryMode::EagerExact,
+                AiCapabilityDeliveryMode::FixedBroker,
+            ]
+            .into_iter()
+            .collect(),
             ..Default::default()
         }
     }
@@ -95,7 +101,7 @@ impl AiProvider for MixedRetainedProvider {
             let response = format!("native-coordinator-{turn}");
             yield ProviderEvent::ResponseStarted { response_id: Some(response.clone()) };
             if turn == 0 {
-                if scenario != CallbackScenario::MixedApproval {
+                if matches!(scenario, CallbackScenario::InvalidReadFirst | CallbackScenario::InvalidMutation) {
                     let tool_id = if scenario == CallbackScenario::InvalidReadFirst {
                         "records.read"
                     } else {
@@ -130,6 +136,39 @@ impl AiProvider for MixedRetainedProvider {
                     assert!(calls[0].completed_at.is_some());
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                 }
+                if scenario == CallbackScenario::FixedBroker {
+                    let definition = request.tools.iter().find(|tool| tool.tool_id == AI_CAPABILITY_DISCOVER_TOOL_ID).unwrap();
+                    let call_id = "native-broker-discover".to_owned();
+                    let arguments = json!({"text":"records", "maximumResults":2});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:definition.tool_id.clone() };
+                    let reply = responder.respond(ProviderDynamicToolCall::from_definition(
+                        &response, &call_id, definition, arguments.clone(),
+                    )?).await?;
+                    assert!(reply.output()["candidates"].is_array(), "broker should return bounded discovery metadata: {:?}", reply.output());
+                    let candidate = reply.output()["candidates"][0].clone();
+                    replies.lock().await.push(reply.output().clone());
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                    let describe = request.tools.iter().find(|tool| tool.tool_id == AI_CAPABILITY_DESCRIBE_TOOL_ID).unwrap();
+                    let call_id = "native-broker-describe".to_owned();
+                    let arguments = json!({"capabilityId":candidate["capabilityId"], "candidateFingerprint":candidate["candidateFingerprint"]});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:describe.tool_id.clone() };
+                    let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, describe, arguments.clone())?).await?;
+                    let loaded = reply.output()["loadedReference"].clone();
+                    assert!(loaded.is_string());
+                    replies.lock().await.push(reply.output().clone());
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                    let execute = request.tools.iter().find(|tool| tool.tool_id == AI_CAPABILITY_EXECUTE_TOOL_ID).unwrap();
+                    let call_id = "native-broker-execute".to_owned();
+                    let arguments = json!({"loadedReference":loaded,
+                        "arguments":[{"name":"recordId", "value":"record-42"}],
+                        "selections":["recordId", "subject"], "relationshipArguments":[],
+                        "relationshipMaximumItems":[], "maximumItems":null});
+                    yield ProviderEvent::ToolCallStarted { call_id:call_id.clone(), tool_id:execute.tool_id.clone() };
+                    let reply = responder.respond(ProviderDynamicToolCall::from_definition(&response, &call_id, execute, arguments.clone())?).await?;
+                    assert_eq!(reply.output()["data"]["GeneratedRecord"]["recordId"], "record-42", "broker execute should return exact resolver result: {:?}", reply.output());
+                    replies.lock().await.push(reply.output().clone());
+                    yield ProviderEvent::ToolCallCompleted { call_id, arguments };
+                }
                 for (index, tool_id, record_id) in [
                     (0, "records.automatic", "ordinary"),
                     (1, "records.automatic", "review"),
@@ -160,6 +199,7 @@ impl AiProvider for MixedRetainedProvider {
 struct MixedPlanner {
     fixture: Arc<Fixture>,
     descriptor: AiProviderSessionDescriptor,
+    broker: bool,
 }
 
 impl MixedPlanner {
@@ -196,8 +236,86 @@ impl MixedPlanner {
         base.budget.lease_generation = lease.lease_generation();
         base.budget.idempotency_key = format!("mixed-native:{}", lease.attempt_id());
         base.transfers[0].estimated_bytes = 16_384;
+        let delivery = self
+            .broker
+            .then(|| mixed_broker_delivery(&self.fixture, base.request.tools.clone()));
+        if let Some(delivery) = &delivery {
+            base.request.tools = delivery.current_tools();
+        }
         let resumed = continuation.is_some();
-        let provider = if let Some(continuation) = continuation {
+        if let Some(delivery) = &delivery {
+            let surface = delivery.current_surface();
+            let check = |request: ModelRequest| {
+                AiProviderCallPlan::new_with_classified_capability_surface(
+                    base.provider_kind.clone(),
+                    request,
+                    base.budget.clone(),
+                    base.transfers.clone(),
+                    "mixed-native-coordinator",
+                    &surface,
+                    self.fixture.runtime.tool_catalog(),
+                    &policy,
+                    &self.fixture.generated_target_policy,
+                )
+            };
+            let mut swapped = base.request.clone();
+            swapped.tools[0].description.push_str(" altered");
+            assert!(
+                check(swapped).is_err(),
+                "exact minted definitions must not be editable"
+            );
+            let mut omitted = base.request.clone();
+            omitted.tools.pop();
+            assert!(
+                check(omitted).is_err(),
+                "a partial surface must not pass exact binding"
+            );
+            assert!(
+                AiProviderCallPlan::new_with_capability_surface(
+                    base.provider_kind.clone(),
+                    base.request.clone(),
+                    base.budget.clone(),
+                    base.transfers.clone(),
+                    "mixed-native-coordinator",
+                    &surface,
+                    self.fixture.runtime.tool_catalog(),
+                    &policy,
+                    &self.fixture.generated_target_policy,
+                )
+                .is_err(),
+                "legacy surface constructors must remain read-only"
+            );
+        }
+        let provider = if let Some(delivery) = &delivery {
+            let surface = delivery.current_surface();
+            if let Some(continuation) = continuation {
+                base.request.input.clear();
+                AiProviderCallPlan::new_continuation_with_classified_capability_surface(
+                    base.provider_kind,
+                    base.request,
+                    base.budget,
+                    base.transfers,
+                    "mixed-native-coordinator",
+                    continuation,
+                    &surface,
+                    self.fixture.runtime.tool_catalog(),
+                    &policy,
+                    &self.fixture.generated_target_policy,
+                )?
+            } else {
+                AiProviderCallPlan::new_with_classified_capability_surface(
+                    base.provider_kind,
+                    base.request,
+                    base.budget,
+                    base.transfers,
+                    "mixed-native-coordinator",
+                    &surface,
+                    self.fixture.runtime.tool_catalog(),
+                    &policy,
+                    &self.fixture.generated_target_policy,
+                )?
+            }
+        } else if let Some(continuation) = continuation {
             base.request.input.clear();
             AiProviderCallPlan::new_continuation_with_classified_tools(
                 base.provider_kind,
@@ -234,14 +352,112 @@ impl MixedPlanner {
         } else {
             "d".repeat(64)
         };
-        AiSupervisedAgentTurnPlan::new_classified_native(
+        if let Some(delivery) = &delivery {
+            let swapped_session = AiSupervisedAgentTurnPlan::new_classified_native(
+                provider.clone(),
+                AiProviderSessionTurnPlan::new(self.descriptor.clone(), transcript.clone())?,
+                automatic_mutation_route(),
+                native_test_rules(self.fixture.scope.clone()),
+                false,
+            )?;
+            assert!(
+                swapped_session
+                    .with_capability_delivery(delivery.clone())
+                    .is_err(),
+                "surface fingerprint must match the retained provider session"
+            );
+        }
+        let descriptor = if let Some(delivery) = &delivery {
+            AiProviderSessionDescriptor::new(
+                ProviderKind::OpenAiCompatible,
+                "mock-profile",
+                "mock-model",
+                delivery.session_binding().fingerprint(),
+                "mock/v1",
+                "b".repeat(64),
+            )?
+        } else {
+            self.descriptor.clone()
+        };
+        let plan = AiSupervisedAgentTurnPlan::new_classified_native(
             provider,
-            AiProviderSessionTurnPlan::new(self.descriptor.clone(), transcript)?,
+            AiProviderSessionTurnPlan::new(descriptor, transcript)?,
             automatic_mutation_route(),
             native_test_rules(self.fixture.scope.clone()),
             false,
-        )
+        )?;
+        if let Some(delivery) = delivery {
+            plan.with_capability_delivery(delivery)
+        } else {
+            Ok(plan)
+        }
     }
+}
+
+fn mixed_broker_delivery(
+    fixture: &Fixture,
+    definitions: Vec<ModelToolDefinition>,
+) -> AiCapabilityDeliveryTurn {
+    let (semantics, query_catalog) = generated_query_catalog();
+    let index = Arc::new(
+        AiCapabilityIndex::compile(
+            GraphqlExecutionTargetId::parse("generated-read-application").unwrap(),
+            query_catalog.finished_schema_fingerprint(),
+            &semantics,
+            Some(&query_catalog),
+            None,
+            None,
+            [],
+            "target-policy-v1",
+            AiCapabilityIndexLimits::default(),
+        )
+        .unwrap(),
+    );
+    let index_set = AiCapabilityIndexSet::compile([index.clone()]).unwrap();
+    let broker = Arc::new(
+        AiCapabilityDiscoveryBroker::new(
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(BrokerCurrentIndex(index)),
+            Arc::new(BrokerAuthority {
+                allowed: AtomicBool::new(true),
+                policy_fingerprint: RwLock::new("current-policy-v1".to_owned()),
+            }),
+            Arc::new(SystemClock),
+            Duration::seconds(30),
+        )
+        .unwrap(),
+    );
+    let binding = AiProviderCapabilitySessionBinding::new(
+        AiCapabilityDeliveryMode::FixedBroker,
+        index_set.fingerprint(),
+        definitions.iter().map(|d| d.fingerprint.clone()).collect(),
+        "test-provider-projection-v1",
+        "mock-model",
+        ModelReasoningEffort::Unspecified,
+        "a".repeat(64),
+    )
+    .unwrap();
+    AiCapabilityDeliveryTurn::select(
+        &ProviderCapabilities {
+            custom_tools: true,
+            capability_delivery_modes: [AiCapabilityDeliveryMode::FixedBroker]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+        index_set.fingerprint(),
+        definitions,
+        true,
+        binding,
+        broker,
+        AiCapabilityBrokerSession::new(AiCapabilityDeliveryLimits::default()).unwrap(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn native_coordinator_fixed_broker_survives_mixed_approval_without_replay() {
+    Box::pin(native_coordinator_lifecycle(CallbackScenario::FixedBroker)).await;
 }
 
 #[async_trait]
@@ -358,7 +574,24 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         )
         .unwrap(),
     );
-    let (consequential, approvals) = consequential_test_service(&fixture);
+    let (_, approvals) = consequential_test_service(&fixture);
+    let consequential = OrmAiConsequentialToolCallService::new(
+        fixture.run_service.clone(),
+        fixture.runtime.clone(),
+        approvals.clone(),
+        Arc::new(PreviewBuilder),
+        fixture.audit.clone(),
+        Arc::new(SystemClock),
+        AiApplicationToolCallLimits::new(
+            8_192,
+            16_384,
+            4,
+            8,
+            Duration::seconds(30),
+            Duration::seconds(10),
+        )
+        .unwrap(),
+    );
     let consequential = Arc::new(consequential.with_provider_session_service(sessions.clone()));
     // This fixture can prepend a rejected read to the four mixed callbacks.
     // Keep application admission aligned with its eight-call coordinator limit.
@@ -411,6 +644,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     ));
     let planner = Arc::new(MixedPlanner {
         fixture: fixture.clone(),
+        broker: scenario == CallbackScenario::FixedBroker,
         descriptor: AiProviderSessionDescriptor::new(
             ProviderKind::OpenAiCompatible,
             "mock-profile",
@@ -489,7 +723,9 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     }
     let waiting = waiting.unwrap();
     let extra_read = usize::from(scenario == CallbackScenario::InvalidReadFirst);
-    let expected_calls = 4 + extra_read;
+    let broker_executions = usize::from(scenario == CallbackScenario::FixedBroker);
+    let broker_calls = 3 * broker_executions;
+    let expected_calls = 4 + extra_read + broker_calls;
     let AiSupervisedAgentRunOutcome::WaitingApproval {
         approval_id,
         provider_turns,
@@ -497,16 +733,24 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         ..
     } = waiting
     else {
-        panic!("expected durable native approval wait: {waiting:?}")
+        panic!(
+            "expected durable native approval wait: {waiting:?}; provider turns={}, created={}, replies={:?}",
+            provider.turns.load(Ordering::SeqCst),
+            provider.created.load(Ordering::SeqCst),
+            provider.replies.lock().await
+        )
     };
     assert_eq!(
         (provider_turns, total_tool_calls),
         (1, expected_calls as u32)
     );
-    assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.completed_executions.load(Ordering::SeqCst),
+        1 + broker_executions
+    );
     let replies = provider.replies.lock().await.clone();
     assert_eq!(replies.len(), expected_calls);
-    let replies = &replies[extra_read..];
+    let replies = &replies[extra_read + broker_calls..];
     assert_eq!(replies[1]["status"], "ApprovalPending");
     assert_eq!(replies[2]["status"], "ConsequentialCallsPaused");
     assert_eq!(replies[1]["effectExecuted"], false);
@@ -534,7 +778,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             .iter()
             .filter(|call| call.state == "completed")
             .count(),
-        2
+        2 + broker_calls
     );
     assert_eq!(
         calls
@@ -589,7 +833,10 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         ),
         "{completed:?}"
     );
-    assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.completed_executions.load(Ordering::SeqCst),
+        2 + broker_executions
+    );
     assert_eq!(provider.turns.load(Ordering::SeqCst), 2);
     assert_eq!(provider.created.load(Ordering::SeqCst), 1);
     assert_eq!(provider.replies.lock().await.len(), expected_calls);
@@ -610,7 +857,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             .iter()
             .filter(|call| call.state == "completed")
             .count(),
-        3
+        3 + broker_calls
     );
     assert_eq!(
         calls
@@ -631,5 +878,8 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         .unwrap();
     assert_eq!(approval.consumed_uses, 1);
     assert!(coordinator.execute_approved_claim(&claim).await.is_err());
-    assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        fixture.completed_executions.load(Ordering::SeqCst),
+        2 + broker_executions
+    );
 }

@@ -28,6 +28,7 @@ pub(super) struct NativeExecution {
     pub(super) turn: u32,
     pub(super) maximum_calls: u32,
     pub(super) plan: AiProviderCallPlan,
+    pub(super) capability_delivery: Option<crate::AiCapabilityDeliveryTurn>,
     pub(super) state: Mutex<NativeState>,
 }
 
@@ -84,57 +85,83 @@ impl AiProviderDynamicToolExecution for NativeExecution {
             self.correlation.clone(),
             result.budget_reservation_id().0.to_string(),
         )?;
-        let disposition = self
-            .services
-            .applications
-            .classify_tool_call(lease, result, &context)
-            .await?;
-        let outcome = match (disposition, pending) {
-            (AiApplicationToolDisposition::ReadOnly, _) => {
-                AiProviderDynamicToolOutcome::Application(Box::new(
-                    self.services
-                        .applications
-                        .execute_read_only(lease, result, context, self.route.clone())
-                        .await?,
-                ))
-            }
-            (_, Some(pending)) => AiProviderDynamicToolOutcome::NativeControl(Box::new(
+        let outcome = if crate::AiCapabilityBrokerOperation::from_tool_id(call.tool_id()).is_some()
+        {
+            let delivery = self
+                .capability_delivery
+                .as_ref()
+                .ok_or(AiError::Forbidden)?;
+            AiProviderDynamicToolOutcome::Application(Box::new(
                 self.services
-                    .consequential
-                    .pause_native_consequential_call(lease, result, context, &pending, &self.route)
+                    .applications
+                    .execute_capability_broker_call(
+                        lease,
+                        result,
+                        context,
+                        self.route.clone(),
+                        delivery,
+                    )
                     .await?,
-            )),
-            (AiApplicationToolDisposition::AutomaticMutation, None) => match self
+            ))
+        } else {
+            let disposition = self
                 .services
                 .applications
-                .execute_automatic_mutation(lease, result, context, self.route.clone())
-                .await?
-            {
-                crate::AiConsequentialToolCallOutcome::Persisted(result) => {
-                    AiProviderDynamicToolOutcome::Application(result)
+                .classify_tool_call(lease, result, &context)
+                .await?;
+            match (disposition, pending) {
+                (AiApplicationToolDisposition::ReadOnly, _) => {
+                    AiProviderDynamicToolOutcome::Application(Box::new(
+                        self.services
+                            .applications
+                            .execute_read_only(lease, result, context, self.route.clone())
+                            .await?,
+                    ))
                 }
-                crate::AiConsequentialToolCallOutcome::RecoveryRequired { .. } => {
-                    return Err(AiError::Conflict);
-                }
-            },
-            (AiApplicationToolDisposition::ApprovalRequired, None) => {
-                let prepared = self
+                (_, Some(pending)) => AiProviderDynamicToolOutcome::NativeControl(Box::new(
+                    self.services
+                        .consequential
+                        .pause_native_consequential_call(
+                            lease,
+                            result,
+                            context,
+                            &pending,
+                            &self.route,
+                        )
+                        .await?,
+                )),
+                (AiApplicationToolDisposition::AutomaticMutation, None) => match self
                     .services
-                    .consequential
-                    .prepare_native_approval(lease, result, context)
-                    .await?;
-                // Retain the candidate before egress: any later failure abandons it under the active run fence.
+                    .applications
+                    .execute_automatic_mutation(lease, result, context, self.route.clone())
+                    .await?
                 {
-                    let mut state = self.state.lock().await;
-                    state.pending = Some(prepared.clone());
-                    state.failure_lease = Some(prepared.lease().clone());
+                    crate::AiConsequentialToolCallOutcome::Persisted(result) => {
+                        AiProviderDynamicToolOutcome::Application(result)
+                    }
+                    crate::AiConsequentialToolCallOutcome::RecoveryRequired { .. } => {
+                        return Err(AiError::Conflict);
+                    }
+                },
+                (AiApplicationToolDisposition::ApprovalRequired, None) => {
+                    let prepared = self
+                        .services
+                        .consequential
+                        .prepare_native_approval(lease, result, context)
+                        .await?;
+                    // Retain the candidate before egress: any later failure abandons it under the active run fence.
+                    {
+                        let mut state = self.state.lock().await;
+                        state.pending = Some(prepared.clone());
+                        state.failure_lease = Some(prepared.lease().clone());
+                    }
+                    let receipt = self
+                        .services
+                        .consequential
+                        .prepare_native_approval_receipt(prepared.lease(), &prepared, &self.route)
+                        .await?;
+                    AiProviderDynamicToolOutcome::NativeControl(Box::new(receipt))
                 }
-                let receipt = self
-                    .services
-                    .consequential
-                    .prepare_native_approval_receipt(prepared.lease(), &prepared, &self.route)
-                    .await?;
-                AiProviderDynamicToolOutcome::NativeControl(Box::new(receipt))
             }
         };
         let current_lease = match &outcome {

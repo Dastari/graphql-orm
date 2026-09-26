@@ -84,6 +84,12 @@ Egress audit writes serialize check-and-insert through the ORM state-machine
 transaction contract. Bounded transaction retries preserve exact replay checks
 and fail closed without repeating application tools or provider requests.
 
+Classified native turns can retain the crate-owned capability broker through
+`AiProviderCallPlan::new_with_classified_capability_surface` and the native
+turn's `with_capability_delivery` binding. Broker operations remain read-only;
+reviewed static bootstrap mutations retain current policy, one-shot approval
+where required, and ordinary resolver authorization.
+
 ## Install
 
 This active pre-release is Git-only. Pin one reviewed full monorepo revision

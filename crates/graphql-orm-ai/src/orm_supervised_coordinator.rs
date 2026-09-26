@@ -82,6 +82,7 @@ pub struct AiSupervisedAgentTurnPlan {
     rules: AiResolvedRuleSet,
     uses_byok: bool,
     native: bool,
+    capability_delivery: Option<crate::AiCapabilityDeliveryTurn>,
 }
 
 impl AiSupervisedAgentTurnPlan {
@@ -114,6 +115,7 @@ impl AiSupervisedAgentTurnPlan {
             rules,
             uses_byok,
             native: false,
+            capability_delivery: None,
         })
     }
 
@@ -146,7 +148,37 @@ impl AiSupervisedAgentTurnPlan {
             rules,
             uses_byok,
             native: true,
+            capability_delivery: None,
         })
+    }
+
+    /// Attaches one exact crate-owned capability delivery turn to native execution.
+    ///
+    /// Broker callbacks use the durable read-only broker. Static bootstrap mutations keep
+    /// their classified path. The immutable retained-session fingerprint binds delivery
+    /// mode, index, bootstrap tools, provider projection and model across approval waits.
+    /// Loaded broker references remain fenced to their original run attempt.
+    /// Client-deferred delivery is unavailable here because native callbacks cannot
+    /// install definitions mid-turn; use the existing read-only coordinator for that mode.
+    ///
+    /// # Errors
+    /// Rejects non-native/client-deferred turns, different offered definitions, or a different session binding.
+    pub fn with_capability_delivery(
+        mut self,
+        delivery: crate::AiCapabilityDeliveryTurn,
+    ) -> Result<Self, AiError> {
+        if !self.native
+            || delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred
+            || !delivery.matches_offered_tools(self.provider_call.offered_tools())
+            || self.provider_session.as_ref().is_none_or(|session| {
+                session.descriptor().registration_fingerprint()
+                    != delivery.session_binding().fingerprint()
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        self.capability_delivery = Some(delivery);
+        Ok(self)
     }
 
     /// Binds this turn to one exact durable provider-session contract.
@@ -162,6 +194,10 @@ impl AiSupervisedAgentTurnPlan {
         if !self
             .provider_call
             .matches_provider_session_descriptor(session.descriptor())
+            || self.capability_delivery.as_ref().is_some_and(|delivery| {
+                session.descriptor().registration_fingerprint()
+                    != delivery.session_binding().fingerprint()
+            })
         {
             return Err(AiError::Conflict);
         }
@@ -189,6 +225,7 @@ impl AiSupervisedAgentTurnPlan {
         AiToolResultEgressRoute,
         AiResolvedRuleSet,
         bool,
+        Option<crate::AiCapabilityDeliveryTurn>,
     ) {
         let scope = self.provider_call.scope().clone();
         let correlation_id = self.provider_call.correlation_id().to_owned();
@@ -200,6 +237,7 @@ impl AiSupervisedAgentTurnPlan {
             self.result_egress_route,
             self.rules,
             self.uses_byok,
+            self.capability_delivery,
         )
     }
 }
@@ -921,6 +959,7 @@ impl AiSupervisedAgentCoordinator {
             route,
             planned_rules,
             uses_byok,
+            capability_delivery,
         ) = plan.into_parts();
         let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
             Ok(resolution) if resolution.rules().fingerprint() == planned_rules.fingerprint() => {
@@ -1129,6 +1168,7 @@ impl AiSupervisedAgentCoordinator {
                 turn: guard.provider_turns(),
                 maximum_calls: guard.remaining_tool_capacity(),
                 plan: provider_plan.clone(),
+                capability_delivery,
                 state: Mutex::new(native::NativeState {
                     usage: rule_usage,
                     calls: 0,
