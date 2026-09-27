@@ -22,7 +22,9 @@ binaries from the reviewed lockfile.
 
 ## 0.5.2 to 0.5.3
 
-Rebuild the router from the reviewed lockfile to adopt Hive 0.2.19. Public
+Rebuild the router from the reviewed lockfile to adopt Hive 0.2.19 and the
+`domain` 0.12.3 security fixes for RUSTSEC-2026-0310. No stored-data migration is
+required. Public
 configuration, authentication, descriptor and schema contracts remain unchanged.
 The private adapter now attaches execution settings to each immutable graph,
 so configured forwarded headers, timeouts and subscription transports survive

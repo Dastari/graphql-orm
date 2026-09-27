@@ -17,6 +17,9 @@ supersedes: []
   consumer cancels or disconnects ([upstream fix introduced in 0.2.8](https://github.com/graphql-hive/router/releases/tag/hive-router/v0.2.8)).
   Both producer and buffer-drainer tasks now
   observe receiver closure without waiting for another source event.
+- Updated the locked `domain` and `domain-macros` dependencies to 0.12.3
+  for RUSTSEC-2026-0310 before publication, including the isolated federation
+  fixture lockfile.
 - Adapted the private HTTP hook and configuration interfaces and bind forwarded
   headers, subgraph timeouts, and subscription transport/buffer settings to
   every immutable graph generation, including replacements.
