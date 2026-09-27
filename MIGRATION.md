@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-28
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,13 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.33.0 to 0.33.1: Federation fixture release identity
+
+Adopt runtime and macros 0.33.1 together from the same published workspace tag.
+This patch records the Federation fixture's router/Hive dependency update;
+no application call-site, generated-code, GraphQL SDL, configuration, or
+stored-data changes are required. No data migration is needed.
 
 ## 0.32.0 to 0.33.0: authorization-aware pagination
 
