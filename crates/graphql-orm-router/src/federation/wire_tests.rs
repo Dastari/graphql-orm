@@ -37,7 +37,7 @@ use hive_router::{
             on_graphql_analysis::{
                 OnGraphqlAnalysisHookPayload, OnGraphqlAnalysisHookResult, Selection,
             },
-            on_http_request::{OnHttpRequestHookPayload, OnHttpRequestHookResult},
+            on_http_request::{OnHttpRequestHookFuture, OnHttpRequestHookPayload},
             on_plugin_init::{OnPluginInitPayload, OnPluginInitResult},
         },
         plugin_trait::{RouterPlugin, StartHookPayload},
@@ -290,7 +290,7 @@ impl AuthenticationProvider for TestAuthenticationProvider {
             "product-admin" => ("test-subject", vec!["products.admin"]),
             "product-writer" => ("test-subject", vec!["products.write"]),
             "product-prefix" => ("test-subject", vec!["products.*"]),
-            "product-events" | "short-lived" => (
+            "product-events" | "product-events-refreshed" | "short-lived" => (
                 "test-subject",
                 vec!["products.p1.events", "products.failure.events"],
             ),
@@ -390,19 +390,21 @@ impl RouterPlugin for WireProofPlugin {
     fn on_http_request<'request>(
         &'request self,
         payload: OnHttpRequestHookPayload<'request>,
-    ) -> OnHttpRequestHookResult<'request> {
-        match payload
-            .router_http_request
-            .headers()
-            .get("x-graphql-orm-wire-switch")
-            .and_then(|value| value.to_str().ok())
-        {
-            Some("v2") => self.replace(PRODUCTS_V2, REVIEWS),
-            Some("invalid") => self.replace(PRODUCTS_V2, CONFLICTING_REVIEWS),
-            _ => {}
-        }
-        payload.set_supergraph(self.store.load().hive.clone());
-        payload.proceed()
+    ) -> OnHttpRequestHookFuture<'request> {
+        Box::pin(async move {
+            match payload
+                .router_http_request
+                .headers()
+                .get("x-graphql-orm-wire-switch")
+                .and_then(|value| value.to_str().ok())
+            {
+                Some("v2") => self.replace(PRODUCTS_V2, REVIEWS),
+                Some("invalid") => self.replace(PRODUCTS_V2, CONFLICTING_REVIEWS),
+                _ => {}
+            }
+            payload.set_supergraph(self.store.load().hive.clone());
+            payload.proceed()
+        })
     }
 
     async fn on_graphql_analysis<'execution>(
@@ -1522,6 +1524,111 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
 }
 
 #[test]
+fn authenticated_quiet_subscription_complete_releases_upstream_before_next_event() {
+    assert_quiet_subscription_cancellation(false, false);
+}
+
+#[test]
+fn authenticated_quiet_subscription_socket_close_releases_upstream_before_next_event() {
+    assert_quiet_subscription_cancellation(true, false);
+}
+
+#[test]
+fn authenticated_quiet_cancellation_preserves_sibling_and_reuses_public_operation_id() {
+    for close_socket in [false, true] {
+        assert_quiet_subscription_cancellation(close_socket, true);
+    }
+}
+
+fn assert_quiet_subscription_cancellation(close_socket: bool, keep_sibling: bool) {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    products.quiet.enabled.store(true, Ordering::Release);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let mut router = TestRouter::spawn_authenticated_subscriptions(
+        reserve_port(),
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+        products_protocol.endpoint(),
+        reviews_protocol.endpoint(),
+    );
+    router.wait_until_ready();
+    let query = "subscription { productChanged(id: \"p1\") { id } }";
+    let mut first = TestWebSocket::connect_at(router.address, "/api/graphql");
+    first.connection_init_bearer("product-events");
+    first.subscribe("quiet", query);
+    wait_until("quiet authenticated upstream registered", || {
+        products.quiet.active.load(Ordering::Acquire) == 1
+    });
+    assert!(products.saw_bearer_header());
+    assert_eq!(products.quiet.started.load(Ordering::Acquire), 1);
+    let mut sibling = keep_sibling.then(|| {
+        let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+        socket.connection_init_bearer("product-events");
+        // Same document, principal and public operation ID, on an independent connection.
+        // Neither cancellation nor deduplication may transfer ownership between them.
+        socket.subscribe("quiet", query);
+        wait_until("independent quiet sibling registered", || {
+            products.quiet.active_ordinals() == [1, 2]
+        });
+        socket
+    });
+    // No next frame is ever emitted by this fixture. Neither cancellation path
+    // can depend on data arriving or on retiring/replacing the selected graph.
+    if close_socket {
+        first.close();
+    } else {
+        first.complete("quiet");
+    }
+    wait_until("quiet upstream released without a source event", || {
+        products.quiet.active_ordinals() == if keep_sibling { vec![2] } else { vec![] }
+    });
+    if !close_socket {
+        first.close();
+    }
+    let mut fresh = TestWebSocket::connect_at(router.address, "/api/graphql");
+    fresh.connection_init_bearer("product-events-refreshed");
+    fresh.subscribe("quiet", query);
+    wait_until(
+        "fresh authentication owns exactly one quiet subscription",
+        || {
+            products.quiet.active_ordinals() == if keep_sibling { vec![2, 3] } else { vec![2] }
+                && products.quiet.started.load(Ordering::Acquire)
+                    == if keep_sibling { 3 } else { 2 }
+        },
+    );
+    assert!(products.quiet.saw_refreshed_bearer.load(Ordering::Acquire));
+    fresh.complete("quiet");
+    wait_until("fresh quiet upstream released", || {
+        products.quiet.active_ordinals() == if keep_sibling { vec![2] } else { vec![] }
+    });
+    fresh.close();
+    if let Some(socket) = sibling.as_mut() {
+        socket.close();
+        wait_until("quiet sibling retains its own close lifecycle", || {
+            products.quiet.active_ordinals().is_empty()
+        });
+    }
+    assert_eq!(products.quiet.active.load(Ordering::Acquire), 0);
+    router.stop();
+}
+
+#[test]
 fn authenticated_polling_reloads_graph_and_policy_as_one_subscription_snapshot() {
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
@@ -2459,6 +2566,55 @@ enum SubgraphKind {
     Reviews,
 }
 
+#[derive(Default)]
+struct QuietSubscriptions {
+    enabled: AtomicBool,
+    active: AtomicUsize,
+    started: AtomicUsize,
+    saw_refreshed_bearer: AtomicBool,
+    ordinals: Mutex<std::collections::BTreeSet<usize>>,
+}
+
+impl QuietSubscriptions {
+    fn active_ordinals(&self) -> Vec<usize> {
+        self.ordinals
+            .lock()
+            .expect("quiet subscription lock")
+            .iter()
+            .copied()
+            .collect()
+    }
+}
+
+struct QuietSubscription {
+    state: Arc<QuietSubscriptions>,
+    ordinal: usize,
+}
+
+impl QuietSubscription {
+    fn new(state: Arc<QuietSubscriptions>) -> Self {
+        state.active.fetch_add(1, Ordering::AcqRel);
+        let ordinal = state.started.fetch_add(1, Ordering::AcqRel) + 1;
+        state
+            .ordinals
+            .lock()
+            .expect("quiet subscription lock")
+            .insert(ordinal);
+        Self { state, ordinal }
+    }
+}
+
+impl Drop for QuietSubscription {
+    fn drop(&mut self) {
+        self.state.active.fetch_sub(1, Ordering::AcqRel);
+        self.state
+            .ordinals
+            .lock()
+            .expect("quiet subscription lock")
+            .remove(&self.ordinal);
+    }
+}
+
 struct LoopbackSubgraph {
     address: SocketAddr,
     opens: Arc<AtomicUsize>,
@@ -2466,6 +2622,7 @@ struct LoopbackSubgraph {
     saw_blocked_header: Arc<AtomicBool>,
     saw_bearer_header: Arc<AtomicBool>,
     slow_gate: Arc<SlowGate>,
+    quiet: Arc<QuietSubscriptions>,
     stopping: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -2477,6 +2634,7 @@ struct SubgraphHandlerState {
     saw_blocked_header: Arc<AtomicBool>,
     saw_bearer_header: Arc<AtomicBool>,
     slow_gate: Arc<SlowGate>,
+    quiet: Arc<QuietSubscriptions>,
     stopping: Arc<AtomicBool>,
 }
 
@@ -2492,6 +2650,7 @@ impl LoopbackSubgraph {
         let saw_blocked_header = Arc::new(AtomicBool::new(false));
         let saw_bearer_header = Arc::new(AtomicBool::new(false));
         let slow_gate = Arc::new(SlowGate::default());
+        let quiet = Arc::new(QuietSubscriptions::default());
         let stopping = Arc::new(AtomicBool::new(false));
         let thread_state = SubgraphHandlerState {
             opens: opens.clone(),
@@ -2499,6 +2658,7 @@ impl LoopbackSubgraph {
             saw_blocked_header: saw_blocked_header.clone(),
             saw_bearer_header: saw_bearer_header.clone(),
             slow_gate: slow_gate.clone(),
+            quiet: quiet.clone(),
             stopping: stopping.clone(),
         };
         let thread = thread::spawn(move || {
@@ -2522,6 +2682,7 @@ impl LoopbackSubgraph {
             saw_blocked_header,
             saw_bearer_header,
             slow_gate,
+            quiet,
             stopping,
             thread: Some(thread),
         }
@@ -3099,11 +3260,23 @@ fn handle_subgraph_websocket(
     });
     if !matches!(
         authorization,
-        Some("Bearer product-events" | "Bearer short-lived")
+        Some("Bearer product-events" | "Bearer product-events-refreshed" | "Bearer short-lived")
     ) {
         return write_server_websocket_close(&mut request.stream, 4401, "unauthorized");
     }
     state.saw_bearer_header.store(true, Ordering::Release);
+    if authorization == Some("Bearer product-events-refreshed") {
+        state
+            .quiet
+            .saw_refreshed_bearer
+            .store(true, Ordering::Release);
+    }
+    // Longer than the test deadline: an idle fixture timeout cannot make the
+    // cancellation assertion pass. Dropping a connection releases its guards.
+    if state.quiet.enabled.load(Ordering::Acquire) {
+        request.stream.set_read_timeout(Some(TEST_TIMEOUT * 3))?;
+    }
+    let mut quiet_operations = std::collections::BTreeMap::new();
     write_server_websocket_json(&mut request.stream, &json!({"type": "connection_ack"}))?;
 
     loop {
@@ -3126,6 +3299,11 @@ fn handle_subgraph_websocket(
         match message["type"].as_str() {
             Some("subscribe") => {
                 let id = message["id"].as_str().unwrap_or_default();
+                if state.quiet.enabled.load(Ordering::Acquire) {
+                    quiet_operations
+                        .insert(id.to_owned(), QuietSubscription::new(state.quiet.clone()));
+                    continue;
+                }
                 let query = message["payload"]["query"].as_str().unwrap_or_default();
                 if query.contains("failure") {
                     write_server_websocket_close(&mut request.stream, 1011, "upstream failure")?;
@@ -3146,7 +3324,11 @@ fn handle_subgraph_websocket(
                 });
                 write_server_websocket_json(&mut request.stream, &event)?;
             }
-            Some("complete") => {}
+            Some("complete") => {
+                if let Some(id) = message["id"].as_str() {
+                    quiet_operations.remove(id);
+                }
+            }
             Some("ping") => {
                 write_server_websocket_json(&mut request.stream, &json!({"type": "pong"}))?;
             }

@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
-  "cargoLockSha256": "57037f90a41b6a85def58b93c278959c60cc483d0a731d09cc636ea7f8391dd0",
-  "componentsSha256": "c27d4628abfb737a9a3c916e63cf12c174c57ef0cb2672403f06d05eb160a211",
+  "cargoLockSha256": "0d64413d9a85f60454c42dda5191767fcdbf1445459450ab57a11b8e4ac70c4e",
+  "componentsSha256": "ed0ed9a9760c2040a17ca930f53c9bb760fec574fa9c2299d2f61b52ab17caf5",
   "target": "x86_64-unknown-linux-gnu",
   "features": [
     "auth-agql"
@@ -19,21 +19,11 @@
     },
     {
       "name": "alloc-stdlib",
-      "version": "0.2.4",
+      "version": "0.3.0",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
           "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
-        }
-      ]
-    },
-    {
-      "name": "async-dropper-simple",
-      "version": "0.2.6",
-      "notices": [
-        {
-          "url": "https://raw.githubusercontent.com/t3hmrman/async-dropper/a6ccaef55e3907dfc1376f70db517abeaf5c764f/LICENSE",
-          "sha256": "405a9a2b3ad77707786386959b65a8aaa41539b463eeaae28e8bdc971b15a82c"
         }
       ]
     },
@@ -78,6 +68,20 @@
       ]
     },
     {
+      "name": "datadog-opentelemetry",
+      "version": "0.5.2",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/dd-trace-rs/3f7427de50079ecd87f76e991ebcf8635309ab2e/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/dd-trace-rs/3f7427de50079ecd87f76e991ebcf8635309ab2e/NOTICE",
+          "sha256": "cc7f6d70ef436d3455647b610f5c8feec4bb7b0d1d5a776aeffa211508565196"
+        }
+      ]
+    },
+    {
       "name": "defmt-parser",
       "version": "1.0.0",
       "notices": [
@@ -117,61 +121,245 @@
     },
     {
       "name": "hive-console-sdk",
-      "version": "0.3.19",
+      "version": "0.3.22",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/graphql-hive/router/5aaa579ddf1a6618097b1925293305f84dc562d9/LICENSE_MIT",
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/fd7f7803618f2a9024196f6a06812ed91eba35f8/LICENSE_MIT",
           "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
         }
       ]
     },
     {
       "name": "hive-router",
-      "version": "0.0.87",
+      "version": "0.2.19",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
+          "url": "https://raw.githubusercontent.com/graphql-hive/router/15c50cf622e9d83bd4a25b3e190a124bcb67ee19/LICENSE_MIT",
           "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
         }
       ]
     },
     {
-      "name": "hive-router-config",
-      "version": "0.1.10",
+      "name": "libdd-capabilities",
+      "version": "3.0.1",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
-          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/7ffbbcb6c10b30cadd74117249b182e2669dd4b9/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/7ffbbcb6c10b30cadd74117249b182e2669dd4b9/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
         }
       ]
     },
     {
-      "name": "hive-router-internal",
-      "version": "0.0.40",
+      "name": "libdd-capabilities-impl",
+      "version": "4.0.0",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
-          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/68b5d3096ddd7c8b5576e166ef9b1523af7f6fc4/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/68b5d3096ddd7c8b5576e166ef9b1523af7f6fc4/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
         }
       ]
     },
     {
-      "name": "hive-router-plan-executor",
-      "version": "7.0.2",
+      "name": "libdd-data-pipeline",
+      "version": "8.0.0",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/graphql-hive/router/56cf846f15e960babb12585855b613f85048796a/LICENSE_MIT",
-          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
         }
       ]
     },
     {
-      "name": "hive-router-query-planner",
-      "version": "2.10.11",
+      "name": "libdd-ddsketch",
+      "version": "1.1.2",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/graphql-hive/router/5aaa579ddf1a6618097b1925293305f84dc562d9/LICENSE_MIT",
-          "sha256": "3cef4f573bae2133919c37f13739ba81e5a617ecab87b3d8a6494086f1ecb2ac"
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/6163adda0f9df0968efe6d512cb55cde2610768c/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/6163adda0f9df0968efe6d512cb55cde2610768c/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-dogstatsd-client",
+      "version": "5.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-library-config",
+      "version": "3.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/ff3947a8c7fb2aa39f5a2b561b6f1da25f2191b8/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/ff3947a8c7fb2aa39f5a2b561b6f1da25f2191b8/NOTICE",
+          "sha256": "132e054fddc49af8d72fea5ea5e2dd6a08d471502b33cc69a1596a1101dd72b1"
+        }
+      ]
+    },
+    {
+      "name": "libdd-remote-config",
+      "version": "2.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/ff3947a8c7fb2aa39f5a2b561b6f1da25f2191b8/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/ff3947a8c7fb2aa39f5a2b561b6f1da25f2191b8/NOTICE",
+          "sha256": "132e054fddc49af8d72fea5ea5e2dd6a08d471502b33cc69a1596a1101dd72b1"
+        }
+      ]
+    },
+    {
+      "name": "libdd-sampling",
+      "version": "6.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/5204443ceb70a31dcb0fef3f8f3b0ca9ba9d3022/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/5204443ceb70a31dcb0fef3f8f3b0ca9ba9d3022/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-shared-runtime",
+      "version": "3.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-telemetry",
+      "version": "7.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-tinybytes",
+      "version": "1.1.4",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/6163adda0f9df0968efe6d512cb55cde2610768c/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/6163adda0f9df0968efe6d512cb55cde2610768c/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-trace-normalization",
+      "version": "3.0.1",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/68b5d3096ddd7c8b5576e166ef9b1523af7f6fc4/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/68b5d3096ddd7c8b5576e166ef9b1523af7f6fc4/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-trace-obfuscation",
+      "version": "6.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-trace-protobuf",
+      "version": "4.0.1",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/68b5d3096ddd7c8b5576e166ef9b1523af7f6fc4/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/68b5d3096ddd7c8b5576e166ef9b1523af7f6fc4/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-trace-stats",
+      "version": "7.0.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/89c4c15d5165b87b9e8fae83019970d7e9a0cfaa/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
+        }
+      ]
+    },
+    {
+      "name": "libdd-trace-utils",
+      "version": "10.1.0",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/5204443ceb70a31dcb0fef3f8f3b0ca9ba9d3022/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "url": "https://raw.githubusercontent.com/DataDog/libdatadog/5204443ceb70a31dcb0fef3f8f3b0ca9ba9d3022/NOTICE",
+          "sha256": "7d9f8ecf7ba0cb7e30d053e57125bd537277f5d5351ad6b48f6dff53cb205968"
         }
       ]
     },
@@ -256,6 +444,16 @@
       ]
     },
     {
+      "name": "opentelemetry-semantic-conventions",
+      "version": "0.32.1",
+      "notices": [
+        {
+          "url": "https://raw.githubusercontent.com/open-telemetry/opentelemetry-rust/74cb6f3a4129bf11fa3191f28d38c518c4ec4ae6/LICENSE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        }
+      ]
+    },
+    {
       "name": "opentelemetry-stdout",
       "version": "0.32.0",
       "notices": [
@@ -311,30 +509,30 @@
     },
     {
       "name": "typify",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/01153fa2fea45d660400e3060d91fa2e102976d8/LICENSE",
+          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/03e51a2785d6f4dc1bbc1b949f9eb99fda5e91a1/LICENSE",
           "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         }
       ]
     },
     {
       "name": "typify-impl",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/01153fa2fea45d660400e3060d91fa2e102976d8/LICENSE",
+          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/03e51a2785d6f4dc1bbc1b949f9eb99fda5e91a1/LICENSE",
           "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         }
       ]
     },
     {
       "name": "typify-macro",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "notices": [
         {
-          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/01153fa2fea45d660400e3060d91fa2e102976d8/LICENSE",
+          "url": "https://raw.githubusercontent.com/oxidecomputer/typify/03e51a2785d6f4dc1bbc1b949f9eb99fda5e91a1/LICENSE",
           "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
         }
       ]
@@ -361,10 +559,6 @@
     }
   ],
   "sourceOnlyNoticePackages": [
-    {
-      "name": "async-scoped",
-      "version": "0.9.0"
-    },
     {
       "name": "community-id",
       "version": "0.2.4"

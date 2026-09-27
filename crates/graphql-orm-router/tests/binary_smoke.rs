@@ -125,7 +125,7 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     assert_eq!(response.0, 200, "{}", String::from_utf8_lossy(&response.1));
     let body: serde_json::Value = serde_json::from_slice(&response.1)
         .unwrap_or_else(|error| panic!("invalid router JSON {error}: {:?}", response.1));
-    assert_eq!(body["data"]["hello"], "world");
+    assert_eq!(body["data"]["hello"], "world", "{body}");
 
     let mut websocket = TestWebSocket::connect(router_address);
     websocket.send_json(&json!({
@@ -378,7 +378,10 @@ impl FixtureSubgraph {
             while !thread_stopping.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        handle_fixture_request(stream, address, thread_graphql_requests.clone())
+                        let requests = thread_graphql_requests.clone();
+                        // A deliberately timed-out request must not serialize the
+                        // following independent request behind the fixture listener.
+                        thread::spawn(move || handle_fixture_request(stream, address, requests));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(5));

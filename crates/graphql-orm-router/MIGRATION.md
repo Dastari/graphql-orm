@@ -3,7 +3,7 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-27
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -19,6 +19,25 @@ commit. The MIT-licensed library source is unchanged from the historical revisio
 no configuration or stored-data migration is needed. The workspace lockfile
 also updates h2 and rustls to their compatible security fixes; rebuild router
 binaries from the reviewed lockfile.
+
+## 0.5.2 to 0.5.3
+
+Rebuild the router from the reviewed lockfile to adopt Hive 0.2.19 and the
+`domain` 0.12.3 security fixes for RUSTSEC-2026-0310. No stored-data migration is
+required. Public
+configuration, authentication, descriptor and schema contracts remain unchanged.
+The private adapter now attaches execution settings to each immutable graph,
+so configured forwarded headers, timeouts and subscription transports survive
+reloads together with the selected schema and authorization snapshot.
+
+Cancelling a quiet subscription with GraphQL Complete or closing its public
+WebSocket now releases the upstream subscription before another event arrives.
+Clients should still authenticate each new connection and retain jittered
+reconnect backoff; cancellation never permits replay of an uncertain mutation.
+Run authenticated quiet-cancellation, schema-retirement and reconnect acceptance
+checks before activation. A source dependency update does not replace an
+independently pinned router executable: publish and adopt a reviewed binary
+artifact through the canonical release process.
 
 ## 0.5.1 to 0.5.2
 

@@ -20,6 +20,16 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.102.2] - 2026-09-28
+
+### Fixed
+
+- Made restore-ordering regression fixtures independent of wall-clock creation
+  timestamps, retaining timestamp-first ordering, deterministic ID ties and
+  repeated evidence-digest checks. Runtime and schema behavior are unchanged.
+
+## [0.102.1] - 2026-09-28
+
 ### Fixed
 
 - Native turns containing only completed callbacks now count prior executions once

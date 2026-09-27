@@ -19,6 +19,12 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.102.1 to 0.102.2
+
+No public API, runtime, configuration, schema or stored-data migration is needed.
+This patch corrects test fixtures that assumed generated creation timestamps
+matched explicit lease timestamps; AI schema module remains `0.68.0`.
+
 ## 0.102.0 to 0.102.1
 
 Apply AI schema module `0.68.0` through the normal managed schema workflow. The

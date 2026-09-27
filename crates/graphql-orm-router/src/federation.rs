@@ -18,8 +18,8 @@ use hive_router::{
         parser::schema::Definition,
         static_graphql::schema::{Directive, TypeDefinition, Value},
     },
-    plugins::hooks::on_supergraph_load::Supergraph,
-    query_planner::{planner::QueryPlannerOptions, utils::parsing::safe_parse_schema},
+    plugins::hooks::on_supergraph_load::{Supergraph, SupergraphOptions},
+    query_planner::utils::parsing::safe_parse_schema,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -184,13 +184,22 @@ impl GraphStore {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_active_graph(
     inputs: &[CandidateSubgraph],
     version: u64,
 ) -> Result<Arc<ActiveGraph>, FederationError> {
+    build_active_graph_with_options(inputs, version, SupergraphOptions::default())
+}
+
+pub(crate) fn build_active_graph_with_options(
+    inputs: &[CandidateSubgraph],
+    version: u64,
+    options: SupergraphOptions,
+) -> Result<Arc<ActiveGraph>, FederationError> {
     let composed = compose_candidate(inputs)?;
     let fingerprint = format!("sha256:{:x}", Sha256::digest(composed.sdl.as_bytes()));
-    let hive = Supergraph::from_document(composed.document, QueryPlannerOptions::default())
+    let hive = Supergraph::from_document("graphql-orm-router", composed.document, options)
         .map_err(|error| FederationError::Runtime {
             details: error.to_string(),
         })?;

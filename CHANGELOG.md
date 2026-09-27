@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-21
+last_reviewed: 2026-09-28
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,18 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.33.1 - 2026-09-28
+
+Companion macros crate: `graphql-orm-macros` **0.33.1**.
+
+- Align the owned Federation integration fixture with router 0.5.3 and Hive
+  0.2.19, including the fixed `domain` 0.12.3 dependency.
+- Advance runtime and macros together to preserve immutable package source
+  identities after the fixture change. Runtime and generated-code behavior,
+  public APIs, GraphQL SDL, and stored-data contracts remain unchanged.
+
+No data migration is required.
 
 ## 0.33.0 - 2026-09-21
 

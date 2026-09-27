@@ -3,12 +3,33 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-09-27
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.5.3 - 2026-09-27
+
+- Updated the private Hive runtime from 0.0.87 to published 0.2.19, including
+  its fix for quiet upstream subscriptions retained after the final downstream
+  consumer cancels or disconnects ([upstream fix introduced in 0.2.8](https://github.com/graphql-hive/router/releases/tag/hive-router/v0.2.8)).
+  Both producer and buffer-drainer tasks now
+  observe receiver closure without waiting for another source event.
+- Updated the locked `domain` and `domain-macros` dependencies to 0.12.3
+  for RUSTSEC-2026-0310 before publication, including the isolated federation
+  fixture lockfile.
+- Adapted the private HTTP hook and configuration interfaces and bind forwarded
+  headers, subgraph timeouts, and subscription transport/buffer settings to
+  every immutable graph generation, including replacements.
+- Added authenticated public WebSocket regressions for explicit Complete and
+  socket Close, upstream cleanup without events, and fresh authentication with
+  exactly one active successor subscription.
+
+No public Rust API, router configuration, GraphQL schema, descriptor, token, or
+stored-data migration is required. Rebuild from the reviewed lockfile; binary
+publication retains its separate artifact and notice-review gates.
 
 ## 0.5.2 - 2026-09-17
 

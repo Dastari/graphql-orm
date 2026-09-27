@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-router"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.90"
 description = "Federated GraphQL router for graphql-orm and project-neutral subgraphs"
@@ -24,7 +24,6 @@ getrandom = { workspace = true }
 graphql-composition = { workspace = true }
 graphql-orm-router-protocol = { workspace = true }
 hive-router = { workspace = true }
-hive-router-config = { workspace = true }
 jsonwebtoken = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -39,5 +38,5 @@ signal-hook = { workspace = true }
 
 [dev-dependencies]
 base64 = { workspace = true }
-ntex = "=3.10.0"
+ntex = "=3.12.3"
 sha1 = { workspace = true }
