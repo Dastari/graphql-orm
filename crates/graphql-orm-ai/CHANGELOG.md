@@ -20,6 +20,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.102.1] - 2026-09-28
+
 ### Fixed
 
 - Native turns containing only completed callbacks now count prior executions once
