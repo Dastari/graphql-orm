@@ -6,13 +6,51 @@ use crate::{
     ProviderEventStream,
 };
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum CallbackScenario {
     #[default]
     MixedApproval,
     InvalidReadFirst,
     InvalidMutation,
     FixedBroker,
+    AutomaticCompleted,
+    FailedReadCompleted,
+    BrokerCompleted,
+    ReadOnlyCompleted,
+    EmptyCompleted,
+    TamperedResult,
+    ChangedStepVersion,
+    ChangedCohort,
+    StaleLease,
+}
+
+impl CallbackScenario {
+    fn completes(self) -> bool {
+        matches!(
+            self,
+            Self::AutomaticCompleted
+                | Self::FailedReadCompleted
+                | Self::BrokerCompleted
+                | Self::ReadOnlyCompleted
+                | Self::EmptyCompleted
+                | Self::TamperedResult
+                | Self::ChangedStepVersion
+                | Self::ChangedCohort
+                | Self::StaleLease
+        )
+    }
+    fn rejects_completion(self) -> bool {
+        matches!(
+            self,
+            Self::TamperedResult
+                | Self::ChangedStepVersion
+                | Self::ChangedCohort
+                | Self::StaleLease
+        )
+    }
+    fn broker(self) -> bool {
+        matches!(self, Self::FixedBroker | Self::BrokerCompleted)
+    }
 }
 
 #[derive(Default)]
@@ -101,8 +139,8 @@ impl AiProvider for MixedRetainedProvider {
             let response = format!("native-coordinator-{turn}");
             yield ProviderEvent::ResponseStarted { response_id: Some(response.clone()) };
             if turn == 0 {
-                if matches!(scenario, CallbackScenario::InvalidReadFirst | CallbackScenario::InvalidMutation) {
-                    let tool_id = if scenario == CallbackScenario::InvalidReadFirst {
+                if matches!(scenario, CallbackScenario::InvalidReadFirst | CallbackScenario::InvalidMutation | CallbackScenario::FailedReadCompleted) {
+                    let tool_id = if scenario != CallbackScenario::InvalidMutation {
                         "records.read"
                     } else {
                         "records.automatic"
@@ -136,7 +174,7 @@ impl AiProvider for MixedRetainedProvider {
                     assert!(calls[0].completed_at.is_some());
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                 }
-                if scenario == CallbackScenario::FixedBroker {
+                if scenario.broker() {
                     let definition = request.tools.iter().find(|tool| tool.tool_id == AI_CAPABILITY_DISCOVER_TOOL_ID).unwrap();
                     let call_id = "native-broker-discover".to_owned();
                     let arguments = json!({"text":"records", "maximumResults":2});
@@ -169,12 +207,13 @@ impl AiProvider for MixedRetainedProvider {
                     replies.lock().await.push(reply.output().clone());
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                 }
-                for (index, tool_id, record_id) in [
-                    (0, "records.automatic", "ordinary"),
-                    (1, "records.automatic", "review"),
-                    (2, "records.automatic", "later"),
-                    (3, "records.read", "after-pending"),
-                ] {
+                let callbacks: &[(usize, &str, &str)] = match scenario {
+                    CallbackScenario::EmptyCompleted => &[],
+                    CallbackScenario::ReadOnlyCompleted => &[(0, "records.read", "ordinary")],
+                    scenario if scenario.completes() => &[(0, "records.automatic", "ordinary"), (1, "records.read", "after-effect")],
+                    _ => &[(0, "records.automatic", "ordinary"), (1, "records.automatic", "review"), (2, "records.automatic", "later"), (3, "records.read", "after-pending")],
+                };
+                for &(index, tool_id, record_id) in callbacks {
                     let definition = request.tools.iter().find(|tool| tool.tool_id == tool_id).unwrap();
                     let call_id = format!("native-coordinator-call-{index}");
                     let arguments = json!({"recordId":record_id});
@@ -187,12 +226,149 @@ impl AiProvider for MixedRetainedProvider {
                         "pending callback must not expose an approvable grant before real settlement");
                     yield ProviderEvent::ToolCallCompleted { call_id, arguments };
                 }
-            } else {
-                yield ProviderEvent::TextDelta { text:"Approved action completed.".to_owned() };
+            }
+            if scenario == CallbackScenario::TamperedResult {
+                let call = AiToolCallRecord::query(database.pool()).fetch_all().await.unwrap().remove(0);
+                AiToolCallRecord::update_by_id(&database, &call.id, UpdateAiToolCallRecordInput {
+                    protected_result: Some(Some(serde_json::to_value(ProtectedContentEnvelope::DatabaseManaged {
+                        value: json!({"substituted":true}),
+                    }).unwrap())),
+                    ..Default::default()
+                }).await.unwrap();
+            }
+            if turn > 0 || scenario.completes() {
+                yield ProviderEvent::TextDelta { text:"All authorized work completed.".to_owned() };
             }
             yield ProviderEvent::Usage { input_tokens:19, output_tokens:7, cached_input_tokens:0 };
             yield ProviderEvent::ResponseCompleted { response_id:Some(response) };
         }))
+    }
+}
+
+// Mutate test-owned durable rows after validation and before atomic checkpoint insertion.
+// This exercises the real transaction fences without exposing a production test hook.
+struct CheckpointRaceProtector {
+    scenario: CallbackScenario,
+    database: Database<SqliteBackend>,
+}
+
+#[async_trait]
+impl AiContentProtector for CheckpointRaceProtector {
+    async fn protect(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        value: serde_json::Value,
+    ) -> Result<ProtectedContentEnvelope, ContentProtectionError> {
+        if value["checkpointKind"] == "native_completed_provider_turn_persisted" {
+            let calls = AiToolCallRecord::query(self.database.pool())
+                .fetch_all()
+                .await
+                .unwrap();
+            let call = &calls[0];
+            match self.scenario {
+                CallbackScenario::ChangedStepVersion => {
+                    let step =
+                        crate::persistence::AiRunStepRecord::find_by_id(&self.database, &call.id)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    assert!(matches!(
+                        crate::persistence::AiRunStepRecord::compare_and_swap(
+                            &self.database,
+                            &step.id,
+                            step.row_version,
+                            crate::persistence::AiRunStepRecordWhereInput::default(),
+                            crate::persistence::UpdateAiRunStepRecordInput {
+                                state: Some(call.state.clone()),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .unwrap(),
+                        ConditionalUpdateOutcome::Updated(_)
+                    ));
+                }
+                CallbackScenario::ChangedCohort => {
+                    let mut extra = call.clone();
+                    extra.id = Uuid::new_v4();
+                    extra.provider_call_id = "unreported-native-effect".to_owned();
+                    extra.provider_response_id = Some("different-response".to_owned());
+                    extra.lease_generation += 1;
+                    extra.provider_call_key = "unreported-native-effect-key".to_owned();
+                    let input = crate::persistence::CreateAiToolCallRecordInput {
+                        id: extra.id,
+                        run_id: extra.run_id,
+                        provider_call_key: extra.provider_call_key,
+                        provider_call_id: extra.provider_call_id,
+                        provider_kind: extra.provider_kind,
+                        provider_model: extra.provider_model,
+                        provider_response_id: extra.provider_response_id,
+                        budget_reservation_id: extra.budget_reservation_id,
+                        provider_turn_index: extra.provider_turn_index,
+                        tool_call_index: extra.tool_call_index,
+                        tool_id: extra.tool_id,
+                        tool_fingerprint: extra.tool_fingerprint,
+                        execution_provenance: extra.execution_provenance,
+                        protected_arguments: extra.protected_arguments,
+                        argument_hash: extra.argument_hash,
+                        protected_result: extra.protected_result,
+                        payload_purged_at: extra.payload_purged_at,
+                        risk: extra.risk,
+                        authorization_code: extra.authorization_code,
+                        authorization_policy_version: extra.authorization_policy_version,
+                        authorization_state_digest: extra.authorization_state_digest,
+                        disclosure_schema_fingerprint: extra.disclosure_schema_fingerprint,
+                        result_classification: extra.result_classification,
+                        result_egress_decision_id: extra.result_egress_decision_id,
+                        result_egress_manifest_hash: extra.result_egress_manifest_hash,
+                        application_audit_ref: extra.application_audit_ref,
+                        approval_id: extra.approval_id,
+                        idempotency_key: extra.idempotency_key,
+                        correlation_id: extra.correlation_id,
+                        causation_id: extra.causation_id,
+                        delegation_reference: extra.delegation_reference,
+                        lease_generation: extra.lease_generation,
+                        state: extra.state,
+                        completed_at: extra.completed_at,
+                    };
+                    AiToolCallRecord::insert(&self.database, input)
+                        .await
+                        .unwrap();
+                }
+                CallbackScenario::StaleLease => {
+                    let run = AiRunRecord::find_by_id(&self.database, &call.run_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    AiRunRecord::update_by_id(
+                        &self.database,
+                        &run.id,
+                        crate::persistence::UpdateAiRunRecordInput {
+                            lease_generation: Some(run.lease_generation + 1),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => {}
+            }
+        }
+        DatabaseManagedContentProtector
+            .protect(policy, context, value)
+            .await
+    }
+
+    async fn open(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        envelope: &ProtectedContentEnvelope,
+    ) -> Result<serde_json::Value, ContentProtectionError> {
+        DatabaseManagedContentProtector
+            .open(policy, context, envelope)
+            .await
     }
 }
 
@@ -500,6 +676,69 @@ async fn native_coordinator_schema_invalid_mutation_denies_without_effect_or_app
     .await;
 }
 
+#[tokio::test]
+async fn native_coordinator_completed_automatic_turn_persists_final_output() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::AutomaticCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_completed_turn_counts_failed_read_once() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::FailedReadCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_completed_fixed_broker_turn_counts_all_callbacks() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::BrokerCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_completed_read_only_turn() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::ReadOnlyCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_completed_empty_turn() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::EmptyCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_completed_evidence_tamper_and_transaction_fences_deny_without_replay() {
+    for scenario in [
+        CallbackScenario::TamperedResult,
+        CallbackScenario::ChangedStepVersion,
+        CallbackScenario::ChangedCohort,
+        CallbackScenario::StaleLease,
+    ] {
+        Box::pin(native_coordinator_lifecycle(scenario)).await;
+    }
+}
+
+async fn assert_retry_does_not_complete(
+    coordinator: &AiSupervisedAgentCoordinator,
+    lease: &AiRunLease,
+) {
+    let retry = Box::pin(coordinator.execute_claimed(lease)).await;
+    assert!(!matches!(
+        retry,
+        Ok(AiSupervisedAgentRunOutcome::Completed { .. })
+    ));
+}
+
 async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     let provider = Arc::new(MixedRetainedProvider {
         scenario,
@@ -615,7 +854,10 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         Arc::new(Resolver(fixture.principal.clone())),
         Arc::new(AllowAccess),
         Arc::new(ProtectionPolicy),
-        Arc::new(DatabaseManagedContentProtector),
+        Arc::new(CheckpointRaceProtector {
+            scenario,
+            database: fixture.database.clone(),
+        }),
         Arc::new(NativeTestRuleResolver),
         Arc::new(SystemClock),
         AiCoordinatorCheckpointLimits::new(256 * 1024, Duration::seconds(30)).unwrap(),
@@ -644,7 +886,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     ));
     let planner = Arc::new(MixedPlanner {
         fixture: fixture.clone(),
-        broker: scenario == CallbackScenario::FixedBroker,
+        broker: scenario.broker(),
         descriptor: AiProviderSessionDescriptor::new(
             ProviderKind::OpenAiCompatible,
             "mock-profile",
@@ -676,13 +918,152 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         .unwrap(),
     )
     .with_provider_session_service(sessions)
-    .with_classified_native_tools(applications, consequential, checkpoints);
+    .with_classified_native_tools(applications, consequential, checkpoints.clone());
     let waiting = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         Box::pin(coordinator.execute_claimed(&fixture.lease)),
     )
     .await
     .unwrap();
+    if scenario.rejects_completion() {
+        assert!(
+            !matches!(
+                waiting,
+                Ok(AiSupervisedAgentRunOutcome::Completed { .. })
+                    | Ok(AiSupervisedAgentRunOutcome::WaitingApproval { .. })
+            ),
+            "{scenario:?} unexpectedly finalized: {waiting:?}"
+        );
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
+        let rows = crate::persistence::AiRunCheckpointRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        assert!(
+            rows.iter()
+                .all(|row| row.checkpoint_kind != "native_completed_provider_turn_persisted")
+        );
+        Box::pin(assert_retry_does_not_complete(&coordinator, &fixture.lease)).await;
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            1,
+            "uncertainty must not replay a completed effect"
+        );
+        assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
+        return;
+    }
+    if scenario.completes() {
+        let outcome = waiting.expect("completed native turn should persist");
+        let expected_calls = match scenario {
+            CallbackScenario::EmptyCompleted => 0,
+            CallbackScenario::ReadOnlyCompleted => 1,
+            CallbackScenario::FailedReadCompleted => 3,
+            CallbackScenario::BrokerCompleted => 5,
+            _ => 2,
+        };
+        assert!(
+            matches!(outcome, AiSupervisedAgentRunOutcome::Completed { provider_turns:1, total_tool_calls, .. } if total_tool_calls == expected_calls),
+            "completed native callback turn must retain its final output: {outcome:?}"
+        );
+        assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            usize::from(!matches!(
+                scenario,
+                CallbackScenario::ReadOnlyCompleted | CallbackScenario::EmptyCompleted
+            )) + usize::from(scenario.broker())
+        );
+        assert!(
+            AiApprovalRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let calls = AiToolCallRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(calls.len(), expected_calls as usize);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.state == "execution_failed")
+                .count(),
+            usize::from(scenario == CallbackScenario::FailedReadCompleted)
+        );
+        assert!(calls.iter().all(|call| call.completed_at.is_some()));
+        let rows = crate::persistence::AiRunCheckpointRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        if expected_calls > 0 {
+            let checkpoint = rows
+                .iter()
+                .find(|row| row.checkpoint_kind == "native_completed_provider_turn_persisted")
+                .expect("separate evidence-only native checkpoint");
+            let ProtectedContentEnvelope::DatabaseManaged { value } =
+                serde_json::from_value(checkpoint.protected_state.clone().unwrap()).unwrap()
+            else {
+                panic!("fixture protection mode")
+            };
+            assert_eq!(value["totalToolCalls"], expected_calls);
+            assert_eq!(
+                value["nativeCompletedOutcomes"].as_array().unwrap().len(),
+                expected_calls as usize
+            );
+            assert_eq!(
+                value["completedTools"].as_array().unwrap().len(),
+                expected_calls as usize
+            );
+            for (index, outcome) in value["nativeCompletedOutcomes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .enumerate()
+            {
+                let call = calls
+                    .iter()
+                    .find(|call| call.tool_call_index == index as i64)
+                    .unwrap();
+                assert_eq!(outcome["callIndex"], index);
+                assert_eq!(outcome["providerCallId"], call.provider_call_id);
+                assert_eq!(outcome["toolCallId"], call.id.to_string());
+                assert_eq!(outcome["kind"], "Application");
+            }
+            assert!(value["continuation"].is_null());
+            assert!(
+                matches!(
+                    Box::pin(checkpoints.adopt_classified_mutation_batch(
+                        &fixture.lease.test_with_checkpoint(checkpoint.id)
+                    ))
+                    .await,
+                    Err(AiError::Conflict)
+                ),
+                "completed effects are never adoption work"
+            );
+        }
+        Box::pin(assert_retry_does_not_complete(&coordinator, &fixture.lease)).await;
+        assert_eq!(
+            provider.turns.load(Ordering::SeqCst),
+            1,
+            "completed turn cannot be replayed"
+        );
+        let messages = AiMessageRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.message_role == "assistant"
+                    && message.completion_state == "complete")
+                .count(),
+            1
+        );
+        return;
+    }
     if scenario == CallbackScenario::InvalidMutation {
         if let Ok(outcome) = &waiting {
             assert!(!matches!(

@@ -1060,6 +1060,8 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         match checkpoint.checkpoint_kind.as_str() {
+            // Terminal native effects are evidence only, never executable continuation work.
+            crate::orm_runs::native_checkpoints::COMPLETED_KIND => Err(AiError::Conflict),
             "supervised_tool_batch_persisted" | native::OUTCOME_KIND => self
                 .adopt_supervised_tool_batch(lease)
                 .await
@@ -1517,7 +1519,30 @@ impl OrmAiCoordinatorCheckpointService {
             }
             _ => None,
         };
+        let completed_native =
+            if checkpoint_kind == crate::orm_runs::native_checkpoints::COMPLETED_KIND {
+                Some(
+                    self.validate_completed_native_turn(
+                        lease,
+                        result,
+                        scope,
+                        route,
+                        rules,
+                        provider_turns,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
         let completed_tool_count = match checkpoint_kind {
+            crate::orm_runs::native_checkpoints::COMPLETED_KIND
+                if !completed_tools.is_empty()
+                    && continuation.is_none()
+                    && completed_tools.len() == result.tool_calls().len() =>
+            {
+                total_tool_calls
+            }
             "provider_turn_persisted" if completed_tools.is_empty() && continuation.is_none() => {
                 total_tool_calls
                     .checked_sub(u32::try_from(result.tool_calls().len()).unwrap_or(u32::MAX))
@@ -1640,7 +1665,7 @@ impl OrmAiCoordinatorCheckpointService {
                 }
             }
         }
-        let payload = json!({
+        let mut payload = json!({
             "formatVersion": 2,
             "checkpointKind": checkpoint_kind,
             "providerTurns": provider_turns,
@@ -1654,6 +1679,10 @@ impl OrmAiCoordinatorCheckpointService {
             "completedTools": protected_tool_values,
             "continuation": continuation.map(AiAgentContinuation::checkpoint_value),
         });
+        if let Some(proof) = &completed_native {
+            // Separate kind and ordered evidence are never adopted as pending calls.
+            payload["nativeCompletedOutcomes"] = json!(proof.outcomes);
+        }
         enforce_size(&payload, self.limits.maximum_state_bytes)?;
         let protected_state = self
             .protect(
@@ -1704,7 +1733,11 @@ impl OrmAiCoordinatorCheckpointService {
             .append_coordinator_checkpoint(
                 lease,
                 PreparedCoordinatorCheckpoint {
-                    native_binding: None,
+                    native_binding: completed_native.map(|proof| {
+                        crate::orm_runs::PreparedNativeCheckpointBinding::Completed {
+                            tool_versions: proof.tool_versions,
+                        }
+                    }),
                     id: checkpoint_id,
                     checkpoint_kind: checkpoint_kind.to_owned(),
                     provider_kind: result.provider_kind().as_str().to_owned(),
@@ -2307,6 +2340,10 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
         provider_turns: u32,
         total_tool_calls: u32,
     ) -> Result<AiRunLease, AiError> {
+        // Native callbacks have already executed. Never serialize them using the
+        // ordinary provider-turn kind, whose tool calls are still pending work.
+        let native = !result.interactive_tool_results().is_empty()
+            || !result.native_control_receipts().is_empty();
         self.persist(
             lease,
             result,
@@ -2317,8 +2354,16 @@ impl AiAgentCheckpointWriter for OrmAiCoordinatorCheckpointService {
             rule_usage,
             provider_turns,
             total_tool_calls,
-            "provider_turn_persisted",
-            &[],
+            if native {
+                crate::orm_runs::native_checkpoints::COMPLETED_KIND
+            } else {
+                "provider_turn_persisted"
+            },
+            if native {
+                result.interactive_tool_results()
+            } else {
+                &[]
+            },
             None,
         )
         .await

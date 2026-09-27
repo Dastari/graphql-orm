@@ -19,6 +19,22 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.102.0 to 0.102.1
+
+Apply AI schema module `0.68.0` through the normal managed schema workflow. The
+version records new protected checkpoint semantics; there are no table/column
+changes, SQL backfills or data rewrites. Completed native callback turns now store
+`native_completed_provider_turn_persisted` evidence with ordered outcomes instead
+of entering the generic pending-tool checkpoint path. Reads and automatic writes
+already executed during the turn contribute once to the existing usage totals.
+
+Completed-native checkpoints are evidence only. They cannot be adopted as pending
+calls or automatic/supervised continuation work. Existing recovery-required runs,
+old checkpoints and uncertain effects remain unchanged; never reopen or replay them
+as part of this upgrade. No public Rust API, GraphQL schema or host configuration
+changes are required. Human approval and existing provider uncertainty gates remain
+unchanged; provider-wire regression coverage does not establish live acceptance.
+
 ## 0.101.0 to 0.102.0
 
 Adopt AI tool profiles `0.14.0` from the same reviewed workspace release.

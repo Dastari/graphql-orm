@@ -896,6 +896,181 @@ pub(crate) mod tests {
         assert!(AiGrokAcpWireProcess::literal_prompt(vec![], 16_384).is_err());
     }
 
+    struct ControlReplies(std::sync::atomic::AtomicUsize);
+    #[async_trait]
+    impl ProviderDynamicToolResponder for ControlReplies {
+        async fn respond(
+            &self,
+            call: crate::ProviderDynamicToolCall,
+        ) -> Result<crate::ProviderDynamicToolResult, ProviderError> {
+            let index = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let kind = match index {
+                0 => crate::AiNativeToolControlKind::ApprovalPending,
+                1 => crate::AiNativeToolControlKind::ConsequentialCallsPaused,
+                _ => panic!("a no-effect receipt must not replay a callback"),
+            };
+            crate::ProviderDynamicToolResult::new(&call, kind.model_value())
+        }
+    }
+
+    fn native_control_reads(terminal: Value) -> Vec<Value> {
+        let mut reads = new_session_reads();
+        let sdk = |id, method, params| {
+            json!({"jsonrpc":"2.0","id":id,
+            "method":"_x.ai/mcp/sdk_call","params":{"serverId":SERVER,"message":{
+                "jsonrpc":"2.0","id":id,"method":method,"params":params}}})
+        };
+        reads.push(sdk(
+            100,
+            "initialize",
+            json!({"protocolVersion":"2025-11-25"}),
+        ));
+        reads.push(sdk(101, "tools/list", json!({})));
+        for id in [102, 103] {
+            reads.push(sdk(
+                id,
+                "tools/call",
+                json!({"name":"discover","arguments":{}}),
+            ));
+        }
+        reads.push(update("agent_message_chunk", "Awaiting approval."));
+        reads.push(terminal);
+        reads
+    }
+
+    // These are transport fixtures, not a substitute for the coordinator's persisted
+    // candidate/egress/finalized-approval proofs. Use its actual closed reply value.
+    #[tokio::test]
+    async fn native_approval_control_wire_replies_require_usage_and_never_retry() {
+        for successful in [true, false] {
+            let terminal = if successful {
+                response(
+                    9,
+                    json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+                )
+            } else {
+                response(9, json!({"stopReason":"end_turn"}))
+            };
+            let (process, wire) = fixture(native_control_reads(terminal));
+            process.create_empty_session().await.unwrap();
+            let responder = Arc::new(ControlReplies(std::sync::atomic::AtomicUsize::new(0)));
+            let mut stream = process
+                .prompt(vec!["synthetic request".into()], responder.clone())
+                .await
+                .unwrap();
+            let mut completed = 0;
+            let mut settled_usage = 0;
+            let mut calls = 0;
+            let mut failed = false;
+            while let Some(event) = stream.next().await {
+                match event {
+                    Ok(ProviderEvent::ToolCallCompleted { .. }) => calls += 1,
+                    Ok(ProviderEvent::Usage { .. }) => settled_usage += 1,
+                    Ok(ProviderEvent::ResponseCompleted { .. }) => completed += 1,
+                    Err(_) => failed = true,
+                    _ => {}
+                }
+            }
+            assert_eq!(calls, 2);
+            assert_eq!(responder.0.load(std::sync::atomic::Ordering::SeqCst), 2);
+            assert_eq!(completed, usize::from(successful));
+            assert_eq!(settled_usage, usize::from(successful));
+            assert_eq!(failed, !successful);
+            let writes = wire.writes.lock().unwrap();
+            assert_eq!(
+                writes
+                    .iter()
+                    .filter(|v| v["method"] == "session/prompt")
+                    .count(),
+                1
+            );
+            for (id, kind) in [
+                (102, crate::AiNativeToolControlKind::ApprovalPending),
+                (
+                    103,
+                    crate::AiNativeToolControlKind::ConsequentialCallsPaused,
+                ),
+            ] {
+                let replies: Vec<_> = writes.iter().filter(|v| v["id"] == id).collect();
+                assert_eq!(replies.len(), 1);
+                let reply = replies[0];
+                assert_eq!(reply["result"]["result"]["isError"], false);
+                let body: Value = serde_json::from_str(
+                    reply["result"]["result"]["content"][0]["text"]
+                        .as_str()
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(body, kind.model_value());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_approval_control_wire_fresh_session_after_uncertain_turn_is_isolated() {
+        let (old, old_wire) = fixture(native_control_reads(response(
+            9,
+            json!({"stopReason":"end_turn"}),
+        )));
+        let cursor = old.create_empty_session().await.unwrap();
+        let mut stream = old
+            .prompt(
+                vec!["synthetic request".into()],
+                Arc::new(ControlReplies(std::sync::atomic::AtomicUsize::new(0))),
+            )
+            .await
+            .unwrap();
+        let mut failed = false;
+        while let Some(event) = stream.next().await {
+            failed |= event.is_err();
+        }
+        assert!(failed);
+        drop(stream);
+        old_wire
+            .reads
+            .lock()
+            .unwrap()
+            .push_back(response(10, json!({"success":true})));
+        old.delete_session(&cursor).await.unwrap();
+        let writes_before = old_wire.writes.lock().unwrap().len();
+
+        let (fresh, fresh_wire) = fixture(native_control_reads(response(
+            9,
+            json!({"stopReason":"end_turn","_meta":{"usage":usage()}}),
+        )));
+        fresh.create_empty_session().await.unwrap();
+        let mut fresh_stream = fresh
+            .prompt(
+                vec!["new synthetic request".into()],
+                Arc::new(ControlReplies(std::sync::atomic::AtomicUsize::new(0))),
+            )
+            .await
+            .unwrap();
+        let mut completed = 0;
+        while let Some(event) = fresh_stream.next().await {
+            if matches!(event.unwrap(), ProviderEvent::ResponseCompleted { .. }) {
+                completed += 1;
+            }
+        }
+        assert_eq!(completed, 1);
+        assert_eq!(old_wire.writes.lock().unwrap().len(), writes_before);
+        let fresh_writes = fresh_wire.writes.lock().unwrap();
+        assert_eq!(
+            fresh_writes
+                .iter()
+                .filter(|v| v["method"] == "session/new")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fresh_writes
+                .iter()
+                .filter(|v| v["method"] == "session/prompt")
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn frozen_profile_scalar_selection_stream_and_usage() {
         let mut reads = new_session_reads();
