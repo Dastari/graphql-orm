@@ -2,6 +2,8 @@
 
 use super::*;
 
+pub(crate) const COMPLETED_KIND: &str = "native_completed_provider_turn_persisted";
+
 pub(crate) const SOURCE_KIND: &str = "native_approval_provider_turn_persisted";
 pub(crate) const OUTCOME_KIND: &str = "native_approved_outcome_persisted";
 

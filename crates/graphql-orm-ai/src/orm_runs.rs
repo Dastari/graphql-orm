@@ -420,6 +420,10 @@ pub(crate) struct PreparedCoordinatorCheckpointTool {
 }
 
 pub(crate) enum PreparedNativeCheckpointBinding {
+    Completed {
+        // Exact row versions whose protected arguments/results and egress were opened.
+        tool_versions: Vec<(Uuid, i64, i64)>,
+    },
     Source {
         candidate_id: Uuid,
         pending_call_index: usize,
@@ -1914,6 +1918,13 @@ impl OrmAiRunService {
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
                     let valid_kind = match checkpoint.checkpoint_kind.as_str() {
                         "provider_turn_persisted" => checkpoint.completed_tools.is_empty(),
+                        native_checkpoints::COMPLETED_KIND => {
+                            !checkpoint.completed_tools.is_empty()
+                                && matches!(
+                                    checkpoint.native_binding,
+                                    Some(PreparedNativeCheckpointBinding::Completed { .. })
+                                )
+                        }
                         "tool_batch_persisted" => !checkpoint.completed_tools.is_empty(),
                         "supervised_tool_batch_persisted" => checkpoint.completed_tools.len() == 1,
                         native_checkpoints::SOURCE_KIND => matches!(
@@ -1932,7 +1943,9 @@ impl OrmAiRunService {
                     if (checkpoint.native_binding.is_some()
                         && !matches!(
                             checkpoint.checkpoint_kind.as_str(),
-                            native_checkpoints::SOURCE_KIND | native_checkpoints::OUTCOME_KIND
+                            native_checkpoints::SOURCE_KIND
+                                | native_checkpoints::OUTCOME_KIND
+                                | native_checkpoints::COMPLETED_KIND
                         ))
                         || persisted_state(&current)? != AiRunState::Running
                         || !valid_kind
@@ -1974,6 +1987,44 @@ impl OrmAiRunService {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
                         match binding {
+                            PreparedNativeCheckpointBinding::Completed { tool_versions } => {
+                                if tool_versions.len() != checkpoint.completed_tools.len()
+                                    || tool_versions
+                                        .iter()
+                                        .map(|(id, _, _)| *id)
+                                        .collect::<BTreeSet<_>>()
+                                        != expected_ids
+                                {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                                for (index, ((id, call_version, step_version), expected)) in
+                                    tool_versions
+                                        .iter()
+                                        .zip(&checkpoint.completed_tools)
+                                        .enumerate()
+                                {
+                                    let call = tx
+                                        .find_by_id::<AiToolCallRecord>(id)
+                                        .await
+                                        .map_err(OrmPublicError::from)?
+                                        .ok_or_else(OrmPublicError::not_found)?;
+                                    let step = tx
+                                        .find_by_id::<AiRunStepRecord>(id)
+                                        .await
+                                        .map_err(OrmPublicError::from)?
+                                        .ok_or_else(OrmPublicError::not_found)?;
+                                    if *id != expected.id
+                                        || call.row_version != *call_version
+                                        || step.row_version != *step_version
+                                        || call.tool_call_index
+                                            != i64::try_from(index).map_err(|_| {
+                                                OrmPublicError::new(OrmErrorCode::Conflict)
+                                            })?
+                                    {
+                                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                    }
+                                }
+                            }
                             PreparedNativeCheckpointBinding::Source {
                                 candidate_id,
                                 pending_call_index,
@@ -2056,6 +2107,14 @@ impl OrmAiRunService {
                             "tool_batch_persisted" => {
                                 call.risk == "read_only" && call.approval_id.is_none()
                             }
+                            native_checkpoints::COMPLETED_KIND => {
+                                matches!(
+                                    call.risk.as_str(),
+                                    "read_only" | "low_risk_write" | "non_idempotent_write"
+                                ) && call.approval_id.is_none()
+                                    && (call.state != "execution_failed"
+                                        || call.risk == "read_only")
+                            }
                             native_checkpoints::SOURCE_KIND => {
                                 matches!(
                                     call.risk.as_str(),
@@ -2117,7 +2176,9 @@ impl OrmAiRunService {
                     }
                     if matches!(
                         checkpoint.checkpoint_kind.as_str(),
-                        "tool_batch_persisted" | "supervised_tool_batch_persisted"
+                        "tool_batch_persisted"
+                            | "supervised_tool_batch_persisted"
+                            | native_checkpoints::COMPLETED_KIND
                     ) {
                         let expected_ids = checkpoint
                             .completed_tools
@@ -2137,9 +2198,19 @@ impl OrmAiRunService {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
+                        if checkpoint.checkpoint_kind == native_checkpoints::COMPLETED_KIND
+                            && calls.len() >= 4_097
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
                         let actual_ids = calls
                             .iter()
                             .filter(|call| {
+                                if checkpoint.checkpoint_kind == native_checkpoints::COMPLETED_KIND
+                                {
+                                    return call.budget_reservation_id
+                                        == Some(checkpoint.budget_reservation_id);
+                                }
                                 call.lease_generation == lease.lease_generation
                                     && call.provider_response_id.as_deref()
                                         == checkpoint.provider_response_id.as_deref()

@@ -20,6 +20,19 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Fixed
+
+- Native turns containing only completed callbacks now count prior executions once
+  and persist final output, including automatic mutations, failed reads and fixed
+  broker calls. A distinct protected completion checkpoint binds ordered durable
+  results, current rules and egress with atomic row-version and cohort validation;
+  it cannot be adopted as pending execution. Existing uncertain runs are not
+  reopened or replayed. AI schema module advances to `0.68.0` for the new persistent
+  checkpoint semantics; no table or column changes are required.
+- Added wire-only regressions for native pending/paused approval replies on Codex
+  and Grok, including authoritative usage and rejection of unknown activity. These
+  checks do not expand provider compatibility or establish live approval acceptance.
+
 ## [0.102.0] - 2026-09-26
 
 ### Added

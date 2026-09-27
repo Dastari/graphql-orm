@@ -8,6 +8,151 @@ use crate::{AiNativeToolControlKind, AiPreparedNativeApproval};
 pub(super) const SOURCE_KIND: &str = "native_approval_provider_turn_persisted";
 pub(super) const OUTCOME_KIND: &str = "native_approved_outcome_persisted";
 
+/// Validated ordered application outcomes for a terminal native turn, never replay work.
+pub(super) struct CompletedNativeProof {
+    pub(super) outcomes: Vec<serde_json::Value>,
+    pub(super) tool_versions: Vec<(Uuid, i64, i64)>,
+}
+
+impl OrmAiCoordinatorCheckpointService {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn validate_completed_native_turn(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        scope: &AiScope,
+        route: &AiToolResultEgressRoute,
+        rules: &AiResolvedRuleSet,
+        provider_turns: u32,
+    ) -> Result<CompletedNativeProof, AiError> {
+        // Framework-control receipts belong exclusively to the approval source path.
+        if result.interactive_tool_results().is_empty()
+            || !result.native_control_receipts().is_empty()
+            || provider_turns == 0
+        {
+            return Err(AiError::Conflict);
+        }
+        let outcomes = result.native_outcome_checkpoint_values()?;
+        let (_, policy) = self.current_policy(lease, scope).await?;
+        let mut tool_versions = Vec::with_capacity(outcomes.len());
+        // The executor canonicalizes callback outcomes into tool-call order before
+        // constructing this result; retain that order and reject any mismatched pair.
+        for (index, (requested, persisted)) in result
+            .tool_calls()
+            .iter()
+            .zip(result.interactive_tool_results())
+            .enumerate()
+        {
+            let call = AiToolCallRecord::find_by_id(self.run_service.database(), &persisted.id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
+            let step = AiRunStepRecord::find_by_id(self.run_service.database(), &call.id)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::Conflict)?;
+            if call.run_id != lease.run_id().0
+                || call.lease_generation != lease.lease_generation()
+                || call.payload_purged_at.is_some()
+                || call.provider_kind.as_deref() != Some(result.provider_kind().as_str())
+                || call.provider_model.as_deref() != Some(result.provider_model())
+                || call.provider_response_id.as_deref() != result.provider_response_id()
+                || call.budget_reservation_id != Some(result.budget_reservation_id().0)
+                || call.provider_call_id != requested.call_id()
+                || call.tool_id != requested.tool_id().as_str()
+                || call.tool_fingerprint != requested.tool_fingerprint()
+                || call.tool_call_index != i64::try_from(index).map_err(|_| AiError::Conflict)?
+                || call.provider_turn_index != i64::from(provider_turns - 1)
+                || call.argument_hash != canonical_json_hash(requested.arguments())?
+                || !matches!(call.state.as_str(), "completed" | "execution_failed")
+                || (call.state == "execution_failed" && call.risk != "read_only")
+                || !matches!(
+                    call.risk.as_str(),
+                    "read_only" | "low_risk_write" | "non_idempotent_write"
+                )
+                || call.approval_id.is_some()
+                || call.completed_at.is_none()
+                || step.run_id != call.run_id
+                || step.lease_generation != call.lease_generation
+                || step.step_kind != "application_tool"
+                || step.state != call.state
+                || step.finished_at.is_none()
+            {
+                return Err(AiError::Conflict);
+            }
+            let maturity = if call.risk == "read_only" {
+                ToolMaturity::ReadOnly
+            } else {
+                ToolMaturity::AutonomousWrite
+            };
+            if rules.constrain_tool(&call.tool_fingerprint, maturity, AiApprovalRule::None)
+                != Some(AiApprovalRule::None)
+            {
+                return Err(AiError::ReauthorizationFailed);
+            }
+            let ModelInputBlock::ToolResult { output, .. } =
+                persisted.model_input().ok_or(AiError::Conflict)?
+            else {
+                return Err(AiError::Conflict);
+            };
+            for (field, protected, expected) in [
+                (
+                    "protected_arguments",
+                    call.protected_arguments.as_ref(),
+                    requested.arguments(),
+                ),
+                ("protected_result", call.protected_result.as_ref(), output),
+            ] {
+                let retained = self
+                    .open(
+                        &policy,
+                        ContentProtectionContext {
+                            entity: "graphql_orm_ai_tool_calls".to_owned(),
+                            row_id: call.id.to_string(),
+                            field: field.to_owned(),
+                            scope: scope.clone(),
+                        },
+                        protected.ok_or(AiError::Conflict)?,
+                    )
+                    .await?;
+                if retained != *expected {
+                    return Err(AiError::Conflict);
+                }
+            }
+            let manifest = persisted.egress_manifest().ok_or(AiError::EgressDenied)?;
+            if !route.matches_manifest(
+                manifest,
+                lease,
+                scope,
+                result.provider_kind().as_str(),
+                result.provider_model(),
+            ) || manifest.sources.len() != 1
+                || manifest.sources[0].kind != "application_tool_result"
+                || manifest.sources[0].reference != call.id.to_string()
+                || manifest.capability != crate::AiEgressCapability::ToolResult
+                || call.result_egress_manifest_hash.as_deref()
+                    != Some(manifest.stable_hash().as_str())
+                || call.result_classification.as_deref()
+                    != Some(classification_value(manifest.maximum_classification()))
+            {
+                return Err(AiError::EgressDenied);
+            }
+            self.validate_native_egress(
+                lease,
+                scope,
+                manifest,
+                call.result_egress_decision_id.ok_or(AiError::Conflict)?,
+            )
+            .await?;
+            tool_versions.push((call.id, call.row_version, step.row_version));
+        }
+        Ok(CompletedNativeProof {
+            outcomes,
+            tool_versions,
+        })
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct NativeApprovalSource {
