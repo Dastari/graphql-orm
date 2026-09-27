@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
+Completed native callback turns retain a distinct, protected evidence-only checkpoint.
+The coordinator counts already completed reads and automatic writes once, validates
+their ordered durable results and egress, and then persists the final provider output.
+These checkpoints cannot be adopted as pending execution; stale leases, changed
+rows or uncertain effects remain closed without replay. Apply schema module `0.68.0`
+when adopting `0.102.1`; see [MIGRATION.md](MIGRATION.md).
+
 Provider and retained-session heartbeat maintenance now continues polling the provider's
 in-flight persistence while renewal waits. A started renewal settles even if the provider
 finishes first, retaining the new row-version proof. This prevents self-deadlock on a
@@ -97,7 +104,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.101.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.102.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

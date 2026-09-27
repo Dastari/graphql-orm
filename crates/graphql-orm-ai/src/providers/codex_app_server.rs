@@ -7968,6 +7968,131 @@ pub(crate) mod tests {
         ));
     }
 
+    // Wire proof only: the coordinator owns preparation, egress, and approval persistence.
+    fn actor_after_native_control_replies() -> (AiCodexAppServerProtocolActor, String) {
+        let tool = dynamic_tool();
+        let input =
+            AiCodexAppServerTurnInput::try_from_dynamic_request(dynamic_model_request()).unwrap();
+        let mut actor = initialized_protocol_actor();
+        let thread = start_bound_dynamic_thread(&mut actor, std::slice::from_ref(&tool));
+        start_bound_dynamic_turn(&mut actor, &thread, &input, "turn-controls", 3);
+        for (index, kind) in [
+            crate::AiNativeToolControlKind::ApprovalPending,
+            crate::AiNativeToolControlKind::ConsequentialCallsPaused,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = 100 + index as u64;
+            let call_id = format!("control-{index}");
+            let mut item = json!({"type":"dynamicToolCall","id":call_id,
+                "arguments":{"Limit":3},"namespace":null,"tool":tool.provider_name,
+                "status":"inProgress"});
+            actor
+                .accept(&lifecycle_notification(
+                    "item/started",
+                    json!({
+                        "threadId":thread,"turnId":"turn-controls","startedAtMs":1,"item":item
+                    }),
+                ))
+                .unwrap();
+            let frame = serde_json::to_vec(&json!({"id":id,"method":"item/tool/call","params":{
+                "threadId":thread,"turnId":"turn-controls","callId":call_id,
+                "namespace":null,"tool":tool.provider_name,"arguments":{"Limit":3}
+            }}))
+            .unwrap();
+            let AiCodexAppServerInbound::DynamicToolCall { call, .. } =
+                actor.accept(&frame).unwrap()
+            else {
+                panic!("expected the exact offered callback")
+            };
+            let value = kind.model_value();
+            let result = ProviderDynamicToolResult::new(&call, value.clone()).unwrap();
+            let response: Value =
+                serde_json::from_slice(&actor.dynamic_tool_response(id, &result).unwrap()).unwrap();
+            assert_eq!(response["id"], id);
+            assert_eq!(response["result"]["success"], true);
+            let content = response["result"]["contentItems"].clone();
+            let decoded: Value =
+                serde_json::from_str(content[0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(decoded["effectExecuted"], false);
+            assert_eq!(decoded["retryAllowed"], false);
+            item["status"] = json!("completed");
+            item["success"] = json!(true);
+            item["contentItems"] = content;
+            actor
+                .accept(&lifecycle_notification(
+                    "item/completed",
+                    json!({
+                        "threadId":thread,"turnId":"turn-controls","completedAtMs":2,"item":item
+                    }),
+                ))
+                .unwrap();
+            assert!(actor.dynamic_tool_response(id, &result).is_err());
+            assert!(
+                actor.accept(&frame).is_err(),
+                "control replies never authorize replay"
+            );
+        }
+        (actor, thread)
+    }
+
+    #[test]
+    fn native_approval_control_wire_replies_allow_only_normal_settlement() {
+        let (mut actor, thread) = actor_after_native_control_replies();
+        for (method, timestamp) in [
+            ("item/started", "startedAtMs"),
+            ("item/completed", "completedAtMs"),
+        ] {
+            let mut params = json!({"threadId":thread,"turnId":"turn-controls",
+                "item":{"id":"pending-message","type":"agentMessage","text":"Awaiting approval."}});
+            params[timestamp] = json!(3);
+            actor
+                .accept(&lifecycle_notification(method, params))
+                .unwrap();
+        }
+        actor
+            .accept(&token_usage_notification(&thread, "turn-controls"))
+            .unwrap();
+        actor
+            .accept(&turn_completed_notification(&thread, "turn-controls"))
+            .unwrap();
+        assert!(actor.active_turn_id.is_none());
+    }
+
+    #[test]
+    fn native_approval_control_wire_reply_does_not_admit_unreviewed_items() {
+        // Names are from installed Codex 0.156.1's generated ThreadItem schema.
+        // Schema presence alone never grants these native capabilities.
+        for kind in [
+            "hookPrompt",
+            "functionCallOutput",
+            "subAgentActivity",
+            "imageView",
+            "sleep",
+            "imageGeneration",
+            "enteredReviewMode",
+            "exitedReviewMode",
+            "unknownCanary",
+        ] {
+            let (mut actor, thread) = actor_after_native_control_replies();
+            assert!(
+                actor
+                    .accept(&lifecycle_notification(
+                        "item/started",
+                        json!({
+                            "threadId":thread,"turnId":"turn-controls","startedAtMs":3,
+                            "item":{"id":"unreviewed","type":kind}
+                        })
+                    ))
+                    .is_err(),
+                "unreviewed item {kind} must remain rejected after a no-effect reply"
+            );
+            assert!(actor.active_turn_id.is_some());
+        }
+    }
+
     #[test]
     fn schema_invalid_dynamic_request_can_be_corrected_in_the_same_turn() {
         let tool = dynamic_tool();
