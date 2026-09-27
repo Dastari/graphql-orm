@@ -8,7 +8,7 @@ publish = false
 
 [dev-dependencies]
 graphql-orm-router = { path = "../../../../../graphql-orm-router" }
-ntex = "=3.10.0"
+ntex = "=3.12.3"
 readings-subgraph = { path = "../readings-subgraph" }
 reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls"] }
 serde_json = "1"
