@@ -8,13 +8,13 @@ use std::{
 use arc_swap::ArcSwap;
 use futures::{StreamExt, lock::Mutex};
 use graphql_orm_router_protocol::{RootOperationType, SubgraphDescriptor};
+use hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions;
 use reqwest::{
     Client,
     header::{ETAG, IF_NONE_MATCH},
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions;
 
 use crate::{
     NetworkPolicy, RouterError, RouterErrorKind, StaticSubgraph,
