@@ -701,11 +701,15 @@ async fn native_coordinator_completed_fixed_broker_turn_counts_all_callbacks() {
 }
 
 #[tokio::test]
-async fn native_coordinator_completed_read_only_turn_and_empty_turn() {
+async fn native_coordinator_completed_read_only_turn() {
     Box::pin(native_coordinator_lifecycle(
         CallbackScenario::ReadOnlyCompleted,
     ))
     .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_completed_empty_turn() {
     Box::pin(native_coordinator_lifecycle(
         CallbackScenario::EmptyCompleted,
     ))
