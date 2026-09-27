@@ -1,4 +1,4 @@
-//! Fenced, protected execution of registered read-only application tools.
+//! Fenced, protected execution of explicitly registered application tools.
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
@@ -78,14 +78,15 @@ impl AiApplicationToolCallLimits {
 }
 
 /// Server-authored position and audit context for one provider tool call.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiApplicationToolCallContext {
-    provider_turn_index: u32,
-    tool_call_index: usize,
-    scope: AiScope,
-    correlation_id: String,
-    causation_id: String,
-    delegation_reference: Option<String>,
+    pub(crate) provider_turn_index: u32,
+    pub(crate) tool_call_index: usize,
+    pub(crate) scope: AiScope,
+    pub(crate) correlation_id: String,
+    pub(crate) causation_id: String,
+    pub(crate) delegation_reference: Option<String>,
 }
 
 impl AiApplicationToolCallContext {
@@ -588,7 +589,286 @@ enum UnapprovedToolMode {
     AutomaticMutation,
 }
 
+/// Fresh routing decision for one exact provider-requested application call.
+///
+/// Classification grants no execution authority. Each effect path revalidates
+/// the current principal, registered request, host policy, and durable fence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiApplicationToolDisposition {
+    /// Bounded read-only application query.
+    ReadOnly,
+    /// Explicitly enabled mutation currently permitted without a per-call grant.
+    AutomaticMutation,
+    /// Exact mutation requiring a fresh one-shot approval envelope.
+    ApprovalRequired,
+}
+
 impl OrmAiApplicationToolCallService {
+    pub(crate) fn runtime(&self) -> &AiRuntime {
+        &self.runtime
+    }
+
+    pub(crate) fn run_service(&self) -> &OrmAiRunService {
+        &self.run_service
+    }
+
+    pub(crate) fn egress_audit(&self) -> &dyn AiEgressDecisionAudit {
+        self.egress_audit.as_ref()
+    }
+
+    pub(crate) async fn prepare_native_blocked_call(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+    ) -> Result<(PreparedToolCallStart, crate::AiContentProtectionPolicy), AiError> {
+        if self
+            .classify_tool_call(lease, provider_result, &context)
+            .await?
+            == AiApplicationToolDisposition::ReadOnly
+        {
+            return Err(AiError::Forbidden);
+        }
+        let provider_call = provider_result
+            .tool_calls()
+            .get(context.tool_call_index)
+            .ok_or(AiError::Conflict)?;
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        validate_session_binding(&session, lease, &context.scope)?;
+        let principal = self.current_access(lease, &context.scope).await?;
+        let policy = self
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(principal.principal(), &context.scope)
+            .await?;
+        if !policy.ready || policy.scope != context.scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let id = AiToolCallId::new();
+        let (descriptor, request, is_static) = if let Some(descriptor) = self
+            .runtime
+            .tool_catalog()
+            .descriptor(provider_call.tool_id())
+            .cloned()
+        {
+            let request = build_tool_request(
+                lease,
+                id,
+                &descriptor,
+                provider_call.arguments().clone(),
+                &context,
+                None,
+            )?;
+            (descriptor, request, true)
+        } else {
+            let prepared = self.runtime.prepare_mutation_capability(
+                provider_call.tool_id(),
+                provider_call.tool_fingerprint(),
+                provider_call.arguments().clone(),
+                GraphqlInvocationContext {
+                    run_id: lease.run_id(),
+                    tool_call_id: id,
+                    scope: context.scope.clone(),
+                    correlation_id: context.correlation_id.clone(),
+                    causation_id: context.causation_id.clone(),
+                    delegation_reference: context.delegation_reference.clone(),
+                    idempotency_key: None,
+                },
+            )?;
+            (
+                prepared.descriptor().clone(),
+                prepared.request().clone(),
+                false,
+            )
+        };
+        let execution_provenance = if is_static {
+            Some(
+                crate::AiToolExecutionProvenance::from_provider_call(
+                    lease,
+                    provider_result,
+                    provider_call.call_id(),
+                    &descriptor,
+                    &request,
+                    session
+                        .execution_selection
+                        .as_deref()
+                        .map(crate::AiSessionExecutionSelection::decode)
+                        .transpose()?,
+                )
+                .map_err(|_| AiError::Conflict)?,
+            )
+        } else {
+            None
+        };
+        let protected_arguments = self
+            .protect(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    id.0,
+                    "protected_arguments",
+                    &context.scope,
+                ),
+                provider_call.arguments().clone(),
+            )
+            .await?;
+        Ok((
+            PreparedToolCallStart {
+                id: id.0,
+                provider_call_key: provider_call_key(lease, provider_call.call_id()),
+                provider_call_id: provider_call.call_id().to_owned(),
+                provider_kind: provider_result.provider_kind().as_str().to_owned(),
+                provider_model: provider_result.provider_model().to_owned(),
+                provider_response_id: provider_result.provider_response_id().map(str::to_owned),
+                budget_reservation_id: provider_result.budget_reservation_id().0,
+                provider_turn_index: i64::from(context.provider_turn_index),
+                tool_call_index: i64::try_from(context.tool_call_index)
+                    .map_err(|_| AiError::Conflict)?,
+                tool_id: descriptor.id.as_str().to_owned(),
+                tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
+                execution_provenance,
+                protected_arguments,
+                argument_hash: canonical_json_hash(provider_call.arguments())?,
+                risk: risk_value(descriptor.risk).to_owned(),
+                idempotency_key: None,
+                correlation_id: context.correlation_id,
+                causation_id: context.causation_id,
+                delegation_reference: context.delegation_reference,
+                started_event: None,
+                expected_owner_principal_kind: session.owner_principal_kind,
+                expected_owner_subject: session.owner_subject,
+                expected_scope_kind: context.scope.kind,
+                expected_scope_id: context.scope.id,
+                expected_tenant_id: context.scope.tenant_id,
+            },
+            policy,
+        ))
+    }
+
+    /// Classifies one validated registered application call under current policy.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for stale provider/session bindings, invalid arguments,
+    /// unsupported descriptors, or current access/policy denial. Generated
+    /// capabilities are compiled through their existing closed typed paths.
+    pub async fn classify_tool_call(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: &AiApplicationToolCallContext,
+    ) -> Result<AiApplicationToolDisposition, AiError> {
+        validate_provider_binding(self, lease, provider_result, context)?;
+        let call = &provider_result.tool_calls()[context.tool_call_index];
+        if serde_json::to_vec(call.arguments())
+            .map_err(|_| AiError::Forbidden)?
+            .len()
+            > self.limits.maximum_argument_bytes
+        {
+            return Err(AiError::Forbidden);
+        }
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .ok_or(AiError::NotFound)?;
+        validate_session_binding(&session, lease, &context.scope)?;
+        self.current_access(lease, &context.scope).await?;
+        let Some(descriptor) = self.runtime.tool_catalog().descriptor(call.tool_id()) else {
+            let invocation = GraphqlInvocationContext {
+                run_id: lease.run_id(),
+                tool_call_id: AiToolCallId::new(),
+                scope: context.scope.clone(),
+                correlation_id: context.correlation_id.clone(),
+                causation_id: context.causation_id.clone(),
+                delegation_reference: context.delegation_reference.clone(),
+                idempotency_key: None,
+            };
+            if self
+                .runtime
+                .tool_catalog()
+                .mutation_capability(call.tool_id())
+                .is_some()
+            {
+                let prepared = self.runtime.prepare_mutation_capability(
+                    call.tool_id(),
+                    call.tool_fingerprint(),
+                    call.arguments().clone(),
+                    invocation,
+                )?;
+                let authorization = self
+                    .runtime
+                    .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                    .await?;
+                return match (
+                    prepared.execution_policy(),
+                    authorization.approval_requirement(),
+                ) {
+                    (
+                        graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic,
+                        AiApprovalRule::None,
+                    ) => Ok(AiApplicationToolDisposition::AutomaticMutation),
+                    (
+                        graphql_orm::graphql::orm::AiMutationExecutionPolicy::ApprovalRequired,
+                        AiApprovalRule::OneShot,
+                    ) => Ok(AiApplicationToolDisposition::ApprovalRequired),
+                    _ => Err(AiError::Forbidden),
+                };
+            }
+            self.runtime
+                .preauthorize_query_capability(
+                    lease.principal_reference(),
+                    call.tool_id(),
+                    call.tool_fingerprint(),
+                    call.arguments().clone(),
+                    invocation,
+                )
+                .await?;
+            return Ok(AiApplicationToolDisposition::ReadOnly);
+        };
+        if descriptor.fingerprint != call.tool_fingerprint() {
+            return Err(AiError::Forbidden);
+        }
+        let request = build_tool_request(
+            lease,
+            AiToolCallId::new(),
+            descriptor,
+            call.arguments().clone(),
+            context,
+            None,
+        )?;
+        let authorization = self
+            .runtime
+            .preauthorize_tool(lease.principal_reference(), &descriptor.id, &request)
+            .await?;
+        if descriptor.operation_kind == AiToolOperationKind::Query
+            && descriptor.operation_domain == AiToolOperationDomain::Application
+            && descriptor.maturity == ToolMaturity::ReadOnly
+            && descriptor.risk == AiToolRisk::ReadOnly
+            && descriptor.idempotent
+            && authorization.approval_requirement() == AiApprovalRule::None
+        {
+            return Ok(AiApplicationToolDisposition::ReadOnly);
+        }
+        if crate::runtime::is_automatic_application_mutation(descriptor) {
+            return match authorization.approval_requirement() {
+                AiApprovalRule::None => Ok(AiApplicationToolDisposition::AutomaticMutation),
+                AiApprovalRule::OneShot => Ok(AiApplicationToolDisposition::ApprovalRequired),
+                _ => Err(AiError::Forbidden),
+            };
+        }
+        validate_supervised_descriptor(descriptor, call.tool_fingerprint())?;
+        if authorization.approval_requirement() == AiApprovalRule::OneShot {
+            Ok(AiApplicationToolDisposition::ApprovalRequired)
+        } else {
+            Err(AiError::Forbidden)
+        }
+    }
+
     /// Creates a protected ORM-backed application-tool service.
     pub fn new(
         run_service: OrmAiRunService,
@@ -804,6 +1084,7 @@ impl OrmAiApplicationToolCallService {
             .begin_tool_call(
                 lease,
                 PreparedToolCallStart {
+                    execution_provenance: None,
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
                     provider_call_id: provider_call.call_id().to_owned(),
@@ -1183,6 +1464,7 @@ impl OrmAiApplicationToolCallService {
             .begin_tool_call(
                 lease,
                 PreparedToolCallStart {
+                    execution_provenance: None,
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
                     provider_call_id: provider_call.call_id().to_owned(),
@@ -1730,37 +2012,96 @@ impl OrmAiApplicationToolCallService {
                     }
                 }
                 UnapprovedToolMode::AutomaticMutation => {
-                    let prepared = self.runtime.prepare_mutation_capability(
-                        provider_call.tool_id(),
-                        provider_call.tool_fingerprint(),
-                        provider_call.arguments().clone(),
-                        invocation,
-                    )?;
-                    if prepared.execution_policy()
-                        != graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
+                    if let Some(descriptor) = self
+                        .runtime
+                        .tool_catalog()
+                        .descriptor(provider_call.tool_id())
+                        .cloned()
                     {
-                        return Err(AiError::Forbidden);
+                        if descriptor.fingerprint != provider_call.tool_fingerprint()
+                            || !crate::runtime::is_automatic_application_mutation(&descriptor)
+                        {
+                            return Err(AiError::Forbidden);
+                        }
+                        let request = build_tool_request(
+                            lease,
+                            id,
+                            &descriptor,
+                            provider_call.arguments().clone(),
+                            &context,
+                            None,
+                        )?;
+                        let authorization = self
+                            .runtime
+                            .preauthorize_tool(
+                                lease.principal_reference(),
+                                &descriptor.id,
+                                &request,
+                            )
+                            .await?;
+                        if authorization.approval_requirement() != AiApprovalRule::None {
+                            return Err(AiError::Forbidden);
+                        }
+                        let disclosure = self
+                            .runtime
+                            .tool_catalog()
+                            .disclosure_schema(&descriptor.id)
+                            .ok_or(AiError::Forbidden)?
+                            .fingerprint
+                            .clone();
+                        (descriptor, disclosure, request, false, None)
+                    } else {
+                        let prepared = self.runtime.prepare_mutation_capability(
+                            provider_call.tool_id(),
+                            provider_call.tool_fingerprint(),
+                            provider_call.arguments().clone(),
+                            invocation,
+                        )?;
+                        if prepared.execution_policy()
+                            != graphql_orm::graphql::orm::AiMutationExecutionPolicy::Automatic
+                        {
+                            return Err(AiError::Forbidden);
+                        }
+                        self.runtime
+                            .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
+                            .await?;
+                        let descriptor = prepared.descriptor().clone();
+                        let disclosure_fingerprint = descriptor
+                            .graphql_contract
+                            .as_ref()
+                            .ok_or(AiError::Forbidden)?
+                            .disclosure_schema_fingerprint
+                            .clone();
+                        let request = prepared.request().clone();
+                        (
+                            descriptor,
+                            disclosure_fingerprint,
+                            request,
+                            false,
+                            Some(prepared),
+                        )
                     }
-                    self.runtime
-                        .preauthorize_prepared_mutation(lease.principal_reference(), &prepared)
-                        .await?;
-                    let descriptor = prepared.descriptor().clone();
-                    let disclosure_fingerprint = descriptor
-                        .graphql_contract
-                        .as_ref()
-                        .ok_or(AiError::Forbidden)?
-                        .disclosure_schema_fingerprint
-                        .clone();
-                    let request = prepared.request().clone();
-                    (
-                        descriptor,
-                        disclosure_fingerprint,
-                        request,
-                        false,
-                        Some(prepared),
-                    )
                 }
             };
+        let provenance = if !generated_query && prepared_mutation.is_none() {
+            Some(
+                crate::AiToolExecutionProvenance::from_provider_call(
+                    lease,
+                    provider_result,
+                    provider_call.call_id(),
+                    &descriptor,
+                    &request,
+                    session
+                        .execution_selection
+                        .as_deref()
+                        .map(crate::AiSessionExecutionSelection::decode)
+                        .transpose()?,
+                )
+                .map_err(|_| AiError::Conflict)?,
+            )
+        } else {
+            None
+        };
         let protected_arguments = self
             .protect(
                 &policy,
@@ -1809,6 +2150,7 @@ impl OrmAiApplicationToolCallService {
             .begin_tool_call(
                 lease,
                 PreparedToolCallStart {
+                    execution_provenance: provenance.clone(),
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
                     provider_call_id: provider_call.call_id().to_owned(),
@@ -1891,7 +2233,12 @@ impl OrmAiApplicationToolCallService {
                         .await
                 } else {
                     self.runtime
-                        .execute_tool(lease.principal_reference(), &descriptor.id, request)
+                        .execute_tool_with_provenance(
+                            lease.principal_reference(),
+                            &descriptor.id,
+                            request,
+                            provenance.clone(),
+                        )
                         .await
                 }
             })
@@ -2204,7 +2551,7 @@ impl OrmAiApplicationToolCallService {
         Ok(())
     }
 
-    async fn current_access(
+    pub(crate) async fn current_access(
         &self,
         lease: &AiRunLease,
         scope: &AiScope,
@@ -2245,7 +2592,7 @@ impl OrmAiApplicationToolCallService {
         Ok(principal)
     }
 
-    async fn protect(
+    pub(crate) async fn protect(
         &self,
         policy: &crate::AiContentProtectionPolicy,
         context: ContentProtectionContext,
@@ -2263,7 +2610,7 @@ impl OrmAiApplicationToolCallService {
         serde_json::to_value(envelope).map_err(|_| AiError::PersistenceFailed)
     }
 
-    async fn open(
+    pub(crate) async fn open(
         &self,
         policy: &crate::AiContentProtectionPolicy,
         context: ContentProtectionContext,
@@ -2295,7 +2642,230 @@ pub struct OrmAiConsequentialToolCallService {
     provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
 }
 
+struct PreparedConsequentialRequest {
+    call: PreparedToolCallStart,
+    binding: AiApprovalBinding,
+    preview: AiCanonicalActionPreview,
+    policy: crate::AiContentProtectionPolicy,
+    context: AiApplicationToolCallContext,
+    tool_maturity: ToolMaturity,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeApprovalPreparation {
+    pub(crate) context: AiApplicationToolCallContext,
+    pub(crate) binding: AiApprovalBinding,
+    pub(crate) preview: AiCanonicalActionPreview,
+    pub(crate) tool_maturity: ToolMaturity,
+}
+
 impl OrmAiConsequentialToolCallService {
+    pub(crate) fn application_tools(&self) -> &OrmAiApplicationToolCallService {
+        &self.application_tools
+    }
+
+    /// Protects an exact native callback action without granting approval or
+    /// releasing the running provider's lease. Requires an authenticated
+    /// retained-provider claim and configured session lifecycle service.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for ephemeral providers, stale authority, changed tool
+    /// contracts, unavailable protection, or a conflicting durable candidate.
+    pub async fn prepare_native_approval(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+    ) -> Result<crate::AiPreparedNativeApproval, AiError> {
+        if self.provider_session_service.is_none()
+            || provider_result.provider_session_claim().is_none()
+        {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let id = AiToolCallId::new();
+        let prepared = self
+            .prepare_consequential_request(lease, provider_result, context, id)
+            .await?;
+        let preparation = NativeApprovalPreparation {
+            context: prepared.context.clone(),
+            binding: prepared.binding,
+            preview: prepared.preview,
+            tool_maturity: prepared.tool_maturity,
+        };
+        let binding_hash = preparation.binding.stable_hash();
+        let preview_hash = preparation.binding.preview_hash.clone();
+        let protected_preparation = self
+            .application_tools
+            .protect(
+                &prepared.policy,
+                protection_context(
+                    "graphql_orm_ai_native_approval_candidates",
+                    id.0,
+                    "protected_preparation",
+                    &prepared.context.scope,
+                ),
+                serde_json::to_value(preparation).map_err(|_| AiError::PersistenceFailed)?,
+            )
+            .await?;
+        let event_id = Uuid::new_v4();
+        let inbox_event_id = Uuid::new_v4();
+        let payload =
+            json!({"toolCallId": id.0, "runId": lease.run_id().0, "state": "approval_prepared"});
+        let protected_event = self
+            .application_tools
+            .protect(
+                &prepared.policy,
+                protection_context(
+                    "graphql_orm_ai_session_events",
+                    event_id,
+                    "protected_payload",
+                    &prepared.context.scope,
+                ),
+                payload.clone(),
+            )
+            .await?;
+        let protected_inbox_event = self
+            .application_tools
+            .protect(
+                &prepared.policy,
+                protection_context(
+                    "graphql_orm_ai_inbox_events",
+                    inbox_event_id,
+                    "protected_payload",
+                    &prepared.context.scope,
+                ),
+                payload,
+            )
+            .await?;
+        self.application_tools
+            .run_service
+            .prepare_native_approval(
+                lease,
+                prepared.call,
+                crate::orm_native_approvals::PreparedNativeApprovalCandidate {
+                    binding_hash,
+                    preview_hash,
+                    protected_preparation,
+                    prepared_event: PreparedToolLifecycleEvent {
+                        event_id,
+                        inbox_event_id,
+                        protected_event,
+                        protected_inbox_event,
+                    },
+                },
+            )
+            .await
+    }
+
+    /// Finalizes a native candidate only after its actual provider turn settled
+    /// and the durable ordered checkpoint is available. Reauthorizes the exact
+    /// arguments and preview before parking the retained provider for approval.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for uncommitted provider usage, missing control receipt,
+    /// changed policy/preview/source, stale lease, or unavailable retained wait.
+    pub async fn finalize_prepared_approval(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        candidate: &crate::AiPreparedNativeApproval,
+        expires_at: time::OffsetDateTime,
+        recent_mfa_required: bool,
+    ) -> Result<AiRequestedConsequentialToolCall, AiError> {
+        if self.provider_session_service.is_none()
+            || provider_result.provider_session_claim().is_none()
+            || candidate.lease().run_id() != lease.run_id()
+            || candidate.lease().attempt_id() != lease.attempt_id()
+            || candidate.lease().lease_generation() != lease.lease_generation()
+        {
+            return Err(AiError::Conflict);
+        }
+        let retained = self
+            .application_tools
+            .run_service
+            .load_prepared_native_approval(lease, candidate.tool_call_id())
+            .await?;
+        let session = AiSessionRecord::find_by_id(
+            self.application_tools.run_service.database(),
+            &lease.session_id().0,
+        )
+        .await
+        .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        .ok_or(AiError::NotFound)?;
+        let scope = AiScope {
+            kind: session.scope_kind.clone(),
+            id: session.scope_id.clone(),
+            tenant_id: session.tenant_id.clone(),
+        };
+        validate_session_binding(&session, lease, &scope)?;
+        let principal = self.application_tools.current_access(lease, &scope).await?;
+        let policy = self
+            .application_tools
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(principal.principal(), &scope)
+            .await?;
+        if !policy.ready || policy.scope != scope {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let clear = self
+            .application_tools
+            .open(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_native_approval_candidates",
+                    candidate.tool_call_id().0,
+                    "protected_preparation",
+                    &scope,
+                ),
+                retained
+                    .protected_preparation
+                    .as_ref()
+                    .ok_or(AiError::Conflict)?,
+            )
+            .await?;
+        let original: NativeApprovalPreparation =
+            serde_json::from_value(clear).map_err(|_| AiError::PersistenceFailed)?;
+        if original.context.scope != scope
+            || original.binding.stable_hash() != retained.binding_hash
+            || original.binding.preview_hash != retained.preview_hash
+            || provider_result
+                .tool_calls()
+                .get(original.context.tool_call_index)
+                .is_none_or(|call| call.call_id() != candidate.provider_call_id())
+        {
+            return Err(AiError::Conflict);
+        }
+        let current = self
+            .prepare_consequential_request(
+                lease,
+                provider_result,
+                original.context,
+                candidate.tool_call_id(),
+            )
+            .await?;
+        if current.binding != original.binding
+            || current.preview != original.preview
+            || current.tool_maturity != original.tool_maturity
+        {
+            return Err(AiError::Conflict);
+        }
+        self.request_prepared_approval_inner(
+            lease,
+            provider_result,
+            candidate.tool_call_id(),
+            current.binding,
+            current.preview,
+            expires_at,
+            recent_mfa_required,
+            true,
+        )
+        .await
+    }
+
     /// Creates a supervised consequential tool service.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -2359,6 +2929,35 @@ impl OrmAiConsequentialToolCallService {
         expires_at: time::OffsetDateTime,
         recent_mfa_required: bool,
     ) -> Result<AiRequestedConsequentialToolCall, AiError> {
+        let id = AiToolCallId::new();
+        let prepared = self
+            .prepare_consequential_request(lease, provider_result, context, id)
+            .await?;
+        let active_lease = self
+            .application_tools
+            .run_service
+            .begin_tool_call(lease, prepared.call)
+            .await?;
+        self.request_prepared_approval_inner(
+            &active_lease,
+            provider_result,
+            id,
+            prepared.binding,
+            prepared.preview,
+            expires_at,
+            recent_mfa_required,
+            false,
+        )
+        .await
+    }
+
+    async fn prepare_consequential_request(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        id: AiToolCallId,
+    ) -> Result<PreparedConsequentialRequest, AiError> {
         validate_provider_binding(&self.application_tools, lease, provider_result, &context)?;
         if provider_result.provider_session_claim().is_some()
             && self.provider_session_service.is_none()
@@ -2398,7 +2997,6 @@ impl OrmAiConsequentialToolCallService {
             return Err(AiError::RuntimeNotReady);
         }
 
-        let id = AiToolCallId::new();
         let provider_call_key = provider_call_key(lease, provider_call.call_id());
         let argument_hash = canonical_json_hash(provider_call.arguments())?;
         let idempotency_key = None;
@@ -2418,7 +3016,7 @@ impl OrmAiConsequentialToolCallService {
                 .descriptor(provider_call.tool_id())
                 .cloned()
         {
-            validate_supervised_descriptor(&descriptor, provider_call.tool_fingerprint())?;
+            validate_approval_descriptor(&descriptor, provider_call.tool_fingerprint())?;
             let request = build_tool_request(
                 lease,
                 id,
@@ -2460,6 +3058,9 @@ impl OrmAiConsequentialToolCallService {
                 provider_call.tool_fingerprint().to_owned(),
             )
         };
+        if preauthorization.approval_requirement() != AiApprovalRule::OneShot {
+            return Err(AiError::Forbidden);
+        }
         let preview = self
             .preview_builder
             .build_preview(preauthorization.principal(), &descriptor, &request)
@@ -2488,41 +3089,81 @@ impl OrmAiConsequentialToolCallService {
                 provider_call.arguments().clone(),
             )
             .await?;
-        let active_lease = self
+        let provenance = if self
             .application_tools
-            .run_service
-            .begin_tool_call(
-                lease,
-                PreparedToolCallStart {
-                    id: id.0,
-                    provider_call_key,
-                    provider_call_id: provider_call.call_id().to_owned(),
-                    provider_kind: provider_result.provider_kind().as_str().to_owned(),
-                    provider_model: provider_result.provider_model().to_owned(),
-                    provider_response_id: provider_result.provider_response_id().map(str::to_owned),
-                    budget_reservation_id: provider_result.budget_reservation_id().0,
-                    provider_turn_index: i64::from(context.provider_turn_index),
-                    tool_call_index: i64::try_from(context.tool_call_index).map_err(|_| {
-                        AiError::InvalidInput("tool call index is invalid".to_owned())
-                    })?,
-                    tool_id: descriptor.id.as_str().to_owned(),
-                    tool_fingerprint: binding_fingerprint,
-                    protected_arguments,
-                    argument_hash,
-                    risk: risk_value(descriptor.risk).to_owned(),
-                    idempotency_key,
-                    correlation_id: context.correlation_id,
-                    causation_id: context.causation_id,
-                    delegation_reference: context.delegation_reference,
-                    started_event: None,
-                    expected_owner_principal_kind: session.owner_principal_kind,
-                    expected_owner_subject: session.owner_subject,
-                    expected_scope_kind: context.scope.kind,
-                    expected_scope_id: context.scope.id,
-                    expected_tenant_id: context.scope.tenant_id,
-                },
+            .runtime
+            .tool_catalog()
+            .descriptor(provider_call.tool_id())
+            .is_some()
+        {
+            Some(
+                crate::AiToolExecutionProvenance::from_provider_call(
+                    lease,
+                    provider_result,
+                    provider_call.call_id(),
+                    &descriptor,
+                    &request,
+                    session
+                        .execution_selection
+                        .as_deref()
+                        .map(crate::AiSessionExecutionSelection::decode)
+                        .transpose()?,
+                )
+                .map_err(|_| AiError::Conflict)?,
             )
-            .await?;
+        } else {
+            None
+        };
+        let call = PreparedToolCallStart {
+            execution_provenance: provenance,
+            id: id.0,
+            provider_call_key,
+            provider_call_id: provider_call.call_id().to_owned(),
+            provider_kind: provider_result.provider_kind().as_str().to_owned(),
+            provider_model: provider_result.provider_model().to_owned(),
+            provider_response_id: provider_result.provider_response_id().map(str::to_owned),
+            budget_reservation_id: provider_result.budget_reservation_id().0,
+            provider_turn_index: i64::from(context.provider_turn_index),
+            tool_call_index: i64::try_from(context.tool_call_index)
+                .map_err(|_| AiError::InvalidInput("tool call index is invalid".to_owned()))?,
+            tool_id: descriptor.id.as_str().to_owned(),
+            tool_fingerprint: binding_fingerprint,
+            protected_arguments,
+            argument_hash,
+            risk: risk_value(descriptor.risk).to_owned(),
+            idempotency_key,
+            correlation_id: context.correlation_id.clone(),
+            causation_id: context.causation_id.clone(),
+            delegation_reference: context.delegation_reference.clone(),
+            started_event: None,
+            expected_owner_principal_kind: session.owner_principal_kind,
+            expected_owner_subject: session.owner_subject,
+            expected_scope_kind: context.scope.kind.clone(),
+            expected_scope_id: context.scope.id.clone(),
+            expected_tenant_id: context.scope.tenant_id.clone(),
+        };
+        Ok(PreparedConsequentialRequest {
+            call,
+            binding,
+            preview,
+            policy,
+            context,
+            tool_maturity: descriptor.maturity,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_prepared_approval_inner(
+        &self,
+        active_lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        id: AiToolCallId,
+        binding: AiApprovalBinding,
+        preview: AiCanonicalActionPreview,
+        expires_at: time::OffsetDateTime,
+        recent_mfa_required: bool,
+        native: bool,
+    ) -> Result<AiRequestedConsequentialToolCall, AiError> {
         let approval_id = AiApprovalId::new();
         let park_request = if let (Some(_), Some(_)) = (
             &self.provider_session_service,
@@ -2539,12 +3180,21 @@ impl OrmAiConsequentialToolCallService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
-                provider_result.provider_session_wait_park_request(
-                    &active_lease,
-                    crate::AiProviderSessionWaitIdentity::approval(approval_id),
-                    checkpoint.id,
-                    checkpoint.checkpoint_hash,
-                )
+                if native {
+                    provider_result.native_provider_session_wait_park_request(
+                        active_lease,
+                        crate::AiProviderSessionWaitIdentity::approval(approval_id),
+                        checkpoint.id,
+                        checkpoint.checkpoint_hash,
+                    )
+                } else {
+                    provider_result.provider_session_wait_park_request(
+                        active_lease,
+                        crate::AiProviderSessionWaitIdentity::approval(approval_id),
+                        checkpoint.id,
+                        checkpoint.checkpoint_hash,
+                    )
+                }
             }
             .await;
             match request {
@@ -2552,7 +3202,7 @@ impl OrmAiConsequentialToolCallService {
                 Err(error) => {
                     return self
                         .converge_approval_staging_failure(
-                            &active_lease,
+                            active_lease,
                             id,
                             provider_result,
                             None,
@@ -2569,12 +3219,12 @@ impl OrmAiConsequentialToolCallService {
         let parked = if let (Some(service), Some(request)) =
             (&self.provider_session_service, park_request.as_ref())
         {
-            match service.park_for_wait(&active_lease, request.clone()).await {
+            match service.park_for_wait(active_lease, request.clone()).await {
                 Ok(parked) => Some(parked),
                 Err(error) => {
                     return self
                         .converge_approval_staging_failure(
-                            &active_lease,
+                            active_lease,
                             id,
                             provider_result,
                             Some(request),
@@ -2591,14 +3241,14 @@ impl OrmAiConsequentialToolCallService {
         let cancelled = match self
             .application_tools
             .run_service
-            .cancellation(&active_lease)
+            .cancellation(active_lease)
             .await
         {
             Ok(cancelled) => cancelled.is_some(),
             Err(error) => {
                 return self
                     .converge_approval_staging_failure(
-                        &active_lease,
+                        active_lease,
                         id,
                         provider_result,
                         park_request.as_ref(),
@@ -2623,10 +3273,24 @@ impl OrmAiConsequentialToolCallService {
             .await;
             return Err(AiError::Conflict);
         }
-        let requested = if let Some(parked) = parked.as_ref() {
+        let requested = if native {
+            let parked = parked.as_ref().ok_or(AiError::Conflict)?;
+            self.approval_service
+                .request_prepared_native_approval_with_id(
+                    active_lease,
+                    approval_id,
+                    binding,
+                    preview,
+                    expires_at,
+                    recent_mfa_required,
+                    parked,
+                    id,
+                )
+                .await
+        } else if let Some(parked) = parked.as_ref() {
             self.approval_service
                 .request_parked_approval_with_id(
-                    &active_lease,
+                    active_lease,
                     approval_id,
                     binding,
                     preview,
@@ -2638,7 +3302,7 @@ impl OrmAiConsequentialToolCallService {
         } else {
             self.approval_service
                 .request_approval_with_id(
-                    &active_lease,
+                    active_lease,
                     approval_id,
                     binding,
                     preview,
@@ -2652,7 +3316,7 @@ impl OrmAiConsequentialToolCallService {
             Err(error) => {
                 return self
                     .converge_approval_staging_failure(
-                        &active_lease,
+                        active_lease,
                         id,
                         provider_result,
                         park_request.as_ref(),
@@ -2808,10 +3472,21 @@ impl OrmAiConsequentialToolCallService {
         .await
         .map_err(|error| map_orm(OrmPublicError::from(error)))?
         .ok_or(AiError::PersistenceFailed)?;
+        if reservation.attempt_id != lease.attempt_id()
+            || reservation.lease_generation != lease.lease_generation()
+        {
+            self.application_tools
+                .run_service
+                .validate_native_approved_budget(
+                    lease,
+                    approval_id,
+                    tool_call_id,
+                    budget_reservation_id,
+                )
+                .await?;
+        }
         if reservation.session_id != lease.session_id().0
             || reservation.run_id != lease.run_id().0
-            || reservation.attempt_id != lease.attempt_id()
-            || reservation.lease_generation != lease.lease_generation()
             || reservation.provider_kind != provider_kind
             || reservation.provider_model != provider_model
             || reservation.state != "committed"
@@ -2875,7 +3550,7 @@ impl OrmAiConsequentialToolCallService {
                 .descriptor(&tool_id)
                 .cloned()
             {
-                validate_supervised_descriptor(&descriptor, &call.tool_fingerprint)?;
+                validate_approval_descriptor(&descriptor, &call.tool_fingerprint)?;
                 let request = build_tool_request(
                     lease,
                     tool_call_id,
@@ -2924,6 +3599,9 @@ impl OrmAiConsequentialToolCallService {
             .ok_or(AiError::Forbidden)?
             .disclosure_schema_fingerprint
             .clone();
+        if preauthorization.approval_requirement() != AiApprovalRule::OneShot {
+            return Err(AiError::Forbidden);
+        }
         let preview = self
             .preview_builder
             .build_preview(preauthorization.principal(), &descriptor, &request)
@@ -2939,6 +3617,27 @@ impl OrmAiConsequentialToolCallService {
             &preauthorization,
             &preview,
         )?;
+        let provenance: Option<crate::AiToolExecutionProvenance> = call
+            .execution_provenance
+            .as_ref()
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|_| AiError::PersistenceFailed)
+            })
+            .transpose()?;
+        if provenance.as_ref().is_some_and(|origin| {
+            origin.session_id() != lease.session_id()
+                || origin.run_id() != lease.run_id()
+                || origin.tool_call_id() != tool_call_id
+                || origin.provider_call_id() != call.provider_call_id
+                || origin.provider_kind().as_str() != provider_kind
+                || origin.provider_model() != provider_model
+                || origin.budget_reservation_id().0 != budget_reservation_id
+                || origin.tool_fingerprint() != descriptor.fingerprint
+                || origin.argument_hash() != call.argument_hash
+                || origin.approval_id().is_some()
+        }) {
+            return Err(AiError::Conflict);
+        }
         let consumed = self
             .approval_service
             .consume_approval(lease, approval_id, &binding, &preview)
@@ -2966,13 +3665,16 @@ impl OrmAiConsequentialToolCallService {
                     .limits
                     .maximum_execution_time
                     .unsigned_abs(),
-                self.application_tools.runtime.execute_approved_tool(
-                    running_lease.principal_reference(),
-                    &descriptor.id,
-                    request,
-                    &approval,
-                    &binding,
-                ),
+                self.application_tools
+                    .runtime
+                    .execute_approved_tool_with_provenance(
+                        running_lease.principal_reference(),
+                        &descriptor.id,
+                        request,
+                        &approval,
+                        &binding,
+                        provenance,
+                    ),
             )
             .await
         };
@@ -3301,6 +4003,19 @@ fn validate_provider_binding(
         return Err(AiError::Conflict);
     }
     Ok(())
+}
+
+fn validate_approval_descriptor(
+    descriptor: &AiToolDescriptor,
+    fingerprint: &str,
+) -> Result<(), AiError> {
+    if descriptor.fingerprint == fingerprint
+        && crate::runtime::is_automatic_application_mutation(descriptor)
+    {
+        Ok(())
+    } else {
+        validate_supervised_descriptor(descriptor, fingerprint)
+    }
 }
 
 fn validate_supervised_descriptor(

@@ -3,7 +3,7 @@ title: "Bounded Session Retention"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-09-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -127,6 +127,32 @@ final-output checkpoint and durable assistant message or its complete
 correlated terminal tombstoned tool set. Tool-batch checkpoints require at
 least one exact terminal tombstoned call; supervised batches require exactly
 one. Every optional one-shot approval must be exact, terminal, and tombstoned.
+
+Native candidates follow their owning terminal tool's protected-payload purge.
+Finalized candidates retain the original provider attempt and budget while the
+approved call may have a newer generation; cleanup requires the exact original
+source and approval linkage. An abandoned candidate has no approval and keeps
+the original call fence. Active preparation and ambiguous linkage remain closed.
+
+Age-based native checkpoint cleanup treats
+`native_approval_provider_turn_persisted` and its
+`native_approved_outcome_persisted` as one dependency graph. It preserves the
+original committed budget, parked source attempt, exact terminal approval and
+ordered callback metadata, and requires candidate, call and approval payloads
+to be tombstoned first. A current or newer outcome retains its source. Eligible
+source/outcome pairs are deleted atomically; a source without an outcome needs
+an exact terminal abandoned or denied wait proof. Recovery-required runs and
+active parked-session dependencies remain protected. The configured
+`maximum_run_checkpoints_per_session` remains a strict row cap: a cap of one
+blocks a two-row native pair, so configure at least two to clean such pairs.
+
+A denied wait that still owns the current `approval_wait_parked` checkpoint
+remains blocked. An idle reclaimed provider binding may retain historical wait
+metadata without blocking cleanup only while its last run is the exact native
+run. A later ordinary provider turn can change that last-run reference while
+preserving the old wait metadata; the conservative proof then retains the older
+native graph until session cleanup or binding replacement. This purge path does
+not clear lifecycle pointers to bypass either dependency.
 
 All selected rows validate before one exact-cardinality purge and redacted
 audit. A current checkpoint, nonterminal or recovery-required run, missing

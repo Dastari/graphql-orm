@@ -130,6 +130,7 @@ pub struct AiToolPreauthorization {
     tool_fingerprint: String,
     policy_version: String,
     authorization_state_digest: String,
+    approval_requirement: AiApprovalRule,
 }
 
 /// Exact compiled mutation plan admitted by deployment target policy.
@@ -184,6 +185,12 @@ impl AiToolPreauthorization {
     /// Exact registered descriptor fingerprint that was authorized.
     pub fn tool_fingerprint(&self) -> &str {
         &self.tool_fingerprint
+    }
+
+    /// Effective immutable-descriptor and exact current host approval requirement.
+    /// This is a routing constraint, not approval authority.
+    pub const fn approval_requirement(&self) -> AiApprovalRule {
+        self.approval_requirement
     }
 
     /// Current host tool-policy version.
@@ -350,6 +357,17 @@ impl AiRuntime {
         tool_id: &AiToolId,
         request: ToolGraphqlRequest,
     ) -> Result<AiToolExecutionResult, AiError> {
+        self.execute_tool_with_provenance(principal_reference, tool_id, request, None)
+            .await
+    }
+
+    pub(crate) async fn execute_tool_with_provenance(
+        &self,
+        principal_reference: &PrincipalReference,
+        tool_id: &AiToolId,
+        request: ToolGraphqlRequest,
+        provenance: Option<crate::AiToolExecutionProvenance>,
+    ) -> Result<AiToolExecutionResult, AiError> {
         if !self.start_gate.is_ready() {
             return Err(AiError::RuntimeNotReady);
         }
@@ -361,9 +379,17 @@ impl AiRuntime {
         if descriptor.approval != AiApprovalRule::None {
             return Err(AiError::Forbidden);
         }
+        let mut registered =
+            AiRegisteredToolExecutionBinding::static_operation(descriptor, &request)
+                .map_err(Self::map_tool_execution_error)?;
+        if let Some(provenance) = provenance {
+            registered = registered
+                .with_provenance(provenance, &request)
+                .map_err(Self::map_tool_execution_error)?;
+        }
         let (response, authorization) = self
             .tool_bridge
-            .execute(principal_reference, descriptor, request)
+            .execute_with_binding(principal_reference, descriptor, request, registered)
             .await
             .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(descriptor, disclosure_schema, response, authorization)
@@ -433,6 +459,57 @@ impl AiRuntime {
             .await
             .map_err(Self::map_tool_execution_error)?;
         self.finish_tool_execution(&descriptor, &disclosure_schema, response, authorization)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) async fn preauthorize_query_capability(
+        &self,
+        principal_reference: &PrincipalReference,
+        capability_id: &AiToolId,
+        capability_fingerprint: &str,
+        plan: serde_json::Value,
+        invocation: GraphqlInvocationContext,
+    ) -> Result<(), AiError> {
+        if !self.start_gate.is_ready() {
+            return Err(AiError::RuntimeNotReady);
+        }
+        let compiled = self.tool_catalog.compile_query_capability(
+            capability_id,
+            capability_fingerprint,
+            plan,
+        )?;
+        let (descriptor, _, variables) = compiled.into_parts();
+        if !self
+            .generated_graphql_target_policy
+            .allows_query(&descriptor)
+            || descriptor.maturity > self.maximum_tool_maturity
+            || descriptor.operation_kind != AiToolOperationKind::Query
+            || descriptor.operation_domain != AiToolOperationDomain::Application
+            || descriptor.approval != AiApprovalRule::None
+            || !descriptor.idempotent
+        {
+            return Err(AiError::Forbidden);
+        }
+        let contract = descriptor
+            .graphql_contract
+            .clone()
+            .ok_or(AiError::Forbidden)?;
+        let request = ToolGraphqlRequest {
+            document: descriptor.document.clone(),
+            operation_name: contract.operation_name.clone(),
+            contract,
+            variables,
+            invocation,
+        };
+        let (_, authorization) = self
+            .tool_bridge
+            .preauthorize(principal_reference, &descriptor, &request)
+            .await
+            .map_err(Self::map_tool_execution_error)?;
+        if authorization.approval_requirement() != AiApprovalRule::None {
+            return Err(AiError::Forbidden);
+        }
+        Ok(())
     }
 
     /// Compiles and target-policy admits one registered classified mutation.
@@ -514,6 +591,10 @@ impl AiRuntime {
             .map_err(|_| AiError::Forbidden)?;
         Ok(AiToolPreauthorization {
             principal,
+            approval_requirement: effective_approval_requirement(
+                &prepared.descriptor,
+                &authorization,
+            ),
             tool_fingerprint: prepared.descriptor.fingerprint.clone(),
             policy_version: authorization.policy_version,
             authorization_state_digest: authorization.authorization_state_digest,
@@ -543,6 +624,7 @@ impl AiRuntime {
             .map_err(|_| AiError::Forbidden)?;
         Ok(AiToolPreauthorization {
             principal,
+            approval_requirement: effective_approval_requirement(descriptor, &authorization),
             tool_fingerprint: descriptor.fingerprint.clone(),
             policy_version: authorization.policy_version,
             authorization_state_digest: authorization.authorization_state_digest,
@@ -730,14 +812,16 @@ impl AiRuntime {
             .map_err(|_| AiError::Forbidden)?;
         Ok(AiToolPreauthorization {
             principal,
+            approval_requirement: effective_approval_requirement(descriptor, &authorization),
             tool_fingerprint: descriptor.fingerprint.clone(),
             policy_version: authorization.policy_version,
             authorization_state_digest: authorization.authorization_state_digest,
         })
     }
 
-    /// Executes one exact supervised application mutation after atomic
-    /// consumption of its complete one-shot approval envelope.
+    /// Executes one exact application mutation after atomic consumption of its
+    /// complete one-shot approval envelope. An originally automatic descriptor
+    /// is accepted only while fresh host policy still requires one-shot approval.
     ///
     /// The bridge rehydrates and authorizes again, compares the newly computed
     /// policy version and authorization-state digest before invoking the
@@ -759,6 +843,26 @@ impl AiRuntime {
         approval: &ConsumedAiApproval,
         binding: &AiApprovalBinding,
     ) -> Result<AiToolExecutionResult, AiError> {
+        self.execute_approved_tool_with_provenance(
+            principal_reference,
+            tool_id,
+            request,
+            approval,
+            binding,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn execute_approved_tool_with_provenance(
+        &self,
+        principal_reference: &PrincipalReference,
+        tool_id: &AiToolId,
+        request: ToolGraphqlRequest,
+        approval: &ConsumedAiApproval,
+        binding: &AiApprovalBinding,
+        provenance: Option<crate::AiToolExecutionProvenance>,
+    ) -> Result<AiToolExecutionResult, AiError> {
         if !self.start_gate.is_ready()
             || approval.binding_hash() != binding.stable_hash()
             || approval.approval_id().0.is_nil()
@@ -770,20 +874,35 @@ impl AiRuntime {
             &request,
             self.maximum_tool_maturity,
         )?;
-        if !is_supervised_one_shot_mutation(descriptor)
+        let escalated_automatic = is_automatic_application_mutation(descriptor);
+        if !(is_supervised_one_shot_mutation(descriptor) || escalated_automatic)
             || descriptor.fingerprint != binding.tool_fingerprint
             || descriptor.graphql_contract.as_ref() != Some(&binding.operation)
+            || !approved_static_request_matches(principal_reference, &request, binding)
         {
             return Err(AiError::Forbidden);
         }
+        let mut registered =
+            AiRegisteredToolExecutionBinding::static_operation(descriptor, &request)
+                .map_err(Self::map_tool_execution_error)?;
+        if let Some(provenance) = provenance {
+            let provenance = provenance
+                .with_consumed_approval(approval, binding)
+                .map_err(Self::map_tool_execution_error)?;
+            registered = registered
+                .with_provenance(provenance, &request)
+                .map_err(Self::map_tool_execution_error)?;
+        }
         let (response, authorization) = self
             .tool_bridge
-            .execute_bound(
+            .execute_registered_bound_requiring(
                 principal_reference,
                 descriptor,
                 request,
+                registered,
                 &binding.policy_version,
                 &binding.authorization_state_digest,
+                escalated_automatic.then_some(AiApprovalRule::OneShot),
             )
             .await
             .map_err(Self::map_tool_execution_error)?;
@@ -1270,6 +1389,42 @@ fn approved_prepared_mutation_matches(
         && prepared.descriptor.graphql_contract.as_ref() == Some(&binding.operation)
 }
 
+fn effective_approval_requirement(
+    descriptor: &AiToolDescriptor,
+    authorization: &AiToolAuthorizationDecision,
+) -> AiApprovalRule {
+    if descriptor.approval == AiApprovalRule::None {
+        authorization.approval_requirement()
+    } else {
+        descriptor.approval
+    }
+}
+
+fn approved_static_request_matches(
+    principal_reference: &PrincipalReference,
+    request: &ToolGraphqlRequest,
+    binding: &AiApprovalBinding,
+) -> bool {
+    request.invocation.tool_call_id == binding.tool_call_id
+        && request.invocation.scope == binding.scope
+        && request.invocation.delegation_reference == binding.delegation_reference
+        && principal_reference.actor_subject == binding.delegated_actor_subject
+        && AiApprovalBinding::principal_fingerprint(principal_reference)
+            == binding.principal_reference_fingerprint
+        && crate::tools::canonical_json_digest(&request.variables) == binding.argument_hash
+}
+
+pub(crate) fn is_automatic_application_mutation(descriptor: &AiToolDescriptor) -> bool {
+    descriptor.operation_kind == AiToolOperationKind::Mutation
+        && descriptor.operation_domain == AiToolOperationDomain::Application
+        && descriptor.maturity == ToolMaturity::AutonomousWrite
+        && descriptor.approval == AiApprovalRule::None
+        && matches!(
+            descriptor.risk,
+            crate::AiToolRisk::LowRiskWrite | crate::AiToolRisk::NonIdempotentWrite
+        )
+}
+
 fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {
     descriptor.operation_kind == crate::AiToolOperationKind::Mutation
         && descriptor.operation_domain == crate::AiToolOperationDomain::Application
@@ -1397,6 +1552,42 @@ mod mutation_binding_tests {
                 .expect("test approval should authorize"),
             now,
         )
+    }
+
+    #[test]
+    fn static_approval_binds_exact_variables_principal_scope_and_call() {
+        let reference: PrincipalReference = serde_json::from_value(json!({
+            "kind": {"kind": "user_session"}, "subject": "owner", "session_id": "session-1"
+        }))
+        .expect("principal reference");
+        let request = prepared(operation("UpdateInventory")).request;
+        let mut exact = binding(request.contract.clone());
+        exact.tool_call_id = request.invocation.tool_call_id;
+        exact.argument_hash = crate::tools::canonical_json_digest(&request.variables);
+        exact.principal_reference_fingerprint =
+            AiApprovalBinding::principal_fingerprint(&reference);
+        assert!(approved_static_request_matches(
+            &reference, &request, &exact
+        ));
+        for change in 0..5 {
+            let mut changed = request.clone();
+            match change {
+                0 => changed.variables = json!({"impact": "different"}),
+                1 => changed.invocation.tool_call_id = AiToolCallId::new(),
+                2 => changed.invocation.scope = AiScope::new("tenant", "different"),
+                3 => changed.invocation.delegation_reference = Some("different-grant".to_owned()),
+                _ => {
+                    let mut other = reference.clone();
+                    other.subject = "other-user".to_owned();
+                    assert!(!approved_static_request_matches(&other, &request, &exact));
+                    continue;
+                }
+            }
+            assert!(
+                !approved_static_request_matches(&reference, &changed, &exact),
+                "change {change}"
+            );
+        }
     }
 
     #[test]

@@ -186,7 +186,7 @@ or resume an agent.
 | `AiGraphqlArgumentValue` | input reference, server-owned constant, closed input object, or fixed-shape list; every input must be used exactly once through argument plans |
 | `AiGraphqlSelection` | explicit scalar/object/list projection; every list needs a positive bound; projection depth is at most 8 and each level at most 128 selections |
 | `AiDisclosureSchema` | versioned recursive allow-list; unknown response fields and `NeverExport` nodes are rejected; maximum nesting depth is 64 |
-| `AiGraphqlToolProfile` | read-only query or explicit supervised mutation; nonempty projection and positive result byte/total-record bounds are required |
+| `AiGraphqlToolProfile` | read-only query, explicit automatic mutation, or supervised mutation; nonempty projection and positive result byte/total-record bounds are required |
 | `AiBrowserResultPreviewPolicy` | optional separate browser preview; byte limit 1..=1 MiB, record limit 1..=100,000, depth 1..=32, never `Secret` |
 | `AiGraphqlToolManifestBuilder` | validates a finished SDL locally, compiles custom/generated profiles, orders entries, and fingerprints the versioned manifest |
 
@@ -195,6 +195,14 @@ or resume an agent.
 idempotency. Profile compilation replaces the result limits and binds a
 server-authored document, JSON Schema, result-projection fingerprint, finished
 SDL fingerprint, and disclosure fingerprint.
+
+`AiGraphqlToolProfile::automatic_mutation` explicitly selects
+`AutonomousWrite`/`None` for `LowRiskWrite` or `NonIdempotentWrite` application
+mutations. High-impact actions use the supervised constructor. The exact
+profile still requires current runtime policy and resolver authorization; a
+host can tighten an individual automatic call to one-shot approval through the
+AI runtime's current authorization decision. Manifest discovery never enables
+execution by itself.
 
 Deployments may explicitly configure automatic query totals up to 100,000 records
 so independently bounded nested collections can fit. The default remains 100;

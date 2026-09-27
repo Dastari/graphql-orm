@@ -8,8 +8,8 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.66.0");
-    assert_eq!(catalog.entities().len(), 47);
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.67.0");
+    assert_eq!(catalog.entities().len(), 48);
     assert!(
         catalog
             .entities()
@@ -50,6 +50,47 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
     assert_eq!(catalog.modules()[0].restore_hooks.len(), 4);
 
     let schema = catalog.schema_model();
+    let native_candidate = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_native_approval_candidates")
+        .expect("protected native approval candidate table should exist");
+    assert!(native_candidate.columns.iter().any(|column| {
+        column.name == "budget_reservation_id" && column.is_unique && !column.nullable
+    }));
+    for protected in ["protected_preparation", "protected_control_receipt"] {
+        assert!(
+            native_candidate
+                .columns
+                .iter()
+                .any(|column| { column.name == protected && column.nullable })
+        );
+        let metadata = catalog
+            .entities()
+            .iter()
+            .find(|entity| entity.table_name == native_candidate.table_name)
+            .unwrap();
+        assert_eq!(
+            metadata
+                .fields
+                .iter()
+                .find(|field| field.name == protected)
+                .unwrap()
+                .backup_policy,
+            ColumnBackupPolicy::Include
+        );
+    }
+    let tool_call = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_tool_calls")
+        .unwrap();
+    assert!(
+        tool_call
+            .columns
+            .iter()
+            .any(|column| { column.name == "execution_provenance" && column.nullable })
+    );
     let counter = schema
         .tables
         .iter()

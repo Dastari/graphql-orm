@@ -98,9 +98,10 @@ impl OrmAiSupervisedResumeService {
 
     /// Executes one exact approved-wait claim and protects its continuation.
     ///
-    /// This first contract accepts one provider-retained supervised mutation.
-    /// Multi-call and stateless provider turns remain closed until their
-    /// complete durable ordering/history proofs are implemented.
+    /// Ordinary turns require one provider-retained supervised mutation.
+    /// Explicit native turns require the separate complete ordered callback
+    /// checkpoint and resume only its exact finalized candidate. Stateless
+    /// approval continuation remains closed.
     ///
     /// # Errors
     ///
@@ -138,11 +139,37 @@ impl OrmAiSupervisedResumeService {
                 total_tool_calls,
             });
         };
-        match self
-            .checkpoints
-            .persist_supervised_tool_batch(adopted, persisted.as_ref())
-            .await
-        {
+        let checkpoint =
+            if let Some((continuation, reasoning)) = adopted.native_continuation_parts() {
+                match self
+                    .consequential_tools
+                    .native_approved_outcome_continuation(
+                        persisted.lease(),
+                        persisted.as_ref(),
+                        continuation,
+                        reasoning,
+                        adopted.result_egress_route(),
+                    )
+                    .await
+                {
+                    Ok((continuation, decision_id)) => {
+                        self.checkpoints
+                            .persist_native_approved_outcome(
+                                adopted,
+                                persisted.as_ref(),
+                                continuation,
+                                decision_id,
+                            )
+                            .await
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                self.checkpoints
+                    .persist_supervised_tool_batch(adopted, persisted.as_ref())
+                    .await
+            };
+        match checkpoint {
             Ok(checkpoint) => Ok(AiSupervisedResumeOutcome::Checkpointed(Box::new(
                 checkpoint,
             ))),

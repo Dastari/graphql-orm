@@ -10,6 +10,21 @@ supersedes: []
 
 # Migration Guide
 
+## 0.13.1 to 0.14.0
+
+`AiGraphqlToolProfile::automatic_mutation` is an explicit alternative to the
+supervised mutation constructor. It accepts an exact server-authored mutation
+and bounded disclosure contract with `LowRiskWrite` or `NonIdempotentWrite`
+risk, and compiles it as `AutonomousWrite`/`None`. It rejects high-impact,
+secret, query and otherwise invalid profiles, including during deserialization
+validation. Existing read-only and supervised constructors are unchanged.
+
+Register and enable the exact resulting fingerprint in current runtime policy;
+a manifest is discovery metadata and never authorization. Hosts may use AI
+`0.102.0` current policy to require exact one-shot approval for selected
+arguments. No data, schema or GraphQL SDL migration is required in this package.
+Adopt the profiles and AI packages from one reviewed workspace release.
+
 ## 0.13.0 to 0.13.1
 
 The validated upper bound for `AiGraphqlQueryCapabilityLimits::maximum_result_records`

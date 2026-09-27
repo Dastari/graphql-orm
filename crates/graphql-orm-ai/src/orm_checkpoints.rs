@@ -28,6 +28,8 @@ use crate::{
     ModelInputBlock, OrmAiRunService, ProtectedContentEnvelope, ProviderKind, ToolMaturity,
 };
 
+mod native;
+
 #[derive(Clone, Copy)]
 enum CompletedToolCheckpointClass {
     ReadOnly,
@@ -164,9 +166,21 @@ pub struct AiAdoptedSupervisedProviderTurn {
     pending_continuation: crate::ModelContinuation,
     rule_fingerprint: String,
     rule_usage: AiRuleRunUsage,
+    native: Option<Box<native::NativeApprovalSource>>,
+    native_source_checkpoint_id: Option<Uuid>,
 }
 
 impl AiAdoptedSupervisedProviderTurn {
+    pub(crate) fn native_continuation_parts(
+        &self,
+    ) -> Option<(crate::ModelContinuation, crate::ModelReasoningEffort)> {
+        self.native.as_ref().map(|_| {
+            (
+                self.pending_continuation.clone(),
+                self.provider_result.reasoning_effort,
+            )
+        })
+    }
     pub(crate) fn result_egress_route(&self) -> &AiToolResultEgressRoute {
         &self.result_egress_route
     }
@@ -175,7 +189,9 @@ impl AiAdoptedSupervisedProviderTurn {
         self.provider_result.provider_response_id.as_deref()
     }
 
-    /// Exact protected provider-turn checkpoint selected for this handoff.
+    /// Current protected checkpoint selected for this handoff. Native approval
+    /// resumes retain the parked-wait checkpoint and bind its original provider
+    /// source separately inside this proof.
     pub const fn checkpoint_id(&self) -> Uuid {
         self.checkpoint_id
     }
@@ -296,6 +312,7 @@ pub struct AiAdoptedSupervisedToolBatch {
     continuation: AiAgentContinuation,
     rule_fingerprint: String,
     rule_usage: AiRuleRunUsage,
+    native: bool,
 }
 
 impl AiAdoptedSupervisedToolBatch {
@@ -319,6 +336,7 @@ impl AiAdoptedSupervisedToolBatch {
             continuation,
             rule_fingerprint,
             rule_usage,
+            native: false,
         }
     }
 
@@ -458,8 +476,9 @@ impl OrmAiCoordinatorCheckpointService {
 
     /// Reopens the exact provider turn behind one approved-wait claim.
     ///
-    /// Only a single provider-retained supervised mutation is accepted in
-    /// this first adoption contract. The method rehydrates current authority,
+    /// Ordinary turns require one provider-retained supervised mutation. An
+    /// explicit native turn instead requires its distinct complete ordered
+    /// callback proof and exact finalized candidate. The method rehydrates current authority,
     /// validates the protected checkpoint and committed provider budget,
     /// verifies the exact resume-claimed approval/tool linkage, and reapplies
     /// hierarchical rule limits. It does not consume the approval or execute
@@ -468,7 +487,7 @@ impl OrmAiCoordinatorCheckpointService {
     /// # Errors
     ///
     /// Returns a safe error for stale fencing, non-provider-retained or
-    /// multi-call turns, malformed/tampered protected state, changed current
+    /// unproven multi-call turns, malformed/tampered protected state, changed current
     /// authority/rules, expired or mismatched approval evidence, denied tool
     /// maturity, or persistence ambiguity.
     pub async fn adopt_supervised_provider_turn(
@@ -497,6 +516,18 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
+        if checkpoint.checkpoint_kind == native::SOURCE_KIND
+            || (checkpoint.checkpoint_kind == "approval_wait_parked"
+                && AiNativeApprovalCandidateRecord::find_by_id(
+                    self.run_service.database(),
+                    &claim.tool_call_id().0,
+                )
+                .await
+                .map_err(|error| map_orm(OrmPublicError::from(error)))?
+                .is_some())
+        {
+            return self.adopt_native_provider_turn(claim).await;
+        }
         let provider_response_id = checkpoint
             .provider_response_id
             .as_deref()
@@ -713,6 +744,8 @@ impl OrmAiCoordinatorCheckpointService {
             },
             rule_fingerprint: payload.rule_fingerprint,
             rule_usage,
+            native: None,
+            native_source_checkpoint_id: None,
         })
     }
 
@@ -735,6 +768,9 @@ impl OrmAiCoordinatorCheckpointService {
         adopted: AiAdoptedSupervisedProviderTurn,
         completed: &AiPersistedApplicationToolCall,
     ) -> Result<AiProtectedSupervisedToolBatch, AiError> {
+        if adopted.native.is_some() {
+            return Err(AiError::Conflict);
+        }
         let lease = completed.lease();
         if lease.state() != crate::AiRunState::Running
             || lease.latest_checkpoint_id() != Some(adopted.checkpoint_id)
@@ -887,6 +923,7 @@ impl OrmAiCoordinatorCheckpointService {
             .append_coordinator_checkpoint(
                 lease,
                 PreparedCoordinatorCheckpoint {
+                    native_binding: None,
                     id: checkpoint_id,
                     checkpoint_kind: "supervised_tool_batch_persisted".to_owned(),
                     provider_kind: adopted.provider_result.provider_kind.as_str().to_owned(),
@@ -964,7 +1001,11 @@ impl OrmAiCoordinatorCheckpointService {
             .consume_adoption_checkpoint(
                 lease,
                 adopted.checkpoint_id,
-                "supervised_tool_batch_persisted",
+                if adopted.native {
+                    native::OUTCOME_KIND
+                } else {
+                    "supervised_tool_batch_persisted"
+                },
             )
             .await
     }
@@ -1019,7 +1060,7 @@ impl OrmAiCoordinatorCheckpointService {
             return Err(AiError::Conflict);
         }
         match checkpoint.checkpoint_kind.as_str() {
-            "supervised_tool_batch_persisted" => self
+            "supervised_tool_batch_persisted" | native::OUTCOME_KIND => self
                 .adopt_supervised_tool_batch(lease)
                 .await
                 .map(|adopted| adopted.map(AiAdoptedClassifiedMutationBatch::Supervised)),
@@ -1075,6 +1116,9 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
+        if checkpoint.checkpoint_kind == native::OUTCOME_KIND {
+            return self.adopt_native_outcome(lease, checkpoint_id).await;
+        }
         let provider_response_id = checkpoint
             .provider_response_id
             .as_deref()
@@ -1431,6 +1475,7 @@ impl OrmAiCoordinatorCheckpointService {
             continuation,
             rule_fingerprint: payload.rule_fingerprint,
             rule_usage: payload.rule_usage,
+            native: false,
         })
     }
 
@@ -1659,6 +1704,7 @@ impl OrmAiCoordinatorCheckpointService {
             .append_coordinator_checkpoint(
                 lease,
                 PreparedCoordinatorCheckpoint {
+                    native_binding: None,
                     id: checkpoint_id,
                     checkpoint_kind: checkpoint_kind.to_owned(),
                     provider_kind: result.provider_kind().as_str().to_owned(),

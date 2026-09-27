@@ -12,6 +12,16 @@ supersedes: []
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-26
+
+### Added
+
+- `AiGraphqlToolProfile::automatic_mutation` compiles an exact static application
+  mutation to `AutonomousWrite` maturity with approval `None`. Only ordinary
+  bounded write risks are accepted; high-impact and secret profiles remain
+  outside this constructor. Runtime policy and resolver authorization remain
+  mandatory, and the AI runtime can tighten an exact call to one-shot approval.
+
 ### Fixed
 
 - Allow an explicitly configured automatic query total of up to 100,000 records

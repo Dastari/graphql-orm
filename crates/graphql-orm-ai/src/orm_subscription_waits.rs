@@ -3076,6 +3076,7 @@ impl OrmAiSubscriptionWaitService {
                         tool_call_index: 0,
                         tool_id: registration.tool_id,
                         tool_fingerprint: registration.tool_fingerprint,
+                        execution_provenance: None,
                         protected_arguments: Some(registration.protected_arguments),
                         argument_hash: registration.argument_hash,
                         protected_result: None,
@@ -4521,6 +4522,7 @@ mod tests {
                         protected_state,
                         checkpoint_hash,
                         completed_tools: Vec::new(),
+                        native_binding: None,
                     },
                 )
                 .await

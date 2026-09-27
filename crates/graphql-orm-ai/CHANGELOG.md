@@ -20,6 +20,44 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+## [0.102.0] - 2026-09-26
+
+### Added
+
+- Classified capability-surface constructors and native turn delivery binding
+  preserve the crate-owned read-only discovery/describe/execute broker alongside
+  exact static mutation bootstrap tools. Native broker reads use the existing
+  durable service, including after an approval becomes pending. Retained-session
+  fingerprints bind the delivery configuration across approved resumption.
+
+- Exact registered remote mutation binding behind the opt-in
+  `RegisteredQueriesAndMutations` adapter policy; query-only remains the
+  default. Mutation transport contexts are single-use, including ambiguous
+  failures. Issuers can inspect actual validated variables through the
+  compatible `issue_for_request` hook and opaque runtime-authored execution
+  provenance, including exact consumed approval and current policy bindings.
+- Explicit classified plans and native coordination for sequential reads,
+  policy-authorized automatic mutations, and policy-tightened one-shot
+  approvals. A prepared native approval is non-executable while the provider
+  turn runs; separately authorized control receipts distinguish pending
+  approval and paused later mutations from application results.
+- Distinct protected native source and approved-outcome checkpoints preserve
+  ordered callbacks, prior completed effects and original usage accounting.
+  Resumption executes only the pending approved action and delivers a fresh
+  framework outcome to the retained provider without reusing its consumed
+  native callback response. Uncertain effects remain recovery-required.
+- `AiApprovalAccessPolicy::can_access_bound_approval` and opaque verified
+  `AiApprovalAccessEvidence` for current resource-specific authorization across
+  request, read, decide, revoke and consume. Existing policies inherit the
+  coarse access hook; denied list entries are omitted. Canonical preview
+  details now have a bounded 2 MiB serialized JSON ceiling.
+- AI schema module `0.67.0` adds protected native approval candidates and
+  optional trusted tool-call provenance, plus native checkpoint, retention and
+  cancellation semantics. Ordinary read-only and single supervised paths keep
+  their existing admission and recovery contracts.
+
+### Fixed
+
 Provider and retained-session heartbeat maintenance now continues polling the provider's
 in-flight persistence while renewal waits. A started renewal settles even if the provider
 finishes first, retaining the new row-version proof. This prevents self-deadlock on a

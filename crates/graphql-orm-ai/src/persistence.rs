@@ -1719,6 +1719,9 @@ pub(crate) struct AiToolCallRecord {
     pub tool_id: String,
     /// Exact descriptor fingerprint.
     pub tool_fingerprint: String,
+    /// Non-secret crate-authored execution provenance; never a grant by itself.
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub execution_provenance: Option<serde_json::Value>,
     /// Protected arguments.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_arguments: Option<serde_json::Value>,
@@ -1770,6 +1773,62 @@ pub(crate) struct AiToolCallRecord {
     /// CAS version.
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
+}
+
+/// Non-approvable preparation retained while a native provider turn settles.
+#[backend_selected_graphql_entity(
+    table = "graphql_orm_ai_native_approval_candidates",
+    plural = "GraphqlOrmAiNativeApprovalCandidates",
+    default_sort = "created_at ASC"
+)]
+#[cfg_attr(feature = "mssql", derive(GraphQLSchemaEntity))]
+#[cfg_attr(
+    any(feature = "sqlite", feature = "postgres"),
+    derive(GraphQLEntity, GraphQLOperations)
+)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq)]
+pub(crate) struct AiNativeApprovalCandidateRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "uuid")]
+    pub id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "uuid")]
+    pub run_id: graphql_orm::uuid::Uuid,
+    pub attempt_id: graphql_orm::uuid::Uuid,
+    pub lease_generation: i64,
+    /// A native provider turn can prepare at most one consequential action.
+    #[unique]
+    pub budget_reservation_id: graphql_orm::uuid::Uuid,
+    pub binding_hash: String,
+    pub preview_hash: String,
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_preparation: Option<serde_json::Value>,
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_control_receipt: Option<serde_json::Value>,
+    pub control_receipt_hash: Option<String>,
+    pub control_egress_decision_id: Option<graphql_orm::uuid::Uuid>,
+    pub control_egress_manifest_hash: Option<String>,
+    #[filterable(type = "string")]
+    pub state: String,
+    pub final_approval_id: Option<graphql_orm::uuid::Uuid>,
+    pub settled_checkpoint_id: Option<graphql_orm::uuid::Uuid>,
+    pub payload_purged_at: Option<i64>,
+    #[sortable]
+    pub created_at: i64,
+    pub finalized_at: Option<i64>,
+    #[graphql_orm(version, default = "0")]
+    pub row_version: i64,
+}
+
+impl std::fmt::Debug for AiNativeApprovalCandidateRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiNativeApprovalCandidateRecord")
+            .field("id", &self.id)
+            .field("run_id", &self.run_id)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Expiring, argument-bound tool approval.
@@ -2437,7 +2496,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.66.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.67.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2512,6 +2571,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiRunStepRecord::metadata(),
                 AiRunCheckpointRecord::metadata(),
                 AiToolCallRecord::metadata(),
+                AiNativeApprovalCandidateRecord::metadata(),
                 AiApprovalRecord::metadata(),
                 AiProposalRecord::metadata(),
                 AiProposalItemRecord::metadata(),

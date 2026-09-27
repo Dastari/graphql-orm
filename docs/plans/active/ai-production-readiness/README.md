@@ -3,7 +3,7 @@ title: GraphQL ORM AI production-readiness plan
 kind: plan
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-09-25
 review_by: 2026-10-01
 supersedes:
   - crates/graphql-orm-ai/docs/completion-plan.md
@@ -25,19 +25,23 @@ retention, or restore proofs remain closed.
 - Provider-persistent file upload/search before creation ambiguity, pricing,
   quota, cleanup, and restore are all proven. Provider-hosted public web search
   is a separate implemented capability.
-- Parallel or autonomous consequential execution.
+- Introducing additional consequential execution shapes as part of restore
+  implementation; parallel consequential execution remains unsupported.
 - Deployment-owned principals, policy, credentials, routes, isolation, or
   product-specific mutation behavior.
 
 ## Dependencies
 
-- `graphql-orm` 0.24.0 schema-module, transaction, fencing, operation-metadata,
+- `graphql-orm` schema-module, transaction, fencing, operation-metadata,
   and restore contracts.
-- `graphql-orm-backup` 0.7 snapshot, repository, verification, and restore
+- `graphql-orm-backup` snapshot, repository, verification, and restore
   orchestration.
-- `graphql-orm-storage` 0.6 streaming provider boundary.
-- Exact external `agql-auth` 0.16 revision declared by the workspace.
+- `graphql-orm-storage` streaming provider boundary.
+- Exact external `agql-auth` release declared by the workspace.
 - Test-owned SQLite and disposable PostgreSQL infrastructure.
+
+Current versions and dependency selectors come from the generated
+[workspace inventory](../../../reference/workspace-packages.md).
 
 ## Acceptance gates
 
@@ -59,7 +63,7 @@ retention, or restore proofs remain closed.
 
 ## Current checkpoint
 
-Package 0.96.2 and AI schema module 0.64.0 provide the protected runtime,
+The current package and managed AI schema provide the protected runtime,
 provider adapters, exact completed-batch adoption, retention foundations,
 restore planning, and readiness observation contracts. Database-derived
 collection covers bounded conservative run classification, approval and
@@ -74,6 +78,15 @@ Retained approval suspension now commits its protected parked checkpoint,
 nonterminal source-attempt outcome and lease release atomically; crash-gap
 confirmation is repairable only from that graph, and approved waits receive a
 fresh fence before consumption and provider reclaim.
+
+Explicit classified native turns additionally preserve reads, automatic effects
+and pending approval controls in one ordered source proof. Only the approved
+pending action crosses into the fresh generation; prior callbacks and settled
+usage do not replay. Candidate and outcome retention follow exact terminal
+dependencies. These live execution capabilities do not bypass restore readiness
+or make restored active/waiting snapshots executable. The crate-local
+[implementation status](../../../../crates/graphql-orm-ai/docs/implementation-status.md)
+owns the current schema and capability boundary.
 
 Schema-derived AI reads now also retain a complete compact fingerprinted index,
 bounded deterministic discovery, coordinator-selected delivery modes, finite

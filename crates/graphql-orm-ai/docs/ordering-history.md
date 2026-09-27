@@ -3,15 +3,16 @@ title: "Canonical Ordering and History Proof"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-09-25
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Canonical Ordering and History Proof
 
-Status: Slice 3 design complete. This proof classifies existing runtime paths;
-it does not enable a new execution shape.
+This proof describes the ordinary completed-turn ordering and the explicitly
+selected retained native callback ordering. Registration and provider support
+alone do not enable either consequential execution path.
 
 The purpose of canonical ordering is to make every provider, resolver,
 approval, budget, egress, checkpoint, and continuation effect attributable to
@@ -62,6 +63,16 @@ and carries the renewed row-version fence from one position to the next.
 Adapters may normalize a provider response containing multiple calls, but no
 application resolver is run concurrently. This is the canonical behavior.
 
+For an explicitly classified native turn, sequential callbacks occur while
+provider transport is still active. Each callback applies current rules and
+access, persists its exact argument/step, performs any authorized effect, and
+persists its disclosure or a closed no-effect control receipt before replying.
+An approval-required callback creates only protected preparation; later writes
+pause. Authoritative provider usage settlement and the complete ordered native
+source checkpoint follow all callbacks and precede approval finalization. This
+separate order never treats an unfinished provider turn as settled or a pending
+control receipt as a completed application result.
+
 ## State transitions
 
 ```text
@@ -104,14 +115,15 @@ boundary without a complete durable result is `RecoveryRequired`.
 
 ## Capacity before irreversible steps
 
-The following proofs must exist before a checkpoint is consumed or a one-shot
-approval is consumed:
+Before consuming a completed checkpoint for the next provider turn, the
+coordinator checks:
 
 - another provider turn fits the deployment loop ceiling;
 - cumulative provider/tool-step/time/token/cost/tool/image usage fits current
   hierarchical rules;
 - the fresh continuation plan has exact provider/model/capability bindings;
-- a new atomic budget reservation and every exact egress allow can be obtained;
+- the exact request is eligible for a new atomic budget reservation and egress
+  authorization through the provider executor;
 - the current principal, scope/session access, rule fingerprint, protection
   policy, retention, and provider profile remain valid; and
 - the exact complete checkpoint is still linked by the current fence.
@@ -120,8 +132,13 @@ For supervised work, preview construction and current tool-policy
 preauthorization precede the human decision. Immediately before mutation, the
 service reopens arguments, rebuilds the canonical preview, rechecks current
 authority, and atomically consumes the exact approval. A later provider-turn
-capacity check must happen before staging an approval on a turn that could not
-continue.
+capacity check happens before staging an approval on a turn that could not
+continue. Approved execution revalidates current hierarchical rules, tool
+authority and the exact approval, but runs before constructing the next
+continuation plan and checking the current deployment loop ceiling. A reduced
+loop ceiling or a later provider-budget or egress denial can therefore stop the
+next provider turn after the approved effect has completed. The durable outcome
+remains evidence of that effect; scheduling failure never makes it replayable.
 
 Failure of a safe precondition leaves an unconsumed checkpoint available for
 durable terminal classification. After checkpoint consumption, a crash is
@@ -135,6 +152,8 @@ consumption, a crash cannot recreate or reuse the approval.
 | Exact complete read-only batch, provider-retained continuation | Allowed after full validation | No resolver or provider effect is repeated |
 | Exact complete bounded stateless read-only history | Allowed after every historical row, budget, result, disclosure, and egress proof validates | Visible history is reconstructible |
 | Exact complete single supervised provider-retained mutation result with consumed approval | Allowed after full approval/result validation | Mutation is not repeated |
+| Exact native approved-outcome checkpoint with finalized candidate, original ordered callback source and consumed approval | Allowed after distinct native proof validation | Only the pending approved effect is new; historical callbacks and provider usage are retained once |
+| Native source checkpoint before the approved outcome | Closed to generic completed recovery and consumption | It is preparation/wait evidence, not a completed approved action |
 | Provider-turn checkpoint before any call result | Closed | It cannot prove whether a resolver later ran |
 | Partial read-only batch | Closed | The missing position could be unstarted, running, completed but unpersisted, or ambiguous |
 | Any partial consequential batch | Closed | One-shot consumption or mutation effect cannot be inferred |
@@ -217,6 +236,13 @@ not a fallback.
   recovery required; mutation and approval are never replayed.
 - After complete supervised checkpoint but before consumption: exact
   provider-retained adoption may continue without rerunning the mutation.
+- During a classified native turn: completed callback evidence remains durable,
+  but uncertain provider usage or missing complete source proof cannot finalize
+  an approval or replay prior callbacks.
+- After native preparation but before settlement: cancellation abandons the
+  candidate; it never becomes an executable approval.
+- After a native approval is consumed but before its distinct outcome checkpoint:
+  recovery required, even if the original source and parked checkpoints remain.
 - During final protected output persistence: only the existing exact
   same-transaction completion/recovery proof may finalize.
 
@@ -224,9 +250,10 @@ not a fallback.
 
 The existing suites prove exact ordering, unique call/result matching,
 sequential fence rotation, complete read-only batch adoption, bounded stateless
-history validation, single supervised retained-result adoption, pre-provider
-checkpoint consumption, turn-limit preservation, and recovery on missing
-checkpoints. Any future admitted shape must additionally test:
+history validation, single supervised retained-result adoption, exact native
+source and approved-outcome validation, pre-provider checkpoint consumption,
+turn-limit preservation, and recovery on missing checkpoints. Any future
+admitted shape must additionally test:
 
 - reordered/duplicated/missing calls and results;
 - stale attempts, generations, row versions, checkpoints, and approvals;

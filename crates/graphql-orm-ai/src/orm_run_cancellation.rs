@@ -535,6 +535,8 @@ async fn cancel_active_tool_calls(
     maximum: usize,
     now: i64,
 ) -> Result<(), OrmPublicError> {
+    crate::orm_runs::abandon_native_approval_candidates(tx, run.id, AiRunState::Cancelled, now)
+        .await?;
     let calls = tx
         .query::<AiToolCallRecord>()
         .filter(AiToolCallRecordWhereInput {

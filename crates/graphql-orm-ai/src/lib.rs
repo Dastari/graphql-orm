@@ -64,6 +64,8 @@ mod orm_inbox;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_live_delta;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_native_approvals;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_pricing;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_proposals;
@@ -185,6 +187,8 @@ pub use orm_egress::*;
 pub use orm_inbox::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_live_delta::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_native_approvals::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_pricing::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

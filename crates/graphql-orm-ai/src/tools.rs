@@ -940,6 +940,51 @@ impl AiToolCatalog {
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn validate_classified_model_definition(
+        &self,
+        definition: &ModelToolDefinition,
+        static_policy: &AiToolPolicySet,
+        generated_targets: &AiGeneratedGraphqlTargetPolicySet,
+    ) -> Result<(ToolMaturity, AiApprovalRule), AiError> {
+        let id = AiToolId::parse(definition.tool_id.clone())?;
+        let registered_kinds = usize::from(self.tools.contains_key(&id))
+            + usize::from(self.query_capabilities.contains_key(&id))
+            + usize::from(self.mutation_capabilities.contains_key(&id))
+            + usize::from(self.subscription_capabilities.contains_key(&id));
+        if registered_kinds != 1 {
+            return Err(AiError::Forbidden);
+        }
+        if let Some(descriptor) = self.descriptor(&id) {
+            if crate::runtime::is_automatic_application_mutation(descriptor) {
+                if !static_policy.allows(descriptor)
+                    || definition.fingerprint != descriptor.fingerprint
+                    || definition.description != descriptor.description
+                    || definition.parameters != descriptor.argument_schema
+                    || !definition.strict
+                {
+                    return Err(AiError::Forbidden);
+                }
+            } else {
+                self.validate_supervised_model_definition(definition, static_policy)?;
+            }
+            return Ok((descriptor.maturity, descriptor.approval));
+        }
+        if self.query_capabilities.contains_key(&id) {
+            self.validate_generated_query_model_definition(definition, generated_targets)?;
+            return Ok((ToolMaturity::ReadOnly, AiApprovalRule::None));
+        }
+        match self.validate_generated_mutation_model_definition(definition, generated_targets)? {
+            AiMutationExecutionPolicy::Automatic => {
+                Ok((ToolMaturity::AutonomousWrite, AiApprovalRule::None))
+            }
+            AiMutationExecutionPolicy::ApprovalRequired => {
+                Ok((ToolMaturity::SupervisedWrite, AiApprovalRule::OneShot))
+            }
+            AiMutationExecutionPolicy::Prohibited => Err(AiError::Forbidden),
+        }
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn validate_read_capability_model_definition(
         &self,
         definition: &ModelToolDefinition,
@@ -1067,6 +1112,8 @@ pub struct AiToolPolicyBinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiToolAuthorizationDecision {
     allowed: bool,
+    #[serde(default)]
+    one_shot_required: bool,
     /// Stable non-sensitive reason code for audit and diagnostics.
     pub reason_code: String,
     /// Current host policy version used for the decision.
@@ -1084,6 +1131,7 @@ impl AiToolAuthorizationDecision {
     ) -> Self {
         Self {
             allowed: true,
+            one_shot_required: false,
             reason_code: reason_code.into(),
             policy_version: policy_version.into(),
             authorization_state_digest: authorization_state_digest.into(),
@@ -1094,6 +1142,7 @@ impl AiToolAuthorizationDecision {
     pub fn deny(reason_code: impl Into<String>, policy_version: impl Into<String>) -> Self {
         Self {
             allowed: false,
+            one_shot_required: false,
             reason_code: reason_code.into(),
             policy_version: policy_version.into(),
             authorization_state_digest: String::new(),
@@ -1103,6 +1152,38 @@ impl AiToolAuthorizationDecision {
     /// Returns whether current host policy allowed this exact request.
     pub const fn is_allowed(&self) -> bool {
         self.allowed
+    }
+
+    /// Allows the exact current-principal request only after one-shot approval.
+    ///
+    /// This can tighten an explicitly enabled automatic mutation based on its
+    /// validated variables. It never changes the registered descriptor, grants
+    /// approval, or replaces ordinary resolver authorization. Automatic execution
+    /// refuses this decision; approved execution rehydrates and checks it again.
+    pub fn require_one_shot(
+        reason_code: impl Into<String>,
+        policy_version: impl Into<String>,
+        authorization_state_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            allowed: true,
+            one_shot_required: true,
+            reason_code: reason_code.into(),
+            policy_version: policy_version.into(),
+            authorization_state_digest: authorization_state_digest.into(),
+        }
+    }
+
+    /// Additional approval required by this exact current host decision.
+    ///
+    /// The immutable descriptor's approval requirement still applies; a denied
+    /// decision remains denied regardless of this value.
+    pub const fn approval_requirement(&self) -> AiApprovalRule {
+        if self.one_shot_required {
+            AiApprovalRule::OneShot
+        } else {
+            AiApprovalRule::None
+        }
     }
 
     pub(crate) fn is_complete_allow(&self) -> bool {
@@ -1197,13 +1278,15 @@ impl AiToolAuthorizationPolicy for AiGeneratedGraphqlAuthorizationPolicy {
     }
 }
 
-fn canonical_json_digest(value: &serde_json::Value) -> String {
+pub(crate) fn canonical_json_digest(value: &serde_json::Value) -> String {
     fn canonical(value: &serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(object) => serde_json::Value::Object(
                 object
                     .iter()
                     .map(|(key, value)| (key.clone(), canonical(value)))
+                    .collect::<BTreeMap<_, _>>()
+                    .into_iter()
                     .collect(),
             ),
             serde_json::Value::Array(values) => {

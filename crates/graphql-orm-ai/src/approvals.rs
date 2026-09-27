@@ -98,46 +98,15 @@ impl AiApprovalBinding {
     /// Returns [`AiError::InvalidConfiguration`] when a required binding is
     /// empty, target resources are duplicated, or the preview hash is stale.
     pub fn validate(&self, preview: &AiCanonicalActionPreview) -> Result<(), AiError> {
-        let preview_bytes = serde_json::to_vec(&preview.details)
-            .map_err(|_| AiError::InvalidConfiguration("approval preview is invalid".to_owned()))?;
-        if preview.action_kind.trim().is_empty()
-            || preview.action_kind.len() > 200
-            || preview.title.trim().is_empty()
-            || preview.title.len() > 1_024
-            || preview.targets.len() > 100
-            || preview_bytes.len() > 256 * 1024
-            || self.tool_fingerprint.trim().is_empty()
+        validate_preview_resources(preview, &self.resources, &self.preview_hash)?;
+        if self.tool_fingerprint.trim().is_empty()
             || self.argument_hash.trim().is_empty()
             || self.policy_version.trim().is_empty()
             || self.authorization_state_digest.trim().is_empty()
-            || self.resources.len() > 100
             || !self.operation.generated_operation_shape_is_valid()
-            || self.preview_hash != preview.stable_hash()
         {
             return Err(AiError::InvalidConfiguration(
                 "approval binding is incomplete or stale".to_owned(),
-            ));
-        }
-        let mut resources = self.resources.clone();
-        resources.sort();
-        if resources.iter().any(|resource| {
-            resource.resource_type.trim().is_empty()
-                || resource.resource_type.len() > 200
-                || resource.resource_id.trim().is_empty()
-                || resource.resource_id.len() > 1_024
-                || resource.expected_version.trim().is_empty()
-                || resource.expected_version.len() > 1_024
-        }) || resources.windows(2).any(|window| window[0] == window[1])
-        {
-            return Err(AiError::InvalidConfiguration(
-                "approval resource binding is invalid".to_owned(),
-            ));
-        }
-        let mut preview_targets = preview.targets.clone();
-        preview_targets.sort();
-        if resources != preview_targets {
-            return Err(AiError::InvalidConfiguration(
-                "approval preview targets do not match action resources".to_owned(),
             ));
         }
         Ok(())
@@ -150,6 +119,55 @@ impl AiApprovalBinding {
             .expect("PrincipalReference consists only of serializable values");
         hex::encode(Sha256::digest(encoded))
     }
+}
+
+/// Maximum serialized JSON bytes in canonical approval preview details (2 MiB).
+/// This is a representation limit, including JSON escaping, not an execution limit.
+pub const AI_APPROVAL_PREVIEW_DETAILS_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+pub(crate) fn validate_preview_resources(
+    preview: &AiCanonicalActionPreview,
+    resources: &[AiApprovalResourceBinding],
+    expected_preview_hash: &str,
+) -> Result<(), AiError> {
+    let preview_bytes = serde_json::to_vec(&preview.details)
+        .map_err(|_| AiError::InvalidConfiguration("approval preview is invalid".to_owned()))?;
+    if preview.action_kind.trim().is_empty()
+        || preview.action_kind.len() > 200
+        || preview.title.trim().is_empty()
+        || preview.title.len() > 1_024
+        || preview.targets.len() > 100
+        || resources.len() > 100
+        || preview_bytes.len() > AI_APPROVAL_PREVIEW_DETAILS_MAX_BYTES
+        || expected_preview_hash != preview.stable_hash()
+    {
+        return Err(AiError::InvalidConfiguration(
+            "approval preview is incomplete or stale".to_owned(),
+        ));
+    }
+    let mut resources = resources.to_vec();
+    resources.sort();
+    if resources.iter().any(|resource| {
+        resource.resource_type.trim().is_empty()
+            || resource.resource_type.len() > 200
+            || resource.resource_id.trim().is_empty()
+            || resource.resource_id.len() > 1_024
+            || resource.expected_version.trim().is_empty()
+            || resource.expected_version.len() > 1_024
+    }) || resources.windows(2).any(|window| window[0] == window[1])
+    {
+        return Err(AiError::InvalidConfiguration(
+            "approval resource binding is invalid".to_owned(),
+        ));
+    }
+    let mut targets = preview.targets.clone();
+    targets.sort();
+    if resources != targets {
+        return Err(AiError::InvalidConfiguration(
+            "approval preview targets do not match action resources".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Persisted lifecycle state for a one-shot approval.
@@ -283,6 +301,125 @@ pub enum AiApprovalAction {
     Consume,
 }
 
+/// Verified approval access evidence supplied only by the ORM approval service.
+///
+/// Retained evidence validates protected resources and preview against immutable
+/// approval metadata. It is not a reconstructed complete `AiApprovalBinding`,
+/// an execution grant, or a substitute for current host resource authorization.
+/// Private construction prevents callers supplying arbitrary evidence to the service.
+#[derive(Clone)]
+pub struct AiApprovalAccessEvidence {
+    pub(crate) approval_id: AiApprovalId,
+    pub(crate) tool_call_id: AiToolCallId,
+    pub(crate) binding_hash: String,
+    pub(crate) tool_fingerprint: String,
+    pub(crate) argument_hash: String,
+    pub(crate) principal_reference_fingerprint: String,
+    pub(crate) execution_target_id: String,
+    pub(crate) target_schema_fingerprint: String,
+    pub(crate) operation_name: String,
+    pub(crate) operation_document_hash: String,
+    pub(crate) result_projection_fingerprint: String,
+    pub(crate) disclosure_schema_fingerprint: String,
+    pub(crate) policy_version: String,
+    pub(crate) authorization_state_digest: String,
+    pub(crate) resources: Vec<AiApprovalResourceBinding>,
+    pub(crate) preview: AiCanonicalActionPreview,
+}
+
+impl AiApprovalAccessEvidence {
+    /// Approval identity.
+    pub fn approval_id(&self) -> AiApprovalId {
+        self.approval_id
+    }
+    /// Bound tool call identity.
+    pub fn tool_call_id(&self) -> AiToolCallId {
+        self.tool_call_id
+    }
+    /// Original complete action envelope digest; not a reconstructed envelope.
+    pub fn binding_hash(&self) -> &str {
+        &self.binding_hash
+    }
+    /// Exact registered tool descriptor fingerprint.
+    pub fn tool_fingerprint(&self) -> &str {
+        &self.tool_fingerprint
+    }
+    /// Exact canonical variables digest.
+    pub fn argument_hash(&self) -> &str {
+        &self.argument_hash
+    }
+    /// Original principal reference fingerprint.
+    pub fn principal_reference_fingerprint(&self) -> &str {
+        &self.principal_reference_fingerprint
+    }
+    /// Registered GraphQL execution target.
+    pub fn execution_target_id(&self) -> &str {
+        &self.execution_target_id
+    }
+    /// Exact target schema fingerprint.
+    pub fn target_schema_fingerprint(&self) -> &str {
+        &self.target_schema_fingerprint
+    }
+    /// Registered operation name.
+    pub fn operation_name(&self) -> &str {
+        &self.operation_name
+    }
+    /// Exact registered operation document digest.
+    pub fn operation_document_hash(&self) -> &str {
+        &self.operation_document_hash
+    }
+    /// Bound result projection fingerprint.
+    pub fn result_projection_fingerprint(&self) -> &str {
+        &self.result_projection_fingerprint
+    }
+    /// Bound disclosure schema fingerprint.
+    pub fn disclosure_schema_fingerprint(&self) -> &str {
+        &self.disclosure_schema_fingerprint
+    }
+    /// Policy version recorded for this action.
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+    /// Authorization state digest recorded for this action.
+    pub fn authorization_state_digest(&self) -> &str {
+        &self.authorization_state_digest
+    }
+    /// Verified exact resource and precondition bindings.
+    pub fn resources(&self) -> &[AiApprovalResourceBinding] {
+        &self.resources
+    }
+    /// Verified bounded server-authored preview; may contain sensitive action details.
+    pub fn preview(&self) -> &AiCanonicalActionPreview {
+        &self.preview
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn from_binding(
+        id: AiApprovalId,
+        binding: &AiApprovalBinding,
+        preview: &AiCanonicalActionPreview,
+    ) -> Self {
+        Self {
+            approval_id: id,
+            tool_call_id: binding.tool_call_id,
+            binding_hash: binding.stable_hash(),
+            tool_fingerprint: binding.tool_fingerprint.clone(),
+            argument_hash: binding.argument_hash.clone(),
+            principal_reference_fingerprint: binding.principal_reference_fingerprint.clone(),
+            execution_target_id: binding.operation.target_id.as_str().to_owned(),
+            target_schema_fingerprint: binding.operation.schema_fingerprint.clone(),
+            operation_name: binding.operation.operation_name.clone(),
+            operation_document_hash: binding.operation.document_hash.clone(),
+            result_projection_fingerprint: binding.operation.result_projection_fingerprint.clone(),
+            disclosure_schema_fingerprint: binding.operation.disclosure_schema_fingerprint.clone(),
+            policy_version: binding.policy_version.clone(),
+            authorization_state_digest: binding.authorization_state_digest.clone(),
+            resources: binding.resources.clone(),
+            preview: preview.clone(),
+        }
+    }
+}
+
 /// Host-owned approval authorization policy.
 #[async_trait]
 pub trait AiApprovalAccessPolicy: Send + Sync {
@@ -294,6 +431,24 @@ pub trait AiApprovalAccessPolicy: Send + Sync {
         session_id: AiSessionId,
         action: AiApprovalAction,
     ) -> bool;
+
+    /// Applies current host authorization to verified exact approval evidence.
+    ///
+    /// The service invokes the coarse gate before opening protected contents,
+    /// then invokes this hook before disclosure, decision, or consumption. Hosts
+    /// may require exact resource authority here. The compatible default forwards
+    /// to the coarse policy; neither hook replaces fresh execution authorization.
+    async fn can_access_bound_approval(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+        session_id: AiSessionId,
+        action: AiApprovalAction,
+        _evidence: &AiApprovalAccessEvidence,
+    ) -> bool {
+        self.can_access_approval(principal, scope, session_id, action)
+            .await
+    }
 }
 
 /// Human approval decision.
@@ -510,5 +665,42 @@ impl AuthorizedAiApproval {
     /// Returns the exact action-envelope hash.
     pub fn binding_hash(&self) -> &str {
         &self.binding_hash
+    }
+}
+
+#[cfg(test)]
+mod preview_bound_tests {
+    use super::*;
+
+    fn preview(details: serde_json::Value) -> AiCanonicalActionPreview {
+        AiCanonicalActionPreview {
+            action_kind: "bounded.action".to_owned(),
+            title: "Exact action".to_owned(),
+            targets: vec![],
+            details,
+        }
+    }
+
+    #[test]
+    fn canonical_preview_allows_escape_heavy_quarter_megabyte_source() {
+        let preview = preview(serde_json::json!({"source": "\0".repeat(256 * 1024)}));
+        let bytes = serde_json::to_vec(&preview.details).unwrap();
+        assert!(bytes.len() > 6 * 256 * 1024);
+        assert!(validate_preview_resources(&preview, &[], &preview.stable_hash()).is_ok());
+    }
+
+    #[test]
+    fn canonical_preview_details_has_exact_two_megabyte_json_ceiling() {
+        let mut preview = preview(serde_json::Value::String(
+            "x".repeat(AI_APPROVAL_PREVIEW_DETAILS_MAX_BYTES - 2),
+        ));
+        assert_eq!(
+            serde_json::to_vec(&preview.details).unwrap().len(),
+            AI_APPROVAL_PREVIEW_DETAILS_MAX_BYTES
+        );
+        assert!(validate_preview_resources(&preview, &[], &preview.stable_hash()).is_ok());
+        preview.details =
+            serde_json::Value::String("x".repeat(AI_APPROVAL_PREVIEW_DETAILS_MAX_BYTES - 1));
+        assert!(validate_preview_resources(&preview, &[], &preview.stable_hash()).is_err());
     }
 }

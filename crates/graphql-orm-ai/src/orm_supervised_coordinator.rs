@@ -2,6 +2,8 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+mod native;
+
 use std::sync::Arc;
 
 use agql_auth::Clock;
@@ -66,11 +68,12 @@ impl AiSupervisedAgentCoordinatorLimits {
     }
 }
 
-/// One host-planned provider turn exposing only classified mutations.
+/// One host-planned provider turn exposing immutable classified tools.
 ///
-/// Construction proves the plan is provider-retained, contains only immutable
-/// `AutonomousWrite`/`None` or `SupervisedWrite`/`OneShot` bindings, targets the
-/// exact resolved-rule scope, and has a valid server-owned result route. It
+/// The ordinary constructor admits mutation bindings; the explicit native
+/// constructor also admits read-only tools in the same retained turn.
+/// Construction binds the exact resolved-rule scope, registered tool contracts,
+/// provider-retained continuation, and a valid server-owned result route. It
 /// grants no provider, budget, egress, approval, mutation, or resolver authority.
 pub struct AiSupervisedAgentTurnPlan {
     provider_call: AiProviderCallPlan,
@@ -78,6 +81,8 @@ pub struct AiSupervisedAgentTurnPlan {
     result_egress_route: AiToolResultEgressRoute,
     rules: AiResolvedRuleSet,
     uses_byok: bool,
+    native: bool,
+    capability_delivery: Option<crate::AiCapabilityDeliveryTurn>,
 }
 
 impl AiSupervisedAgentTurnPlan {
@@ -109,7 +114,71 @@ impl AiSupervisedAgentTurnPlan {
             result_egress_route,
             rules,
             uses_byok,
+            native: false,
+            capability_delivery: None,
         })
+    }
+
+    /// Creates an explicitly mixed native read/automatic/approval-required turn.
+    ///
+    /// A durable provider-session plan is mandatory. This does not relax read-only coordinators.
+    ///
+    /// # Errors
+    /// Returns a conflict unless exact classified tools, scope, native shape and retained session match.
+    pub fn new_classified_native(
+        provider_call: AiProviderCallPlan,
+        session: crate::AiProviderSessionTurnPlan,
+        result_egress_route: AiToolResultEgressRoute,
+        rules: AiResolvedRuleSet,
+        uses_byok: bool,
+    ) -> Result<Self, AiError> {
+        if !provider_call.allows_native_control()
+            || !provider_call.has_classified_application_tools()
+            || !provider_call.uses_provider_retained_continuation()
+            || provider_call.scope() != rules.target_scope()
+            || !provider_call.matches_provider_session_descriptor(session.descriptor())
+        {
+            return Err(AiError::Conflict);
+        }
+        result_egress_route.validate()?;
+        Ok(Self {
+            provider_call,
+            provider_session: Some(session),
+            result_egress_route,
+            rules,
+            uses_byok,
+            native: true,
+            capability_delivery: None,
+        })
+    }
+
+    /// Attaches one exact crate-owned capability delivery turn to native execution.
+    ///
+    /// Broker callbacks use the durable read-only broker. Static bootstrap mutations keep
+    /// their classified path. The immutable retained-session fingerprint binds delivery
+    /// mode, index, bootstrap tools, provider projection and model across approval waits.
+    /// Loaded broker references remain fenced to their original run attempt.
+    /// Client-deferred delivery is unavailable here because native callbacks cannot
+    /// install definitions mid-turn; use the existing read-only coordinator for that mode.
+    ///
+    /// # Errors
+    /// Rejects non-native/client-deferred turns, different offered definitions, or a different session binding.
+    pub fn with_capability_delivery(
+        mut self,
+        delivery: crate::AiCapabilityDeliveryTurn,
+    ) -> Result<Self, AiError> {
+        if !self.native
+            || delivery.mode() == crate::AiCapabilityDeliveryMode::ClientDeferred
+            || !delivery.matches_offered_tools(self.provider_call.offered_tools())
+            || self.provider_session.as_ref().is_none_or(|session| {
+                session.descriptor().registration_fingerprint()
+                    != delivery.session_binding().fingerprint()
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        self.capability_delivery = Some(delivery);
+        Ok(self)
     }
 
     /// Binds this turn to one exact durable provider-session contract.
@@ -125,6 +194,10 @@ impl AiSupervisedAgentTurnPlan {
         if !self
             .provider_call
             .matches_provider_session_descriptor(session.descriptor())
+            || self.capability_delivery.as_ref().is_some_and(|delivery| {
+                session.descriptor().registration_fingerprint()
+                    != delivery.session_binding().fingerprint()
+            })
         {
             return Err(AiError::Conflict);
         }
@@ -152,6 +225,7 @@ impl AiSupervisedAgentTurnPlan {
         AiToolResultEgressRoute,
         AiResolvedRuleSet,
         bool,
+        Option<crate::AiCapabilityDeliveryTurn>,
     ) {
         let scope = self.provider_call.scope().clone();
         let correlation_id = self.provider_call.correlation_id().to_owned();
@@ -163,6 +237,7 @@ impl AiSupervisedAgentTurnPlan {
             self.result_egress_route,
             self.rules,
             self.uses_byok,
+            self.capability_delivery,
         )
     }
 }
@@ -179,11 +254,13 @@ fn plan_binding(
 ///
 /// Implementations select configuration, exact registered definitions,
 /// provider/model, current rule evidence, atomic-budget estimate, and every
-/// egress manifest. Continuation implementations must use
-/// [`AiProviderCallPlan::new_supervised_continuation_with_tools`].
+/// egress manifest. Ordinary continuation implementations use
+/// [`AiProviderCallPlan::new_supervised_continuation_with_tools`]; explicit
+/// classified-native implementations use
+/// [`AiProviderCallPlan::new_continuation_with_classified_tools`].
 #[async_trait]
 pub trait AiSupervisedAgentTurnPlanner: Send + Sync {
-    /// Builds the first supervised-only provider turn.
+    /// Builds the first turn for the selected supervised or classified-native mode.
     ///
     /// # Errors
     ///
@@ -551,6 +628,7 @@ pub struct AiSupervisedAgentCoordinator {
     clock: Arc<dyn Clock>,
     limits: AiSupervisedAgentCoordinatorLimits,
     provider_session_service: Option<Arc<dyn crate::AiProviderSessionService>>,
+    native_services: Option<Arc<native::NativeServices>>,
 }
 
 impl AiSupervisedAgentCoordinator {
@@ -584,6 +662,7 @@ impl AiSupervisedAgentCoordinator {
             clock,
             limits,
             provider_session_service: None,
+            native_services: None,
         }
     }
 
@@ -594,6 +673,22 @@ impl AiSupervisedAgentCoordinator {
         service: Arc<dyn crate::AiProviderSessionService>,
     ) -> Self {
         self.provider_session_service = Some(service);
+        self
+    }
+
+    /// Enables the explicit mixed native lifecycle with protected candidate and checkpoint services.
+    #[must_use]
+    pub fn with_classified_native_tools(
+        mut self,
+        applications: Arc<OrmAiApplicationToolCallService>,
+        consequential: Arc<OrmAiConsequentialToolCallService>,
+        checkpoints: Arc<OrmAiCoordinatorCheckpointService>,
+    ) -> Self {
+        self.native_services = Some(Arc::new(native::NativeServices {
+            applications,
+            consequential,
+            checkpoints,
+        }));
         self
     }
 
@@ -855,6 +950,7 @@ impl AiSupervisedAgentCoordinator {
                 .finish_failed(&lease, &guard, "supervised_provider_turn_limit_reached")
                 .await;
         }
+        let native_mode = plan.native;
         let (
             provider_plan,
             provider_session,
@@ -863,6 +959,7 @@ impl AiSupervisedAgentCoordinator {
             route,
             planned_rules,
             uses_byok,
+            capability_delivery,
         ) = plan.into_parts();
         let resolution = match self.rule_resolver.resolve_rules(&lease, &scope).await {
             Ok(resolution) if resolution.rules().fingerprint() == planned_rules.fingerprint() => {
@@ -882,9 +979,12 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         };
-        if provider_plan
-            .project_supervised_rule_usage(&resolution, started_usage, uses_byok)
-            .is_err()
+        if (if native_mode {
+            provider_plan.project_classified_rule_usage(&resolution, started_usage, uses_byok)
+        } else {
+            provider_plan.project_supervised_rule_usage(&resolution, started_usage, uses_byok)
+        })
+        .is_err()
         {
             return self
                 .finish_failed(&lease, &guard, "supervised_rule_plan_denied")
@@ -919,9 +1019,12 @@ impl AiSupervisedAgentCoordinator {
                         .await;
                 }
             };
-            if provider_plan
-                .project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
-                .is_err()
+            if (if native_mode {
+                provider_plan.project_classified_rule_usage(&final_rules, rule_usage, uses_byok)
+            } else {
+                provider_plan.project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
+            })
+            .is_err()
             {
                 return self
                     .finish_failed(&lease, &guard, "supervised_rule_denied_after_consume")
@@ -959,9 +1062,12 @@ impl AiSupervisedAgentCoordinator {
                         .await;
                 }
             };
-            if provider_plan
-                .project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
-                .is_err()
+            if (if native_mode {
+                provider_plan.project_classified_rule_usage(&final_rules, rule_usage, uses_byok)
+            } else {
+                provider_plan.project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
+            })
+            .is_err()
             {
                 return self
                     .finish_failed(&lease, &guard, "automatic_rule_denied_after_consume")
@@ -999,9 +1105,12 @@ impl AiSupervisedAgentCoordinator {
                         .await;
                 }
             };
-            if provider_plan
-                .project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
-                .is_err()
+            if (if native_mode {
+                provider_plan.project_classified_rule_usage(&final_rules, rule_usage, uses_byok)
+            } else {
+                provider_plan.project_supervised_rule_usage(&final_rules, rule_usage, uses_byok)
+            })
+            .is_err()
             {
                 return self
                     .finish_failed(&lease, &guard, "subscription_rule_denied_after_consume")
@@ -1040,6 +1149,36 @@ impl AiSupervisedAgentCoordinator {
         } else {
             None
         };
+        let native_execution = if native_mode {
+            let services = self
+                .native_services
+                .clone()
+                .ok_or(AiError::RuntimeNotReady)?;
+            if provider_session.is_none() {
+                return Err(AiError::Conflict);
+            }
+            Some(Arc::new(native::NativeExecution {
+                services,
+                run_control: self.run_control.clone(),
+                rules: self.rule_resolver.clone(),
+                scope: scope.clone(),
+                correlation: correlation_id.clone(),
+                route: route.clone(),
+                fingerprint: planned_rules.fingerprint().to_owned(),
+                turn: guard.provider_turns(),
+                maximum_calls: guard.remaining_tool_capacity(),
+                plan: provider_plan.clone(),
+                capability_delivery,
+                state: Mutex::new(native::NativeState {
+                    usage: rule_usage,
+                    calls: 0,
+                    pending: None,
+                    failure_lease: None,
+                }),
+            }))
+        } else {
+            None
+        };
         let provider_result = if let Some(session_plan) = provider_session {
             let Some(service) = &self.provider_session_service else {
                 return self
@@ -1057,6 +1196,9 @@ impl AiSupervisedAgentCoordinator {
                 provider_plan,
                 session_plan,
                 service.clone(),
+                native_execution
+                    .clone()
+                    .map(|execution| execution as Arc<dyn crate::AiProviderDynamicToolExecution>),
             )
             .await
         } else {
@@ -1174,6 +1316,9 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         };
+        if let Some(execution) = &native_execution {
+            rule_usage = execution.state.lock().await.usage;
+        }
         rule_usage = match rule_usage.accept_provider_with_web_searches(
             result.usage(),
             result.builtin_usage().web_search_calls(),
@@ -1197,6 +1342,72 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         };
+        if let Some(execution) = &native_execution {
+            let pending = execution.state.lock().await.pending.clone();
+            if let Some(pending) = pending {
+                let prepared = async {
+                    let renewed = execution
+                        .services
+                        .checkpoints
+                        .persist_native_approval_provider_turn(
+                            &lease,
+                            &result,
+                            &pending,
+                            &scope,
+                            &correlation_id,
+                            &route,
+                            &planned_rules,
+                            rule_usage,
+                            guard.provider_turns(),
+                            guard.total_tool_calls(),
+                        )
+                        .await?;
+                    lease = renewed;
+                    let expires = self
+                        .clock
+                        .now()
+                        .checked_add(self.limits.approval_ttl)
+                        .ok_or(AiError::PersistenceFailed)?;
+                    execution
+                        .services
+                        .consequential
+                        .finalize_prepared_approval(
+                            &lease,
+                            &result,
+                            &pending,
+                            expires,
+                            self.limits.recent_mfa_required,
+                        )
+                        .await
+                }
+                .await;
+                return match prepared {
+                    Ok(wait) if wait.lease().state() == AiRunState::WaitingApproval => {
+                        Ok(AiSupervisedAgentRunOutcome::WaitingApproval {
+                            approval_id: wait.approval_id(),
+                            tool_call_id: wait.tool_call_id(),
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        })
+                    }
+                    _ => {
+                        self.invalidate_result_provider_session(
+                            &result,
+                            "native_approval_finalization_uncertain",
+                        )
+                        .await;
+                        self.finish_recovery(
+                            &lease,
+                            &guard,
+                            AiAgentRecoveryPhase::ApplicationTool,
+                            "native_approval_finalization_uncertain",
+                            result.provider_response_id(),
+                        )
+                        .await
+                    }
+                };
+            }
+        }
         lease = match self
             .checkpoint_writer
             .persist_provider_turn(
@@ -1627,11 +1838,9 @@ impl AiSupervisedAgentCoordinator {
                     return result.map_err(|error| classify_supervised_turn_failure(&error));
                 }
                 () = &mut heartbeat => {
-                    *lease = self
-                        .run_control
-                        .heartbeat(lease)
-                        .await
-                        .map_err(SupervisedProviderTurnFailure::LeaseLost)?;
+                    let (renewal, completed_provider) = crate::provider_calls::maintenance::poll_provider_during_maintenance(provider.as_mut(),self.run_control.heartbeat(lease)).await;
+                    *lease = renewal.map_err(SupervisedProviderTurnFailure::LeaseLost)?;
+                    if let Some(result) = completed_provider { return result.map_err(|error| classify_supervised_turn_failure(&error)); }
                 }
             }
         }
@@ -1643,6 +1852,7 @@ impl AiSupervisedAgentCoordinator {
         plan: AiProviderCallPlan,
         session_plan: crate::AiProviderSessionTurnPlan,
         session_service: Arc<dyn crate::AiProviderSessionService>,
+        dynamic: Option<Arc<dyn crate::AiProviderDynamicToolExecution>>,
     ) -> Result<crate::AiProviderCallResult, SupervisedProviderTurnFailure> {
         let lease_state = Arc::new(Mutex::new(lease.clone()));
         let provider = self.provider_executor.execute_retained_turn(
@@ -1650,27 +1860,28 @@ impl AiSupervisedAgentCoordinator {
             plan,
             session_plan,
             session_service,
-            None,
+            dynamic,
         );
         tokio::pin!(provider);
         let delay = self.limits.heartbeat_interval.unsigned_abs();
         loop {
-            let heartbeat = tokio::time::sleep(delay);
+            let heartbeat = async {
+                tokio::time::sleep(delay).await;
+                lease_state.lock().await
+            };
             tokio::pin!(heartbeat);
             tokio::select! {
                 result = &mut provider => {
                     *lease = lease_state.lock().await.clone();
                     return result.map_err(|error| classify_supervised_turn_failure(&error));
                 }
-                () = &mut heartbeat => {
-                    let current = lease_state.lock().await.clone();
-                    let renewed = self
-                        .run_control
-                        .heartbeat(&current)
-                        .await
-                        .map_err(SupervisedProviderTurnFailure::LeaseLost)?;
+                mut current = &mut heartbeat => {
+                    let (renewal, completed_provider) = crate::provider_calls::maintenance::poll_provider_during_maintenance(provider.as_mut(),self.run_control.heartbeat(&current)).await;
+                    let renewed = renewal.map_err(SupervisedProviderTurnFailure::LeaseLost)?;
                     *lease = renewed.clone();
-                    *lease_state.lock().await = renewed;
+                    *current = renewed;
+                    drop(current);
+                    if let Some(result) = completed_provider { return result.map_err(|error| classify_supervised_turn_failure(&error)); }
                 }
             }
         }
@@ -2995,6 +3206,150 @@ mod tests {
         assert_eq!(checkpoints.automatic_checkpoints.load(Ordering::SeqCst), 1);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
+    }
+
+    #[derive(Default)]
+    struct NativeHeartbeatGate {
+        writer: tokio::sync::Mutex<()>,
+        started: tokio::sync::Notify,
+        finished: AtomicBool,
+    }
+
+    struct NativeHeartbeatRun(Arc<NativeHeartbeatGate>);
+    #[async_trait]
+    impl AiAgentRunControl for NativeHeartbeatRun {
+        async fn start(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError> {
+            Ok(lease.clone())
+        }
+        async fn heartbeat(&self, lease: &AiRunLease) -> Result<AiRunLease, AiError> {
+            self.0.started.notify_one();
+            let _writer = self.0.writer.lock().await;
+            tokio::task::yield_now().await;
+            self.0.finished.store(true, Ordering::SeqCst);
+            Ok(lease.clone())
+        }
+        async fn finish(&self, _: &AiRunLease, _: AiRunCompletion) -> Result<(), AiError> {
+            Ok(())
+        }
+    }
+    struct NativeHeartbeatProvider(Arc<NativeHeartbeatGate>);
+    impl NativeHeartbeatProvider {
+        async fn complete(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<crate::AiProviderCallResult, AiError> {
+            let writer = self.0.writer.lock().await;
+            self.0.started.notified().await;
+            drop(writer);
+            Ok(crate::AiProviderCallResult::test_result(
+                lease,
+                None,
+                "native-heartbeat",
+                vec![],
+            ))
+        }
+    }
+    #[async_trait]
+    impl AiAgentProviderTurnExecutor for NativeHeartbeatProvider {
+        async fn execute_turn(
+            &self,
+            lease: &AiRunLease,
+            _: AiProviderCallPlan,
+        ) -> Result<crate::AiProviderCallResult, AiError> {
+            self.complete(lease).await
+        }
+        async fn execute_retained_turn(
+            &self,
+            lease: Arc<tokio::sync::Mutex<AiRunLease>>,
+            _: AiProviderCallPlan,
+            _: crate::AiProviderSessionTurnPlan,
+            _: Arc<dyn crate::AiProviderSessionService>,
+            _: Option<Arc<dyn crate::AiProviderDynamicToolExecution>>,
+        ) -> Result<crate::AiProviderCallResult, AiError> {
+            let held = lease.lock().await;
+            // Simulate a callback that needs continued polling while the heartbeat waits for its fence.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            let snapshot = held.clone();
+            drop(held);
+            self.complete(&snapshot).await
+        }
+    }
+
+    async fn native_heartbeat_case(retained: bool) {
+        let gate = Arc::new(NativeHeartbeatGate::default());
+        let mut lease = AiRunLease::test_running(principal_reference());
+        let mut limits = limits();
+        limits.heartbeat_interval = Duration::milliseconds(1);
+        let coordinator = AiSupervisedAgentCoordinator::new(
+            Arc::new(NativeHeartbeatRun(gate.clone())),
+            Arc::new(NativeHeartbeatProvider(gate.clone())),
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            }),
+            Arc::new(TestCheckpointControl {
+                adopted: Mutex::new(None),
+                consumed: AtomicBool::new(false),
+            }),
+            Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            }),
+            unused_automatic(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            Arc::new(TestPlanner {
+                scope: test_scope(),
+                route: test_route(),
+                continuation_count: AtomicUsize::new(0),
+            }),
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits,
+        );
+        let plan = AiProviderCallPlan::test_supervised_plan(&lease, test_scope(), false);
+        let work = async {
+            if retained {
+                let descriptor = retained_descriptor();
+                let sessions = Arc::new(RetainedSupervisedSessionService {
+                    claim: Mutex::new(None),
+                    run: Arc::new(TestRunControl::new()),
+                    reclaimed: Arc::new(AtomicBool::new(false)),
+                    commits: AtomicUsize::new(0),
+                    cleanups: AtomicUsize::new(0),
+                });
+                coordinator
+                    .execute_retained_provider_with_heartbeats(
+                        &mut lease,
+                        plan,
+                        crate::AiProviderSessionTurnPlan::new(descriptor, "c".repeat(64)).unwrap(),
+                        sessions,
+                        None,
+                    )
+                    .await
+            } else {
+                coordinator
+                    .execute_provider_with_heartbeats(&mut lease, plan)
+                    .await
+            }
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), work)
+                .await
+                .expect("provider-held write must make progress while renewal waits")
+                .is_ok()
+        );
+        assert!(
+            gate.finished.load(Ordering::SeqCst),
+            "started renewal must settle before returning provider completion"
+        );
+    }
+    #[tokio::test]
+    async fn native_supervised_heartbeat_polls_writer_and_drains_renewal() {
+        native_heartbeat_case(false).await;
+    }
+    #[tokio::test]
+    async fn native_retained_heartbeat_polls_callback_fence_then_writer_and_drains_renewal() {
+        native_heartbeat_case(true).await;
     }
 
     #[tokio::test]
