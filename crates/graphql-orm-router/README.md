@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-09-27
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -26,7 +26,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.2" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.3" }
 ```
 
 Enable `auth-agql` only when adapting a separately configured
@@ -84,6 +84,10 @@ the same bounded startup validation without binding a listener:
 graphql-orm-router --config /etc/graphql-orm/router.json --check
 graphql-orm-router --config /etc/graphql-orm/router.json
 ```
+
+Quiet subscriptions release their upstream resources when the final public
+consumer completes or disconnects, without requiring another upstream event.
+A fresh connection authenticates again before opening a successor subscription.
 
 Sensitive headers, arbitrary endpoint overrides, proxy bypass, private network
 access, and stale JWKS cache use explicit deny-by-default policy. Static source

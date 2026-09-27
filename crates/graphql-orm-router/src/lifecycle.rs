@@ -14,11 +14,14 @@ use reqwest::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions;
 
 use crate::{
     NetworkPolicy, RouterError, RouterErrorKind, StaticSubgraph,
     auth::AuthorizationCatalog,
-    federation::{ActiveGraph, CandidateSubgraph, FederationError, build_active_graph},
+    federation::{
+        ActiveGraph, CandidateSubgraph, FederationError, build_active_graph_with_options,
+    },
     metrics::{RouterMetrics, RouterMetricsSnapshot},
     server::ActiveGraphIdentity,
 };
@@ -281,6 +284,7 @@ pub(crate) struct GraphLifecycle {
     poll_interval: Duration,
     authorization_required: bool,
     subscriptions_enabled: bool,
+    graph_options: SupergraphOptions,
     metrics: Arc<RouterMetrics>,
 }
 
@@ -296,6 +300,7 @@ impl GraphLifecycle {
         poll_interval: Duration,
         authorization_required: bool,
         subscriptions_enabled: bool,
+        graph_options: SupergraphOptions,
     ) -> Result<Arc<Self>, RouterError> {
         if subgraphs.len() != fetched.len()
             || subgraphs
@@ -314,6 +319,7 @@ impl GraphLifecycle {
             1,
             authorization_required,
             subscriptions_enabled,
+            &graph_options,
         )?;
         let now = SystemTime::now();
         let metrics = Arc::new(RouterMetrics::default());
@@ -357,6 +363,7 @@ impl GraphLifecycle {
             poll_interval,
             authorization_required,
             subscriptions_enabled,
+            graph_options,
             metrics,
         }))
     }
@@ -459,6 +466,7 @@ impl GraphLifecycle {
             next_version,
             self.authorization_required,
             self.subscriptions_enabled,
+            &self.graph_options,
         );
         let candidate = match candidate {
             Ok(candidate) => candidate,
@@ -528,6 +536,7 @@ impl GraphLifecycle {
             next_version,
             self.authorization_required,
             self.subscriptions_enabled,
+            &self.graph_options,
         );
         let candidate = match candidate {
             Ok(candidate) => candidate,
@@ -599,6 +608,7 @@ impl GraphLifecycle {
             next_version,
             self.authorization_required,
             self.subscriptions_enabled,
+            &self.graph_options,
         );
         let name = fetched.candidate.name.clone();
         let fingerprint = fetched.fingerprint.clone();
@@ -1075,10 +1085,12 @@ fn build_snapshot<'a>(
     version: u64,
     authorization_required: bool,
     subscriptions_enabled: bool,
+    graph_options: &SupergraphOptions,
 ) -> Result<Arc<ActiveRouterGraph>, RouterError> {
     let inputs = inputs.into_iter().cloned().collect::<Vec<_>>();
     let descriptors = descriptors.into_iter().cloned().collect::<Vec<_>>();
-    let graph = build_active_graph(&inputs, version).map_err(map_federation_error)?;
+    let graph = build_active_graph_with_options(&inputs, version, graph_options.clone())
+        .map_err(map_federation_error)?;
     if authorization_required && descriptors.len() != inputs.len() {
         return Err(RouterError::new(
             RouterErrorKind::AuthorizationMetadata,
@@ -1552,6 +1564,7 @@ mod tests {
             Duration::from_secs(60),
             false,
             false,
+            SupergraphOptions::default(),
         )
         .unwrap()
     }

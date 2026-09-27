@@ -9,6 +9,7 @@ use std::{
 };
 
 use futures::future::try_join_all;
+use hive_router::config::HiveRouterConfig;
 use hive_router::{
     GraphQLError, PlanExecutionOutput, PluginRegistry, RouterPaths, background_tasks,
     ntex::web,
@@ -18,7 +19,9 @@ use hive_router::{
             on_execute::{OnExecuteStartHookPayload, OnExecuteStartHookResult},
             on_graphql_analysis::{OnGraphqlAnalysisHookPayload, OnGraphqlAnalysisHookResult},
             on_graphql_error::{OnGraphQLErrorHookPayload, OnGraphQLErrorHookResult},
-            on_http_request::{OnHttpRequestHookPayload, OnHttpRequestHookResult},
+            on_http_request::{
+                OnHttpRequestHookFuture, OnHttpRequestHookPayload, OnHttpRequestHookResult,
+            },
             on_plugin_init::{OnPluginInitPayload, OnPluginInitResult},
             on_subgraph_http_request::{
                 OnSubgraphHttpRequestHookPayload, OnSubgraphHttpRequestHookResult,
@@ -31,7 +34,6 @@ use hive_router::{
     },
     sonic_rs::JsonContainerTrait,
 };
-use hive_router_config::HiveRouterConfig;
 use reqwest::{Client, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -216,6 +218,7 @@ impl PreparedRouter {
             config.schema_poll_interval,
             config.authentication.is_some(),
             config.subscriptions.is_some(),
+            build_graph_options(&config)?,
         )?;
         let active = lifecycle.load();
         let graph = &active.graph;
@@ -294,8 +297,9 @@ impl PreparedRouter {
                     return Err(error);
                 }
             };
+        let hive_config = hive_config.into_static();
         let telemetry =
-            hive_router::telemetry::Telemetry::init_global(&hive_config).map_err(|error| {
+            hive_router::telemetry::Telemetry::init_global(hive_config).map_err(|error| {
                 remove_plugin_runtime(runtime_id);
                 RouterError::new(
                     RouterErrorKind::Runtime,
@@ -523,68 +527,70 @@ impl RouterPlugin for StaticGraphPlugin {
     fn on_http_request<'request>(
         &'request self,
         payload: OnHttpRequestHookPayload<'request>,
-    ) -> OnHttpRequestHookResult<'request> {
-        self.runtime.lifecycle.metrics().graphql_request();
-        let selected = self.runtime.lifecycle.load();
-        payload.set_supergraph(selected.graph.hive.clone());
-        payload
-            .context
-            .insert(SelectedRouterPolicy(selected.authorization.clone()));
-        if let Some(internal) = &self.runtime.internal_subscription {
-            let is_internal_subscription = payload.router_http_request.path() == internal.path;
-            let supplied = payload
+    ) -> OnHttpRequestHookFuture<'request> {
+        Box::pin(async move {
+            self.runtime.lifecycle.metrics().graphql_request();
+            let selected = self.runtime.lifecycle.load();
+            payload.set_supergraph(selected.graph.hive.clone());
+            payload
+                .context
+                .insert(SelectedRouterPolicy(selected.authorization.clone()));
+            if let Some(internal) = &self.runtime.internal_subscription {
+                let is_internal_subscription = payload.router_http_request.path() == internal.path;
+                let supplied = payload
+                    .router_http_request
+                    .headers()
+                    .get(INTERNAL_SUBSCRIPTION_HEADER)
+                    .and_then(|value| value.to_str().ok());
+                if !internal.authorizes(payload.router_http_request.path(), supplied) {
+                    return invalid_bearer_response(payload);
+                }
+                if is_internal_subscription {
+                    payload.context.insert(TrustedInternalSubscription);
+                }
+            }
+            let Some(provider) = &self.runtime.authentication else {
+                return payload.proceed();
+            };
+            let Some(authorization) = payload
                 .router_http_request
                 .headers()
-                .get(INTERNAL_SUBSCRIPTION_HEADER)
-                .and_then(|value| value.to_str().ok());
-            if !internal.authorizes(payload.router_http_request.path(), supplied) {
+                .get(hive_router::http::header::AUTHORIZATION)
+            else {
+                return payload.proceed();
+            };
+            let Ok(authorization) = authorization.to_str() else {
                 return invalid_bearer_response(payload);
-            }
-            if is_internal_subscription {
-                payload.context.insert(TrustedInternalSubscription);
-            }
-        }
-        let Some(provider) = &self.runtime.authentication else {
-            return payload.proceed();
-        };
-        let Some(authorization) = payload
-            .router_http_request
-            .headers()
-            .get(hive_router::http::header::AUTHORIZATION)
-        else {
-            return payload.proceed();
-        };
-        let Ok(authorization) = authorization.to_str() else {
-            return invalid_bearer_response(payload);
-        };
-        let Some(token) = strict_bearer_token(authorization) else {
-            return invalid_bearer_response(payload);
-        };
-        match provider.authenticate_bearer(token) {
-            Ok(principal) => {
-                payload.context.insert(principal);
-                payload.proceed()
-            }
-            Err(error) => {
-                let unavailable =
-                    matches!(error.kind(), crate::AuthenticationErrorKind::Unavailable);
-                payload.end_with_graphql_error(
-                    GraphQLError::from_message_and_code(
+            };
+            let Some(token) = strict_bearer_token(authorization) else {
+                return invalid_bearer_response(payload);
+            };
+            match provider.authenticate_bearer(token) {
+                Ok(principal) => {
+                    payload.context.insert(principal);
+                    payload.proceed()
+                }
+                Err(error) => {
+                    let unavailable =
+                        matches!(error.kind(), crate::AuthenticationErrorKind::Unavailable);
+                    payload.end_with_graphql_error(
+                        GraphQLError::from_message_and_code(
+                            if unavailable {
+                                "authentication service unavailable"
+                            } else {
+                                "invalid bearer credential"
+                            },
+                            "UNAUTHENTICATED",
+                        ),
                         if unavailable {
-                            "authentication service unavailable"
+                            hive_router::http::StatusCode::SERVICE_UNAVAILABLE
                         } else {
-                            "invalid bearer credential"
+                            hive_router::http::StatusCode::UNAUTHORIZED
                         },
-                        "UNAUTHENTICATED",
-                    ),
-                    if unavailable {
-                        hive_router::http::StatusCode::SERVICE_UNAVAILABLE
-                    } else {
-                        hive_router::http::StatusCode::UNAUTHORIZED
-                    },
-                )
+                    )
+                }
             }
-        }
+        })
     }
 
     async fn on_graphql_analysis<'execution>(
@@ -841,6 +847,20 @@ pub(crate) fn strict_bearer_token(authorization: &str) -> Option<&str> {
         return None;
     }
     Some(token)
+}
+
+// Hive 0.2 binds execution settings to each immutable graph generation. Build
+// them from the same private configuration as the server, before publication.
+fn build_graph_options(
+    config: &RouterConfig,
+) -> Result<hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions, RouterError> {
+    let hive = build_hive_config(config, 0, None)?;
+    let mut options = hive_router::plugins::hooks::on_supergraph_load::SupergraphOptions::default();
+    options.traffic_shaping = (&hive.traffic_shaping).into();
+    options.headers = hive.headers;
+    options.subscriptions = (&hive.subscriptions).into();
+    options.error_masking = hive.error_masking;
+    Ok(options)
 }
 
 fn build_hive_config(

@@ -43,8 +43,7 @@ graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.7.2", de
 graphql-orm-operation-catalog = { path = "crates/graphql-orm-operation-catalog", version = "0.4.0" }
 graphql-orm-router-protocol = { path = "crates/graphql-orm-router-protocol", version = "0.2.1" }
 graphql-orm-storage = { path = "crates/graphql-orm-storage", version = "0.6.2", default-features = false }
-hive-router = "=0.0.87"
-hive-router-config = "=0.1.10"
+hive-router = "=0.2.19"
 jsonwebtoken = { version = "=11.0.0", features = ["rust_crypto"] }
 proc-macro2 = "1"
 quote = "1"
