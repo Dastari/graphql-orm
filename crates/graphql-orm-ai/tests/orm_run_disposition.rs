@@ -483,6 +483,10 @@ async fn recovery_required_still_admits_acknowledgement() {
         .expect("dismissing a failure asserts nothing about re-execution safety");
     assert_eq!(acknowledged.disposition, AiRunDisposition::Acknowledged);
     assert!(acknowledged.retry_run_id.is_none());
+    // Dismissing the failure notice does not rewrite historical activity.
+    let activity = listed_activity(&fixture).await;
+    assert_eq!(activity.state, Some(AiSessionActivityState::Error));
+    assert_eq!(activity.run_id, Some(sent.run_id));
     let after = fixture
         .sessions
         .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 20, 20, 100)
