@@ -82,6 +82,53 @@ pub struct AiSessionConnection {
     pub edges: Vec<AiSessionEdge>,
     /// Relay page metadata.
     pub page_info: PageInfo,
+    /// Authoritative activity for exactly this authorized page, independent of inbox retention.
+    pub activity_snapshot: AiSessionActivitySnapshot,
+}
+
+/// Closed display state of the newest submitted run; never execution authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
+pub enum AiSessionActivityState {
+    /// Work is queued, running, retrying, or waiting on a tool/provider/subscription.
+    #[graphql(name = "Working")]
+    Working,
+    /// The newest submitted run completed successfully.
+    #[graphql(name = "Done")]
+    Done,
+    /// The session is empty or its newest run needs approval/reauthentication.
+    #[graphql(name = "Prompt")]
+    Prompt,
+    /// The newest submitted run failed, was cancelled, or requires recovery.
+    #[graphql(name = "Error")]
+    Error,
+}
+
+/// Metadata-only activity for one authorized session.
+#[derive(Clone, Debug, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiSessionActivity {
+    /// Authorized session identity.
+    pub session_id: Uuid,
+    /// Closed current state; absent when required durable run/message evidence is unavailable.
+    pub state: Option<AiSessionActivityState>,
+    /// Run selected by the newest durable message/retry request, never a late completion.
+    pub run_id: Option<Uuid>,
+    /// Actual sequence of the selected run's input message; explicit retry may reuse an older input.
+    pub input_message_sequence: Option<i64>,
+    /// Server timestamp when this run was queued, retained for elapsed displays.
+    pub started_at: Option<i64>,
+}
+
+/// Bounded, current-principal activity snapshot paired with a session-list page.
+#[derive(Clone, Debug, Default, SimpleObject)]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
+pub struct AiSessionActivitySnapshot {
+    /// Stable principal-inbox horizon around the metadata reads. Ignore older replay
+    /// for this snapshot; later activity events invalidate it rather than replacing
+    /// newest-run state with the event of an older run.
+    pub inbox_watermark: i64,
+    /// One entry per visible page edge, in that edge order; never full conversation history.
+    pub sessions: Vec<AiSessionActivity>,
 }
 
 /// Message shell; large content remains in separately windowed blocks.

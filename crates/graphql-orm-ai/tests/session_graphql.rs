@@ -189,6 +189,7 @@ impl AiSessionService for RecordingSessionService {
         Ok(AiSessionConnection {
             edges: vec![],
             page_info: page_info(),
+            activity_snapshot: Default::default(),
         })
     }
 

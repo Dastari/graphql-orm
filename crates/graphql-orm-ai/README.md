@@ -10,6 +10,14 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.103.0` adds a bounded `AiSessions.ActivitySnapshot` to the session-list
+connection. Initial status reads the durable run selected by each session's newest
+message/retry request, without opening messages, tool results, or inbox payloads. Error/Done
+survive inbox and content retention; an older run finishing late cannot replace the
+newer submitted run. A stable principal inbox watermark supports replay handoff;
+later relevant inbox events invalidate this snapshot for a coalesced page refresh.
+No persistence migration is required; schema module remains `0.68.0`.
+
 Completed native callback turns retain a distinct, protected evidence-only checkpoint.
 The coordinator counts already completed reads and automatic writes once, validates
 their ordered durable results and egress, and then persists the final provider output.

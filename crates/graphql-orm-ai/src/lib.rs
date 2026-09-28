@@ -83,6 +83,8 @@ mod orm_run_disposition;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_runs;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_session_activity;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_execution;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_session_retention;

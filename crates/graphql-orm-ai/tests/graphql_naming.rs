@@ -9,6 +9,9 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     let sdl = Schema::build(AiQueryRoot, AiMutationRoot, AiSubscriptionRoot)
         .finish()
         .sdl();
+    for state in ["Working", "Done", "Prompt", "Error"] {
+        assert!(sdl.contains(&format!("\t{state}\n")));
+    }
     let configuration_sdl = Schema::build(
         AiConfigurationQueryRoot,
         AiConfigurationMutationRoot,
@@ -26,6 +29,9 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     #[cfg(not(feature = "graphql-case-pascal"))]
     {
         assert!(sdl.contains("aiSessions("));
+        assert!(sdl.contains("activitySnapshot: AiSessionActivitySnapshot!"));
+        assert!(sdl.contains("inboxWatermark: Int!"));
+        assert!(sdl.contains("inputMessageSequence: Int"));
         assert!(sdl.contains("failureDisposition: AiRunDisposition\n"));
         assert!(sdl.contains("aiMessages(sessionId:"));
         assert!(sdl.contains("aiToolCallResultPreview(input:"));
@@ -60,6 +66,9 @@ fn configured_graphql_case_is_coherent_without_aliases() {
     #[cfg(feature = "graphql-case-pascal")]
     {
         assert!(sdl.contains("AiSessions("));
+        assert!(sdl.contains("ActivitySnapshot: AiSessionActivitySnapshot!"));
+        assert!(sdl.contains("InboxWatermark: Int!"));
+        assert!(sdl.contains("InputMessageSequence: Int"));
         assert!(sdl.contains("FailureDisposition: AiRunDisposition\n"));
         assert!(sdl.contains("AiMessages(SessionId:"));
         assert!(sdl.contains("AiToolCallResultPreview(Input:"));

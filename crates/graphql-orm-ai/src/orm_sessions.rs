@@ -72,6 +72,35 @@ pub struct OrmAiSessionService {
 }
 
 impl OrmAiSessionService {
+    async fn inbox_head(&self, kind: &str, subject: &str) -> Result<i64, AiError> {
+        let kind = kind.to_owned();
+        let subject = subject.to_owned();
+        let stream_id = crate::orm_inbox::inbox_stream_id(&kind, &subject);
+        self.database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    let stream = tx
+                        .find_by_id::<AiInboxStreamRecord>(&stream_id)
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    let Some(stream) = stream else {
+                        return Ok(0);
+                    };
+                    if stream.principal_kind != kind
+                        || stream.principal_subject != subject
+                        || stream.stream_head < 0
+                        || stream.minimum_retained_sequence < 1
+                        || stream.minimum_retained_sequence > stream.stream_head.saturating_add(1)
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                    }
+                    Ok(stream.stream_head)
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
     /// Creates a durable session service.
     pub fn new(
         database: Database<DefaultWriteBackend>,
@@ -487,46 +516,73 @@ impl AiSessionService for OrmAiSessionService {
         page: ValidatedKeysetConnection,
     ) -> Result<AiSessionConnection, AiError> {
         let (kind, subject) = principal_identity(principal);
-        let connection = AiSessionRecord::keyset_connection_page(
-            &self.database,
-            AiSessionRecordWhereInput {
-                owner_principal_kind: Some(StringFilter {
-                    eq: Some(kind),
+        if !(1..=200).contains(&page.limit) {
+            return Err(AiError::InvalidInput(
+                "invalid session activity page size".to_owned(),
+            ));
+        }
+        for _ in 0..3 {
+            let before = self.inbox_head(&kind, subject).await?;
+            let connection = AiSessionRecord::keyset_connection_page(
+                &self.database,
+                AiSessionRecordWhereInput {
+                    owner_principal_kind: Some(StringFilter {
+                        eq: Some(kind.clone()),
+                        ..Default::default()
+                    }),
+                    owner_subject: Some(StringFilter {
+                        eq: Some(subject.to_owned()),
+                        ..Default::default()
+                    }),
+                    state: Some(StringFilter {
+                        in_list: Some(vec!["active".to_owned(), "archived".to_owned()]),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                owner_subject: Some(StringFilter {
-                    eq: Some(subject.to_owned()),
-                    ..Default::default()
-                }),
-                state: Some(StringFilter {
-                    in_list: Some(vec!["active".to_owned(), "archived".to_owned()]),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            page_input(&page, false),
-        )
-        .await
-        .map_err(map_orm)?;
+                },
+                page_input(&page, false),
+            )
+            .await
+            .map_err(map_orm)?;
 
-        let mut edges = Vec::with_capacity(connection.edges.len());
-        for edge in connection.edges {
-            if !self
-                .access_policy
-                .can_access_scope(principal, &record_scope(&edge.node), AiSessionAction::List)
-                .await
-                .is_allowed()
-            {
+            let mut edges = Vec::with_capacity(connection.edges.len());
+            for edge in connection.edges {
+                if !self
+                    .access_policy
+                    .can_access_scope(principal, &record_scope(&edge.node), AiSessionAction::List)
+                    .await
+                    .is_allowed()
+                {
+                    continue;
+                }
+                edges.push(AiSessionEdge {
+                    node: session_view(&edge.node)?,
+                    cursor: edge.cursor,
+                });
+            }
+            let mut page_info = connection.page_info;
+            page_info.total_count = None;
+            let sessions = crate::orm_session_activity::session_activity(
+                &self.database,
+                &kind,
+                subject,
+                &edges,
+            )
+            .await?;
+            let after = self.inbox_head(&kind, subject).await?;
+            if before != after {
                 continue;
             }
-            edges.push(AiSessionEdge {
-                node: session_view(&edge.node)?,
-                cursor: edge.cursor,
+            return Ok(AiSessionConnection {
+                edges,
+                page_info,
+                activity_snapshot: crate::AiSessionActivitySnapshot {
+                    inbox_watermark: after,
+                    sessions,
+                },
             });
         }
-        let mut page_info = connection.page_info;
-        page_info.total_count = None;
-        Ok(AiSessionConnection { edges, page_info })
+        Err(AiError::Conflict)
     }
 
     async fn session(

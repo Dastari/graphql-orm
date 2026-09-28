@@ -10,6 +10,41 @@ supersedes: []
 
 # Migration Guide
 
+## 0.103.0: bounded initial session activity
+
+`AiSessionConnection` gains the public `activity_snapshot` field; custom Rust
+implementations must populate `AiSessionActivitySnapshot`. Its GraphQL
+`ActivitySnapshot` (camelCase with the default naming feature) contains a stable
+`InboxWatermark` and one `Sessions` metadata entry per returned edge. The enum values
+are `Working`, `Done`, `Prompt`, and `Error`. Null state means required durable
+message/run evidence is unavailable, not successful completion. Empty sessions are
+`Prompt`; approval/reauthentication waits are `Prompt`; cancellation and uncertain
+recovery remain `Error`. `StartedAt` is the queued run timestamp.
+
+Status selects the run of the highest durable session run-request sequence
+(`message_queued` or `run_retry_queued`), even if an older run finishes later.
+A retry resolves its immutable disposition to the newly authored run; it never
+assumes the input message's original run ID is current. `InputMessageSequence`
+retains the actual input-message sequence and may decrease on an explicit retry
+of an older input. Inbox and message-content retention do not remove that
+metadata. A newer submitted run takes precedence over older active/terminal runs.
+Clients should seed initial rows from this snapshot and invalidate/refetch the
+bounded list when subsequent activity events arrive; do not blindly replace it
+with a late older-run event. Done acknowledgement remains a client presentation
+choice. Acknowledging a failed run dismisses its detailed failure surface but
+retains `Error` as historical sidebar status, preserving the existing status policy.
+Keep inbox cursor advancement independent of per-page snapshot hydration.
+
+The ORM service takes at most three stable-horizon attempts, returning `Conflict`
+on continuous concurrent inbox changes. It uses the supplied current principal and
+current scope-list policy, exactly like the owning session query. Callers must not
+supply a cached/stale principal. Database reads are constant-count batched metadata
+queries for at most 200 page rows, with per-parent one-request windows and no counts.
+Session event shells survive ordinary inbox/message-content retention; deleting
+sessions are excluded. No event or message protected content is opened.
+No entity, index, durable semantic, backup, or restore change is introduced: no data
+migration is required, and `AI_SCHEMA_MODULE_VERSION` remains `0.68.0`.
+
 `graphql-orm-ai` is not yet published. This guide is still mandatory so early
 Git consumers and disposable test deployments can track schema and API changes
 without guessing.
