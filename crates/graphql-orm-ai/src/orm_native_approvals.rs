@@ -14,6 +14,24 @@ pub enum AiNativeToolControlKind {
 
 impl AiNativeToolControlKind {
     pub(crate) fn model_value(self) -> serde_json::Value {
+        let mut value = self.legacy_model_value();
+        value["formatVersion"] = serde_json::json!(2);
+        value["requiredNextAction"] = serde_json::json!("FinishCurrentTurn");
+        value["instructions"] = serde_json::json!(concat!(
+            "Finish your current response now with a brief message that human approval is required. ",
+            "Do not call any more tools, retry the action, poll for approval, sleep, or wait. ",
+            "The approval request becomes available only after this response finishes. ",
+            "This call did not execute an action. The server will handle the human decision and ",
+            "automatically continue the approved action if approval is granted. ",
+            "Resume only when the server provides the continuation; do not initiate it yourself."
+        ));
+        value
+    }
+
+    // Keep the exact historical value: stored checkpoints bind these bytes and
+    // must survive a rolling upgrade. A new guidance revision needs a new closed
+    // format, not permissive field matching or rewriting retained evidence.
+    fn legacy_model_value(self) -> serde_json::Value {
         serde_json::json!({
             "formatVersion": 1,
             "kind": "FrameworkToolControl",
@@ -24,6 +42,10 @@ impl AiNativeToolControlKind {
             "effectExecuted": false,
             "retryAllowed": false,
         })
+    }
+
+    pub(crate) fn matches_persisted_model_value(self, value: &serde_json::Value) -> bool {
+        *value == self.model_value() || *value == self.legacy_model_value()
     }
 }
 
@@ -585,6 +607,76 @@ pub(crate) fn native_receipt_hash(value: &serde_json::Value) -> Result<String, c
 #[cfg(test)]
 mod preparation_limit_tests {
     use super::*;
+
+    #[test]
+    fn native_control_receipt_requires_turn_completion_before_human_wait() {
+        for (kind, status) in [
+            (AiNativeToolControlKind::ApprovalPending, "ApprovalPending"),
+            (
+                AiNativeToolControlKind::ConsequentialCallsPaused,
+                "ConsequentialCallsPaused",
+            ),
+        ] {
+            let value = kind.model_value();
+            assert_eq!(value["formatVersion"], 2);
+            assert_eq!(value["status"], status);
+            assert_eq!(value["effectExecuted"], false);
+            assert_eq!(value["retryAllowed"], false);
+            assert_eq!(value["requiredNextAction"], "FinishCurrentTurn");
+            let instruction = value["instructions"].as_str().unwrap();
+            assert!(instruction.contains(
+                "Do not call any more tools, retry the action, poll for approval, sleep, or wait."
+            ));
+            assert!(instruction.contains("only after this response finishes"));
+            assert!(
+                instruction
+                    .contains("automatically continue the approved action if approval is granted")
+            );
+            assert!(instruction.contains("Resume only when the server provides the continuation"));
+            assert!(serde_json::to_vec(&value).unwrap().len() < 1024);
+            assert!(kind.matches_persisted_model_value(&value));
+        }
+    }
+
+    #[test]
+    fn native_control_receipt_checkpoint_accepts_only_exact_legacy_or_guided_values() {
+        for (kind, status) in [
+            (AiNativeToolControlKind::ApprovalPending, "ApprovalPending"),
+            (
+                AiNativeToolControlKind::ConsequentialCallsPaused,
+                "ConsequentialCallsPaused",
+            ),
+        ] {
+            // Literal retained v1 fixture does not depend on the new writer.
+            let legacy = serde_json::json!({"formatVersion":1,"kind":"FrameworkToolControl",
+                "status":status,"effectExecuted":false,"retryAllowed":false});
+            assert!(kind.matches_persisted_model_value(&legacy));
+            for original in [legacy, kind.model_value()] {
+                for (field, replacement) in [
+                    ("formatVersion", serde_json::json!(99)),
+                    ("effectExecuted", serde_json::json!(true)),
+                    ("retryAllowed", serde_json::json!(true)),
+                    ("status", serde_json::json!("Approved")),
+                    ("instructions", serde_json::json!("execute immediately")),
+                    ("requiredNextAction", serde_json::json!("Retry")),
+                    ("unexpected", serde_json::json!(true)),
+                ] {
+                    let mut tampered = original.clone();
+                    tampered[field] = replacement;
+                    assert!(!kind.matches_persisted_model_value(&tampered), "{field}");
+                }
+            }
+            let mut downgraded = kind.model_value();
+            downgraded["formatVersion"] = serde_json::json!(1);
+            assert!(!kind.matches_persisted_model_value(&downgraded));
+            let mut missing_guidance = kind.model_value();
+            missing_guidance
+                .as_object_mut()
+                .unwrap()
+                .remove("instructions");
+            assert!(!kind.matches_persisted_model_value(&missing_guidance));
+        }
+    }
 
     #[test]
     fn native_protected_preparation_has_separate_exact_envelope_ceiling() {

@@ -659,7 +659,7 @@ impl OrmAiCoordinatorCheckpointService {
                 }
                 NativeOutcomeKind::FrameworkControl => {
                     let kind = outcome.control_kind.ok_or(AiError::Conflict)?;
-                    if *output != kind.model_value()
+                    if !kind.matches_persisted_model_value(output)
                         || manifest.sources[0].kind != "native_tool_control_receipt"
                         || manifest.sources[0].classification != crate::DataClassification::Internal
                         || manifest.sources[0].trust != crate::AiSourceTrust::TrustedRuntime

@@ -18,6 +18,12 @@ newer submitted run. A stable principal inbox watermark supports replay handoff;
 later relevant inbox events invalidate this snapshot for a coalesced page refresh.
 No persistence migration is required; schema module remains `0.68.0`.
 
+Native approval control replies instruct the provider to finish its current turn
+before the server publishes the human approval request. The provider must not
+poll, sleep or retry; only server-driven continuation can resume an approved
+action. Exact legacy receipts remain readable; see the rollback qualification in
+[MIGRATION.md](MIGRATION.md).
+
 Codex 0.156.1 `sleep` display items are admitted only as bounded, exact-turn
 start/completion metadata. They grant no application execution or approval and
 cannot extend the provider's absolute deadline; see the

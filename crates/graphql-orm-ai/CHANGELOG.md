@@ -30,6 +30,11 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Native no-effect control replies explicitly tell providers to finish the turn
+  before human approval can be published, without polling, sleeping or retrying.
+  New guided v2 receipts retain no-effect/retry-false authority; exact historical
+  v1 checkpoint values remain readable. Older readers cannot adopt v2 evidence.
+
 - Release exact supervised run process ownership after terminal outcomes and
   parked waits, retaining durable provider cursors for fenced resume. Empty-thread
   owner-slot admission deferral remains distinct from uncertain provider dispatch;

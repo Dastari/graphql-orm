@@ -107,7 +107,13 @@ Ordinary read-only and supervised constructors do not enable this mode.
 A callback that needs approval first stores a protected, non-executable
 candidate under the active run fence. Its separately egress-authorized
 `ApprovalPending` control receipt says that no effect ran and retry is not
-allowed. Later mutations in that same turn receive durable
+allowed. Guided v2 replies require the provider to finish its current response
+promptly, with no further calls, polling, sleeping, waiting or retries. The server
+publishes approval only after that response settles, and provides automatic
+continuation only if the human decision approves the exact action. The provider
+cannot initiate that continuation. Exact old v1 receipts remain valid evidence;
+new v2 receipts require a compatible reader (use forward repair after writes).
+Later mutations in that same turn receive durable
 `ConsequentialCallsPaused` receipts; reads can continue through current policy.
 No approval is available for human consumption while the provider turn is
 still active or its usage is uncertain.

@@ -56,6 +56,16 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.102.2 to 0.102.3
 
+New native no-effect control replies use closed model-visible format version 2
+with an explicit finish-current-turn instruction. The server cannot publish
+approval before that turn settles; the provider must not poll, sleep, retry or
+continue itself. Server-driven continuation follows only an approved decision.
+The stored checkpoint/container format and AI schema module are unchanged; readers
+accept only the exact historical v1 or exact guided v2 model value, retaining all
+manifest/hash/identity/authorization checks. Do not rewrite old evidence. Once v2
+receipts/checkpoints have been written, use forward repair: readers at 0.102.2
+cannot validate them, so blindly reverting that binary is unsupported.
+
 No data, GraphQL or configuration migration is required. AI schema
 module remains `0.68.0`. The Codex protocol actor now accepts only the installed
 0.156.1 schema's correlated `sleep` display item (`id`, `type`, unsigned
