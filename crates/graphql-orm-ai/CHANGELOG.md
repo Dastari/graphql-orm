@@ -28,6 +28,17 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Fixed
+
+- Release exact supervised run process ownership after terminal outcomes and
+  parked waits, retaining durable provider cursors for fenced resume. Empty-thread
+  owner-slot admission deferral remains distinct from uncertain provider dispatch;
+  later provider errors cannot be reclassified as safe pre-transport retries.
+- Admit Codex 0.156.1's strictly typed, turn-correlated `sleep` display lifecycle
+  after native approval control replies. Duration metadata cannot execute an
+  application action, extend the absolute turn deadline, or publish approval;
+  malformed, duplicate, cross-turn and unmatched lifecycle evidence stays closed.
+
 ## [0.102.2] - 2026-09-28
 
 ### Fixed

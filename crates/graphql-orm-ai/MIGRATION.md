@@ -54,6 +54,22 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.102.2 to 0.102.3
+
+No data, GraphQL or configuration migration is required. AI schema
+module remains `0.68.0`. The Codex protocol actor now accepts only the installed
+0.156.1 schema's correlated `sleep` display item (`id`, `type`, unsigned
+`durationMs`) with exact start/completion identity and shared lifecycle/frame
+bounds. It does not invoke a clock, tool, command or endpoint action. Existing
+absolute provider deadlines and exact interruption remain authoritative. Approval
+is still published only after provider settlement and durable checkpointing;
+unknown native items and consequential execution remain independently fenced.
+Supervised terminal and parked-wait exits release exact process ownership while
+retaining the durable cursor for fenced resume. A new non-exhaustive `Parked`
+close reason is diagnostic only. Proven empty-session owner-slot deferral stays
+pre-transport; later stream failures remain uncertain. Existing recovery-required
+runs must not be reopened or replayed.
+
 ## 0.102.1 to 0.102.2
 
 No public API, runtime, configuration, schema or stored-data migration is needed.

@@ -18,6 +18,11 @@ newer submitted run. A stable principal inbox watermark supports replay handoff;
 later relevant inbox events invalidate this snapshot for a coalesced page refresh.
 No persistence migration is required; schema module remains `0.68.0`.
 
+Codex 0.156.1 `sleep` display items are admitted only as bounded, exact-turn
+start/completion metadata. They grant no application execution or approval and
+cannot extend the provider's absolute deadline; see the
+[provider lifecycle contract](docs/provider-sessions-and-hosted-activity.md).
+
 Completed native callback turns retain a distinct, protected evidence-only checkpoint.
 The coordinator counts already completed reads and automatic writes once, validates
 their ordered durable results and egress, and then persists the final provider output.
@@ -114,7 +119,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.102.2", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.102.3", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -336,7 +341,7 @@ sharing the existing runtime-warning limits; notices cannot establish readiness.
 
 The retained dynamic-tool launch profile is version-observed on Codex 0.148.0.
 It disables Code Mode, Code Mode-only routing, shell, files, MCP, browser, and
-every other native item surface by default. Native web search has a separate
+every other execution-capable native item surface by default. Native web search has a separate
 default-off `with_web_search(bool)` profile setting and still requires an exact
 request built-in, egress proof, supported PublicWeb/allow-domain policy, and
 call ceiling. Its other sole process-level exception is `code_mode_host`:

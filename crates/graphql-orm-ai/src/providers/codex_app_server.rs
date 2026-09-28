@@ -3588,7 +3588,9 @@ enum ThreadLifecycleOperation {
 /// exact-resume- or turn-correlated, flood-bounded control event. A warning
 /// never advances resume readiness. Empty reasoning-item
 /// lifecycles are admitted only as content-free signals while turn-level
-/// reasoning summaries remain explicitly disabled. All other server-initiated
+/// reasoning summaries remain explicitly disabled. Typed `sleep` display items
+/// retain exact turn/item lifecycle bounds without granting execution authority
+/// or extending the provider turn deadline. All other server-initiated
 /// requests and non-allowlisted notifications fail closed.
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
@@ -4635,10 +4637,17 @@ impl AiCodexAppServerProtocolActor {
         {
             return self.accept_web_search_lifecycle(method, &params);
         }
+        if matches!(method, "item/started" | "item/completed")
+            && params.pointer("/item/type").and_then(Value::as_str) == Some("sleep")
+        {
+            return self.accept_sleep_lifecycle(method, &params);
+        }
         validate_allowed_notification(method, &params)?;
         self.accept_notification_binding(method, &params)?;
         if method == "turn/completed" {
-            if !self.pending_dynamic_requests.is_empty()
+            if (params.pointer("/turn/status").and_then(Value::as_str) == Some("completed")
+                && self.started_items.values().any(|kind| kind == "sleep"))
+                || !self.pending_dynamic_requests.is_empty()
                 || !self.started_dynamic_calls.is_empty()
                 || !self.responded_dynamic_calls.is_empty()
                 || self.readiness_probe_tool_id.is_some()
@@ -4772,6 +4781,65 @@ impl AiCodexAppServerProtocolActor {
             call_id: call_id.to_owned(),
             provider_name: provider_name.to_owned(),
             completed,
+        })
+    }
+
+    // Codex 0.156.1 SleepThreadItem is display-only metadata for interruptible
+    // clock.sleep. Admitting this notification neither invokes a tool nor grants
+    // execution authority. The process guard still owns the unchanged absolute
+    // turn deadline and interruption; durationMs never creates a host-side wait.
+    fn accept_sleep_lifecycle(
+        &mut self,
+        method: &str,
+        params: &Value,
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        self.validate_active_turn(
+            direct_reference(params, "threadId")?,
+            direct_reference(params, "turnId")?,
+        )?;
+        let object = params.as_object().ok_or(ProviderError::Rejected)?;
+        let completed = method == "item/completed";
+        let timestamp = if completed {
+            "completedAtMs"
+        } else {
+            "startedAtMs"
+        };
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "item" | "threadId" | "turnId") && key != timestamp)
+            || object
+                .get(timestamp)
+                .and_then(Value::as_i64)
+                .is_none_or(|value| value <= 0)
+        {
+            return Err(ProviderError::Rejected);
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct SleepItem {
+            id: String,
+            #[serde(rename = "type")]
+            kind: SleepKind,
+            #[serde(rename = "durationMs")]
+            _duration_ms: u64,
+        }
+        #[derive(Deserialize)]
+        enum SleepKind {
+            #[serde(rename = "sleep")]
+            Sleep,
+        }
+        let item: SleepItem =
+            serde_json::from_value(object.get("item").cloned().ok_or(ProviderError::Rejected)?)
+                .map_err(|_| ProviderError::Rejected)?;
+        let SleepKind::Sleep = item.kind;
+        if !valid_reference(&item.id) {
+            return Err(ProviderError::Rejected);
+        }
+        // Reuse exact turn/item identity and shared lifecycle flood accounting.
+        self.accept_notification_binding(method, params)?;
+        Ok(AiCodexAppServerInbound::Notification {
+            method: method.to_owned(),
+            params: params.clone(),
         })
     }
 
@@ -8061,6 +8129,200 @@ pub(crate) mod tests {
         assert!(actor.active_turn_id.is_none());
     }
 
+    fn sleep_notification(thread: &str, method: &str, duration: Value) -> Vec<u8> {
+        let timestamp = if method == "item/started" {
+            "startedAtMs"
+        } else {
+            "completedAtMs"
+        };
+        let mut params = json!({"threadId":thread,"turnId":"turn-controls",
+            "item":{"id":"sleep-one","type":"sleep","durationMs":duration}});
+        params[timestamp] = json!(3);
+        lifecycle_notification(method, params)
+    }
+
+    #[test]
+    fn native_sleep_after_approval_receipt_allows_settlement_without_execution() {
+        let (mut actor, thread) = actor_after_native_control_replies();
+        for method in ["item/started", "item/completed"] {
+            assert!(matches!(
+                actor
+                    .accept(&sleep_notification(&thread, method, json!(1000)))
+                    .unwrap(),
+                AiCodexAppServerInbound::Notification { .. }
+            ));
+        }
+        actor
+            .accept(&token_usage_notification(&thread, "turn-controls"))
+            .unwrap();
+        actor
+            .accept(&turn_completed_notification(&thread, "turn-controls"))
+            .unwrap();
+        assert!(actor.active_turn_id.is_none());
+        assert!(!actor.started_items.values().any(|kind| kind == "sleep"));
+        assert!(actor.pending_dynamic_requests.is_empty());
+    }
+
+    #[test]
+    fn native_sleep_rejects_malformed_duration_and_extra_payloads() {
+        for duration in [
+            Value::Null,
+            json!(-1),
+            json!(1.5),
+            json!("1000"),
+            json!({}),
+            json!(1e30),
+        ] {
+            let (mut actor, thread) = actor_after_native_control_replies();
+            assert!(
+                actor
+                    .accept(&sleep_notification(&thread, "item/started", duration))
+                    .is_err()
+            );
+            assert!(!actor.started_items.values().any(|kind| kind == "sleep"));
+        }
+        for extra in ["command", "content", "arguments", "tool"] {
+            let (mut actor, thread) = actor_after_native_control_replies();
+            let mut frame: Value =
+                serde_json::from_slice(&sleep_notification(&thread, "item/started", json!(1000)))
+                    .unwrap();
+            frame["params"]["item"][extra] = json!("must-not-cross-boundary");
+            assert!(actor.accept(&serde_json::to_vec(&frame).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn native_sleep_requires_exact_turn_timestamp_and_matching_completion() {
+        for path in [
+            "/params/threadId",
+            "/params/turnId",
+            "/params/startedAtMs",
+            "/params/item/id",
+        ] {
+            let (mut actor, thread) = actor_after_native_control_replies();
+            let mut frame: Value =
+                serde_json::from_slice(&sleep_notification(&thread, "item/started", json!(1000)))
+                    .unwrap();
+            *frame.pointer_mut(path).unwrap() = if path.ends_with("startedAtMs") {
+                json!(0)
+            } else if path.ends_with("item/id") {
+                json!("")
+            } else {
+                json!("wrong-correlation")
+            };
+            assert!(actor.accept(&serde_json::to_vec(&frame).unwrap()).is_err());
+        }
+        let (mut actor, thread) = actor_after_native_control_replies();
+        assert!(
+            actor
+                .accept(&sleep_notification(&thread, "item/completed", json!(1000)))
+                .is_err()
+        );
+        let start = sleep_notification(&thread, "item/started", json!(1000));
+        actor.accept(&start).unwrap();
+        assert!(actor.accept(&start).is_err());
+        // The documented metadata may differ at completion; only item/turn
+        // identity binds the lifecycle, never a model-authored duration.
+        actor
+            .accept(&sleep_notification(&thread, "item/completed", json!(2000)))
+            .unwrap();
+        assert!(
+            actor
+                .accept(&sleep_notification(&thread, "item/completed", json!(1000)))
+                .is_err()
+        );
+        assert!(actor.accept(&start).is_err());
+    }
+
+    #[test]
+    fn native_sleep_retains_frame_and_lifecycle_bounds_and_no_server_requests() {
+        let (mut actor, thread) = actor_after_native_control_replies();
+        let frame = sleep_notification(&thread, "item/started", json!(1000));
+        actor.maximum_frame_bytes = frame.len() - 1;
+        assert!(actor.accept(&frame).is_err());
+        actor.maximum_frame_bytes = MAXIMUM_FRAME_BYTES;
+        actor.accepted_item_lifecycle_starts = MAXIMUM_TEXT_BLOCKS;
+        assert!(actor.accept(&frame).is_err());
+        let (mut actor, thread) = actor_after_native_control_replies();
+        let mut frame: Value =
+            serde_json::from_slice(&sleep_notification(&thread, "item/started", json!(1000)))
+                .unwrap();
+        frame["id"] = json!(900);
+        assert!(actor.accept(&serde_json::to_vec(&frame).unwrap()).is_err());
+    }
+
+    #[tokio::test]
+    async fn native_sleep_notification_cannot_extend_absolute_turn_deadline() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let entry = pool.entry(binding, registration("1.0.0")).await.unwrap();
+        entry.turn_active.store(true, Ordering::Release);
+        let (mut actor, thread) = actor_after_native_control_replies();
+        let source: ProviderEventStream = Box::pin(async_stream::try_stream! {
+            actor.accept(&sleep_notification(&thread, "item/started", json!(u64::MAX)))?;
+            // Real process adapters ignore the validated display notification
+            // and remain pending until provider output or the outer deadline.
+            std::future::pending::<()>().await;
+            yield ProviderEvent::ResponseCompleted { response_id: None };
+        });
+        let mut guarded = pool
+            .guard_turn_stream(
+                binding,
+                entry,
+                tokio::time::Instant::now() + Duration::from_millis(20),
+                source,
+            )
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(1), guarded.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            Some(Err(ProviderError::Classified(
+                AiProviderFailureCategory::Timeout
+            )))
+        ));
+        assert!(pool.inner.entries.lock().await.is_empty());
+        assert_eq!(counters.shutdowns.load(Ordering::SeqCst), 1);
+        // The yielded error stream still owns its guard until the caller drops
+        // it; final kill-on-drop follows the ordinary adapter lifetime.
+        drop(guarded);
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn native_sleep_does_not_grant_completion_or_block_exact_interruption() {
+        let (mut actor, thread) = actor_after_native_control_replies();
+        // The schema's full u64 metadata range does not extend the external
+        // absolute turn deadline or cause a host-side sleep.
+        actor
+            .accept(&sleep_notification(
+                &thread,
+                "item/started",
+                json!(u64::MAX),
+            ))
+            .unwrap();
+        assert!(
+            actor
+                .accept(&turn_completed_notification(&thread, "turn-controls"))
+                .is_err()
+        );
+        let interrupted: Value =
+            serde_json::from_slice(&actor.interrupt_turn(&thread, "turn-controls").unwrap())
+                .unwrap();
+        assert_eq!(interrupted["method"], "turn/interrupt");
+        assert_eq!(interrupted["params"]["turnId"], "turn-controls");
+        let mut finished: Value =
+            serde_json::from_slice(&turn_completed_notification(&thread, "turn-controls")).unwrap();
+        finished["params"]["turn"]["status"] = json!("interrupted");
+        actor
+            .accept(&serde_json::to_vec(&finished).unwrap())
+            .unwrap();
+        assert!(actor.active_turn_id.is_none());
+        assert!(!actor.started_items.values().any(|kind| kind == "sleep"));
+    }
+
     #[test]
     fn native_approval_control_wire_reply_does_not_admit_unreviewed_items() {
         // Names are from installed Codex 0.156.1's generated ThreadItem schema.
@@ -8070,7 +8332,6 @@ pub(crate) mod tests {
             "functionCallOutput",
             "subAgentActivity",
             "imageView",
-            "sleep",
             "imageGeneration",
             "enteredReviewMode",
             "exitedReviewMode",
