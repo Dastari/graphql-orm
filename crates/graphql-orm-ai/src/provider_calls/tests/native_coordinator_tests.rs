@@ -10,6 +10,8 @@ use crate::{
 enum CallbackScenario {
     #[default]
     MixedApproval,
+    AdmissionLimited,
+    StreamLimited,
     InvalidReadFirst,
     InvalidMutation,
     FixedBroker,
@@ -58,6 +60,8 @@ struct MixedRetainedProvider {
     scenario: CallbackScenario,
     turns: AtomicUsize,
     created: AtomicUsize,
+    live: std::sync::Mutex<Option<crate::AiProviderRunBinding>>,
+    closed: std::sync::Mutex<Vec<crate::AiProviderRunCloseReason>>,
     invalid_mutations_rejected: Arc<AtomicUsize>,
     replies: Arc<Mutex<Vec<serde_json::Value>>>,
     database: std::sync::Mutex<Option<Database<SqliteBackend>>>,
@@ -86,13 +90,54 @@ impl AiProvider for MixedRetainedProvider {
 
     async fn create_empty_session(
         &self,
-        _: &crate::AiProviderRunBinding,
+        binding: &crate::AiProviderRunBinding,
         _: &AiProviderSessionDescriptor,
         _: &ModelRequest,
     ) -> Result<AiProviderSessionCursor, ProviderError> {
         assert_eq!(self.created.fetch_add(1, Ordering::SeqCst), 0);
+        if self.scenario == CallbackScenario::AdmissionLimited {
+            return Err(ProviderError::RateLimited);
+        }
+        assert!(self.live.lock().unwrap().replace(*binding).is_none());
         AiProviderSessionCursor::new("test.thread", "coordinator-native-thread")
             .map_err(|_| ProviderError::Rejected)
+    }
+
+    async fn close_run(
+        &self,
+        binding: &crate::AiProviderRunBinding,
+        reason: crate::AiProviderRunCloseReason,
+    ) -> Result<crate::AiProviderRunCloseOutcome, ProviderError> {
+        let database = self.database.lock().unwrap().clone().unwrap();
+        if reason == crate::AiProviderRunCloseReason::Parked {
+            let rows =
+                crate::orm_provider_session::AiProviderSessionBindingRecord::query(database.pool())
+                    .fetch_all()
+                    .await
+                    .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].state, "parked_wait",
+                "process closes only after durable park"
+            );
+        } else if reason == crate::AiProviderRunCloseReason::Completed {
+            let run = AiRunRecord::find_by_id(&database, &binding.run_id().0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                run.state, "completed",
+                "process closes only after durable terminal write"
+            );
+        }
+        let mut live = self.live.lock().unwrap();
+        if live.as_ref().is_some_and(|current| current == binding) {
+            live.take();
+            self.closed.lock().unwrap().push(reason);
+            Ok(crate::AiProviderRunCloseOutcome::Closed)
+        } else {
+            Ok(crate::AiProviderRunCloseOutcome::NotActive)
+        }
     }
 
     async fn stream(
@@ -111,6 +156,9 @@ impl AiProvider for MixedRetainedProvider {
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&self.provider_kind(), &request)?;
         let turn = self.turns.fetch_add(1, Ordering::SeqCst);
+        if self.scenario == CallbackScenario::StreamLimited {
+            return Err(ProviderError::RateLimited);
+        }
         let opened = context.provider_session().ok_or(ProviderError::Rejected)?;
         assert_eq!(opened.cursor().kind(), "test.thread");
         if turn == 0 {
@@ -121,6 +169,18 @@ impl AiProvider for MixedRetainedProvider {
             assert!(request.continuation.is_none());
         } else {
             assert_eq!(turn, 1, "approval resume must not replay a provider turn");
+            assert!(
+                self.live
+                    .lock()
+                    .unwrap()
+                    .replace(context.run_binding().unwrap())
+                    .is_none(),
+                "approved retained resume starts a fresh process after park cleanup"
+            );
+            assert_eq!(
+                *self.closed.lock().unwrap(),
+                vec![crate::AiProviderRunCloseReason::Parked]
+            );
             assert_eq!(
                 opened.activation(),
                 AiProviderSessionActivation::ExistingRetained
@@ -925,6 +985,61 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     )
     .await
     .unwrap();
+    if scenario == CallbackScenario::StreamLimited {
+        assert!(
+            matches!(
+                waiting,
+                Ok(AiSupervisedAgentRunOutcome::RecoveryRequired { .. })
+            ),
+            "rate limit after turn dispatch has no no-effect proof: {waiting:?}"
+        );
+        assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        assert!(provider.live.lock().unwrap().is_none());
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![crate::AiProviderRunCloseReason::RecoveryRequired]
+        );
+        return;
+    }
+    if scenario == CallbackScenario::AdmissionLimited {
+        assert!(
+            matches!(
+                waiting,
+                Ok(AiSupervisedAgentRunOutcome::Failed {
+                    provider_turns: 0,
+                    total_tool_calls: 0
+                })
+            ),
+            "pre-business capacity refusal is certain: {waiting:?}"
+        );
+        assert_eq!(provider.turns.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 0);
+        assert!(provider.live.lock().unwrap().is_none());
+        assert!(
+            crate::orm_provider_session::AiProviderSessionBindingRecord::query(
+                fixture.database.pool()
+            )
+            .fetch_all()
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "failed");
+        assert_eq!(
+            run.error_code.as_deref(),
+            Some("provider_pre_transport_failed")
+        );
+        return;
+    }
+    assert!(
+        provider.live.lock().unwrap().is_none(),
+        "each settled coordinator invocation releases its live process"
+    );
     if scenario.rejects_completion() {
         assert!(
             !matches!(
@@ -1220,6 +1335,14 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
     );
     assert_eq!(provider.turns.load(Ordering::SeqCst), 2);
     assert_eq!(provider.created.load(Ordering::SeqCst), 1);
+    assert!(provider.live.lock().unwrap().is_none());
+    assert_eq!(
+        *provider.closed.lock().unwrap(),
+        vec![
+            crate::AiProviderRunCloseReason::Parked,
+            crate::AiProviderRunCloseReason::Completed
+        ]
+    );
     assert_eq!(provider.replies.lock().await.len(), expected_calls);
     let calls = AiToolCallRecord::query(fixture.database.pool())
         .fetch_all()
@@ -1263,4 +1386,20 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         fixture.completed_executions.load(Ordering::SeqCst),
         2 + broker_executions
     );
+}
+
+#[tokio::test]
+async fn native_coordinator_pre_dispatch_capacity_refusal_is_certain_without_effects() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::AdmissionLimited,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_rate_limit_after_dispatch_remains_uncertain() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::StreamLimited,
+    ))
+    .await;
 }

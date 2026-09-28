@@ -140,6 +140,9 @@ fn provider_run_owner_fingerprint(reference: &agql_auth::PrincipalReference) -> 
 pub enum AiProviderRunCloseReason {
     /// The fenced run completed successfully.
     Completed,
+    /// The provider turn and continuation were durably parked for a wait.
+    /// Only the live process is closed; retained session state is preserved.
+    Parked,
     /// The fenced run failed safely.
     Failed,
     /// Owner cancellation won the durable fence.

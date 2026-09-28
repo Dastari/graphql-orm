@@ -3490,7 +3490,14 @@ impl AiProviderCallExecutor {
                     .await
                     .map_err(|error| {
                         self.record_provider_failure(error.safe_category());
-                        AiError::ProviderFailed
+                        // Empty-session admission has not sent business input.
+                        // Capacity refusal here proves a safe deferral; the
+                        // same provider error during a turn remains uncertain.
+                        if matches!(error, ProviderError::RateLimited) {
+                            AiError::ProviderSessionDeferred
+                        } else {
+                            AiError::ProviderFailed
+                        }
                     })?;
                 let request = crate::AiProviderSessionBindRequest::new(
                     session_plan.descriptor().clone(),
@@ -3526,7 +3533,14 @@ impl AiProviderCallExecutor {
                     .await
                     .map_err(|error| {
                         self.record_provider_failure(error.safe_category());
-                        AiError::ProviderFailed
+                        // Empty-session admission has not sent business input.
+                        // Capacity refusal here proves a safe deferral; the
+                        // same provider error during a turn remains uncertain.
+                        if matches!(error, ProviderError::RateLimited) {
+                            AiError::ProviderSessionDeferred
+                        } else {
+                            AiError::ProviderFailed
+                        }
                     })?;
                 let request = crate::AiProviderSessionBindRequest::new(
                     session_plan.descriptor().clone(),
