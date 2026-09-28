@@ -22,8 +22,10 @@ compatibility is described below and in [MIGRATION.md](MIGRATION.md).
 Native approval control replies instruct the provider to finish its current turn
 before the server publishes the human approval request. The provider must not
 poll, sleep or retry; only server-driven continuation can resume an approved
-action. Exact legacy receipts remain readable; see the rollback qualification in
-[MIGRATION.md](MIGRATION.md).
+action. Apply schema module `0.69.0` for the guided receipt semantics; there are no
+table or column changes. Exact legacy receipts remain readable, but older readers
+cannot accept newly written v2 evidence. See the forward-repair and backup
+fingerprint boundaries in [MIGRATION.md](MIGRATION.md).
 
 Codex 0.156.1 `sleep` display items are admitted only as bounded, exact-turn
 start/completion metadata. They grant no application execution or approval and
@@ -34,8 +36,9 @@ Completed native callback turns retain a distinct, protected evidence-only check
 The coordinator counts already completed reads and automatic writes once, validates
 their ordered durable results and egress, and then persists the final provider output.
 These checkpoints cannot be adopted as pending execution; stale leases, changed
-rows or uncertain effects remain closed without replay. Apply schema module `0.68.0`
-when adopting `0.102.1` or later; see [MIGRATION.md](MIGRATION.md).
+rows or uncertain effects remain closed without replay. These completed-native
+semantics were introduced with schema module `0.68.0` in `0.102.1`; the current
+module is `0.69.0`. See [MIGRATION.md](MIGRATION.md).
 Version `0.102.2` makes restore-ordering test fixtures independent of wall-clock
 boundaries without changing runtime or schema behavior.
 

@@ -34,6 +34,9 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   before human approval can be published, without polling, sleeping or retrying.
   New guided v2 receipts retain no-effect/retry-false authority; exact historical
   v1 checkpoint values remain readable. Older readers cannot adopt v2 evidence.
+  Advance AI schema module to `0.69.0` for these persistent semantics, without
+  table/column changes or evidence rewrites. The module and backup fingerprints
+  change; older snapshots retain their original restore compatibility boundary.
 
 - Release exact supervised run process ownership after terminal outcomes and
   parked waits, retaining durable provider cursors for fenced resume. Empty-thread
