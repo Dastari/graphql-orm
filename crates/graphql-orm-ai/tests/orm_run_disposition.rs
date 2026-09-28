@@ -483,6 +483,10 @@ async fn recovery_required_still_admits_acknowledgement() {
         .expect("dismissing a failure asserts nothing about re-execution safety");
     assert_eq!(acknowledged.disposition, AiRunDisposition::Acknowledged);
     assert!(acknowledged.retry_run_id.is_none());
+    // Dismissing the failure notice does not rewrite historical activity.
+    let activity = listed_activity(&fixture).await;
+    assert_eq!(activity.state, Some(AiSessionActivityState::Error));
+    assert_eq!(activity.run_id, Some(sent.run_id));
     let after = fixture
         .sessions
         .conversation_bootstrap(&fixture.owner, AiSessionId(session.id), 20, 20, 100)
@@ -806,4 +810,188 @@ async fn owner_retry_preserves_the_original_execution_selection_snapshot() {
         reader.selection_for_run(&lease).await.unwrap(),
         session.execution_selection.unwrap()
     );
+}
+
+async fn listed_activity(fixture: &Fixture) -> AiSessionActivity {
+    fixture
+        .sessions
+        .sessions(
+            &fixture.owner,
+            graphql_orm::graphql::pagination::KeysetConnectionInput {
+                first: Some(50),
+                ..Default::default()
+            }
+            .validate(50, 200)
+            .unwrap(),
+        )
+        .await
+        .unwrap()
+        .activity_snapshot
+        .sessions
+        .into_iter()
+        .next()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn session_activity_tracks_retries_new_input_and_ignores_late_old_completion() {
+    let fixture = fixture().await;
+    let session = session(&fixture).await;
+    let original = failed_run(
+        &fixture,
+        session.id,
+        AiRunState::Failed,
+        "agent_rule_budget_exceeded",
+        Some("agent_rule_budget_exceeded"),
+    )
+    .await;
+    assert_eq!(
+        listed_activity(&fixture).await.state,
+        Some(AiSessionActivityState::Error)
+    );
+    let first = fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: original.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap()
+        .retry_run_id
+        .unwrap();
+    let activity = listed_activity(&fixture).await;
+    assert_eq!(activity.run_id, Some(first));
+    assert_eq!(activity.state, Some(AiSessionActivityState::Working));
+    assert_eq!(activity.input_message_sequence, Some(1));
+    let first_lease = fixture
+        .runs
+        .claim_next("activity-retry")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_lease.run_id().0, first);
+    let first_lease = fixture.runs.start(&first_lease).await.unwrap();
+    fixture
+        .runs
+        .finish(
+            &first_lease,
+            AiRunCompletion::new(
+                AiRunState::Failed,
+                "agent_rule_budget_exceeded",
+                Some("agent_rule_budget_exceeded".to_owned()),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let second = fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: first,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap()
+        .retry_run_id
+        .unwrap();
+    assert_eq!(listed_activity(&fixture).await.run_id, Some(second));
+    let second_lease = fixture
+        .runs
+        .claim_next("activity-retry-two")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_lease.run_id().0, second);
+    let second_lease = fixture.runs.start(&second_lease).await.unwrap();
+    let newest = fixture
+        .sessions
+        .send_message(
+            &fixture.owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "A new input takes precedence".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    fixture
+        .runs
+        .finish(
+            &second_lease,
+            AiRunCompletion::new(AiRunState::Completed, "complete", None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    let activity = listed_activity(&fixture).await;
+    assert_eq!(activity.run_id, Some(newest.run_id));
+    assert_eq!(activity.input_message_sequence, Some(2));
+    assert_eq!(activity.state, Some(AiSessionActivityState::Working));
+    let lease = fixture
+        .runs
+        .claim_next("newer-input-failure")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.run_id().0, newest.run_id);
+    let lease = fixture.runs.start(&lease).await.unwrap();
+    fixture
+        .runs
+        .finish(
+            &lease,
+            AiRunCompletion::new(
+                AiRunState::Failed,
+                "agent_rule_budget_exceeded",
+                Some("agent_rule_budget_exceeded".to_owned()),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    fixture
+        .sessions
+        .send_message(
+            &fixture.owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Third input".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        listed_activity(&fixture).await.input_message_sequence,
+        Some(3)
+    );
+    let older_input_retry = fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: newest.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap()
+        .retry_run_id
+        .unwrap();
+    let activity = listed_activity(&fixture).await;
+    assert_eq!(activity.run_id, Some(older_input_retry));
+    assert_eq!(activity.input_message_sequence, Some(2));
+    assert_eq!(activity.state, Some(AiSessionActivityState::Working));
 }

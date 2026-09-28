@@ -228,7 +228,7 @@ that one argument produced the direct `dynamicToolCall` / `item/tool/call`.
 `codex_arguments()` therefore omits only that disable. The actor still sends
 `features.code_mode_host=false`, `features.code_mode=false`, and
 `features.code_mode_only=false` per thread; shell, file, MCP, browser, and every
-other native item remain unavailable and are rejected by the protocol actor if
+other execution-capable native item remain unavailable and are rejected by the protocol actor if
 emitted. A registration may separately opt into only native web search as
 described below. Re-run the direct-tool readiness probe and negative native-
 item suite before adopting another Codex version.
@@ -253,6 +253,18 @@ documented `item/tool/call` server request. Commands, shell, files, patches,
 MCP, collaboration, images, browser control, raw reasoning, and arbitrary
 methods remain forbidden. Native web-search items are admitted only for an
 enabled profile and exact request configuration.
+
+Codex 0.156.1 additionally emits a `sleep` display item for interruptible
+`clock.sleep`. The actor accepts exactly `id`, `type: sleep`, and unsigned
+`durationMs`, positive lifecycle timestamps, and the active thread/turn. Matching
+completion must retain item identity; duration remains metadata. Shared frame-size and
+item-count ceilings apply; successful turn settlement rejects unfinished sleeps.
+Interrupted/failed turns may retire an outstanding sleep. Duration is metadata
+only: no host wait is scheduled and the absolute provider turn deadline is never
+renewed. Existing adapters can ignore these validated item notifications. Native
+approval candidates still require successful provider settlement and the existing
+durable checkpoint before publication; this compatibility does not grant any
+consequential call, endpoint, command, file, or approval authority.
 
 The generated 0.148.0 server-notification union makes the outer `emittedAtMs`
 metadata optional for every method. The actor accepts an omitted field but

@@ -19,6 +19,80 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.102.2 to 0.103.0
+
+### Bounded initial session activity
+
+`AiSessionConnection` gains the public `activity_snapshot` field; custom Rust
+implementations must populate `AiSessionActivitySnapshot`. Its GraphQL
+`ActivitySnapshot` (camelCase with the default naming feature) contains a stable
+`InboxWatermark` and one `Sessions` metadata entry per returned edge. The enum values
+are `Working`, `Done`, `Prompt`, and `Error`. Null state means required durable
+message/run evidence is unavailable, not successful completion. Empty sessions are
+`Prompt`; approval/reauthentication waits are `Prompt`; cancellation and uncertain
+recovery remain `Error`. `StartedAt` is the queued run timestamp.
+
+Status selects the run of the highest durable session run-request sequence
+(`message_queued` or `run_retry_queued`), even if an older run finishes later.
+A retry resolves its immutable disposition to the newly authored run; it never
+assumes the input message's original run ID is current. `InputMessageSequence`
+retains the actual input-message sequence and may decrease on an explicit retry
+of an older input. Inbox and message-content retention do not remove that
+metadata. A newer submitted run takes precedence over older active/terminal runs.
+Clients should seed initial rows from this snapshot and invalidate/refetch the
+bounded list when subsequent activity events arrive; do not blindly replace it
+with a late older-run event. Done acknowledgement remains a client presentation
+choice. Acknowledging a failed run dismisses its detailed failure surface but
+retains `Error` as historical sidebar status, preserving the existing status policy.
+Keep inbox cursor advancement independent of per-page snapshot hydration.
+
+The ORM service takes at most three stable-horizon attempts, returning `Conflict`
+on continuous concurrent inbox changes. It uses the supplied current principal and
+current scope-list policy, exactly like the owning session query. Callers must not
+supply a cached/stale principal. Database reads are constant-count batched metadata
+queries for at most 200 page rows, with per-parent one-request windows and no counts.
+Session event shells survive ordinary inbox/message-content retention; deleting
+sessions are excluded. No event or message protected content is opened.
+The activity projection itself adds no entity, index, durable semantic, backup, or
+restore change and requires no data migration. Native checkpoint compatibility
+changes in the same release are described below.
+
+### Native approval and provider lifecycle
+
+New native no-effect control replies use closed model-visible format version 2
+with an explicit finish-current-turn instruction. The server cannot publish
+approval before that turn settles; the provider must not poll, sleep, retry or
+continue itself. Server-driven continuation follows only an approved decision.
+Apply AI schema module `0.69.0` through the normal managed schema workflow to
+record the new retained receipt semantics. The checkpoint/container format is
+unchanged; readers accept only the exact historical v1 or exact guided v2 model
+value, retaining all
+manifest/hash/identity/authorization checks. Do not rewrite old evidence. Once v2
+receipts/checkpoints have been written, use forward repair: readers at 0.102.2
+cannot validate them, so blindly reverting that binary is unsupported.
+
+No table/column changes, SQL backfills or stored evidence rewrites are required.
+The schema-module version participates in the module fingerprint and module-aware
+backup schema hash; perform the host's normal managed-schema and readiness
+preparation before starting the new writer. Snapshots from module `0.68.0` retain
+their original fingerprint: the restore reconciler rejects a mismatched expected
+fingerprint, so do not assume automatic cross-version restore compatibility or
+relabel historical snapshots. Qualify the appropriate restore/forward-upgrade
+procedure independently. Exact legacy checkpoint validation remains unchanged.
+
+The Codex protocol actor now accepts only the installed
+0.156.1 schema's correlated `sleep` display item (`id`, `type`, unsigned
+`durationMs`) with exact start/completion identity and shared lifecycle/frame
+bounds. It does not invoke a clock, tool, command or endpoint action. Existing
+absolute provider deadlines and exact interruption remain authoritative. Approval
+is still published only after provider settlement and durable checkpointing;
+unknown native items and consequential execution remain independently fenced.
+Supervised terminal and parked-wait exits release exact process ownership while
+retaining the durable cursor for fenced resume. A new non-exhaustive `Parked`
+close reason is diagnostic only. Proven empty-session owner-slot deferral stays
+pre-transport; later stream failures remain uncertain. Existing recovery-required
+runs must not be reopened or replayed.
+
 ## 0.102.1 to 0.102.2
 
 No public API, runtime, configuration, schema or stored-data migration is needed.

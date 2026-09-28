@@ -20,6 +20,33 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Added
+
+- Add authoritative, owner/policy-scoped activity snapshots to bounded session lists.
+  At most five batched ORM metadata reads select the newest durable run request
+  per visible session, including explicit retry lineage; no N+1 bootstrap, full history, or protected payload reads.
+  A stable inbox horizon prevents old replay from replacing initial state. Inbox
+  retention and late completion of older runs do not change selected-run status.
+
+### Fixed
+
+- Native no-effect control replies explicitly tell providers to finish the turn
+  before human approval can be published, without polling, sleeping or retrying.
+  New guided v2 receipts retain no-effect/retry-false authority; exact historical
+  v1 checkpoint values remain readable. Older readers cannot adopt v2 evidence.
+  Advance AI schema module to `0.69.0` for these persistent semantics, without
+  table/column changes or evidence rewrites. The module and backup fingerprints
+  change; older snapshots retain their original restore compatibility boundary.
+
+- Release exact supervised run process ownership after terminal outcomes and
+  parked waits, retaining durable provider cursors for fenced resume. Empty-thread
+  owner-slot admission deferral remains distinct from uncertain provider dispatch;
+  later provider errors cannot be reclassified as safe pre-transport retries.
+- Admit Codex 0.156.1's strictly typed, turn-correlated `sleep` display lifecycle
+  after native approval control replies. Duration metadata cannot execute an
+  application action, extend the absolute turn deadline, or publish approval;
+  malformed, duplicate, cross-turn and unmatched lifecycle evidence stays closed.
+
 ## [0.102.2] - 2026-09-28
 
 ### Fixed

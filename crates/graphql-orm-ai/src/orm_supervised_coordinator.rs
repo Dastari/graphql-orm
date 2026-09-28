@@ -715,6 +715,15 @@ impl AiSupervisedAgentCoordinator {
         &self,
         claimed: &AiRunLease,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        let result = Box::pin(self.execute_claimed_inner(claimed)).await;
+        self.close_provider_run(claimed, &result).await;
+        result
+    }
+
+    async fn execute_claimed_inner(
+        &self,
+        claimed: &AiRunLease,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         let lease = self.run_control.start(claimed).await?;
         if self.run_control.cancellation(&lease).await?.is_some() {
             return Ok(AiSupervisedAgentRunOutcome::Cancelled {
@@ -778,6 +787,46 @@ impl AiSupervisedAgentCoordinator {
     /// Returns a safe error for stale/denied pre-execution evidence, lost
     /// fencing, or failure to persist a terminal classification.
     pub async fn execute_approved_claim(
+        &self,
+        claim: &crate::AiApprovedRunClaim,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        let result = Box::pin(self.execute_approved_claim_inner(claim)).await;
+        self.close_provider_run(claim.lease(), &result).await;
+        result
+    }
+
+    async fn close_provider_run(
+        &self,
+        lease: &AiRunLease,
+        result: &Result<AiSupervisedAgentRunOutcome, AiError>,
+    ) {
+        use crate::AiProviderRunCloseReason;
+        let reason = match result {
+            Ok(AiSupervisedAgentRunOutcome::Completed { .. }) => {
+                AiProviderRunCloseReason::Completed
+            }
+            Ok(AiSupervisedAgentRunOutcome::WaitingApproval { .. }) => {
+                AiProviderRunCloseReason::Parked
+            }
+            Ok(AiSupervisedAgentRunOutcome::Failed { .. }) => AiProviderRunCloseReason::Failed,
+            Ok(AiSupervisedAgentRunOutcome::Cancelled { .. }) => {
+                AiProviderRunCloseReason::Cancelled
+            }
+            Ok(AiSupervisedAgentRunOutcome::RecoveryRequired { .. }) => {
+                AiProviderRunCloseReason::RecoveryRequired
+            }
+            Err(_) => AiProviderRunCloseReason::LeaseLost,
+        };
+        // Inner execution has settled its durable outcome/checkpoint before
+        // releasing this exact attempt's process. Closing does not delete its
+        // retained cursor or grant permission to replay tools. A later claim
+        // reopens the persisted continuation under its fresh authorization.
+        // As in the read-only coordinator, cleanup cannot rewrite the durable
+        // outcome, and each adapter retains its bounded kill-on-drop fallback.
+        let _ = self.provider_executor.close_run(lease, reason).await;
+    }
+
+    async fn execute_approved_claim_inner(
         &self,
         claim: &crate::AiApprovedRunClaim,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
@@ -2037,6 +2086,7 @@ mod tests {
         responses: Mutex<VecDeque<Result<crate::AiProviderCallResult, AiError>>>,
         require_checkpoint_cleared: bool,
         calls: AtomicUsize,
+        closed: Mutex<Vec<(crate::AiProviderRunBinding, crate::AiProviderRunCloseReason)>>,
     }
 
     impl TestProviderExecutor {
@@ -2050,6 +2100,18 @@ mod tests {
 
     #[async_trait]
     impl AiAgentProviderTurnExecutor for TestProviderExecutor {
+        async fn close_run(
+            &self,
+            lease: &AiRunLease,
+            reason: crate::AiProviderRunCloseReason,
+        ) -> Result<(), AiError> {
+            self.closed
+                .lock()
+                .unwrap()
+                .push((crate::AiProviderRunBinding::from_lease(lease)?, reason));
+            Ok(())
+        }
+
         async fn execute_turn(
             &self,
             lease: &AiRunLease,
@@ -3143,6 +3205,7 @@ mod tests {
             ])),
             require_checkpoint_cleared: true,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let checkpoints = Arc::new(TestAutomaticCheckpointWriter {
             provider_checkpoints: AtomicUsize::new(0),
@@ -3205,6 +3268,13 @@ mod tests {
         assert_eq!(checkpoints.provider_checkpoints.load(Ordering::SeqCst), 2);
         assert_eq!(checkpoints.automatic_checkpoints.load(Ordering::SeqCst), 1);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![(
+                crate::AiProviderRunBinding::from_lease(&lease).unwrap(),
+                crate::AiProviderRunCloseReason::Completed
+            )]
+        );
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
     }
 
@@ -3360,6 +3430,7 @@ mod tests {
             responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportBudgetDenied)])),
             require_checkpoint_cleared: false,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let coordinator = AiSupervisedAgentCoordinator::new(
             run.clone(),
@@ -3402,6 +3473,13 @@ mod tests {
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![(
+                crate::AiProviderRunBinding::from_lease(&lease).unwrap(),
+                crate::AiProviderRunCloseReason::Failed
+            )]
+        );
         assert_eq!(run.final_states(), vec![AiRunState::Failed]);
         assert_eq!(
             crate::classify_run_retry(
@@ -3424,6 +3502,7 @@ mod tests {
             responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportProviderFailed)])),
             require_checkpoint_cleared: false,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let coordinator = AiSupervisedAgentCoordinator::new(
             run.clone(),
@@ -3466,6 +3545,13 @@ mod tests {
         );
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![(
+                crate::AiProviderRunBinding::from_lease(&lease).unwrap(),
+                crate::AiProviderRunCloseReason::Failed
+            )]
+        );
         assert_eq!(run.final_states(), vec![AiRunState::Failed]);
         assert_eq!(
             crate::classify_run_retry(
@@ -3503,6 +3589,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: false,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let checkpoints = Arc::new(TestCheckpointWriter {
             provider_checkpoints: AtomicUsize::new(0),
@@ -3513,7 +3600,7 @@ mod tests {
         });
         let coordinator = AiSupervisedAgentCoordinator::new(
             run.clone(),
-            provider,
+            provider.clone(),
             Arc::new(TestOutputWriter),
             checkpoints.clone(),
             Arc::new(TestCheckpointControl {
@@ -3550,6 +3637,13 @@ mod tests {
         assert_eq!(stager.calls.load(Ordering::SeqCst), 1);
         assert!(stager.saw_checkpoint.load(Ordering::SeqCst));
         assert!(run.final_states().is_empty());
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![(
+                crate::AiProviderRunBinding::from_lease(&lease).unwrap(),
+                crate::AiProviderRunCloseReason::Parked
+            )]
+        );
     }
 
     #[tokio::test]
@@ -3570,6 +3664,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: false,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let stager = Arc::new(TestApprovalStager {
             calls: AtomicUsize::new(0),
@@ -3630,6 +3725,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: false,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let stager = Arc::new(TestApprovalStager {
             calls: AtomicUsize::new(0),
@@ -3695,6 +3791,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: true,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let run = Arc::new(TestRunControl::new());
         let planner = Arc::new(TestPlanner {
@@ -3738,6 +3835,13 @@ mod tests {
         assert!(control.consumed.load(Ordering::SeqCst));
         assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
         assert_eq!(planner.continuation_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![(
+                crate::AiProviderRunBinding::from_lease(&claimed).unwrap(),
+                crate::AiProviderRunCloseReason::Completed
+            )]
+        );
         assert_eq!(run.final_states(), vec![AiRunState::Completed]);
     }
 
@@ -3761,6 +3865,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: true,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let run = Arc::new(TestRunControl::new());
         let planner = Arc::new(TestPlanner {
@@ -3830,6 +3935,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: true,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let run = Arc::new(TestRunControl::new());
         let coordinator = AiSupervisedAgentCoordinator::new(
@@ -3894,6 +4000,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: true,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let run = Arc::new(TestRunControl::new());
         let coordinator = AiSupervisedAgentCoordinator::new(
@@ -3949,6 +4056,7 @@ mod tests {
             )])),
             require_checkpoint_cleared: false,
             calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
         });
         let run = Arc::new(TestRunControl::new());
         let coordinator = AiSupervisedAgentCoordinator::new(
@@ -4000,6 +4108,13 @@ mod tests {
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         assert_eq!(provider.remaining_responses(), 1);
         assert!(run.final_states().is_empty());
+        assert_eq!(
+            *provider.closed.lock().unwrap(),
+            vec![(
+                crate::AiProviderRunBinding::from_lease(claim.lease()).unwrap(),
+                crate::AiProviderRunCloseReason::RecoveryRequired
+            )]
+        );
     }
 
     #[test]

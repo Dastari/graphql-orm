@@ -1309,6 +1309,61 @@ pub(super) mod tests {
         })
     }
     #[tokio::test]
+    async fn settled_run_close_releases_same_owner_capacity_without_weakening_active_cap() {
+        let factory = test_factory(false);
+        let provider = AiGrokAcpProvider::new(
+            Arc::new(registration()),
+            factory.clone(),
+            2,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let reasons = [
+            AiProviderRunCloseReason::Completed,
+            AiProviderRunCloseReason::Parked,
+            AiProviderRunCloseReason::Failed,
+            AiProviderRunCloseReason::Cancelled,
+            AiProviderRunCloseReason::RecoveryRequired,
+            AiProviderRunCloseReason::LeaseLost,
+        ];
+        for (index, reason) in reasons.into_iter().enumerate() {
+            let current = binding();
+            let next = binding();
+            assert_ne!(current.session_id(), next.session_id());
+            assert_eq!(current.owner_fingerprint(), next.owner_fingerprint());
+            let entry = provider.entry(current).await.unwrap();
+            entry.active.store(true, Ordering::Release);
+            assert!(matches!(
+                provider.entry(next).await,
+                Err(ProviderError::RateLimited)
+            ));
+            entry.active.store(false, Ordering::Release);
+            // Completing a turn alone must not bypass lifecycle authority.
+            assert!(matches!(
+                provider.entry(next).await,
+                Err(ProviderError::RateLimited)
+            ));
+            drop(entry);
+            assert_eq!(
+                provider.close_run(&current, reason).await.unwrap(),
+                AiProviderRunCloseOutcome::Closed
+            );
+            assert!(provider.entries.lock().await.is_empty());
+            assert_eq!(provider.slots.available_permits(), 2);
+            assert_eq!(factory.killed.load(Ordering::Acquire), index * 2 + 1);
+            drop(provider.entry(next).await.unwrap());
+            assert_eq!(
+                provider
+                    .close_run(&next, AiProviderRunCloseReason::Completed)
+                    .await
+                    .unwrap(),
+                AiProviderRunCloseOutcome::Closed
+            );
+            assert_eq!(factory.killed.load(Ordering::Acquire), index * 2 + 2);
+        }
+    }
+
+    #[tokio::test]
     async fn interrupt_during_launch_drops_factory_and_never_installs_process() {
         let factory = test_factory(true);
         let provider = Arc::new(

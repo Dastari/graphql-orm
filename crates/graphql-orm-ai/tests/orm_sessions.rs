@@ -1286,3 +1286,183 @@ async fn generic_graphql_mutation_uses_the_same_selection_admission() {
         ))
     );
 }
+
+struct ChangeInboxDuringList {
+    sessions: Arc<OrmAiSessionService>,
+    owner: AuthPrincipal,
+    session_id: Uuid,
+    remaining: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl AiAccessPolicy for ChangeInboxDuringList {
+    async fn can_access_scope(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        action: AiSessionAction,
+    ) -> AiAccessDecision {
+        if matches!(action, AiSessionAction::List)
+            && self
+                .remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok()
+        {
+            self.sessions
+                .rename_session(
+                    &self.owner,
+                    RenameAiSessionInput {
+                        session_id: self.session_id,
+                        title: format!("Concurrent {}", Uuid::new_v4()),
+                        client_mutation_id: Uuid::new_v4(),
+                        expected_title_revision: None,
+                    },
+                )
+                .await
+                .expect("concurrent rename commits inbox event");
+        }
+        AiAccessDecision::allow("test", "test-v1")
+    }
+    async fn can_access_session(
+        &self,
+        _principal: &AuthPrincipal,
+        _session_id: AiSessionId,
+        _action: AiSessionAction,
+    ) -> AiAccessDecision {
+        AiAccessDecision::allow("test", "test-v1")
+    }
+}
+
+#[tokio::test]
+async fn activity_snapshot_retries_changed_inbox_horizon_and_bounds_continuous_churn() {
+    let sessions = Arc::new(service().await);
+    let owner = principal("snapshot-owner");
+    let session = sessions
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: scope_input(),
+                title: None,
+            },
+        )
+        .await
+        .unwrap();
+    let reader = |changes| {
+        OrmAiSessionService::new(
+            sessions.database().clone(),
+            Arc::new(ChangeInboxDuringList {
+                sessions: sessions.clone(),
+                owner: owner.clone(),
+                session_id: session.id,
+                remaining: std::sync::atomic::AtomicUsize::new(changes),
+            }),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+        )
+    };
+    let page = || {
+        KeysetConnectionInput {
+            first: Some(50),
+            ..Default::default()
+        }
+        .validate(50, 200)
+        .unwrap()
+    };
+    let snapshot = reader(1).sessions(&owner, page()).await.unwrap();
+    assert_eq!(snapshot.activity_snapshot.inbox_watermark, 2);
+    assert_eq!(snapshot.activity_snapshot.sessions.len(), 1);
+    assert_eq!(
+        snapshot.activity_snapshot.sessions[0].state,
+        Some(AiSessionActivityState::Prompt)
+    );
+    assert!(matches!(
+        reader(10).sessions(&owner, page()).await,
+        Err(AiError::Conflict)
+    ));
+    let other = reader(0)
+        .sessions(&principal("other-owner"), page())
+        .await
+        .unwrap();
+    assert!(other.edges.is_empty());
+    assert!(other.activity_snapshot.sessions.is_empty());
+    assert_eq!(other.activity_snapshot.inbox_watermark, 0);
+}
+
+struct RevocableListPolicy(std::sync::atomic::AtomicBool);
+
+#[async_trait]
+impl AiAccessPolicy for RevocableListPolicy {
+    async fn can_access_scope(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        _action: AiSessionAction,
+    ) -> AiAccessDecision {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            AiAccessDecision::allow("test", "test-v1")
+        } else {
+            AiAccessDecision::deny("revoked", "test-v2")
+        }
+    }
+    async fn can_access_session(
+        &self,
+        _principal: &AuthPrincipal,
+        _session_id: AiSessionId,
+        _action: AiSessionAction,
+    ) -> AiAccessDecision {
+        AiAccessDecision::allow("test", "test-v1")
+    }
+}
+
+#[tokio::test]
+async fn activity_snapshot_rechecks_current_scope_policy_without_cached_status() {
+    let sessions = service().await;
+    let owner = principal("revocable-owner");
+    sessions
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: scope_input(),
+                title: None,
+            },
+        )
+        .await
+        .unwrap();
+    let policy = Arc::new(RevocableListPolicy(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let reader = OrmAiSessionService::new(
+        sessions.database().clone(),
+        policy.clone(),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let page = || {
+        KeysetConnectionInput {
+            first: Some(50),
+            ..Default::default()
+        }
+        .validate(50, 200)
+        .unwrap()
+    };
+    assert_eq!(
+        reader
+            .sessions(&owner, page())
+            .await
+            .unwrap()
+            .activity_snapshot
+            .sessions
+            .len(),
+        1
+    );
+    policy.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    let denied = reader.sessions(&owner, page()).await.unwrap();
+    assert!(denied.edges.is_empty());
+    assert!(denied.activity_snapshot.sessions.is_empty());
+}

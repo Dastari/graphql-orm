@@ -10,12 +10,35 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.103.0` adds a bounded `AiSessions.ActivitySnapshot` to the session-list
+connection. Initial status reads the durable run selected by each session's newest
+message/retry request, without opening messages, tool results, or inbox payloads. Error/Done
+survive inbox and content retention; an older run finishing late cannot replace the
+newer submitted run. A stable principal inbox watermark supports replay handoff;
+later relevant inbox events invalidate this snapshot for a coalesced page refresh.
+The activity projection requires no data migration. Native checkpoint reader
+compatibility is described below and in [MIGRATION.md](MIGRATION.md).
+
+Native approval control replies instruct the provider to finish its current turn
+before the server publishes the human approval request. The provider must not
+poll, sleep or retry; only server-driven continuation can resume an approved
+action. Apply schema module `0.69.0` for the guided receipt semantics; there are no
+table or column changes. Exact legacy receipts remain readable, but older readers
+cannot accept newly written v2 evidence. See the forward-repair and backup
+fingerprint boundaries in [MIGRATION.md](MIGRATION.md).
+
+Codex 0.156.1 `sleep` display items are admitted only as bounded, exact-turn
+start/completion metadata. They grant no application execution or approval and
+cannot extend the provider's absolute deadline; see the
+[provider lifecycle contract](docs/provider-sessions-and-hosted-activity.md).
+
 Completed native callback turns retain a distinct, protected evidence-only checkpoint.
 The coordinator counts already completed reads and automatic writes once, validates
 their ordered durable results and egress, and then persists the final provider output.
 These checkpoints cannot be adopted as pending execution; stale leases, changed
-rows or uncertain effects remain closed without replay. Apply schema module `0.68.0`
-when adopting `0.102.1` or later; see [MIGRATION.md](MIGRATION.md).
+rows or uncertain effects remain closed without replay. These completed-native
+semantics were introduced with schema module `0.68.0` in `0.102.1`; the current
+module is `0.69.0`. See [MIGRATION.md](MIGRATION.md).
 Version `0.102.2` makes restore-ordering test fixtures independent of wall-clock
 boundaries without changing runtime or schema behavior.
 
@@ -106,7 +129,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.102.2", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.102.3", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
@@ -328,7 +351,7 @@ sharing the existing runtime-warning limits; notices cannot establish readiness.
 
 The retained dynamic-tool launch profile is version-observed on Codex 0.148.0.
 It disables Code Mode, Code Mode-only routing, shell, files, MCP, browser, and
-every other native item surface by default. Native web search has a separate
+every other execution-capable native item surface by default. Native web search has a separate
 default-off `with_web_search(bool)` profile setting and still requires an exact
 request built-in, egress proof, supported PublicWeb/allow-domain policy, and
 call ceiling. Its other sole process-level exception is `code_mode_host`:
