@@ -10,14 +10,6 @@ supersedes: []
 
 # Changelog
 
-## Unreleased
-
-- Add authoritative, owner/policy-scoped activity snapshots to bounded session lists.
-  At most five batched ORM metadata reads select the newest durable run request
-  per visible session, including explicit retry lineage; no N+1 bootstrap, full history, or protected payload reads.
-  A stable inbox horizon prevents old replay from replacing initial state. Inbox
-  retention and late completion of older runs do not change selected-run status.
-
 All notable user-visible changes are recorded here. The crate follows
 Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION.md).
 
@@ -27,6 +19,14 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
 ## [Unreleased]
+
+### Added
+
+- Add authoritative, owner/policy-scoped activity snapshots to bounded session lists.
+  At most five batched ORM metadata reads select the newest durable run request
+  per visible session, including explicit retry lineage; no N+1 bootstrap, full history, or protected payload reads.
+  A stable inbox horizon prevents old replay from replacing initial state. Inbox
+  retention and late completion of older runs do not change selected-run status.
 
 ### Fixed
 

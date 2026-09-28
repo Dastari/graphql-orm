@@ -10,7 +10,18 @@ supersedes: []
 
 # Migration Guide
 
-## 0.103.0: bounded initial session activity
+`graphql-orm-ai` is not yet published. This guide is still mandatory so early
+Git consumers and disposable test deployments can track schema and API changes
+without guessing.
+
+Migration entries preserve the dependency and schema facts for the checkpoint
+they describe. For the current workspace baseline and active delivery gates,
+use [implementation status](docs/implementation-status.md) and the central
+[AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.102.2 to 0.103.0
+
+### Bounded initial session activity
 
 `AiSessionConnection` gains the public `activity_snapshot` field; custom Rust
 implementations must populate `AiSessionActivitySnapshot`. Its GraphQL
@@ -42,19 +53,11 @@ supply a cached/stale principal. Database reads are constant-count batched metad
 queries for at most 200 page rows, with per-parent one-request windows and no counts.
 Session event shells survive ordinary inbox/message-content retention; deleting
 sessions are excluded. No event or message protected content is opened.
-No entity, index, durable semantic, backup, or restore change is introduced: no data
-migration is required, and `AI_SCHEMA_MODULE_VERSION` remains `0.68.0`.
+The activity projection itself adds no entity, index, durable semantic, backup, or
+restore change and requires no data migration. Native checkpoint compatibility
+changes in the same release are described below.
 
-`graphql-orm-ai` is not yet published. This guide is still mandatory so early
-Git consumers and disposable test deployments can track schema and API changes
-without guessing.
-
-Migration entries preserve the dependency and schema facts for the checkpoint
-they describe. For the current workspace baseline and active delivery gates,
-use [implementation status](docs/implementation-status.md) and the central
-[AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
-
-## 0.102.2 to 0.102.3
+### Native approval and provider lifecycle
 
 New native no-effect control replies use closed model-visible format version 2
 with an explicit finish-current-turn instruction. The server cannot publish

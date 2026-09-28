@@ -16,7 +16,8 @@ message/retry request, without opening messages, tool results, or inbox payloads
 survive inbox and content retention; an older run finishing late cannot replace the
 newer submitted run. A stable principal inbox watermark supports replay handoff;
 later relevant inbox events invalidate this snapshot for a coalesced page refresh.
-No persistence migration is required; schema module remains `0.68.0`.
+The activity projection requires no data migration. Native checkpoint reader
+compatibility is described below and in [MIGRATION.md](MIGRATION.md).
 
 Native approval control replies instruct the provider to finish its current turn
 before the server publishes the human approval request. The provider must not
