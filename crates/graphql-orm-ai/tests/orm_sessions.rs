@@ -279,6 +279,27 @@ async fn owner_isolation_atomic_send_idempotency_and_windowed_reads() {
         )
         .await
         .expect("message and run are committed atomically");
+    let resolved = service
+        .session_for_run(&owner, AiRunId(first.run_id))
+        .await
+        .expect("current owner can resolve run metadata")
+        .unwrap();
+    assert_eq!(resolved.id, session.id);
+    assert_eq!(resolved.state, "active");
+    assert!(
+        service
+            .session_for_run(&stranger, AiRunId(first.run_id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .session_for_run(&owner, AiRunId::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
     let replay = service
         .send_message(
             &owner,
@@ -1465,4 +1486,76 @@ async fn activity_snapshot_rechecks_current_scope_policy_without_cached_status()
     let denied = reader.sessions(&owner, page()).await.unwrap();
     assert!(denied.edges.is_empty());
     assert!(denied.activity_snapshot.sessions.is_empty());
+}
+
+#[tokio::test]
+async fn run_session_lookup_rechecks_policy_and_preserves_archive_delete_visibility() {
+    let sessions = service().await;
+    let owner = principal("run-shell-owner");
+    let session = sessions
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: scope_input(),
+                title: None,
+            },
+        )
+        .await
+        .unwrap();
+    let sent = sessions
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Inspect without effects".into(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = Arc::new(RevocableListPolicy(std::sync::atomic::AtomicBool::new(
+        true,
+    )));
+    let reader = OrmAiSessionService::new(
+        sessions.database().clone(),
+        policy.clone(),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let run = AiRunId(sent.run_id);
+    assert_eq!(
+        reader
+            .session_for_run(&owner, run)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "active"
+    );
+    policy.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        reader.session_for_run(&owner, run).await,
+        Err(AiError::Forbidden)
+    ));
+    policy.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    sessions
+        .archive_session(&owner, AiSessionId(session.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        reader
+            .session_for_run(&owner, run)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "archived"
+    );
+    sessions
+        .delete_session(&owner, AiSessionId(session.id))
+        .await
+        .unwrap();
+    assert!(reader.session_for_run(&owner, run).await.unwrap().is_none());
 }

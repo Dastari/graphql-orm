@@ -432,6 +432,24 @@ pub trait AiSessionService: Send + Sync {
         page: ValidatedKeysetConnection,
     ) -> Result<AiSessionConnection, AiError>;
 
+    /// Resolves a run to its currently visible session shell for host policy.
+    ///
+    /// This bounded lookup returns no messages, tool arguments, results or
+    /// credentials. Implementations must apply the same current owner, tenant
+    /// and scope checks as [`Self::session`]; a run ID is never an access grant.
+    /// Archived shells retain their state so execution policy can reject them.
+    ///
+    /// # Errors
+    /// Returns a safe persistence/access error when current visibility cannot
+    /// be established. Unsupported implementations return no visible session.
+    async fn session_for_run(
+        &self,
+        _principal: &AuthPrincipal,
+        _run_id: crate::AiRunId,
+    ) -> Result<Option<AiSessionView>, AiError> {
+        Ok(None)
+    }
+
     /// Loads one visible session shell.
     async fn session(
         &self,

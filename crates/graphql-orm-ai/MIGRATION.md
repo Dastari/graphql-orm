@@ -19,6 +19,20 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.104.0 to 0.105.0
+
+`AiToolAuthorizationPolicy` gains a compatible `authorize_request` default method.
+Existing policies compile unchanged and keep their scope/variable decisions. A
+host needing run-aware policy can override it and resolve the current session
+through `AiSessionService::session_for_run`, a bounded current owner/tenant/scope
+lookup returning no protected payloads. Its default returns no visible session
+for unsupported backends. The bridge rehydrates the principal,
+validates the operation contract, and uses the hook again after approval.
+Invocation identifiers are correlation metadata, never model-created grants or
+proof of session ownership; ordinary resolver authorization remains mandatory.
+No data migration, schema-module bump, GraphQL change or historical rewrite is
+needed. This hook does not implement or implicitly enable session-wide approval.
+
 ## 0.103.0 to 0.104.0
 
 Adopt the AI and tool-profile packages from one reviewed workspace release.

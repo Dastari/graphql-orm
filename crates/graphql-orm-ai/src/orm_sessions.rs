@@ -585,6 +585,20 @@ impl AiSessionService for OrmAiSessionService {
         Err(AiError::Conflict)
     }
 
+    async fn session_for_run(
+        &self,
+        principal: &AuthPrincipal,
+        run_id: crate::AiRunId,
+    ) -> Result<Option<AiSessionView>, AiError> {
+        let Some(run) = AiRunRecord::find_by_id(&self.database, &run_id.0)
+            .await
+            .map_err(|error| map_orm(OrmPublicError::from(error)))?
+        else {
+            return Ok(None);
+        };
+        self.session(principal, AiSessionId(run.session_id)).await
+    }
+
     async fn session(
         &self,
         principal: &AuthPrincipal,

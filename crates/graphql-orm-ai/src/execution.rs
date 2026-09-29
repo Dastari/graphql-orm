@@ -791,12 +791,7 @@ impl AuthenticatedToolBridge {
                 .map_err(|_| ToolExecutionError::Reauthorization)?;
             let authorization = self
                 .authorization_policy
-                .authorize(
-                    &principal,
-                    &request.invocation.scope,
-                    descriptor,
-                    &request.variables,
-                )
+                .authorize_request(&principal, descriptor, &request)
                 .await;
             if !authorization.is_complete_allow()
                 || authorization.approval_requirement() != AiApprovalRule::None
@@ -860,12 +855,7 @@ impl AuthenticatedToolBridge {
             .map_err(|_| ToolExecutionError::Reauthorization)?;
         let authorization = self
             .authorization_policy
-            .authorize(
-                &principal,
-                &request.invocation.scope,
-                descriptor,
-                &request.variables,
-            )
+            .authorize_request(&principal, descriptor, request)
             .await;
         if !authorization.is_complete_allow() {
             return Err(ToolExecutionError::Authorization);

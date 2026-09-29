@@ -209,6 +209,10 @@ impl AiEgressPolicy for AllowEgress {
 }
 
 fn runtime() -> AiRuntime {
+    runtime_with_policy(Arc::new(AllowTools))
+}
+
+fn runtime_with_policy(policy: Arc<dyn AiToolAuthorizationPolicy>) -> AiRuntime {
     let document = "query Current { current { scopes } }";
     let disclosure = AiDisclosureSchema::new(
         "current-v1",
@@ -277,7 +281,7 @@ fn runtime() -> AiRuntime {
     AiRuntime::builder()
         .principal_resolver(Arc::new(Resolver(principal(&["records:read"]))))
         .access_policy(Arc::new(AllowAccess))
-        .tool_authorization_policy(Arc::new(AllowTools))
+        .tool_authorization_policy(policy)
         .request_context_factory(Arc::new(ContextFactory))
         .graphql_executor(Arc::new(Executor))
         .graphql_targets(targets)
@@ -506,4 +510,68 @@ async fn runtime_preserves_authorization_and_reauthorization_failures() {
 fn runtime_builder_requires_every_security_boundary() {
     let result = AiRuntime::builder().build();
     assert!(matches!(result, Err(AiError::InvalidConfiguration(_))));
+}
+
+struct InvocationPolicy {
+    run_id: AiRunId,
+    observed: std::sync::Mutex<Vec<ToolGraphqlRequest>>,
+}
+
+#[async_trait]
+impl AiToolAuthorizationPolicy for InvocationPolicy {
+    async fn authorize(
+        &self,
+        _principal: &ResolvedPrincipal,
+        _scope: &AiScope,
+        _descriptor: &AiToolDescriptor,
+        _variables: &serde_json::Value,
+    ) -> AiToolAuthorizationDecision {
+        AiToolAuthorizationDecision::deny("missing_invocation", "test-1")
+    }
+
+    async fn authorize_request(
+        &self,
+        principal: &ResolvedPrincipal,
+        descriptor: &AiToolDescriptor,
+        request: &ToolGraphqlRequest,
+    ) -> AiToolAuthorizationDecision {
+        assert_eq!(principal.principal().scopes(), &["records:read".to_owned()]);
+        assert_eq!(descriptor.id.as_str(), "records.current");
+        self.observed.lock().unwrap().push(request.clone());
+        if request.invocation.run_id == self.run_id {
+            AiToolAuthorizationDecision::allow("current_invocation", "test-1", "exact-authority")
+        } else {
+            AiToolAuthorizationDecision::deny("invocation_denied", "test-1")
+        }
+    }
+}
+
+#[tokio::test]
+async fn current_invocation_policy_receives_exact_request_and_cannot_authorize_another_run() {
+    let run_id = AiRunId::new();
+    let policy = Arc::new(InvocationPolicy {
+        run_id,
+        observed: std::sync::Mutex::new(vec![]),
+    });
+    let runtime = runtime_with_policy(policy.clone());
+    open_runtime(&runtime);
+    let reference = principal(&["stale:scope"]).reference();
+    let id = AiToolId::parse("records.current").unwrap();
+    let mut request = current_request(&runtime, json!({}));
+    request.invocation.run_id = run_id;
+    let response = runtime
+        .execute_tool(&reference, &id, request.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        response.response().data,
+        json!({"scopes": ["records:read"]})
+    );
+    let mut other = request.clone();
+    other.invocation.run_id = AiRunId::new();
+    assert!(matches!(
+        runtime.execute_tool(&reference, &id, other.clone()).await,
+        Err(AiError::Forbidden)
+    ));
+    assert_eq!(*policy.observed.lock().unwrap(), vec![request, other]);
 }
