@@ -20,6 +20,25 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Fixed
+
+- Proved pre-execution application refusals close the exact automatic or approved
+  tool call and return a protected, egress-authorized `not_started_*` result to
+  the model. Native completed-turn checkpoints admit those exact failure
+  envelopes, allowing subsequent reads and a final answer. Foreign bindings,
+  raw GraphQL codes, timeouts and possible effects remain recovery-required.
+- Preserve list and total-record disclosure limits as `result_budget_exceeded`.
+  Generic execution failures now use `resolver_execution_failed` without
+  claiming invalid arguments or permitting an identical blind retry.
+- Advance schema module to `0.70.0` for new durable refusal and failure-code
+  semantics, without table or column changes or historical evidence rewrites.
+
+### Added
+
+- Compatible `AuthenticatedGraphqlExecutor::execute_registered` hook and exact
+  registered/remote refusal helpers for trusted execution-owner integrations.
+
+
 ### Added
 
 - Add authoritative, owner/policy-scoped activity snapshots to bounded session lists.

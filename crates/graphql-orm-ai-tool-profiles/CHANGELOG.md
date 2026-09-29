@@ -12,6 +12,15 @@ supersedes: []
 
 ## [Unreleased]
 
+### Added
+
+- Trusted `ToolPreExecutionRejection` carries an exact invocation hash and one
+  closed public reason without resolver text, credentials or request content.
+  `RejectedBeforeExecution` and `ToolRejectedBeforeExecution` preserve this
+  assertion across the authenticated tool bridge. Hash binding is not remote
+  authentication: the host must verify the execution owner's no-effect evidence.
+
+
 ## [0.14.0] - 2026-09-26
 
 ### Added

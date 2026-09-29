@@ -10,6 +10,23 @@ supersedes: []
 
 # Migration Guide
 
+## 0.14.0 to 0.15.0
+
+Adopt the AI and tool-profile packages from one reviewed workspace release.
+Trusted hosts may emit `ToolExecutionError::RejectedBeforeExecution` only after
+verifying no admission, dispatch, persisted work or application effect for the
+exact invocation, including earlier work under its idempotency key. The
+attestation has no deserialization implementation. The request hash is a
+correlation check, not authentication of a remote execution owner; HTTP status,
+arbitrary GraphQL extensions, resolver text and missing rows are insufficient.
+
+The new error variants are non-exhaustive API additions. Callers that normalize
+errors must preserve trusted exact rejection evidence and must not classify an
+ordinary `Execution` or `ResultBudgetExceeded` error as no-effect evidence.
+There is no data migration, feature/default change or GraphQL SDL change in
+this package. The owning AI runtime separately versions its persistence semantics.
+
+
 ## 0.13.1 to 0.14.0
 
 `AiGraphqlToolProfile::automatic_mutation` is an explicit alternative to the

@@ -369,6 +369,10 @@ fn extract_exact_result(value: &serde_json::Value) -> Result<&serde_json::Value,
 fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationToolFailureCode> {
     use crate::AiApplicationToolFailureCode as Code;
 
+    if let Some(reason) = crate::ToolPreExecutionRejectionReason::from_failure_code(value) {
+        return Some(Code::NotStarted(reason));
+    }
+
     let code = match value {
         "invalid_arguments" => Code::InvalidArguments,
         "selection_too_large" => Code::SelectionTooLarge,
@@ -380,6 +384,7 @@ fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationTool
         "temporarily_unavailable" => Code::TemporarilyUnavailable,
         "tool_unavailable" => Code::ToolUnavailable,
         "resolver_validation_failed" => Code::ResolverValidationFailed,
+        "resolver_execution_failed" => Code::ResolverExecutionFailed,
         "not_found" => Code::NotFound,
         _ => return None,
     };
@@ -392,6 +397,7 @@ const fn exhaustive_browser_failure_code(
     use crate::AiApplicationToolFailureCode as Code;
 
     match code {
+        Code::NotStarted(_) => code,
         Code::InvalidArguments
         | Code::SelectionTooLarge
         | Code::RelationshipDepthExceeded
@@ -402,6 +408,7 @@ const fn exhaustive_browser_failure_code(
         | Code::TemporarilyUnavailable
         | Code::ToolUnavailable
         | Code::ResolverValidationFailed
+        | Code::ResolverExecutionFailed
         | Code::NotFound => code,
     }
 }

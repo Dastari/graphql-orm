@@ -65,7 +65,13 @@ impl OrmAiCoordinatorCheckpointService {
                 || call.provider_turn_index != i64::from(provider_turns - 1)
                 || call.argument_hash != canonical_json_hash(requested.arguments())?
                 || !matches!(call.state.as_str(), "completed" | "execution_failed")
-                || (call.state == "execution_failed" && call.risk != "read_only")
+                || (call.state == "execution_failed"
+                    && call.risk != "read_only"
+                    && call
+                        .authorization_code
+                        .as_deref()
+                        .and_then(crate::ToolPreExecutionRejectionReason::from_failure_code)
+                        .is_none())
                 || !matches!(
                     call.risk.as_str(),
                     "read_only" | "low_risk_write" | "non_idempotent_write"
@@ -95,6 +101,22 @@ impl OrmAiCoordinatorCheckpointService {
             else {
                 return Err(AiError::Conflict);
             };
+            if call.state == "execution_failed" && call.risk != "read_only" {
+                let reason = call
+                    .authorization_code
+                    .as_deref()
+                    .and_then(crate::ToolPreExecutionRejectionReason::from_failure_code)
+                    .ok_or(AiError::Conflict)?;
+                if *output
+                    != crate::AiApplicationToolFailureEnvelope::new(
+                        crate::AiApplicationToolFailureCode::NotStarted(reason),
+                    )
+                    .to_json()
+                    || call.result_classification.as_deref() != Some("public")
+                {
+                    return Err(AiError::Conflict);
+                }
+            }
             for (field, protected, expected) in [
                 (
                     "protected_arguments",

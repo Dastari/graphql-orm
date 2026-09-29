@@ -671,7 +671,7 @@ impl AiRuntime {
         }
         let disclosure = disclosure_schema
             .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_disclosure_error)?;
         Ok(AiToolExecutionResult {
             response,
             disclosure,
@@ -943,7 +943,7 @@ impl AiRuntime {
         }
         let disclosure = disclosure_schema
             .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
-            .map_err(|_| AiError::ToolExecutionFailed)?;
+            .map_err(Self::map_disclosure_error)?;
         Ok(AiToolExecutionResult {
             response,
             disclosure,
@@ -953,8 +953,19 @@ impl AiRuntime {
         })
     }
 
+    fn map_disclosure_error(error: crate::AiDisclosureError) -> AiError {
+        match error {
+            crate::AiDisclosureError::ListLimitExceeded
+            | crate::AiDisclosureError::RecordLimitExceeded => AiError::ResultBudgetExceeded,
+            _ => AiError::ToolExecutionFailed,
+        }
+    }
+
     fn map_tool_execution_error(error: ToolExecutionError) -> AiError {
         match error {
+            ToolExecutionError::RejectedBeforeExecution(proof) => {
+                AiError::ToolRejectedBeforeExecution(proof)
+            }
             ToolExecutionError::Reauthorization => AiError::ReauthorizationFailed,
             ToolExecutionError::Authorization => AiError::Forbidden,
             ToolExecutionError::ResultBudgetExceeded => AiError::ResultBudgetExceeded,

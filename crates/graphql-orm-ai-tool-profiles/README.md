@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.13.1" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0" }
 serde_json = "1"
 ```
 
@@ -242,3 +242,13 @@ for execution, persistence, approval, and egress responsibilities.
 
 The shared error contract includes `AI_SESSION_EXECUTION_UNBOUND` and
 `AI_SESSION_EXECUTION_UNAVAILABLE` for safe session-routing recovery.
+
+## Trusted pre-execution refusals
+
+`ToolPreExecutionRejection` and its closed reason enum describe a trusted
+execution owner's exact no-effect refusal. They carry no resolver text or
+request content and cannot be deserialized from a response. Use the AI runtime's
+registered or remote binding helpers after independently verifying the owner's
+authenticated evidence. The binding hash correlates one request/attempt; it
+never proves remote authenticity or grants authority. Generic transport and
+resolver failures remain uncertain for consequential operations.

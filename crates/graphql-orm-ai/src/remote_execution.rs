@@ -438,6 +438,53 @@ pub struct AiRemoteGraphqlDelegationRequest {
 }
 
 impl AiRemoteGraphqlDelegationRequest {
+    /// Attests an authenticated execution-owner refusal for this exact request.
+    ///
+    /// The trusted transport must independently verify the owner's no-admission,
+    /// no-dispatch and no-effect evidence, including prior idempotent attempts.
+    /// Arbitrary extensions, HTTP status, timeout or missing rows are insufficient.
+    /// This helper checks correlation and hashes; it does not authenticate the
+    /// remote evidence or bypass resolver, disclosure, approval or egress policy.
+    ///
+    /// # Errors
+    /// Returns a safe error if any operation or invocation binding has changed.
+    pub fn reject_before_execution(
+        &self,
+        request: &ToolGraphqlRequest,
+        reason: crate::ToolPreExecutionRejectionReason,
+    ) -> Result<crate::ToolPreExecutionRejection, ToolExecutionError> {
+        if self.target_id != request.contract.target_id
+            || self.schema_fingerprint != request.contract.schema_fingerprint
+            || self.operation_name != request.operation_name
+            || request.operation_name != request.contract.operation_name
+            || self.operation_document_hash
+                != crate::stable_graphql_document_hash(&request.document)
+            || self.operation_document_hash != request.contract.document_hash
+            || self.result_projection_fingerprint != request.contract.result_projection_fingerprint
+            || self.disclosure_schema_fingerprint != request.contract.disclosure_schema_fingerprint
+            || self.argument_hash != canonical_json_hash(&request.variables)?
+            || self.scope != request.invocation.scope
+            || self.run_id != request.invocation.run_id
+            || self.tool_call_id != request.invocation.tool_call_id
+            || self.correlation_id != request.invocation.correlation_id
+            || self.causation_id != request.invocation.causation_id
+            || self.delegation_reference != request.invocation.delegation_reference
+            || self.idempotency_key_hash
+                != request
+                    .invocation
+                    .idempotency_key
+                    .as_deref()
+                    .map(stable_text_hash)
+        {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        crate::execution_rejection::attest(
+            self.capability_binding.compiled_tool_fingerprint(),
+            self.provenance(),
+            request,
+            reason,
+        )
+    }
     /// Crate-authored durable tool origin, absent for direct bridge calls.
     /// It does not grant authority or replace current issuer/resolver policy.
     pub fn provenance(&self) -> Option<&crate::AiToolExecutionProvenance> {

@@ -109,6 +109,13 @@ impl AuthenticatedGraphqlExecutor for Executor {
             .unwrap_or(false)
         {
             json!({"scopes": ["x".repeat(65 * 1024)]})
+        } else if request
+            .variables
+            .get("emitTooManyItems")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            json!({"scopes": vec!["bounded"; 33]})
         } else {
             json!({"scopes": scopes})
         };
@@ -240,6 +247,7 @@ fn runtime() -> AiRuntime {
             "properties": {
                 "emitUnknown": { "type": "boolean" },
                 "emitOversizedResult": { "type": "boolean" },
+                "emitTooManyItems": { "type": "boolean" },
                 "rejectAuthorization": { "type": "boolean" },
                 "rejectOversizedResult": { "type": "boolean" },
                 "rejectReauthorization": { "type": "boolean" },
@@ -450,6 +458,7 @@ async fn runtime_preserves_result_budget_failures_from_transport_and_descriptor_
     for variables in [
         json!({"rejectOversizedResult": true}),
         json!({"emitOversizedResult": true}),
+        json!({"emitTooManyItems": true}),
     ] {
         assert!(matches!(
             runtime

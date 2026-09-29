@@ -544,6 +544,10 @@ fn document_selects_exact_generated_root(
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ToolExecutionError {
+    /// Trusted exact-invocation attestation of refusal before any effect.
+    /// The authenticated bridge independently verifies the request binding.
+    #[error("tool was refused before execution")]
+    RejectedBeforeExecution(crate::ToolPreExecutionRejection),
     /// Principal could not be rehydrated/currently authorized.
     #[error("tool principal reauthorization failed")]
     Reauthorization,

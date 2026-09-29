@@ -4929,13 +4929,54 @@ mod tests {
         }
     }
 
+    #[path = "pre_execution_rejection_tests.rs"]
+    mod pre_execution_rejection_tests;
+
     struct Executor {
+        refusal: Arc<AtomicUsize>,
         fail: Arc<AtomicBool>,
         completed: Arc<AtomicUsize>,
     }
 
     #[async_trait]
     impl AuthenticatedGraphqlExecutor for Executor {
+        async fn execute_registered(
+            &self,
+            context: GraphqlRequestContext,
+            binding: &crate::AiRegisteredToolExecutionBinding,
+            request: ToolGraphqlRequest,
+        ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
+            use crate::ToolPreExecutionRejectionReason as Reason;
+            match if binding.operation_kind() == crate::AiToolOperationKind::Mutation {
+                self.refusal.load(Ordering::SeqCst)
+            } else {
+                0
+            } {
+                1 => {
+                    return Err(ToolExecutionError::RejectedBeforeExecution(
+                        binding
+                            .reject_before_execution(&request, Reason::AuthenticationRequired)?,
+                    ));
+                }
+                2 => {
+                    return Err(ToolExecutionError::RejectedBeforeExecution(
+                        crate::ToolPreExecutionRejection::attest_trusted(
+                            "a".repeat(64),
+                            Reason::ConsentRequired,
+                        )?,
+                    ));
+                }
+                3 => {
+                    return Ok(ToolGraphqlResponse {
+                        data: json!(null),
+                        error_codes: vec!["NOT_STARTED_AUTHENTICATION_REQUIRED".to_owned()],
+                        application_audit_ref: None,
+                    });
+                }
+                _ => {}
+            }
+            self.execute(context, request).await
+        }
         async fn execute(
             &self,
             context: GraphqlRequestContext,
@@ -5474,6 +5515,7 @@ mod tests {
         scope: AiScope,
         tool_policy_version: Arc<AtomicUsize>,
         fail_execution: Arc<AtomicBool>,
+        refusal: Arc<AtomicUsize>,
         completed_executions: Arc<AtomicUsize>,
         principal_resolutions: Arc<AtomicUsize>,
         generated_query_id: Option<AiToolId>,
@@ -6211,6 +6253,7 @@ mod tests {
                 .expect("generated read target should register");
         }
         let tool_policy_version = Arc::new(AtomicUsize::new(1));
+        let refusal = Arc::new(AtomicUsize::new(0));
         let fail_execution = Arc::new(AtomicBool::new(false));
         let completed_executions = Arc::new(AtomicUsize::new(0));
         let principal_resolutions = Arc::new(AtomicUsize::new(0));
@@ -6227,6 +6270,7 @@ mod tests {
             .tool_authorization_policy(Arc::new(generated_authorization))
             .request_context_factory(Arc::new(ContextFactory))
             .graphql_executor(Arc::new(Executor {
+                refusal: refusal.clone(),
                 fail: fail_execution.clone(),
                 completed: completed_executions.clone(),
             }))
@@ -6291,6 +6335,7 @@ mod tests {
             scope,
             tool_policy_version,
             fail_execution,
+            refusal,
             completed_executions,
             principal_resolutions,
             generated_query_id,
@@ -11669,8 +11714,8 @@ mod tests {
                 run_id: fixture.lease.run_id().0,
                 attempt_id: fixture.lease.attempt_id(),
                 lease_generation: fixture.lease.lease_generation(),
-                provider_kind: ProviderKind::OpenAi.as_str().to_owned(),
-                provider_model: "coordinator-test-model".to_owned(),
+                provider_kind: result.provider_kind().as_str().to_owned(),
+                provider_model: result.provider_model().to_owned(),
                 reasoning_effort: ModelReasoningEffort::Unspecified.as_str().to_owned(),
                 pricing_policy_version: "broker-test-pricing-v1".to_owned(),
                 reserved_input_tokens: 1,

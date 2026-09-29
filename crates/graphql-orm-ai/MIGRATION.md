@@ -19,6 +19,43 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.103.0 to 0.104.0
+
+Adopt the AI and tool-profile packages from one reviewed workspace release.
+Trusted hosts may emit `ToolExecutionError::RejectedBeforeExecution` only after
+verifying no admission, dispatch, persisted work or application effect for the
+exact invocation, including earlier work under its idempotency key. The
+attestation has no deserialization implementation. The request hash is a
+correlation check, not authentication of a remote execution owner; HTTP status,
+arbitrary GraphQL extensions, resolver text and missing rows are insufficient.
+
+Existing executors remain compatible through the default `execute_registered`
+hook. Override it only to use a reviewed authoritative refusal boundary. Remote
+transports can use `AiRemoteGraphqlDelegationRequest::reject_before_execution`
+after separately authenticating and validating the owner's exact evidence.
+The bridge independently compares the full request, descriptor and provenance.
+
+Framework-authored refusals before executor entry require lifecycle-bound
+provenance. Direct bridge calls preserve their existing admission errors because
+the bridge cannot rule out earlier work under a reused invocation/idempotency key.
+Explicit execution-owner attestations still require the full no-effect assertion.
+
+The four-field v1 failure envelope remains unchanged in shape. New
+`not_started_*` codes state that execution did not begin; `retryable` is false.
+They require explaining the blocker or obtaining the required action, never
+blindly repeating a consequential operation or substituting a fresh idempotency
+key. `resolver_execution_failed` states that a safe reason was not retained,
+not that arguments were wrong. Historical `resolver_validation_failed` remains
+readable. Browser previews still require current authorization.
+
+Apply `AiSchemaModule` version `0.70.0` before admitting these durable semantics.
+No table/column data migration or historical payload rewrite is required.
+Module/backup fingerprints change; older readers cannot adopt the new refusal
+codes, so restore/rollback retains its existing fingerprint boundary and should
+use forward repair after new evidence is written. Approval consumption remains
+one-shot, and denial does not grant new execution authority.
+
+
 ## 0.102.2 to 0.103.0
 
 ### Bounded initial session activity

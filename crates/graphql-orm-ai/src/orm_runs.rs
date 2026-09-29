@@ -2113,7 +2113,9 @@ impl OrmAiRunService {
                                     "read_only" | "low_risk_write" | "non_idempotent_write"
                                 ) && call.approval_id.is_none()
                                     && (call.state != "execution_failed"
-                                        || call.risk == "read_only")
+                                        || call.risk == "read_only"
+                                        || (call.authorization_code.as_deref().and_then(crate::ToolPreExecutionRejectionReason::from_failure_code).is_some()
+                                            && call.result_classification.as_deref() == Some("public")))
                             }
                             native_checkpoints::SOURCE_KIND => {
                                 matches!(

@@ -60,6 +60,10 @@ pub enum AiError {
     /// Host GraphQL execution failed safely.
     #[error("AI tool execution failed")]
     ToolExecutionFailed,
+    /// The authenticated bridge validated exact trusted no-effect evidence.
+    /// This is not an inference from a generic resolver or transport failure.
+    #[error("AI tool was refused before execution")]
+    ToolRejectedBeforeExecution(crate::ToolPreExecutionRejection),
     /// Provider operation failed safely.
     #[error("AI provider operation failed")]
     ProviderFailed,
@@ -119,6 +123,7 @@ impl AiError {
             Self::ResultBudgetExceeded => "AI_RESULT_BUDGET_EXCEEDED",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",
             Self::ToolExecutionFailed => "AI_TOOL_EXECUTION_FAILED",
+            Self::ToolRejectedBeforeExecution(_) => "AI_TOOL_NOT_STARTED",
             Self::ProviderFailed => "AI_PROVIDER_FAILED",
             Self::ProviderExecutionLimit => "AI_PROVIDER_EXECUTION_LIMIT",
             Self::ProviderUsageIncomplete => "AI_PROVIDER_USAGE_INCOMPLETE",
