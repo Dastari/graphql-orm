@@ -32,6 +32,7 @@ mod content_protection;
 mod domain;
 mod egress;
 mod execution;
+mod execution_rejection;
 mod inbox;
 mod live_delta;
 #[cfg(feature = "local-harness")]

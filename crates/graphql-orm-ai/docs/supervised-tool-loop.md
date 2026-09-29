@@ -96,6 +96,36 @@ consumption. Hosts enforce current session ownership and exact resource
 authority there. The compatible default delegates to the coarse hook. Preview
 details are bounded to 2 MiB of serialized JSON, including escaping.
 
+## Proved refusals and uncertain execution
+
+A trusted execution owner may attest refusal before admission, dispatch,
+persisted work or any application effect for the exact invocation, including
+prior attempts under the idempotency key. The registered/remote helpers bind
+that assertion to the full request, descriptor and durable provenance. The
+host must authenticate remote evidence independently. A GraphQL error code,
+HTTP status, timeout, missing execution row or stage log is insufficient.
+
+The authenticated bridge also creates exact refusal evidence when its own
+current-authority or context construction fails before invoking the executor.
+Request-context factories must never execute application work.
+
+Proved refusals close as `execution_failed` with a four-field, protected v1
+failure envelope whose `not_started_*` code describes the public blocker and
+whose `retryable` is false. Result egress and current access remain mandatory.
+Native completed-turn checkpoints verify the exact retained envelope, allowing
+later authorized reads and meaningful final output. Approved refusal closes
+the consumed one-shot action; it never reinstates approval or dispatches again.
+Explain any required user action and retain completed evidence. Authentication
+refusal is not itself a durable approval wait or an automatically resumable
+action; use the existing exact approval lifecycle where policy requires it.
+
+After possible dispatch, ordinary errors and malformed/foreign attestations
+remain recovery-required. Status reconciliation must refer to that attempt;
+never silently retry a consequential action with a different key. Generic
+read failures use `resolver_execution_failed`; they do not establish invalid
+arguments, missing data or a specific authorization cause. Size refusals retain
+`result_budget_exceeded` so the model can narrow its requested result.
+
 ## Explicit mixed native turns
 
 `AiSupervisedAgentTurnPlan::new_classified_native` with the coordinator's

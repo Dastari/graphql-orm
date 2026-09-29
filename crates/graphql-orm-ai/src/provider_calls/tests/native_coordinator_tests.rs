@@ -16,6 +16,7 @@ enum CallbackScenario {
     InvalidMutation,
     FixedBroker,
     AutomaticCompleted,
+    RefusedAutomaticCompleted,
     FailedReadCompleted,
     BrokerCompleted,
     ReadOnlyCompleted,
@@ -31,6 +32,7 @@ impl CallbackScenario {
         matches!(
             self,
             Self::AutomaticCompleted
+                | Self::RefusedAutomaticCompleted
                 | Self::FailedReadCompleted
                 | Self::BrokerCompleted
                 | Self::ReadOnlyCompleted
@@ -281,6 +283,10 @@ impl AiProvider for MixedRetainedProvider {
                     let reply = responder.respond(ProviderDynamicToolCall::from_definition(
                         &response, &call_id, definition, arguments.clone(),
                     )?).await?;
+                    if scenario == CallbackScenario::RefusedAutomaticCompleted && tool_id == "records.automatic" {
+                        assert_eq!(reply.output()["code"], "not_started_authentication_required");
+                        assert_eq!(reply.output()["retryable"], false);
+                    }
                     replies.lock().await.push(reply.output().clone());
                     assert!(AiApprovalRecord::query(database.pool()).fetch_all().await.unwrap().is_empty(),
                         "pending callback must not expose an approvable grant before real settlement");
@@ -297,7 +303,9 @@ impl AiProvider for MixedRetainedProvider {
                 }).await.unwrap();
             }
             if turn > 0 || scenario.completes() {
-                yield ProviderEvent::TextDelta { text:"All authorized work completed.".to_owned() };
+                yield ProviderEvent::TextDelta { text: if scenario == CallbackScenario::RefusedAutomaticCompleted {
+                    "The diagnostic read completed. The command was not started because authentication must be renewed.".to_owned()
+                } else { "All authorized work completed.".to_owned() } };
             }
             yield ProviderEvent::Usage { input_tokens:19, output_tokens:7, cached_input_tokens:0 };
             yield ProviderEvent::ResponseCompleted { response_id:Some(response) };
@@ -745,6 +753,14 @@ async fn native_coordinator_completed_automatic_turn_persists_final_output() {
 }
 
 #[tokio::test]
+async fn native_coordinator_trusted_refusal_allows_read_and_meaningful_final_output() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::RefusedAutomaticCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn native_coordinator_completed_turn_counts_failed_read_once() {
     Box::pin(native_coordinator_lifecycle(
         CallbackScenario::FailedReadCompleted,
@@ -817,6 +833,9 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         )
         .await,
     );
+    if scenario == CallbackScenario::RefusedAutomaticCompleted {
+        fixture.refusal.store(1, Ordering::SeqCst);
+    }
     *provider.database.lock().unwrap() = Some(fixture.database.clone());
     let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
         .await
@@ -1086,7 +1105,9 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             fixture.completed_executions.load(Ordering::SeqCst),
             usize::from(!matches!(
                 scenario,
-                CallbackScenario::ReadOnlyCompleted | CallbackScenario::EmptyCompleted
+                CallbackScenario::ReadOnlyCompleted
+                    | CallbackScenario::EmptyCompleted
+                    | CallbackScenario::RefusedAutomaticCompleted
             )) + usize::from(scenario.broker())
         );
         assert!(
@@ -1106,7 +1127,10 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
                 .iter()
                 .filter(|call| call.state == "execution_failed")
                 .count(),
-            usize::from(scenario == CallbackScenario::FailedReadCompleted)
+            usize::from(matches!(
+                scenario,
+                CallbackScenario::FailedReadCompleted | CallbackScenario::RefusedAutomaticCompleted
+            ))
         );
         assert!(calls.iter().all(|call| call.completed_at.is_some()));
         let rows = crate::persistence::AiRunCheckpointRecord::query(fixture.database.pool())

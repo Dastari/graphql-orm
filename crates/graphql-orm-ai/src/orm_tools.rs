@@ -2266,7 +2266,10 @@ impl OrmAiApplicationToolCallService {
                 result.response().application_audit_ref.clone(),
                 None,
             ),
-            Err(_) if matches!(mode, UnapprovedToolMode::AutomaticMutation) => {
+            Err(ref error)
+                if matches!(mode, UnapprovedToolMode::AutomaticMutation)
+                    && !matches!(error, AiError::ToolRejectedBeforeExecution(_)) =>
+            {
                 return self
                     .mark_automatic_recovery(
                         lease,
@@ -2456,7 +2459,11 @@ impl OrmAiApplicationToolCallService {
                         authorization_code: final_authorization_code,
                         authorization_policy_version: policy_version,
                         authorization_state_digest,
-                        disclosure_schema_fingerprint: disclosure_fingerprint,
+                        disclosure_schema_fingerprint: if failure_code.is_some() {
+                            safe_failure_disclosure_fingerprint()
+                        } else {
+                            disclosure_fingerprint
+                        },
                         result_classification: classification_value(classification).to_owned(),
                         result_egress_decision_id: decision_id,
                         result_egress_manifest_hash: manifest_hash,
@@ -3678,8 +3685,36 @@ impl OrmAiConsequentialToolCallService {
             )
             .await
         };
-        let result = match execution {
-            Ok(Ok(result)) => result,
+        let (
+            model_output,
+            classification,
+            source_trust,
+            failure_code,
+            policy_version,
+            authorization_digest,
+            audit_ref,
+        ) = match execution {
+            Ok(Ok(result)) => (
+                result.model_output(),
+                result.disclosure().maximum_classification,
+                AiSourceTrust::ResolverResult,
+                None,
+                Some(result.policy_version().to_owned()),
+                Some(result.authorization_state_digest().to_owned()),
+                result.response().application_audit_ref.clone(),
+            ),
+            Ok(Err(AiError::ToolRejectedBeforeExecution(proof))) => {
+                let code = crate::AiApplicationToolFailureCode::NotStarted(proof.reason());
+                (
+                    crate::AiApplicationToolFailureEnvelope::new(code).to_json(),
+                    DataClassification::Public,
+                    AiSourceTrust::TrustedRuntime,
+                    Some(code),
+                    Some(binding.policy_version.clone()),
+                    Some(binding.authorization_state_digest.clone()),
+                    None,
+                )
+            }
             Ok(Err(_)) | Err(_) => {
                 return self
                     .mark_consequential_recovery(
@@ -3705,7 +3740,6 @@ impl OrmAiConsequentialToolCallService {
                 )
                 .await;
         }
-        let model_output = result.model_output();
         let output_bytes = match serde_json::to_vec(&model_output) {
             Ok(output) => output,
             Err(_) => {
@@ -3740,7 +3774,6 @@ impl OrmAiConsequentialToolCallService {
                     .await;
             }
         };
-        let classification = result.disclosure().maximum_classification;
         let manifest = AiEgressManifest {
             provider_profile_id: route.provider_profile_id,
             provider_kind,
@@ -3755,7 +3788,7 @@ impl OrmAiConsequentialToolCallService {
                 kind: "application_tool_result".to_owned(),
                 reference: tool_call_id.0.to_string(),
                 classification,
-                trust: AiSourceTrust::ResolverResult,
+                trust: source_trust,
             }],
             estimated_bytes,
             estimated_tokens: 0,
@@ -3784,36 +3817,41 @@ impl OrmAiConsequentialToolCallService {
             .egress_audit
             .record(&manifest, &decision)
             .await;
-        let (state, model_input, decision_id, manifest_hash, authorization_code) =
-            if audit_result.is_err() {
-                (
-                    AiApplicationToolCallState::EgressAuditFailed,
-                    None,
-                    None,
-                    None,
-                    "egress_audit_failed".to_owned(),
-                )
-            } else if decision.authorize(&manifest).is_err() {
-                (
-                    AiApplicationToolCallState::EgressDenied,
-                    None,
-                    Some(decision.id.0),
-                    Some(decision.manifest_hash.clone()),
-                    "egress_denied".to_owned(),
-                )
-            } else {
-                (
-                    AiApplicationToolCallState::Completed,
-                    Some(ModelInputBlock::ToolResult {
-                        call_id: call.provider_call_id.clone(),
-                        tool_id: descriptor.id.as_str().to_owned(),
-                        output: model_output.clone(),
-                    }),
-                    Some(decision.id.0),
-                    Some(decision.manifest_hash.clone()),
-                    "allowed".to_owned(),
-                )
-            };
+        let (state, model_input, decision_id, manifest_hash, authorization_code) = if audit_result
+            .is_err()
+        {
+            (
+                AiApplicationToolCallState::EgressAuditFailed,
+                None,
+                None,
+                None,
+                "egress_audit_failed".to_owned(),
+            )
+        } else if decision.authorize(&manifest).is_err() {
+            (
+                AiApplicationToolCallState::EgressDenied,
+                None,
+                Some(decision.id.0),
+                Some(decision.manifest_hash.clone()),
+                "egress_denied".to_owned(),
+            )
+        } else {
+            (
+                if failure_code.is_some() {
+                    AiApplicationToolCallState::ExecutionFailed
+                } else {
+                    AiApplicationToolCallState::Completed
+                },
+                Some(ModelInputBlock::ToolResult {
+                    call_id: call.provider_call_id.clone(),
+                    tool_id: descriptor.id.as_str().to_owned(),
+                    output: model_output.clone(),
+                }),
+                Some(decision.id.0),
+                Some(decision.manifest_hash.clone()),
+                failure_code.map_or_else(|| "allowed".to_owned(), |code| code.as_str().to_owned()),
+            )
+        };
         let protected_result = match self
             .application_tools
             .protect(
@@ -3913,15 +3951,17 @@ impl OrmAiConsequentialToolCallService {
                     state: state.as_str().to_owned(),
                     protected_result,
                     authorization_code,
-                    authorization_policy_version: Some(result.policy_version().to_owned()),
-                    authorization_state_digest: Some(
-                        result.authorization_state_digest().to_owned(),
-                    ),
-                    disclosure_schema_fingerprint,
+                    authorization_policy_version: policy_version,
+                    authorization_state_digest: authorization_digest,
+                    disclosure_schema_fingerprint: if failure_code.is_some() {
+                        safe_failure_disclosure_fingerprint()
+                    } else {
+                        disclosure_schema_fingerprint
+                    },
                     result_classification: classification_value(classification).to_owned(),
                     result_egress_decision_id: decision_id,
                     result_egress_manifest_hash: manifest_hash,
-                    application_audit_ref: result.response().application_audit_ref.clone(),
+                    application_audit_ref: audit_ref,
                     event_id,
                     inbox_event_id,
                     protected_event,
@@ -3956,7 +3996,7 @@ impl OrmAiConsequentialToolCallService {
                 state,
                 model_input,
                 egress_manifest: decision_id.map(|_| manifest),
-                failure_code: None,
+                failure_code,
                 lease: renewed,
             },
         )))

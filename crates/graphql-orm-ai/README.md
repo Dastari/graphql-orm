@@ -258,6 +258,24 @@ authenticated registered replay source and the existing run queue; it
 rehydrates current authority at open, event and adoption boundaries. See
 [durable bounded subscription waits](docs/durable-subscription-waits.md).
 
+## Actionable application refusals
+
+The authenticated bridge distinguishes trusted exact pre-execution refusals
+from possible application effects. Registered executors can override
+`execute_registered`; private transports can use the exact remote refusal
+helper after verifying the execution owner's authenticated evidence. The
+runtime independently validates the full request, descriptor and provenance.
+It never interprets arbitrary GraphQL extensions, HTTP status, a timeout or
+missing rows as proof that a command did not execute.
+
+A proved refusal becomes a protected, egress-authorized `not_started_*` tool
+result. Automatic and approved calls close as `execution_failed`, so the model
+can continue authorized reads and explain what authentication, permission,
+consent or supported capability is needed. No refusal grants authority or
+causes automatic replay. Uncertain dispatch and result/persistence ambiguity
+retain recovery-required behavior. See the
+[supervised tool lifecycle](docs/supervised-tool-loop.md).
+
 ## Session reliability
 
 Hosts can opt into `AiRunAuthorization` on session submission and explicit retry.

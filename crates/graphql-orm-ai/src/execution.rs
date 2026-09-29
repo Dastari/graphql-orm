@@ -394,6 +394,32 @@ pub enum AiRegisteredToolExecutionKind {
 }
 
 impl AiRegisteredToolExecutionBinding {
+    /// Attests a trusted refusal before admission, dispatch or any application effect.
+    ///
+    /// The execution owner must first establish those facts for this exact
+    /// request, including any earlier attempt under its idempotency key. Remote
+    /// hosts must authenticate the owner's evidence; arbitrary GraphQL errors,
+    /// HTTP status, missing rows and timeouts are not evidence. The runtime
+    /// independently binds adoption to this contract, full request and durable
+    /// provenance. This assertion grants no execution or disclosure authority.
+    ///
+    /// # Errors
+    /// Returns a safe error when the request differs from this registered binding.
+    pub fn reject_before_execution(
+        &self,
+        request: &ToolGraphqlRequest,
+        reason: crate::ToolPreExecutionRejectionReason,
+    ) -> Result<crate::ToolPreExecutionRejection, ToolExecutionError> {
+        if !self.matches_request(request) {
+            return Err(ToolExecutionError::StaleContract);
+        }
+        crate::execution_rejection::attest(
+            self.tool_fingerprint(),
+            self.provenance(),
+            request,
+            reason,
+        )
+    }
     fn with_current_authorization(mut self, decision: &AiToolAuthorizationDecision) -> Self {
         if let Some(provenance) = self.provenance.as_mut() {
             provenance.policy_version = Some(decision.policy_version.clone());
@@ -639,6 +665,25 @@ pub trait GraphqlRequestContextFactory: Send + Sync {
 /// Executes a server-authored operation against the composed host schema.
 #[async_trait]
 pub trait AuthenticatedGraphqlExecutor: Send + Sync {
+    /// Executes an admitted operation with its exact crate-authored binding.
+    ///
+    /// The default retains the ordinary executor. Trusted execution owners may
+    /// return `RejectedBeforeExecution` only after proving no admission,
+    /// dispatch, persisted work or effect for the exact invocation. A generic
+    /// resolver error or an ambiguous response must retain its ordinary error.
+    /// All returned rejection bindings are checked by the authenticated bridge.
+    ///
+    /// # Errors
+    /// Returns a safe execution error or an exact trusted pre-execution refusal.
+    async fn execute_registered(
+        &self,
+        context: GraphqlRequestContext,
+        binding: &AiRegisteredToolExecutionBinding,
+        request: ToolGraphqlRequest,
+    ) -> Result<ToolGraphqlResponse, ToolExecutionError> {
+        let _ = binding;
+        self.execute(context, request).await
+    }
     /// Executes with the canonical host request context.
     async fn execute(
         &self,
@@ -732,37 +777,62 @@ impl AuthenticatedToolBridge {
         request: ToolGraphqlRequest,
         binding: AiRegisteredToolExecutionBinding,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
-        if request.operation_name != request.contract.operation_name {
+        if !binding.matches_request(&request) {
             return Err(ToolExecutionError::StaleContract);
         }
-        let target = self
-            .targets
-            .validate_contract(&request.contract, &request.document)?;
-        let principal = self
-            .principal_resolver
-            .resolve(principal_reference)
-            .await
-            .map_err(|_| ToolExecutionError::Reauthorization)?;
-        let authorization = self
-            .authorization_policy
-            .authorize(
-                &principal,
-                &request.invocation.scope,
-                descriptor,
-                &request.variables,
-            )
-            .await;
-        if !authorization.is_complete_allow()
-            || authorization.approval_requirement() != AiApprovalRule::None
-        {
-            return Err(ToolExecutionError::Authorization);
+        let admission = async {
+            let target = self
+                .targets
+                .validate_contract(&request.contract, &request.document)?;
+            let principal = self
+                .principal_resolver
+                .resolve(principal_reference)
+                .await
+                .map_err(|_| ToolExecutionError::Reauthorization)?;
+            let authorization = self
+                .authorization_policy
+                .authorize(
+                    &principal,
+                    &request.invocation.scope,
+                    descriptor,
+                    &request.variables,
+                )
+                .await;
+            if !authorization.is_complete_allow()
+                || authorization.approval_requirement() != AiApprovalRule::None
+            {
+                return Err(ToolExecutionError::Authorization);
+            }
+            let admitted = binding.clone().with_current_authorization(&authorization);
+            Ok((principal, target, admitted, authorization))
         }
-        let binding = binding.with_current_authorization(&authorization);
+        .await
+        .map_err(|error| {
+            crate::execution_rejection::before_executor_error(&binding, &request, error)
+        })?;
+        let (principal, target, binding, authorization) = admission;
         let context = self
             .context_factory
             .build_registered(&principal, target, &binding, &request)
-            .await?;
-        let response = self.executor.execute(context, request).await?;
+            .await
+            .map_err(|error| {
+                crate::execution_rejection::before_executor_error(&binding, &request, error)
+            })?;
+        let expected_request = request.clone();
+        let response = self
+            .executor
+            .execute_registered(context, &binding, request)
+            .await
+            .map_err(|error| match error {
+                ToolExecutionError::RejectedBeforeExecution(proof) => {
+                    crate::execution_rejection::validate_rejection(
+                        &binding,
+                        &expected_request,
+                        proof,
+                    )
+                }
+                error => error,
+            })?;
         Ok((response, authorization))
     }
 
@@ -861,25 +931,53 @@ impl AuthenticatedToolBridge {
         expected_authorization_state_digest: &str,
         required_approval: Option<AiApprovalRule>,
     ) -> Result<(ToolGraphqlResponse, AiToolAuthorizationDecision), ToolExecutionError> {
-        let (principal, authorization) = self
-            .preauthorize(principal_reference, descriptor, &request)
-            .await?;
-        if authorization.policy_version != expected_policy_version
-            || authorization.authorization_state_digest != expected_authorization_state_digest
-            || required_approval
-                .is_some_and(|required| authorization.approval_requirement() != required)
-        {
-            return Err(ToolExecutionError::Authorization);
+        if !binding.matches_request(&request) {
+            return Err(ToolExecutionError::StaleContract);
         }
-        let target = self
-            .targets
-            .validate_contract(&request.contract, &request.document)?;
-        let binding = binding.with_current_authorization(&authorization);
+        let admission = async {
+            let (principal, authorization) = self
+                .preauthorize(principal_reference, descriptor, &request)
+                .await?;
+            if authorization.policy_version != expected_policy_version
+                || authorization.authorization_state_digest != expected_authorization_state_digest
+                || required_approval
+                    .is_some_and(|required| authorization.approval_requirement() != required)
+            {
+                return Err(ToolExecutionError::Authorization);
+            }
+            let target = self
+                .targets
+                .validate_contract(&request.contract, &request.document)?;
+            let admitted = binding.clone().with_current_authorization(&authorization);
+            Ok((principal, target, admitted, authorization))
+        }
+        .await
+        .map_err(|error| {
+            crate::execution_rejection::before_executor_error(&binding, &request, error)
+        })?;
+        let (principal, target, binding, authorization) = admission;
         let context = self
             .context_factory
             .build_registered(&principal, target, &binding, &request)
-            .await?;
-        let response = self.executor.execute(context, request).await?;
+            .await
+            .map_err(|error| {
+                crate::execution_rejection::before_executor_error(&binding, &request, error)
+            })?;
+        let expected_request = request.clone();
+        let response = self
+            .executor
+            .execute_registered(context, &binding, request)
+            .await
+            .map_err(|error| match error {
+                ToolExecutionError::RejectedBeforeExecution(proof) => {
+                    crate::execution_rejection::validate_rejection(
+                        &binding,
+                        &expected_request,
+                        proof,
+                    )
+                }
+                error => error,
+            })?;
         Ok((response, authorization))
     }
 }

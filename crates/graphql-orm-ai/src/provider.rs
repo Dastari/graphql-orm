@@ -2563,6 +2563,10 @@ pub const AI_APPLICATION_TOOL_FAILURE_VERSION: u16 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum AiApplicationToolFailureCode {
+    /// Trusted exact-attempt refusal with no admitted application execution.
+    /// `retryable` is always false: explain the blocker or obtain the required
+    /// action; never blindly repeat or bypass approval with a new key.
+    NotStarted(crate::ToolPreExecutionRejectionReason),
     /// The model-authored arguments violated the advertised schema.
     InvalidArguments,
     /// The requested public selection exceeds the bounded projection surface.
@@ -2581,6 +2585,9 @@ pub enum AiApplicationToolFailureCode {
     ToolUnavailable,
     /// A resolver reported a bounded validation failure safe for correction.
     ResolverValidationFailed,
+    /// Execution failed without a retained public reason. This proves neither
+    /// invalid arguments nor a missing result, and does not permit blind retry.
+    ResolverExecutionFailed,
     /// No result exists and current disclosure policy permits that distinction.
     NotFound,
     /// No further tools may execute in this turn; summarize available evidence.
@@ -2591,6 +2598,7 @@ impl AiApplicationToolFailureCode {
     /// Stable machine code written into the failure envelope.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::NotStarted(reason) => reason.failure_code(),
             Self::InvalidArguments => "invalid_arguments",
             Self::SelectionTooLarge => "selection_too_large",
             Self::RelationshipDepthExceeded => "relationship_depth_exceeded",
@@ -2601,6 +2609,7 @@ impl AiApplicationToolFailureCode {
             Self::TemporarilyUnavailable => "temporarily_unavailable",
             Self::ToolUnavailable => "tool_unavailable",
             Self::ResolverValidationFailed => "resolver_validation_failed",
+            Self::ResolverExecutionFailed => "resolver_execution_failed",
             Self::NotFound => "not_found",
         }
     }
@@ -2654,6 +2663,9 @@ pub fn classify_safe_application_tool_error(
     error: &AiError,
 ) -> Option<AiApplicationToolFailureCode> {
     match error {
+        AiError::ToolRejectedBeforeExecution(proof) => {
+            Some(AiApplicationToolFailureCode::NotStarted(proof.reason()))
+        }
         AiError::InvalidInput(message) if message.contains("relationship depth") => {
             Some(AiApplicationToolFailureCode::RelationshipDepthExceeded)
         }
@@ -2679,9 +2691,7 @@ pub fn classify_safe_application_tool_error(
         AiError::Forbidden => Some(AiApplicationToolFailureCode::AuthorizationDenied),
         AiError::InvalidConfiguration(_) => Some(AiApplicationToolFailureCode::ToolUnavailable),
         AiError::NotFound => Some(AiApplicationToolFailureCode::NotFound),
-        AiError::ToolExecutionFailed => {
-            Some(AiApplicationToolFailureCode::ResolverValidationFailed)
-        }
+        AiError::ToolExecutionFailed => Some(AiApplicationToolFailureCode::ResolverExecutionFailed),
         AiError::RuntimeNotReady => Some(AiApplicationToolFailureCode::TemporarilyUnavailable),
         _ => None,
     }
