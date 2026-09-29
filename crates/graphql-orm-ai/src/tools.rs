@@ -1201,6 +1201,32 @@ impl AiToolAuthorizationDecision {
 /// authoritative.
 #[async_trait]
 pub trait AiToolAuthorizationPolicy: Send + Sync {
+    /// Authorizes one validated, server-authored invocation with its audit context.
+    ///
+    /// Hosts can use the run identifier to resolve current, owner-authorized
+    /// session policy through the runtime's public services. Request metadata is
+    /// correlation, not a session grant, approval or proof of resolver authority;
+    /// never trust a provider-supplied session ID or authorization flag. The bridge
+    /// rehydrates the principal and validates the operation contract first, and
+    /// invokes this hook again when reauthorizing an approved execution.
+    ///
+    /// The default preserves existing implementations by calling
+    /// [`Self::authorize`] with the exact request scope and variables.
+    async fn authorize_request(
+        &self,
+        principal: &ResolvedPrincipal,
+        descriptor: &AiToolDescriptor,
+        request: &crate::ToolGraphqlRequest,
+    ) -> AiToolAuthorizationDecision {
+        self.authorize(
+            principal,
+            &request.invocation.scope,
+            descriptor,
+            &request.variables,
+        )
+        .await
+    }
+
     /// Authorizes the exact registered descriptor, scope, and validated
     /// variables using the freshly resolved principal.
     async fn authorize(

@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.105.0` adds a compatible request-aware tool authorization hook. Hosts
+can resolve current run/session policy through public services before execution
+and after approval, without extracting runtime tables or accepting model-owned
+permission flags. Existing policies remain compatible; no data migration or
+GraphQL change is needed.
+
 Version `0.103.0` adds a bounded `AiSessions.ActivitySnapshot` to the session-list
 connection. Initial status reads the durable run selected by each session's newest
 message/retry request, without opening messages, tool results, or inbox payloads. Error/Done

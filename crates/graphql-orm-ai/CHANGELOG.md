@@ -20,6 +20,17 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Added
+
+- Compatible `AiToolAuthorizationPolicy::authorize_request` hook supplies exact
+  server-authored invocation metadata to current host policy, both before normal
+  execution and during approved reauthorization. Existing implementations retain
+  their scope/variable decisions through the default hook. Hosts resolve session
+  ownership and grants through public runtime services; metadata alone grants no
+  authority. `AiSessionService::session_for_run` supplies a bounded, current
+  owner/tenant/scope-authorized shell without exposing runtime tables or payloads.
+  No persistence or GraphQL contract changes.
+
 ### Fixed
 
 - Proved pre-execution application refusals close the exact automatic or approved
