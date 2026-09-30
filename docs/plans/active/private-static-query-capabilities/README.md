@@ -25,10 +25,14 @@ resolved to `a90f229da66416e70f094c27e01f0bf4b4edc6bd`, ORM/macros 0.33.1.
 `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`; its merge commit is
 `9ed46db5d1c5c6214f83ef9084352030e14905ad`. This approval covers its bounded A–D
 interfaces, not new static query interfaces. [PR #88](https://github.com/Dastari/graphql-orm/pull/88)'s
-reviewed fix is `b29b00af6f78697dcbcb203556d79758cdf768d6`; its current head
-`3799483a8e53adc5d524c97d0aa660d59e53d4c8` integrates the contract and updates the
-legacy compile fixture's path-package lock versions to 0.33.2. The reviewed fix,
+reviewed fix is `b29b00af6f78697dcbcb203556d79758cdf768d6`; its final head is
+`7873984c2b981696a8535fd3d82dd63e1460816b`, merged at
+`e6c5d744a25fb3bead59446aa31f417e5417ba17`. It includes the contract, fixture locks,
+and independently merged AI/release maintenance. The reviewed fix,
 dependency-minimal consumer, static SDL and plain aggregate behavior are retained.
+The independent fixture maintenance [PR #92](https://github.com/Dastari/graphql-orm/pull/92)
+had already consumed 0.33.2; [PR #94](https://github.com/Dastari/graphql-orm/pull/94)
+corrects the aggregate fix's aligned package identity to 0.33.3 without behavior changes.
 Neither PR implements the query or generated-adapter gaps below.
 
 ## Overlap and dependency matrix
