@@ -809,7 +809,7 @@ impl AiRuntime {
             .tool_bridge
             .preauthorize(principal_reference, descriptor, request)
             .await
-            .map_err(|_| AiError::Forbidden)?;
+            .map_err(Self::map_tool_execution_error)?;
         Ok(AiToolPreauthorization {
             principal,
             approval_requirement: effective_approval_requirement(descriptor, &authorization),

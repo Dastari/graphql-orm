@@ -51,6 +51,7 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::Conflict)?;
+            let preflight_code = crate::orm_tools::native_preflight_failure_code(&call);
             if call.run_id != lease.run_id().0
                 || call.lease_generation != lease.lease_generation()
                 || call.payload_purged_at.is_some()
@@ -67,6 +68,7 @@ impl OrmAiCoordinatorCheckpointService {
                 || !matches!(call.state.as_str(), "completed" | "execution_failed")
                 || (call.state == "execution_failed"
                     && call.risk != "read_only"
+                    && preflight_code.is_none()
                     && call
                         .authorization_code
                         .as_deref()
@@ -102,16 +104,16 @@ impl OrmAiCoordinatorCheckpointService {
                 return Err(AiError::Conflict);
             };
             if call.state == "execution_failed" && call.risk != "read_only" {
-                let reason = call
-                    .authorization_code
-                    .as_deref()
-                    .and_then(crate::ToolPreExecutionRejectionReason::from_failure_code)
-                    .ok_or(AiError::Conflict)?;
-                if *output
-                    != crate::AiApplicationToolFailureEnvelope::new(
-                        crate::AiApplicationToolFailureCode::NotStarted(reason),
-                    )
-                    .to_json()
+                let code = match preflight_code {
+                    Some(code) => code,
+                    None => crate::AiApplicationToolFailureCode::NotStarted(
+                        call.authorization_code
+                            .as_deref()
+                            .and_then(crate::ToolPreExecutionRejectionReason::from_failure_code)
+                            .ok_or(AiError::Conflict)?,
+                    ),
+                };
+                if *output != crate::AiApplicationToolFailureEnvelope::new(code).to_json()
                     || call.result_classification.as_deref() != Some("public")
                 {
                     return Err(AiError::Conflict);
