@@ -3,6 +3,8 @@ use super::core::{
     SchemaPolicy, SchemaStage, SqlValue, record_executed_query,
 };
 use super::migrations::build_migration_plan;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use super::runtime_migration::{OwnedPlannedMigration, RuntimeMigrationError};
 use super::{MigrationBackend, OrmBackend, SqlxBackend, WriteBackend};
 use std::collections::HashSet;
 
@@ -254,8 +256,11 @@ impl MigrationBackend for super::SqliteBackend {
             statements,
             metadata,
             record_history,
+            None,
         )
         .await
+        .map(|_| ())
+        .map_err(runtime_error_to_legacy)
     }
 }
 
@@ -289,8 +294,11 @@ impl MigrationBackend for super::PostgresBackend {
             statements,
             metadata,
             record_history,
+            None,
         )
         .await
+        .map(|_| ())
+        .map_err(runtime_error_to_legacy)
     }
 }
 
@@ -744,11 +752,12 @@ async fn apply_sqlite_migration_statements_transactionally<S>(
     statements: &[S],
     metadata: Option<&MigrationApplicationMetadata>,
     record_history: bool,
-) -> crate::Result<()>
+    owned: Option<&OwnedPlannedMigration>,
+) -> Result<Option<super::AppliedMigrationReport>, RuntimeMigrationError>
 where
     S: AsRef<str>,
 {
-    use sqlx::Acquire;
+    use sqlx::{Acquire, Connection};
 
     let mut conn = pool.acquire().await?;
     let suspend_foreign_keys = statements.iter().any(|statement| {
@@ -759,13 +768,38 @@ where
     });
 
     if suspend_foreign_keys {
+        if owned.is_some() {
+            conn.close_on_drop();
+        }
         sqlx::query("PRAGMA foreign_keys = OFF")
             .execute(&mut *conn)
             .await?;
     }
 
-    let mut tx = conn.begin().await?;
+    let mut tx = if owned.is_some() {
+        conn.begin_with("BEGIN IMMEDIATE").await?
+    } else {
+        conn.begin().await?
+    };
     let migration_result = async {
+        if let Some(plan) = owned {
+            let current = super::migrations::introspect_owned_sqlite_connection(&mut tx).await?;
+            plan.check_baseline(&current)?;
+            validate_owned_sqlite_plan(&mut tx, plan).await?;
+            let recorded: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE} WHERE version = ?"))
+                .bind(version).fetch_one(&mut *tx).await?;
+            if let Some(report) = plan.recorded_version_report(recorded != 0)? { return Ok(Some(report)); }
+            // Controlled rebuilds must not erase host triggers, views, or reserved collision tables.
+            if suspend_foreign_keys {
+                for table in plan.ownership().tables() {
+                    let temp_name = format!("__graphql_orm_{table}_new");
+                    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?")
+                        .bind(temp_name).fetch_one(&mut *tx).await?;
+                    if exists != 0 { return Err(sqlx::Error::Protocol("owned rebuild temporary table collision".into()).into()); }
+                }
+            }
+        }
+
         for statement in statements {
             let statement = statement.as_ref().trim();
             if statement.is_empty()
@@ -784,7 +818,7 @@ where
             if !violations.is_empty() {
                 return Err(sqlx::Error::Protocol(format!(
                     "SQLite foreign_key_check failed after controlled rebuild during migration {version}"
-                )));
+                )).into());
             }
         }
 
@@ -792,12 +826,12 @@ where
             insert_sqlite_history_row(&mut tx, version, description, metadata).await?;
         }
 
-        Ok::<(), sqlx::Error>(())
+        Ok::<_, RuntimeMigrationError>(None)
     }
     .await;
 
     let final_result = match migration_result {
-        Ok(()) => tx.commit().await,
+        Ok(report) => tx.commit().await.map(|_| report).map_err(Into::into),
         Err(error) => {
             let _ = tx.rollback().await;
             Err(error)
@@ -811,6 +845,76 @@ where
     }
 
     final_result
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn runtime_error_to_legacy(error: RuntimeMigrationError) -> sqlx::Error {
+    match error {
+        RuntimeMigrationError::Database(error) => error,
+        RuntimeMigrationError::Diagnostics(error) => sqlx::Error::Protocol(error.to_string()),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+pub(super) async fn apply_owned_sqlite_migration(
+    pool: &sqlx::SqlitePool,
+    plan: &OwnedPlannedMigration,
+    options: &super::ApplyOptions,
+) -> Result<super::AppliedMigrationReport, RuntimeMigrationError> {
+    let current = super::migrations::introspect_owned_sqlite_schema(pool).await?;
+    plan.check_baseline(&current)?;
+    ensure_sqlite_migration_history_table(pool).await?;
+    let metadata = plan.application_metadata();
+    if let Some(report) = apply_sqlite_migration_statements_transactionally(
+        pool,
+        plan.version(),
+        plan.description(),
+        plan.statements(),
+        Some(&metadata),
+        options.record_history,
+        Some(plan),
+    )
+    .await?
+    {
+        return Ok(report);
+    }
+    Ok(super::AppliedMigrationReport {
+        version: plan.version().into(),
+        dry_run: false,
+        statements_applied: plan.statements().len(),
+        already_applied: false,
+    })
+}
+
+#[cfg(feature = "postgres")]
+pub(super) async fn apply_owned_postgres_migration(
+    pool: &sqlx::PgPool,
+    plan: &OwnedPlannedMigration,
+    options: &super::ApplyOptions,
+) -> Result<super::AppliedMigrationReport, RuntimeMigrationError> {
+    let current = super::migrations::introspect_owned_postgres_schema(pool).await?;
+    plan.check_baseline(&current)?;
+    ensure_postgres_migration_history_table(pool).await?;
+    let metadata = plan.application_metadata();
+    if let Some(report) = apply_postgres_migration_statements_transactionally(
+        pool,
+        plan.version(),
+        plan.description(),
+        plan.statements(),
+        Some(&metadata),
+        options.record_history,
+        Some(plan),
+    )
+    .await?
+    {
+        return Ok(report);
+    }
+    Ok(super::AppliedMigrationReport {
+        version: plan.version().into(),
+        dry_run: false,
+        statements_applied: plan.statements().len(),
+        already_applied: false,
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -848,11 +952,45 @@ async fn apply_postgres_migration_statements_transactionally<S>(
     statements: &[S],
     metadata: Option<&MigrationApplicationMetadata>,
     record_history: bool,
-) -> crate::Result<()>
+    owned: Option<&OwnedPlannedMigration>,
+) -> Result<Option<super::AppliedMigrationReport>, RuntimeMigrationError>
 where
     S: AsRef<str>,
 {
     let mut tx = pool.begin().await?;
+    if let Some(plan) = owned {
+        // Cooperative migration serialization plus table locks keep catalog validation
+        // and DDL on this pinned transaction. Hosts fence non-ORM external DDL.
+        sqlx::query("SELECT pg_advisory_xact_lock(718644299020133922)")
+            .execute(&mut *tx)
+            .await?;
+        for table in plan.ownership().tables() {
+            let row: Option<(bool,)> = sqlx::query_as("SELECT c.relrowsecurity OR c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relname = $1 AND c.relkind = 'r'")
+                .bind(table).fetch_optional(&mut *tx).await?;
+            if row.is_some() {
+                let identifier = table.replace('"', "\"\"");
+                sqlx::query(&format!(
+                    "LOCK TABLE \"{identifier}\" IN ACCESS EXCLUSIVE MODE"
+                ))
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        let current = super::migrations::introspect_owned_postgres_connection(&mut tx).await?;
+        plan.check_baseline(&current)?;
+        validate_owned_postgres_plan(&mut tx, plan).await?;
+        let recorded: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {MIGRATION_HISTORY_TABLE} WHERE version = $1"
+        ))
+        .bind(version)
+        .fetch_one(&mut *tx)
+        .await?;
+        if let Some(report) = plan.recorded_version_report(recorded != 0)? {
+            tx.commit().await?;
+            return Ok(Some(report));
+        }
+    }
+
     for statement in statements {
         let statement = statement.as_ref().trim();
         if statement.is_empty() {
@@ -866,7 +1004,7 @@ where
     }
 
     tx.commit().await?;
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(feature = "postgres")]
@@ -1021,4 +1159,71 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+#[cfg(feature = "sqlite")]
+pub(super) async fn validate_owned_sqlite_plan(
+    connection: &mut sqlx::SqliteConnection,
+    plan: &OwnedPlannedMigration,
+) -> Result<(), RuntimeMigrationError> {
+    use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
+    let rebuilt = plan.rebuilt_sqlite_tables().collect::<Vec<_>>();
+    if !rebuilt.is_empty() {
+        // Without a SQL view-dependency IR, preserving arbitrary view definitions
+        // cannot be proven through a drop/rebuild. Reject conservatively.
+        let views: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'view'")
+                .fetch_one(&mut *connection)
+                .await?;
+        if views != 0 {
+            return Err(rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into());
+        }
+    }
+    for table in rebuilt {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?",
+        )
+        .bind(table)
+        .fetch_all(&mut *connection)
+        .await?;
+        let current =
+            super::migrations::introspect_owned_sqlite_connection(&mut *connection).await?;
+        let canonical_append_only = current
+            .tables()
+            .iter()
+            .find(|t| t.table_name() == table)
+            .is_some_and(|t| t.append_only());
+        let name = super::migrations::append_only_name(table);
+        if rows.iter().any(|(trigger,)| {
+            !canonical_append_only
+                || (*trigger != format!("{name}_update") && *trigger != format!("{name}_delete"))
+        }) {
+            return Err(rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into());
+        }
+        let collision: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                .bind(format!("__graphql_orm_{table}_new"))
+                .fetch_one(&mut *connection)
+                .await?;
+        if collision != 0 {
+            return Err(rejection(RuntimeMigrationDiagnosticCode::OwnershipMismatch).into());
+        }
+    }
+    Ok(())
+}
+#[cfg(feature = "postgres")]
+pub(super) async fn validate_owned_postgres_plan(
+    connection: &mut sqlx::PgConnection,
+    plan: &OwnedPlannedMigration,
+) -> Result<(), RuntimeMigrationError> {
+    use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
+    let protected: Vec<(String,)> = sqlx::query_as("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind='r' AND (c.relrowsecurity OR c.relforcerowsecurity OR EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid))")
+        .fetch_all(connection).await?;
+    if protected
+        .iter()
+        .any(|(table,)| plan.changes_protected_rls_structure(table))
+    {
+        return Err(rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into());
+    }
+    Ok(())
 }
