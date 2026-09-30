@@ -13,6 +13,14 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.33.1 to 0.33.2: migration compatibility fixture release identity
+
+Adopt runtime and macros 0.33.2 together from the same published workspace tag.
+The patch records the merged external migration compatibility fixture under a
+new immutable package source identity. No application call-site, generated-code,
+GraphQL SDL, configuration or stored-data changes are required. No data migration
+is needed.
+
 ## 0.33.0 to 0.33.1: Federation fixture release identity
 
 Adopt runtime and macros 0.33.1 together from the same published workspace tag.
