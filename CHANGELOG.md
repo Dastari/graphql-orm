@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-30
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,20 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.33.2 - 2026-09-30
+
+Companion macros crate: `graphql-orm-macros` **0.33.2**.
+
+- Fix `RepositoryEntity` aggregate-field enums retaining the async-graphql
+  `Enum` derive and helper attribute. Repository consumers compile without a
+  direct async-graphql dependency; plain Rust aggregate enums/builders retain
+  their existing traits, fields, SQL behavior and authorization checks.
+- Preserve ordinary `GraphQLEntity` aggregate SDL. Add external scalar/composite
+  consumer fixtures and disposable SQLite/PostgreSQL aggregate evidence.
+
+No data migration is required. Package identities advance together; no
+release is published by this change.
 
 ## 0.33.1 - 2026-09-28
 

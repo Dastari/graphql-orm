@@ -4546,13 +4546,18 @@ fn generate_entity_impl(
         ));
     }
     let aggregate_field_name_str = aggregate_field_name.to_string();
+    let aggregate_graphql_derive = (!has_repository_entity_attribute(&input.attrs))
+        .then(|| quote! { ::graphql_orm::async_graphql::Enum, });
+    let aggregate_graphql_attribute = (!has_repository_entity_attribute(&input.attrs)).then(|| {
+        quote! { #[graphql(name = #aggregate_field_name_str, rename_items = #field_case_rule)] }
+    });
     let aggregate_field_definition = if aggregate_field_variants.is_empty() {
         quote! {}
     } else {
         quote! {
         /// Closed public fields accepted by typed aggregate queries for this entity.
         #[derive(
-            ::graphql_orm::async_graphql::Enum,
+            #aggregate_graphql_derive
             Clone,
             Copy,
             Debug,
@@ -4560,7 +4565,7 @@ fn generate_entity_impl(
             Hash,
             PartialEq,
         )]
-        #[graphql(name = #aggregate_field_name_str, rename_items = #field_case_rule)]
+        #aggregate_graphql_attribute
         pub enum #aggregate_field_name {
             #(#aggregate_field_variants),*
         }

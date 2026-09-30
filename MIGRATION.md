@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-30
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,20 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.33.1 to 0.33.2: repository aggregate enum compatibility
+
+Pin runtime and macros 0.33.2 to the same reviewed full workspace revision.
+`RepositoryEntity` aggregate-field enums now remain plain Rust enums, matching
+its documented repository-only surface. No direct `async-graphql` dependency
+is needed. Existing Rust aggregate calls, field traits, SQL and authorization
+remain unchanged; ordinary GraphQL aggregate SDL is preserved. No stored-data
+migration or runtime-schema API adoption is required.
+
+Consumers that deliberately exposed a repository enum through GraphQL should
+own a GraphQL wrapper or use `GraphQLEntity`; repository enums do not implement
+GraphQL input/output traits. See the compiled
+[external consumer fixture](crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs).
 
 ## 0.33.0 to 0.33.1: Federation fixture release identity
 

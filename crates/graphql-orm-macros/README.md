@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-30
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.2", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.1", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.2", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -158,3 +158,10 @@ list/keyset pagination, and opt-in bounded callback scans on keyset-enabled
 entities. Existing callback list offsets/counts remain exact. See the
 [pagination guide](../../docs/reference/graphql-orm/pagination-migration.md)
 for configuration, generic examples, continuation semantics, and limitations.
+
+`RepositoryEntity` aggregate-field enums use only ordinary Rust derives and no
+`#[graphql]` helper attributes. The repository surface guard also rejects an
+accidentally retained async-graphql `Enum` derive. Ordinary `GraphQLEntity`
+aggregate enums keep their GraphQL derive and naming attributes. See the
+[external runtime consumer](../graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs)
+for compiled plain Rust aggregate calls without a direct async-graphql dependency.

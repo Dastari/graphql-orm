@@ -296,6 +296,20 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
     .await?;
     let schema = schema_builder(database).finish();
     let sdl = schema.sdl();
+    let expected_enum = format!(
+        "enum AggregateWorkRecordAggregateField {{\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n}}",
+        field_name("id", "Id"),
+        field_name("team", "Team"),
+        field_name("category", "Category"),
+        field_name("units", "Units"),
+        field_name("hours", "Hours"),
+        field_name("amount", "Amount"),
+        field_name("adjustment", "Adjustment"),
+    );
+    assert!(
+        sdl.contains(&expected_enum),
+        "ordinary aggregate enum SDL changed: {sdl}"
+    );
     let descriptor = AggregateWorkRecord::generated_graphql_operations()
         .iter()
         .find(|operation| operation.category() == GeneratedGraphqlOperationCategory::Aggregate)
