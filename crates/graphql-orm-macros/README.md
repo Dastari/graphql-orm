@@ -165,3 +165,7 @@ accidentally retained async-graphql `Enum` derive. Ordinary `GraphQLEntity`
 aggregate enums keep their GraphQL derive and naming attributes. See the
 [external runtime consumer](../graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs)
 for compiled plain Rust aggregate calls without a direct async-graphql dependency.
+
+Version 0.33.3 gives the repository aggregate compatibility fix a distinct package
+identity after the independent 0.33.2 fixture maintenance. Generated behavior is
+unchanged from the reviewed aggregate fix.
