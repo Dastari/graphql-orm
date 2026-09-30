@@ -13578,7 +13578,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn protocol_keeps_resume_warnings_closed_outside_the_exact_resume_window() {
+    fn protocol_keeps_warnings_closed_outside_correlated_start_resume_or_turn_windows() {
         let cursor =
             crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "thread-retained-1")
                 .expect("cursor should validate");
@@ -13600,6 +13600,15 @@ pub(crate) mod tests {
         ));
         assert!(!mismatched.retained_resume_ready(&cursor));
 
+        let mut idle = initialized_protocol_actor();
+        assert!(matches!(
+            idle.accept(&runtime_warning_notification(
+                None,
+                "No correlated thread operation."
+            )),
+            Err(ProviderError::Rejected)
+        ));
+
         let mut new_thread = initialized_protocol_actor();
         new_thread
             .start_persistent_empty_thread(
@@ -13610,7 +13619,23 @@ pub(crate) mod tests {
             )
             .expect("new-thread fixture should begin");
         assert!(matches!(
-            new_thread.accept(&runtime_warning_notification(None, "Not a resume window.")),
+            new_thread.accept(&runtime_warning_notification(
+                None,
+                "A correlated startup warning."
+            )),
+            Ok(AiCodexAppServerInbound::RuntimeWarning)
+        ));
+        new_thread
+            .accept(br#"{"id":2,"result":{"thread":{"id":"thread-new"}}}"#)
+            .expect("start response remains required");
+        new_thread
+            .accept(&thread_started_notification("thread-new"))
+            .expect("started notification remains required");
+        assert!(matches!(
+            new_thread.accept(&runtime_warning_notification(
+                None,
+                "Completed start is idle."
+            )),
             Err(ProviderError::Rejected)
         ));
 
