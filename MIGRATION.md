@@ -27,6 +27,10 @@ own a GraphQL wrapper or use `GraphQLEntity`; repository enums do not implement
 GraphQL input/output traits. See the compiled
 [external consumer fixture](crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs).
 
+The same patch also records the merged external migration compatibility fixture
+under the new package source identity and refreshes its fixture locks.
+
+
 ## 0.33.0 to 0.33.1: Federation fixture release identity
 
 Adopt runtime and macros 0.33.1 together from the same published workspace tag.
