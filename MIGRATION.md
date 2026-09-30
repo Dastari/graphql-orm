@@ -33,9 +33,9 @@ The physical dependency environment is not a record-write API or an authorizatio
 certificate. Hosts must fence external DDL and validate their complete public/policy
 revision before future mutations; ORM fingerprints exclude host policy revisions.
 
-## 0.33.1 to 0.33.2: repository aggregate enum compatibility
+## 0.33.2 to 0.33.3: repository aggregate enum compatibility
 
-Pin runtime and macros 0.33.2 to the same reviewed full workspace revision.
+Pin runtime and macros 0.33.3 to the same reviewed full workspace revision.
 `RepositoryEntity` aggregate-field enums now remain plain Rust enums, matching
 its documented repository-only surface. No direct `async-graphql` dependency
 is needed. Existing Rust aggregate calls, field traits, SQL and authorization
@@ -47,8 +47,12 @@ own a GraphQL wrapper or use `GraphQLEntity`; repository enums do not implement
 GraphQL input/output traits. See the compiled
 [external consumer fixture](crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs).
 
-The same patch also records the merged external migration compatibility fixture
-under the new package source identity and refreshes its fixture locks.
+## 0.33.1 to 0.33.2: migration compatibility fixture release identity
+
+Adopt runtime and macros 0.33.2 together from the same published workspace tag.
+The patch records the merged external migration compatibility fixture under a
+new immutable package source identity. No application call-site, generated-code,
+GraphQL SDL, configuration or stored-data changes are required.
 
 
 ## 0.33.0 to 0.33.1: Federation fixture release identity

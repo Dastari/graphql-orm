@@ -93,7 +93,7 @@ merged directly into a dynamic schema; hosts provide dynamic fields/types.
 | PR | Depends on | Change | Suggested aligned ORM/macros version |
 | --- | --- | --- | --- |
 | Contract | Current main | This review checkpoint only | 0.33.1, unchanged |
-| Fix | Reviewed scope, independently of A–D | Plain repository aggregate enums | 0.33.2 |
+| Fix | Reviewed scope, independently of A–D | Plain repository aggregate enums | 0.33.3 (merged identity correction) |
 | A | Contract review | Owned physical target conversion and scoped planning | 0.34.0 |
 | B | Contract review and A's verified composed physical target | Transactional runtime mutation engine | 0.35.0 |
 | C | Contract review; A for end-to-end fixtures | Read-only dynamic GraphQL | 0.36.0 |
