@@ -33,6 +33,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Thread-targeted Codex startup warnings can precede the first thread response.
+  Their bounded target is staged without binding an active thread; both the
+  response and started notification must subsequently agree with that exact
+  target. Conflicting warnings or lifecycle IDs remain rejected, and warnings
+  never complete startup, authorize tools, or expose their text.
+
 - Bounded Codex runtime warnings emitted during the sole outstanding `thread/start`
   RPC no longer abort startup. Unthreaded warnings before the first thread binding
   and exact matching warnings during either response/notification ordering are
