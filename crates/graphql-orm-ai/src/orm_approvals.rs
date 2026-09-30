@@ -3105,6 +3105,7 @@ mod tests {
                 &lease,
                 PreparedToolCallStart {
                     execution_provenance: None,
+                    native_preflight_refusal: None,
                     id: tool_call_id.0,
                     provider_call_key: format!("approval-provider-call-{}", tool_call_id.0),
                     provider_call_id: format!("provider-call-{}", tool_call_id.0),

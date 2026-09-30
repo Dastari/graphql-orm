@@ -632,6 +632,7 @@ pub(crate) struct PreparedToolCallStart {
     pub tool_id: String,
     pub tool_fingerprint: String,
     pub execution_provenance: Option<crate::AiToolExecutionProvenance>,
+    pub native_preflight_refusal: Option<crate::orm_tools::NativePreflightRefusal>,
     pub protected_arguments: serde_json::Value,
     pub argument_hash: String,
     pub risk: String,
@@ -2114,6 +2115,7 @@ impl OrmAiRunService {
                                 ) && call.approval_id.is_none()
                                     && (call.state != "execution_failed"
                                         || call.risk == "read_only"
+                                        || crate::orm_tools::native_preflight_failure_code(&call).is_some()
                                         || (call.authorization_code.as_deref().and_then(crate::ToolPreExecutionRejectionReason::from_failure_code).is_some()
                                             && call.result_classification.as_deref() == Some("public")))
                             }
@@ -2943,6 +2945,9 @@ impl OrmAiRunService {
         native: Option<(String, String, serde_json::Value)>,
         blocked: Option<NativeBlockedCall>,
     ) -> Result<AiRunLease, AiError> {
+        if call.execution_provenance.is_some() && call.native_preflight_refusal.is_some() {
+            return Err(AiError::Conflict);
+        }
         if call
             .execution_provenance
             .as_ref()
@@ -2969,7 +2974,12 @@ impl OrmAiRunService {
             .as_ref()
             .map(serde_json::to_value)
             .transpose()
-            .map_err(|_| AiError::PersistenceFailed)?;
+            .map_err(|_| AiError::PersistenceFailed)?
+            .or_else(|| {
+                call.native_preflight_refusal
+                    .as_ref()
+                    .map(crate::orm_tools::NativePreflightRefusal::to_json)
+            });
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
@@ -7472,6 +7482,7 @@ mod tests {
             tool_id: "reviewed-action".to_owned(),
             tool_fingerprint: "descriptor-v1".to_owned(),
             execution_provenance: None,
+            native_preflight_refusal: None,
             protected_arguments: serde_json::json!({"ciphertext":"arguments"}),
             argument_hash: "b".repeat(64),
             risk: risk.to_owned(),

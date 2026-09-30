@@ -17,6 +17,9 @@ enum CallbackScenario {
     FixedBroker,
     AutomaticCompleted,
     RefusedAutomaticCompleted,
+    MfaPreflightCompleted,
+    DeniedPreflightCompleted,
+    TamperedPreflight,
     FailedReadCompleted,
     BrokerCompleted,
     ReadOnlyCompleted,
@@ -33,6 +36,9 @@ impl CallbackScenario {
             self,
             Self::AutomaticCompleted
                 | Self::RefusedAutomaticCompleted
+                | Self::MfaPreflightCompleted
+                | Self::DeniedPreflightCompleted
+                | Self::TamperedPreflight
                 | Self::FailedReadCompleted
                 | Self::BrokerCompleted
                 | Self::ReadOnlyCompleted
@@ -47,6 +53,7 @@ impl CallbackScenario {
         matches!(
             self,
             Self::TamperedResult
+                | Self::TamperedPreflight
                 | Self::ChangedStepVersion
                 | Self::ChangedCohort
                 | Self::StaleLease
@@ -272,6 +279,8 @@ impl AiProvider for MixedRetainedProvider {
                 let callbacks: &[(usize, &str, &str)] = match scenario {
                     CallbackScenario::EmptyCompleted => &[],
                     CallbackScenario::ReadOnlyCompleted => &[(0, "records.read", "ordinary")],
+                    CallbackScenario::MfaPreflightCompleted | CallbackScenario::TamperedPreflight => &[(0, "records.automatic", "mfa"), (1, "records.read", "after-mfa-refusal")],
+                    CallbackScenario::DeniedPreflightCompleted => &[(0, "records.automatic", "preflight-denied"), (1, "records.read", "after-permission-refusal")],
                     scenario if scenario.completes() => &[(0, "records.automatic", "ordinary"), (1, "records.read", "after-effect")],
                     _ => &[(0, "records.automatic", "ordinary"), (1, "records.automatic", "review"), (2, "records.automatic", "later"), (3, "records.read", "after-pending")],
                 };
@@ -285,6 +294,14 @@ impl AiProvider for MixedRetainedProvider {
                     )?).await?;
                     if scenario == CallbackScenario::RefusedAutomaticCompleted && tool_id == "records.automatic" {
                         assert_eq!(reply.output()["code"], "not_started_authentication_required");
+                        assert_eq!(reply.output()["retryable"], false);
+                    }
+                    if matches!(scenario, CallbackScenario::MfaPreflightCompleted | CallbackScenario::TamperedPreflight) && tool_id == "records.automatic" {
+                        assert_eq!(reply.output()["code"], "preflight_authentication_required");
+                        assert_eq!(reply.output()["retryable"], false);
+                    }
+                    if scenario == CallbackScenario::DeniedPreflightCompleted && tool_id == "records.automatic" {
+                        assert_eq!(reply.output()["code"], "preflight_authorization_denied");
                         assert_eq!(reply.output()["retryable"], false);
                     }
                     replies.lock().await.push(reply.output().clone());
@@ -302,9 +319,18 @@ impl AiProvider for MixedRetainedProvider {
                     ..Default::default()
                 }).await.unwrap();
             }
+            if scenario == CallbackScenario::TamperedPreflight {
+                let call = AiToolCallRecord::query(database.pool()).fetch_all().await.unwrap().into_iter().find(|call| call.state == "execution_failed").unwrap();
+                AiToolCallRecord::update_by_id(&database, &call.id, UpdateAiToolCallRecordInput {
+                    execution_provenance: Some(None),
+                    ..Default::default()
+                }).await.unwrap();
+            }
             if turn > 0 || scenario.completes() {
-                yield ProviderEvent::TextDelta { text: if scenario == CallbackScenario::RefusedAutomaticCompleted {
+                yield ProviderEvent::TextDelta { text: if matches!(scenario, CallbackScenario::RefusedAutomaticCompleted | CallbackScenario::MfaPreflightCompleted) {
                     "The diagnostic read completed. The command was not started because authentication must be renewed.".to_owned()
+                } else if scenario == CallbackScenario::DeniedPreflightCompleted {
+                    "The diagnostic read completed. Current permission does not allow the command; renewing MFA will not grant permission.".to_owned()
                 } else { "All authorized work completed.".to_owned() } };
             }
             yield ProviderEvent::Usage { input_tokens:19, output_tokens:7, cached_input_tokens:0 };
@@ -1068,7 +1094,10 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
             ),
             "{scenario:?} unexpectedly finalized: {waiting:?}"
         );
-        assert_eq!(fixture.completed_executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fixture.completed_executions.load(Ordering::SeqCst),
+            usize::from(scenario != CallbackScenario::TamperedPreflight)
+        );
         assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
         let rows = crate::persistence::AiRunCheckpointRecord::query(fixture.database.pool())
             .fetch_all()
@@ -1081,7 +1110,7 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
         Box::pin(assert_retry_does_not_complete(&coordinator, &fixture.lease)).await;
         assert_eq!(
             fixture.completed_executions.load(Ordering::SeqCst),
-            1,
+            usize::from(scenario != CallbackScenario::TamperedPreflight),
             "uncertainty must not replay a completed effect"
         );
         assert_eq!(provider.turns.load(Ordering::SeqCst), 1);
@@ -1108,6 +1137,8 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
                 CallbackScenario::ReadOnlyCompleted
                     | CallbackScenario::EmptyCompleted
                     | CallbackScenario::RefusedAutomaticCompleted
+                    | CallbackScenario::MfaPreflightCompleted
+                    | CallbackScenario::DeniedPreflightCompleted
             )) + usize::from(scenario.broker())
         );
         assert!(
@@ -1129,7 +1160,10 @@ async fn native_coordinator_lifecycle(scenario: CallbackScenario) {
                 .count(),
             usize::from(matches!(
                 scenario,
-                CallbackScenario::FailedReadCompleted | CallbackScenario::RefusedAutomaticCompleted
+                CallbackScenario::FailedReadCompleted
+                    | CallbackScenario::RefusedAutomaticCompleted
+                    | CallbackScenario::MfaPreflightCompleted
+                    | CallbackScenario::DeniedPreflightCompleted
             ))
         );
         assert!(calls.iter().all(|call| call.completed_at.is_some()));
@@ -1424,6 +1458,30 @@ async fn native_coordinator_pre_dispatch_capacity_refusal_is_certain_without_eff
 async fn native_coordinator_rate_limit_after_dispatch_remains_uncertain() {
     Box::pin(native_coordinator_lifecycle(
         CallbackScenario::StreamLimited,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_mfa_preflight_allows_diagnostic_read_and_final_answer() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::MfaPreflightCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_permission_preflight_is_distinct_from_mfa_and_can_finish() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::DeniedPreflightCompleted,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn native_coordinator_preflight_code_without_owned_receipt_cannot_finalize_or_replay() {
+    Box::pin(native_coordinator_lifecycle(
+        CallbackScenario::TamperedPreflight,
     ))
     .await;
 }

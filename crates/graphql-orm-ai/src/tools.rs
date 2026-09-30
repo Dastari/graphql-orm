@@ -1114,6 +1114,8 @@ pub struct AiToolAuthorizationDecision {
     allowed: bool,
     #[serde(default)]
     one_shot_required: bool,
+    #[serde(default)]
+    authentication_required: bool,
     /// Stable non-sensitive reason code for audit and diagnostics.
     pub reason_code: String,
     /// Current host policy version used for the decision.
@@ -1132,6 +1134,7 @@ impl AiToolAuthorizationDecision {
         Self {
             allowed: true,
             one_shot_required: false,
+            authentication_required: false,
             reason_code: reason_code.into(),
             policy_version: policy_version.into(),
             authorization_state_digest: authorization_state_digest.into(),
@@ -1143,6 +1146,7 @@ impl AiToolAuthorizationDecision {
         Self {
             allowed: false,
             one_shot_required: false,
+            authentication_required: false,
             reason_code: reason_code.into(),
             policy_version: policy_version.into(),
             authorization_state_digest: String::new(),
@@ -1152,6 +1156,23 @@ impl AiToolAuthorizationDecision {
     /// Returns whether current host policy allowed this exact request.
     pub const fn is_allowed(&self) -> bool {
         self.allowed
+    }
+
+    /// Denies this request until current authentication or assurance is renewed.
+    /// This is a trusted host policy distinction, not proof that earlier
+    /// application work under a reused idempotency key does not exist.
+    pub fn require_authentication(
+        reason_code: impl Into<String>,
+        policy_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            authentication_required: true,
+            ..Self::deny(reason_code, policy_version)
+        }
+    }
+
+    pub(crate) const fn authentication_required(&self) -> bool {
+        !self.allowed && self.authentication_required
     }
 
     /// Allows the exact current-principal request only after one-shot approval.
@@ -1168,6 +1189,7 @@ impl AiToolAuthorizationDecision {
         Self {
             allowed: true,
             one_shot_required: true,
+            authentication_required: false,
             reason_code: reason_code.into(),
             policy_version: policy_version.into(),
             authorization_state_digest: authorization_state_digest.into(),

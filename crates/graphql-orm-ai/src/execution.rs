@@ -796,6 +796,9 @@ impl AuthenticatedToolBridge {
             if !authorization.is_complete_allow()
                 || authorization.approval_requirement() != AiApprovalRule::None
             {
+                if authorization.authentication_required() {
+                    return Err(ToolExecutionError::Reauthorization);
+                }
                 return Err(ToolExecutionError::Authorization);
             }
             let admitted = binding.clone().with_current_authorization(&authorization);
@@ -858,6 +861,9 @@ impl AuthenticatedToolBridge {
             .authorize_request(&principal, descriptor, request)
             .await;
         if !authorization.is_complete_allow() {
+            if authorization.authentication_required() {
+                return Err(ToolExecutionError::Reauthorization);
+            }
             return Err(ToolExecutionError::Authorization);
         }
         Ok((principal, authorization))

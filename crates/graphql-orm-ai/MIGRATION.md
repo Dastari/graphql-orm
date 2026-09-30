@@ -19,6 +19,22 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.105.2 to 0.106.0
+
+Hosts can return `AiToolAuthorizationDecision::require_authentication` for an
+otherwise authorized request needing fresh authentication. Ordinary permission
+denials remain `deny`. Native callbacks receive the closed, non-retryable
+`preflight_authentication_required` / `preflight_authorization_denied` envelope
+before executor admission; clients may offer their existing sign-in/step-up flow
+for the authentication code only. Do not automatically replay an earlier command.
+
+The schema-module version advances to `0.71.0` for the new durable receipt
+semantics; no columns or public GraphQL fields change. Native completed-turn
+checkpoints validate the private framework receipt alongside protected output,
+current rules, egress and atomic fences. The receipt proves this callback was not
+dispatched, not that an earlier application idempotency intent had no effects.
+Execution ambiguity and unproved transport failures remain recovery-required.
+
 ## 0.105.1 to 0.105.2
 
 The Codex actor now stages a bounded thread target supplied by a startup `warning`

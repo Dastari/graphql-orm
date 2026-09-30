@@ -22,6 +22,16 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
+- `AiToolAuthorizationDecision::require_authentication` distinguishes current
+  authentication renewal from permission denial without granting execution.
+  Native classification returns protected, audited non-retryable
+  `preflight_authentication_required` or `preflight_authorization_denied` results.
+  The model can continue permitted diagnostics and finish with a useful answer.
+  Native finalization requires the exact crate-owned undispatched callback receipt,
+  protected arguments/result, current rules, egress proof and transaction fences.
+  This receipt does not attest absence of earlier idempotent application work;
+  ambiguous dispatch and execution failures retain existing recovery behavior.
+
 - Compatible `AiToolAuthorizationPolicy::authorize_request` hook supplies exact
   server-authored invocation metadata to current host policy, both before normal
   execution and during approved reauthorization. Existing implementations retain
