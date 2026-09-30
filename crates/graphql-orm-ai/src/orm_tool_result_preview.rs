@@ -381,6 +381,8 @@ fn application_tool_failure_code(value: &str) -> Option<crate::AiApplicationTool
         "tool_call_limit_reached" => Code::ToolCallLimitReached,
         "capability_stale" => Code::CapabilityStale,
         "authorization_denied" => Code::AuthorizationDenied,
+        "preflight_authentication_required" => Code::AuthenticationRequired,
+        "preflight_authorization_denied" => Code::PreflightAuthorizationDenied,
         "temporarily_unavailable" => Code::TemporarilyUnavailable,
         "tool_unavailable" => Code::ToolUnavailable,
         "resolver_validation_failed" => Code::ResolverValidationFailed,
@@ -405,6 +407,8 @@ const fn exhaustive_browser_failure_code(
         | Code::ToolCallLimitReached
         | Code::CapabilityStale
         | Code::AuthorizationDenied
+        | Code::AuthenticationRequired
+        | Code::PreflightAuthorizationDenied
         | Code::TemporarilyUnavailable
         | Code::ToolUnavailable
         | Code::ResolverValidationFailed

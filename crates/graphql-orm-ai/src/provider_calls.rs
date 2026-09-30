@@ -5100,6 +5100,18 @@ mod tests {
             _descriptor: &AiToolDescriptor,
             _variables: &serde_json::Value,
         ) -> AiToolAuthorizationDecision {
+            if _variables["recordId"] == "preflight-denied" {
+                return AiToolAuthorizationDecision::deny(
+                    "test_permission_denied",
+                    "tool-policy-v1",
+                );
+            }
+            if _variables["recordId"] == "mfa" {
+                return AiToolAuthorizationDecision::require_authentication(
+                    "fresh_mfa_required",
+                    "tool-policy-v1",
+                );
+            }
             if self.0.load(Ordering::SeqCst) == 0 {
                 return AiToolAuthorizationDecision::deny("test_read_denied", "tool-policy-v0");
             }

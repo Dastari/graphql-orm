@@ -2579,6 +2579,12 @@ pub enum AiApplicationToolFailureCode {
     CapabilityStale,
     /// Current authorization denied the call without disclosing why.
     AuthorizationDenied,
+    /// Current authentication or assurance must be renewed before dispatch.
+    /// This does not attest absence of earlier application/idempotency work.
+    AuthenticationRequired,
+    /// Current policy refused this native callback before executor admission.
+    /// This does not attest absence of earlier application/idempotency work.
+    PreflightAuthorizationDenied,
     /// The target or runtime was temporarily unavailable.
     TemporarilyUnavailable,
     /// The registered tool cannot be executed; the detailed cause is operator-only.
@@ -2606,6 +2612,8 @@ impl AiApplicationToolFailureCode {
             Self::ToolCallLimitReached => "tool_call_limit_reached",
             Self::CapabilityStale => "capability_stale",
             Self::AuthorizationDenied => "authorization_denied",
+            Self::AuthenticationRequired => "preflight_authentication_required",
+            Self::PreflightAuthorizationDenied => "preflight_authorization_denied",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
             Self::ToolUnavailable => "tool_unavailable",
             Self::ResolverValidationFailed => "resolver_validation_failed",
