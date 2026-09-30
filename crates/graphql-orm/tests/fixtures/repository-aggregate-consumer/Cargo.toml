@@ -1,0 +1,21 @@
+[package]
+name = "repository-aggregate-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[features]
+default = ["sqlite"]
+sqlite = ["graphql-orm/sqlite"]
+postgres = ["graphql-orm/postgres"]
+mssql = ["graphql-orm/mssql"]
+
+[dependencies]
+graphql-orm = { path = "../../..", default-features = false }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

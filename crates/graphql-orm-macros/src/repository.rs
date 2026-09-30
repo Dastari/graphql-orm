@@ -648,7 +648,141 @@ fn contains_generated_graphql_impl(tokens: &TokenStream) -> bool {
         "async_graphql :: InputObject",
         "async_graphql :: SimpleObject",
         "async_graphql :: Subscription",
+        "async_graphql :: Enum",
     ]
     .iter()
     .any(|needle| rendered.contains(needle))
+}
+
+#[cfg(test)]
+mod aggregate_tests {
+    use super::*;
+
+    fn entity(composite: bool) -> DeriveInput {
+        let backend = if cfg!(feature = "sqlite") {
+            "sqlite"
+        } else if cfg!(feature = "postgres") {
+            "postgres"
+        } else {
+            "mssql"
+        };
+        let other_key = composite.then(|| {
+            quote! {
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                tenant: String,
+            }
+        });
+        syn::parse2(quote! {
+            #[repository_entity(backend = #backend, table = "plain_aggregate", plural = "PlainAggregates")]
+            struct PlainAggregate {
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                id: String,
+                #other_key
+                amount: i64,
+                #[graphql_orm(private, sensitive)]
+                secret: String,
+                #[graphql_orm(read = false)]
+                unreadable: String,
+            }
+        }).expect("valid repository fixture")
+    }
+
+    #[test]
+    fn repository_aggregate_enum_and_helpers_are_plain_rust() {
+        for composite in [false, true] {
+            let input = entity(composite);
+            let tokens = strip_entity_graphql_surface(
+                &input,
+                crate::entity::generate_graphql_entity(&input).expect("generate entity"),
+            )
+            .expect("strip repository surface");
+            let file = syn::parse2::<syn::File>(tokens.clone()).expect("generated Rust");
+            let aggregate = file
+                .items
+                .iter()
+                .find_map(|item| match item {
+                    Item::Enum(item) if item.ident == "PlainAggregateAggregateField" => Some(item),
+                    _ => None,
+                })
+                .expect("aggregate enum remains");
+            let names = aggregate
+                .variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+                .collect::<Vec<_>>();
+            assert!(names.contains(&"Amount".into()));
+            assert!(!names.contains(&"Secret".into()));
+            assert!(!names.contains(&"Unreadable".into()));
+            assert_eq!(names.contains(&"Tenant".into()), composite);
+            assert!(
+                !aggregate
+                    .attrs
+                    .iter()
+                    .any(|attr| attr.path().is_ident("graphql"))
+            );
+            let attrs = aggregate
+                .attrs
+                .iter()
+                .map(ToTokens::to_token_stream)
+                .collect::<TokenStream>()
+                .to_string();
+            assert!(!attrs.contains("async_graphql"), "{attrs}");
+            for plain_trait in ["Clone", "Copy", "Debug", "Eq", "Hash", "PartialEq"] {
+                assert!(attrs.contains(plain_trait), "{attrs}");
+            }
+            let rendered = tokens.to_string();
+            assert!(rendered.contains("TypedAggregateField"));
+            assert!(rendered.contains("GroupedAggregateQuery"));
+            assert!(!contains_generated_graphql_impl(&tokens));
+        }
+    }
+
+    #[test]
+    fn repository_surface_guard_rejects_a_remaining_graphql_enum() {
+        assert!(contains_generated_graphql_impl(&quote! {
+            #[derive(::graphql_orm::async_graphql::Enum)]
+            enum Accidental { Amount }
+        }));
+    }
+
+    #[test]
+    fn ordinary_graphql_aggregate_enum_keeps_its_graphql_attributes() {
+        let mut input = entity(false);
+        let backend = if cfg!(feature = "sqlite") {
+            "sqlite"
+        } else if cfg!(feature = "postgres") {
+            "postgres"
+        } else {
+            "mssql"
+        };
+        input.attrs = vec![parse_quote!(
+            #[graphql_entity(backend = #backend, table = "plain_aggregate", plural = "PlainAggregates")]
+        )];
+        let tokens =
+            crate::entity::generate_graphql_entity(&input).expect("generate GraphQL entity");
+        let file = syn::parse2::<syn::File>(tokens).expect("generated Rust");
+        let aggregate = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Enum(item) if item.ident == "PlainAggregateAggregateField" => Some(item),
+                _ => None,
+            })
+            .expect("aggregate enum");
+        let attrs = aggregate
+            .attrs
+            .iter()
+            .map(ToTokens::to_token_stream)
+            .collect::<TokenStream>()
+            .to_string();
+        assert!(attrs.contains("async_graphql :: Enum"));
+        assert!(
+            aggregate
+                .attrs
+                .iter()
+                .any(|attr| attr.path().is_ident("graphql"))
+        );
+    }
 }

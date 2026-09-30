@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-09-30
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,11 +18,22 @@ for historical context.
 
 Companion macros crate: `graphql-orm-macros` **0.33.2**.
 
+- Fix `RepositoryEntity` aggregate-field enums retaining the async-graphql
+  `Enum` derive and helper attribute. Repository consumers compile without a
+  direct async-graphql dependency; plain Rust aggregate enums/builders retain
+  their existing traits, fields, SQL behavior and authorization checks.
+- Preserve ordinary `GraphQLEntity` aggregate SDL. Add external scalar/composite
+  consumer fixtures and disposable SQLite/PostgreSQL aggregate evidence.
+
+No data migration is required. Package identities advance together; no
+release is published by this change.
+
 - Advance runtime and macros together after the external migration compatibility
   fixture changed the runtime package source tree. This preserves immutable
   package-release identities and refreshes fixture lockfiles.
 - Runtime and generated-code behavior, public APIs, GraphQL SDL and stored-data
   contracts remain unchanged. No data migration is required.
+
 
 ## 0.33.1 - 2026-09-28
 
