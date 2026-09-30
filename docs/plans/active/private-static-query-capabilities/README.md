@@ -34,6 +34,11 @@ The independent fixture maintenance [PR #92](https://github.com/Dastari/graphql-
 had already consumed 0.33.2; [PR #94](https://github.com/Dastari/graphql-orm/pull/94)
 corrects the aggregate fix's aligned package identity to 0.33.3 without behavior changes.
 Neither PR implements the query or generated-adapter gaps below.
+[PR #90](https://github.com/Dastari/graphql-orm/pull/90), merged at
+`ad054a66abdcdb1b7fb7e06479cc3e8a985985d9`, concerns native AI authentication
+preflight. It adds no query, aggregate continuation or generated-view capability.
+Its inherited schema-module fixture assertion is tracked separately in
+[issue #93](https://github.com/Dastari/graphql-orm/issues/93).
 
 ## Overlap and dependency matrix
 
