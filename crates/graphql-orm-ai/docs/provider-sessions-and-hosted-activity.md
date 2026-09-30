@@ -273,13 +273,15 @@ method-specific contract: required fields and inner lifecycle timestamps,
 active thread/turn/item correlation, content bounds, and the closed method
 allowlist remain mandatory.
 
-Codex may emit the documented generic `warning` while a turn is open. The
+Codex may emit the documented generic `warning` while a turn is open or while
+the sole thread-start RPC awaits its response/started notification. Before the
+new thread is bound only an unthreaded warning is admitted. Afterwards the
 optional thread ID must match the active thread, and the message must be
 bounded, non-empty, and control-free. The actor limits each turn to eight
 warnings and 16 KiB total text, discards every field, and returns only
 `AiCodexAppServerInbound::RuntimeWarning`. Hosts treat that variant as a
 non-fatal control event; they never log or forward the warning text. Warnings
-outside the current turn and malformed, mismatched, late, or flooding warnings
+outside those correlated windows and malformed, mismatched, late, or flooding warnings
 remain rejected.
 
 Every turn explicitly requests `summary: "none"`. Codex may still report an
