@@ -13,6 +13,26 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.33.x to 0.34.0: owned runtime migration targets
+
+Adopt runtime and macros 0.34.0 together. Existing static enums, variant imports,
+constructors, exhaustive matches, struct literals and function pointers remain
+source-compatible; no call-site or stored-data migration is required.
+
+Runtime hosts may opt into `ValidatedRuntimeSchema::physical_schema`, compose
+static metadata, explicitly declare owned physical tables, preview a plan, then
+apply its immutable artifact with ordinary `ApplyOptions`. Retain intentionally
+removed tables in the ownership set to review drops. Baseline validation is always
+required for owned plans; `require_clean_schema = false` does not disable their
+immutable baseline binding. Replan after drift and after successful application.
+Owned application does not reconcile PostgreSQL RLS. Unsupported backends fail
+before connection acquisition; unsupported live preservation cases return structured
+rejections. See [owned runtime migrations](docs/reference/graphql-orm/runtime-migrations.md).
+
+The physical dependency environment is not a record-write API or an authorization
+certificate. Hosts must fence external DDL and validate their complete public/policy
+revision before future mutations; ORM fingerprints exclude host policy revisions.
+
 ## 0.33.1 to 0.33.2: repository aggregate enum compatibility
 
 Pin runtime and macros 0.33.2 to the same reviewed full workspace revision.

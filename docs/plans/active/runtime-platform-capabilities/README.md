@@ -14,9 +14,13 @@ supersedes: []
 
 Provide reusable runtime migration, transactional single-record mutation, and
 opt-in dynamic GraphQL mechanisms for applications with catalog-loaded schemas.
-This is a **proposed contract**, not an implemented API. All Rust signatures,
-examples, SDL, feature additions, and future versions below are proposals.
-Review this checkpoint before implementing unsettled public interfaces.
+The revised contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd` is approved for
+implementation and merged by PR #86 at `9ed46db5d1c5c6214f83ef9084352030e14905ad`.
+PR A implements the owned migration slice; its current public mechanics are in
+[owned runtime migrations](../../../reference/graphql-orm/runtime-migrations.md).
+B–D signatures, examples, SDL and feature additions below remain approved
+proposals until their separate implementation/test PRs. A proposal is not
+execution or downstream adoption evidence.
 
 The initiating [consumer contract](https://github.com/Dastari/digibase/blob/agent/vertical-slice-plan/docs/coordination/prompts/0013-graphql-orm-runnable-product-prerequisites.md)
 requires separate reviewable PRs. The host owns catalog persistence, activation,

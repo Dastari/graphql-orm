@@ -14,6 +14,26 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.34.0 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.34.0** (alignment only).
+
+- Add owned canonical physical targets from `ValidatedRuntimeSchema`, checked
+  static/system composition, explicit `ManagedTableSet`, read-only owned planning
+  and validation, and separate guarded `apply_owned_migration` on SQLite/PostgreSQL.
+- Keep the public legacy `MigrationStep` enum and struct literals unchanged.
+  Static and owned storage share validation, hashing, diffing, risk classification,
+  rendering and transactional history application; runtime conversion and owned
+  catalog introspection do not leak index storage.
+- Bind immutable plans to complete live baselines and ownership, retain destructive
+  and additive guards, preserve host PostgreSQL RLS, and reject unsupported live
+  preservation cases. Add a verified incoming-dependency environment for later
+  runtime mutations; record mutation and dynamic GraphQL are still later slices.
+- Respect SQLite composite primary-key ordinal order during introspection.
+
+No automatic application, host catalog, transport, durable delivery or release
+publication is introduced. See the owned runtime migration reference and example.
+
 ## 0.33.2 - 2026-10-01
 
 Companion macros crate: `graphql-orm-macros` **0.33.2**.

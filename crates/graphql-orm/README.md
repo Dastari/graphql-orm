@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.2", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.34.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -187,3 +187,6 @@ compiles scalar and composite keys on SQLite/PostgreSQL/MSSQL; its
 [owned-backend tests](tests/fixtures/repository-aggregate-consumer/tests/owned_backend.rs)
 execute grouped aggregates and denial before SQL on disposable SQLite/PostgreSQL.
 Ordinary `GraphQLEntity` aggregate SDL remains unchanged.
+
+Owned runtime targets, explicit table ownership, read-only plans and guarded apply
+are documented in [runtime migrations](../../docs/reference/graphql-orm/runtime-migrations.md).

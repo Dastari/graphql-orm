@@ -402,7 +402,7 @@ fn render_column_definition(
 }
 
 fn render_create_table_statement(backend: DatabaseBackend, table: &TableRef<'_>) -> String {
-    render_create_table_statement_for_name(backend, table, &table.table_name)
+    render_create_table_statement_for_name(backend, table, table.table_name)
 }
 
 fn render_create_table_statement_for_name(
@@ -914,8 +914,7 @@ pub(super) fn diff_schema_views(
                 retention_purge: target_table.retention_purge,
             });
         }
-        if !check_constraints_equivalent(&table.check_constraints, &target_table.check_constraints)
-        {
+        if !check_constraints_equivalent(table.check_constraints, target_table.check_constraints) {
             steps.push(OwnedMigrationStep::SetCheckConstraints {
                 table_name: table_name.clone(),
                 before: table.check_constraints.clone(),
@@ -951,7 +950,7 @@ fn foreign_key_constraint_name(table_name: &str, foreign_key: &ForeignKeyModel) 
 pub(super) fn migration_step_table_name<'a>(step: &StepRef<'a>) -> Option<&'a str> {
     match step {
         StepRef::EnableExtension { .. } => None,
-        StepRef::CreateTable(table) => Some(&table.table_name),
+        StepRef::CreateTable(table) => Some(table.table_name),
         StepRef::DropTable { table_name } => Some(table_name),
         StepRef::AddColumn { table_name, .. } => Some(table_name),
         StepRef::DropColumn { table_name, .. } => Some(table_name),
@@ -1759,12 +1758,12 @@ fn render_sqlite_table_rebuild_statements(
         temp_table_name, target_table.table_name
     ));
     statements.extend(target_table.indexes.iter().map(|index| {
-        render_create_index_statement(DatabaseBackend::Sqlite, &target_table.table_name, index)
+        render_create_index_statement(DatabaseBackend::Sqlite, target_table.table_name, index)
     }));
     if target_table.append_only {
         statements.extend(render_append_only_statements(
             DatabaseBackend::Sqlite,
-            &target_table.table_name,
+            target_table.table_name,
             true,
             target_table.retention_purge,
         ));
@@ -1796,7 +1795,7 @@ pub(super) fn render_migration_step_view(
                 table
                     .indexes
                     .iter()
-                    .map(|index| render_create_index_statement(backend, &table.table_name, index)),
+                    .map(|index| render_create_index_statement(backend, table.table_name, index)),
             );
             statements.extend(
                 table
@@ -1807,7 +1806,7 @@ pub(super) fn render_migration_step_view(
             if table.append_only {
                 statements.extend(render_append_only_statements(
                     backend,
-                    &table.table_name,
+                    table.table_name,
                     true,
                     table.retention_purge,
                 ));

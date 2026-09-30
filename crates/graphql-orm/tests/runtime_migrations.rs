@@ -4,10 +4,15 @@ use graphql_orm::GraphQLSchemaEntity;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::*;
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 
+#[cfg_attr(feature = "sqlite", graphql_entity(backend = "sqlite"))]
+#[cfg_attr(
+    all(feature = "postgres", not(feature = "sqlite")),
+    graphql_entity(backend = "postgres")
+)]
 #[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(table = "owned_notes", plural = "Notes", default_sort = "id ASC")]
 struct Note {
@@ -49,10 +54,16 @@ fn canonical_owned_storage_matches_static_target_and_legacy_hash() {
     assert_eq!(owned.stable_hash(), static_target.stable_hash());
     #[cfg(feature = "sqlite")]
     assert_eq!(
+        static_target.stable_hash(),
+        "e7b75c205412e474",
+        "legacy 0.33.3 physical hash format"
+    );
+    #[cfg(feature = "sqlite")]
+    assert_eq!(
         target::<SqliteBackend>().stable_hash(),
         static_target.stable_hash()
     );
-    #[cfg(feature = "postgres")]
+    #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
     assert_eq!(
         target::<PostgresBackend>().stable_hash(),
         static_target.stable_hash()
@@ -125,6 +136,10 @@ async fn sqlite_read_only_plan_shared_apply_noop_and_public_rename()
         .plan_migration_to_entities("static", "same", &[Note::metadata()])
         .await?;
     assert_eq!(plan.statements(), static_plan.statements);
+    assert_eq!(
+        static_plan.plan_hash, "20e6f11d31144511",
+        "legacy 0.33.3 plan hash format"
+    );
     assert_eq!(
         plan.steps().iter().map(|s| s.risk()).collect::<Vec<_>>(),
         static_plan.steps.iter().map(|s| s.risk).collect::<Vec<_>>()
@@ -331,7 +346,7 @@ async fn sqlite_guards_baseline_removed_ownership_and_rollback()
     Ok(())
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 #[tokio::test]
 async fn postgres_owned_static_noop_baseline_and_host_rls_preservation()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -463,6 +478,494 @@ async fn postgres_owned_static_noop_baseline_and_host_rls_preservation()
             .unwrap_err(),
         RuntimeMigrationDiagnosticCode::BaselineMismatch,
     );
+    db.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_reverse_origin_plan_limits_and_rebuild_preservation_guards()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    let manager = db.schema();
+    let static_plan = manager
+        .plan_migration_to_entities("static", "static origin", &[Note::metadata()])
+        .await?;
+    manager
+        .apply_migration(&static_plan, Default::default())
+        .await?;
+    let owned = target::<SqliteBackend>();
+    let ownership = ownership();
+    let noop = manager
+        .plan_owned_migration(
+            "owned",
+            "owned origin",
+            &owned,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(noop.steps().is_empty());
+    rejected(
+        manager
+            .apply_owned_migration(
+                &noop,
+                ApplyOptions {
+                    expected_current_schema_hash: Some("wrong".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err(),
+        RuntimeMigrationDiagnosticCode::BaselineMismatch,
+    );
+    let removed = manager
+        .plan_owned_migration(
+            "drop",
+            "guard",
+            &OwnedSchemaModel::default(),
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(
+        manager
+            .apply_owned_migration(
+                &removed,
+                ApplyOptions {
+                    allow_destructive: true,
+                    additive_only: true,
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    let empty_db = sqlite().await;
+    let bounded = schema().physical_schema::<SqliteBackend>(RuntimeMigrationLimits {
+        max_plan_steps: 0,
+        ..Default::default()
+    })?;
+    rejected(
+        empty_db
+            .schema()
+            .plan_owned_migration(
+                "bounded",
+                "limits retained",
+                &bounded,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await
+            .unwrap_err(),
+        RuntimeMigrationDiagnosticCode::LimitExceeded,
+    );
+    let mut definition = schema().schema().clone();
+    definition.collections[0].fields[1].nullable = true; // controlled SQLite rebuild
+    let nullable = definition
+        .validate()?
+        .physical_schema::<SqliteBackend>(Default::default())?;
+    sqlx::query("CREATE TRIGGER host_trigger AFTER INSERT ON owned_notes BEGIN SELECT 1; END")
+        .execute(db.pool())
+        .await?;
+    rejected(
+        manager
+            .plan_owned_migration(
+                "rebuild",
+                "preserve host trigger",
+                &nullable,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await
+            .unwrap_err(),
+        RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+    );
+    sqlx::query("DROP TRIGGER host_trigger")
+        .execute(db.pool())
+        .await?;
+    sqlx::query("CREATE TABLE __graphql_orm_owned_notes_new(id TEXT)")
+        .execute(db.pool())
+        .await?;
+    rejected(
+        manager
+            .plan_owned_migration(
+                "rebuild",
+                "temporary name collision",
+                &nullable,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await
+            .unwrap_err(),
+        RuntimeMigrationDiagnosticCode::OwnershipMismatch,
+    );
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name='__graphql_orm_owned_notes_new'",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(exists, 1, "owned planning must not run global cleanup");
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_composite_keys_all_runtime_types_and_timestamp_defaults()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    let mut definition = schema().schema().clone();
+    let collection = &mut definition.collections[0];
+    collection.primary_key = vec![
+        collection.fields[1].id.clone(),
+        collection.fields[0].id.clone(),
+    ];
+    collection.indexes.clear();
+    collection.fields[1].filterable = false;
+    for (id, kind, nullable, generated, default) in [
+        (
+            "boolean",
+            RuntimeValueKind::Boolean,
+            false,
+            false,
+            Some(RuntimeDefault::Literal("true".into())),
+        ),
+        ("float", RuntimeValueKind::Float, true, false, None),
+        ("uuid", RuntimeValueKind::Uuid, false, true, None),
+        ("json", RuntimeValueKind::Json, true, false, None),
+        ("bytes", RuntimeValueKind::Bytes, true, false, None),
+        (
+            "datetime",
+            RuntimeValueKind::DateTime,
+            false,
+            true,
+            Some(RuntimeDefault::CurrentTimestamp),
+        ),
+        (
+            "epoch",
+            RuntimeValueKind::Integer,
+            false,
+            true,
+            Some(RuntimeDefault::CurrentTimestamp),
+        ),
+    ] {
+        collection.fields.push(RuntimeField {
+            id: FieldId::new(id)?,
+            api_name: id.into(),
+            physical_column: id.into(),
+            value_kind: kind,
+            nullable,
+            unique: false,
+            filterable: false,
+            sortable: false,
+            generated,
+            default,
+        });
+    }
+    let target = definition
+        .validate()?
+        .physical_schema::<SqliteBackend>(Default::default())?;
+    let ownership = ownership();
+    assert_eq!(target.tables()[0].primary_keys(), ["label", "id"]);
+    let manager = db.schema();
+    let plan = manager
+        .plan_owned_migration(
+            "types",
+            "types and ordered composite key",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    sqlx::query("INSERT INTO owned_notes(id,label,uuid) VALUES ('id','label',?)")
+        .bind(graphql_orm::uuid::Uuid::new_v4().to_string())
+        .execute(db.pool())
+        .await?;
+    let row: (String, i64, i64) =
+        sqlx::query_as("SELECT datetime, epoch, boolean FROM owned_notes")
+            .fetch_one(db.pool())
+            .await?;
+    assert_eq!(row.0.len(), 27);
+    assert!(row.0.ends_with('Z'));
+    assert_eq!(RuntimeDateTime::parse(&row.0)?.as_str(), row.0);
+    assert!(row.1 > 0);
+    assert_eq!(row.2, 1);
+    let noop = manager
+        .plan_owned_migration(
+            "noop",
+            "reverse key order retained",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(noop.steps().is_empty(), "{noop:?}");
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[graphql_entity(backend = "sqlite")]
+#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    table = "host_journal",
+    plural = "HostJournal",
+    default_sort = "id ASC",
+    append_only = true,
+    read_policy = "journal_private"
+)]
+struct HostJournal {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    note_id: String,
+}
+#[cfg(feature = "sqlite")]
+fn build_system_metadata() -> EntityMetadata {
+    let mut metadata = HostJournal::metadata().clone();
+    // Static system metadata can bind directly to stable runtime physical names.
+    metadata.relations = vec![RelationMetadata {
+        field_name: "note",
+        target_type: "owned_notes",
+        source_column: "note_id",
+        target_column: "id",
+        source_columns: &["note_id"],
+        target_columns: &["id"],
+        is_multiple: false,
+        emit_foreign_key: true,
+        on_delete: DeletePolicy::Restrict,
+        propagate_change: RelationChangePropagation::None,
+        search_fields: None,
+    }]
+    .into_boxed_slice();
+    metadata
+}
+#[cfg(feature = "sqlite")]
+fn system_metadata() -> &'static EntityMetadata {
+    static METADATA: std::sync::LazyLock<EntityMetadata> =
+        std::sync::LazyLock::new(build_system_metadata);
+    &METADATA
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_composed_static_system_target_dependencies_and_policy_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    let metadata = system_metadata();
+    let composed = target::<SqliteBackend>().with_static_entities(&[metadata])?;
+    let ownership = ManagedTableSet::new(["owned_notes".into(), "host_journal".into()])?;
+    let manager = db.schema();
+    let plan = manager
+        .plan_owned_migration(
+            "composed",
+            "runtime plus journal",
+            &composed,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    let static_plan = manager
+        .plan_migration_to_entities("static", "equivalent", &[Note::metadata(), metadata])
+        .await?;
+    assert_eq!(plan.statements(), static_plan.statements);
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    let environment = manager
+        .runtime_mutation_environment(std::sync::Arc::new(schema()), &composed, &ownership)
+        .await?;
+    assert_eq!(
+        environment.incoming_dependencies("owned_notes")[0].source_table,
+        "host_journal"
+    );
+    assert_eq!(
+        environment.incoming_dependencies("owned_notes")[0].on_delete,
+        DeletePolicy::Restrict
+    );
+    assert_eq!(metadata.read_policy, Some("journal_private"));
+    assert!(
+        manager
+            .plan_owned_migration(
+                "noop",
+                "replan",
+                &composed,
+                &ownership,
+                PlanOptions::strict()
+            )
+            .await?
+            .steps()
+            .is_empty()
+    );
+    assert!(
+        manager
+            .plan_migration_to_entities("static", "replan", &[Note::metadata(), metadata])
+            .await?
+            .steps
+            .is_empty()
+    );
+    sqlx::query("INSERT INTO owned_notes(id,label) VALUES ('a','kept')")
+        .execute(db.pool())
+        .await?;
+    sqlx::query("INSERT INTO host_journal(id,note_id) VALUES ('j','a')")
+        .execute(db.pool())
+        .await?;
+    assert!(
+        sqlx::query("UPDATE host_journal SET note_id='a'")
+            .execute(db.pool())
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("DELETE FROM owned_notes WHERE id='a'")
+            .execute(db.pool())
+            .await
+            .is_err()
+    );
+    // Reserved host infrastructure dependencies are also included, not filtered away.
+    sqlx::query("CREATE TABLE __graphql_orm_custom_link(id TEXT PRIMARY KEY NOT NULL,note_id TEXT REFERENCES owned_notes(id) ON DELETE CASCADE)").execute(db.pool()).await?;
+    let environment = manager
+        .runtime_mutation_environment(std::sync::Arc::new(schema()), &composed, &ownership)
+        .await?;
+    assert!(
+        environment
+            .incoming_dependencies("owned_notes")
+            .iter()
+            .any(|dep| dep.source_table == "__graphql_orm_custom_link"
+                && dep.on_delete == DeletePolicy::Cascade)
+    );
+    Ok(())
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_competing_baselines_destructive_guards_and_atomic_failure()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("owned-migration-guards")?;
+    let db = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
+    let manager = db.schema();
+    let target = target::<PostgresBackend>();
+    let ownership = ownership();
+    let first = manager
+        .plan_owned_migration(
+            "first",
+            "same baseline",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    let competing = manager
+        .plan_owned_migration(
+            "second",
+            "same baseline",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&first, Default::default())
+        .await?;
+    rejected(
+        manager
+            .apply_owned_migration(&competing, Default::default())
+            .await
+            .unwrap_err(),
+        RuntimeMigrationDiagnosticCode::BaselineMismatch,
+    );
+    let drop = manager
+        .plan_owned_migration(
+            "drop",
+            "explicit removal",
+            &OwnedSchemaModel::default(),
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(
+        manager
+            .apply_owned_migration(&drop, Default::default())
+            .await
+            .is_err()
+    );
+    assert!(
+        manager
+            .apply_owned_migration(
+                &drop,
+                ApplyOptions {
+                    allow_destructive: true,
+                    additive_only: true,
+                    ..Default::default()
+                }
+            )
+            .await
+            .is_err()
+    );
+    sqlx::query("INSERT INTO owned_notes(id,label) VALUES ('a','kept')")
+        .execute(db.pool())
+        .await?;
+    let mut definition = schema().schema().clone();
+    definition.collections[0].fields.push(RuntimeField {
+        id: FieldId::new("required")?,
+        api_name: "required".into(),
+        physical_column: "required".into(),
+        value_kind: RuntimeValueKind::String,
+        nullable: false,
+        unique: false,
+        filterable: false,
+        sortable: false,
+        generated: false,
+        default: None,
+    });
+    let target = definition
+        .validate()?
+        .physical_schema::<PostgresBackend>(Default::default())?;
+    let fail = manager
+        .plan_owned_migration(
+            "fail",
+            "required on existing row",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(
+        manager
+            .apply_owned_migration(&fail, Default::default())
+            .await
+            .is_err()
+    );
+    let row: String = sqlx::query_scalar("SELECT label FROM owned_notes WHERE id='a'")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(row, "kept");
+    let history: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_migrations WHERE version='fail'")
+            .fetch_one(db.pool())
+            .await?;
+    assert_eq!(history, 0);
+    let drop = manager
+        .plan_owned_migration(
+            "drop",
+            "guarded removal",
+            &OwnedSchemaModel::default(),
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(
+            &drop,
+            ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await?;
     db.pool().close().await;
     owned.cleanup()?;
     Ok(())

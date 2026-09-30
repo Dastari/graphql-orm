@@ -7,8 +7,8 @@
 //!
 //! The IR deliberately covers structural schema semantics only in this slice: collections,
 //! fields, primary keys, relations with ordered key pairs, secondary/unique indexes, composite
-//! unique groups, defaults, and deterministic ordering. Runtime query execution, migration
-//! planning from the IR, and dynamic GraphQL registration are later slices. Spatial columns,
+//! unique groups, defaults, and deterministic ordering. Schema-bound query execution and owned migration planning reuse this IR;
+//! opt-in dynamic GraphQL registration remains a later slice. Spatial columns,
 //! full-text search, partial/GiST indexes, check constraints, backup ordering, policy hook
 //! names, and relation change propagation are deliberately not represented yet; conversion
 //! reports them as [`RuntimeSchemaDiagnosticCode::UnsupportedCapability`] instead of silently

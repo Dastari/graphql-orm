@@ -608,19 +608,19 @@ pub(super) fn stable_schema_view_hash(schema: &SchemaRef<'_>) -> String {
     }
 
     let mut tables = schema.tables.iter().collect::<Vec<_>>();
-    tables.sort_by(|left, right| left.table_name.cmp(&right.table_name));
+    tables.sort_by(|left, right| left.table_name.cmp(right.table_name));
 
     for table in tables {
         canonical.push_str("table:");
-        canonical.push_str(&table.entity_name);
+        canonical.push_str(table.entity_name);
         canonical.push('|');
-        canonical.push_str(&table.table_name);
+        canonical.push_str(table.table_name);
         canonical.push('|');
-        canonical.push_str(&table.primary_key);
+        canonical.push_str(table.primary_key);
         canonical.push('|');
         canonical.push_str(&table.primary_keys().join(","));
         canonical.push('|');
-        canonical.push_str(&table.default_sort);
+        canonical.push_str(table.default_sort);
         canonical.push('|');
         canonical.push_str(if table.append_only {
             "append_only"
@@ -1241,82 +1241,78 @@ pub(super) enum StepRef<'a> {
 impl<'a> From<&'a MigrationStep> for StepRef<'a> {
     fn from(step: &'a MigrationStep) -> Self {
         match step {
-            MigrationStep::EnableExtension { name } => Self::EnableExtension { name: name },
+            MigrationStep::EnableExtension { name } => Self::EnableExtension { name },
             MigrationStep::CreateTable(value) => Self::CreateTable(TableRef::from(value)),
-            MigrationStep::DropTable { table_name } => Self::DropTable {
-                table_name: table_name,
-            },
-            MigrationStep::AddColumn { table_name, column } => Self::AddColumn {
-                table_name: table_name,
-                column: column,
-            },
+            MigrationStep::DropTable { table_name } => Self::DropTable { table_name },
+            MigrationStep::AddColumn { table_name, column } => {
+                Self::AddColumn { table_name, column }
+            }
             MigrationStep::DropColumn {
                 table_name,
                 column_name,
             } => Self::DropColumn {
-                table_name: table_name,
-                column_name: column_name,
+                table_name,
+                column_name,
             },
             MigrationStep::AlterColumn {
                 table_name,
                 before,
                 after,
             } => Self::AlterColumn {
-                table_name: table_name,
-                before: before,
-                after: after,
+                table_name,
+                before,
+                after,
             },
             MigrationStep::CreateIndex { table_name, index } => Self::CreateIndex {
-                table_name: table_name,
+                table_name,
                 index: IndexRef::from(index),
             },
             MigrationStep::DropIndex {
                 table_name,
                 index_name,
             } => Self::DropIndex {
-                table_name: table_name,
-                index_name: index_name,
+                table_name,
+                index_name,
             },
-            MigrationStep::CreateSearchIndex { table_name, index } => Self::CreateSearchIndex {
-                table_name: table_name,
-                index: index,
-            },
+            MigrationStep::CreateSearchIndex { table_name, index } => {
+                Self::CreateSearchIndex { table_name, index }
+            }
             MigrationStep::DropSearchIndex {
                 table_name,
                 index_name,
             } => Self::DropSearchIndex {
-                table_name: table_name,
-                index_name: index_name,
+                table_name,
+                index_name,
             },
             MigrationStep::AlterSearchIndex {
                 table_name,
                 before,
                 after,
             } => Self::AlterSearchIndex {
-                table_name: table_name,
-                before: before,
-                after: after,
+                table_name,
+                before,
+                after,
             },
             MigrationStep::AddForeignKey {
                 table_name,
                 foreign_key,
             } => Self::AddForeignKey {
-                table_name: table_name,
-                foreign_key: foreign_key,
+                table_name,
+                foreign_key,
             },
             MigrationStep::DropForeignKey {
                 table_name,
                 foreign_key,
             } => Self::DropForeignKey {
-                table_name: table_name,
-                foreign_key: foreign_key,
+                table_name,
+                foreign_key,
             },
             MigrationStep::SetAppendOnly {
                 table_name,
                 enabled,
                 retention_purge,
             } => Self::SetAppendOnly {
-                table_name: table_name,
+                table_name,
                 enabled: *enabled,
                 retention_purge: *retention_purge,
             },
@@ -1325,9 +1321,9 @@ impl<'a> From<&'a MigrationStep> for StepRef<'a> {
                 before,
                 after,
             } => Self::SetCheckConstraints {
-                table_name: table_name,
-                before: before,
-                after: after,
+                table_name,
+                before,
+                after,
             },
         }
     }
@@ -1335,84 +1331,78 @@ impl<'a> From<&'a MigrationStep> for StepRef<'a> {
 impl<'a> From<&'a OwnedMigrationStep> for StepRef<'a> {
     fn from(step: &'a OwnedMigrationStep) -> Self {
         match step {
-            OwnedMigrationStep::EnableExtension { name } => Self::EnableExtension { name: name },
+            OwnedMigrationStep::EnableExtension { name } => Self::EnableExtension { name },
             OwnedMigrationStep::CreateTable(value) => Self::CreateTable(value.borrowed()),
-            OwnedMigrationStep::DropTable { table_name } => Self::DropTable {
-                table_name: table_name,
-            },
-            OwnedMigrationStep::AddColumn { table_name, column } => Self::AddColumn {
-                table_name: table_name,
-                column: column,
-            },
+            OwnedMigrationStep::DropTable { table_name } => Self::DropTable { table_name },
+            OwnedMigrationStep::AddColumn { table_name, column } => {
+                Self::AddColumn { table_name, column }
+            }
             OwnedMigrationStep::DropColumn {
                 table_name,
                 column_name,
             } => Self::DropColumn {
-                table_name: table_name,
-                column_name: column_name,
+                table_name,
+                column_name,
             },
             OwnedMigrationStep::AlterColumn {
                 table_name,
                 before,
                 after,
             } => Self::AlterColumn {
-                table_name: table_name,
-                before: before,
-                after: after,
+                table_name,
+                before,
+                after,
             },
             OwnedMigrationStep::CreateIndex { table_name, index } => Self::CreateIndex {
-                table_name: table_name,
+                table_name,
                 index: index.borrowed(),
             },
             OwnedMigrationStep::DropIndex {
                 table_name,
                 index_name,
             } => Self::DropIndex {
-                table_name: table_name,
-                index_name: index_name,
+                table_name,
+                index_name,
             },
             OwnedMigrationStep::CreateSearchIndex { table_name, index } => {
-                Self::CreateSearchIndex {
-                    table_name: table_name,
-                    index: index,
-                }
+                Self::CreateSearchIndex { table_name, index }
             }
             OwnedMigrationStep::DropSearchIndex {
                 table_name,
                 index_name,
             } => Self::DropSearchIndex {
-                table_name: table_name,
-                index_name: index_name,
+                table_name,
+                index_name,
             },
             OwnedMigrationStep::AlterSearchIndex {
                 table_name,
                 before,
                 after,
             } => Self::AlterSearchIndex {
-                table_name: table_name,
-                before: before,
-                after: after,
+                table_name,
+                before,
+                after,
             },
             OwnedMigrationStep::AddForeignKey {
                 table_name,
                 foreign_key,
             } => Self::AddForeignKey {
-                table_name: table_name,
-                foreign_key: foreign_key,
+                table_name,
+                foreign_key,
             },
             OwnedMigrationStep::DropForeignKey {
                 table_name,
                 foreign_key,
             } => Self::DropForeignKey {
-                table_name: table_name,
-                foreign_key: foreign_key,
+                table_name,
+                foreign_key,
             },
             OwnedMigrationStep::SetAppendOnly {
                 table_name,
                 enabled,
                 retention_purge,
             } => Self::SetAppendOnly {
-                table_name: table_name,
+                table_name,
                 enabled: *enabled,
                 retention_purge: *retention_purge,
             },
@@ -1421,9 +1411,9 @@ impl<'a> From<&'a OwnedMigrationStep> for StepRef<'a> {
                 before,
                 after,
             } => Self::SetCheckConstraints {
-                table_name: table_name,
-                before: before,
-                after: after,
+                table_name,
+                before,
+                after,
             },
         }
     }

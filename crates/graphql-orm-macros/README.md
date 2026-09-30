@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.2", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.34.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.2", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.34.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -165,3 +165,6 @@ accidentally retained async-graphql `Enum` derive. Ordinary `GraphQLEntity`
 aggregate enums keep their GraphQL derive and naming attributes. See the
 [external runtime consumer](../graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs)
 for compiled plain Rust aggregate calls without a direct async-graphql dependency.
+
+Version 0.34.0 aligns with the runtime migration API addition. Macro syntax and
+ordinary static GraphQL SDL remain unchanged.

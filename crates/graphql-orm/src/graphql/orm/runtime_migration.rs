@@ -864,7 +864,7 @@ impl RuntimeMigrationBackend for super::SqliteBackend {
         plan: &OwnedPlannedMigration,
         options: &ApplyOptions,
     ) -> Result<AppliedMigrationReport, RuntimeMigrationError> {
-        Ok(super::execution::apply_owned_sqlite_migration(pool, plan, options).await?)
+        super::execution::apply_owned_sqlite_migration(pool, plan, options).await
     }
 }
 #[cfg(feature = "postgres")]
