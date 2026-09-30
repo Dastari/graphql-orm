@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.33.2 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.2**.
+
+- Advance runtime and macros together after the external migration compatibility
+  fixture changed the runtime package source tree. This preserves immutable
+  package-release identities and refreshes fixture lockfiles.
+- Runtime and generated-code behavior, public APIs, GraphQL SDL and stored-data
+  contracts remain unchanged. No data migration is required.
+
 ## 0.33.1 - 2026-09-28
 
 Companion macros crate: `graphql-orm-macros` **0.33.1**.
