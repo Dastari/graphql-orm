@@ -27,7 +27,8 @@ clients, and durable event delivery. No sibling repository changes are needed.
 
 The consumer revision is `a6f079ff29e7f16910eee2f98d9e0eedf329e109`, with
 `graphql-orm` and `graphql-orm-macros` 0.33.1. This proposal uses remote main
-`131693bdb4a74cf43732cb279419701fe273c1d0`, also ORM/macros 0.33.1. A Git diff
+`a90f229da66416e70f094c27e01f0bf4b4edc6bd`, also ORM/macros 0.33.1.
+The original reviewed proposal used `131693bdb4a74cf43732cb279419701fe273c1d0`. A Git diff
 between those revisions shows **no changes in either ORM package**. Intervening
 changes concern AI provider startup and its documentation; none closes A–D or
 the repository aggregate regression. The original local checkout remains at
@@ -90,7 +91,7 @@ merged directly into a dynamic schema; hosts provide dynamic fields/types.
 | Contract | Current main | This review checkpoint only | 0.33.1, unchanged |
 | Fix | Reviewed scope, independently of A–D | Plain repository aggregate enums | 0.33.2 |
 | A | Contract review | Owned physical target conversion and scoped planning | 0.34.0 |
-| B | Contract review; A recommended for installation examples | Transactional runtime mutation engine | 0.35.0 |
+| B | Contract review and A's verified composed physical target | Transactional runtime mutation engine | 0.35.0 |
 | C | Contract review; A for end-to-end fixtures | Read-only dynamic GraphQL | 0.36.0 |
 | D | Committed, reviewed B and C | Dynamic mutation registration | 0.37.0 |
 
@@ -112,26 +113,40 @@ predicate members require `&'static` storage. Repeated runtime conversion must
 not use `Box::leak`, including through live introspection. Existing generated
 index helpers and introspection have leaks that this execution path must avoid.
 
-Proposed compatibility-preserving solution: parameterize the implementation of
-the **existing** physical models and migration containers over index storage.
-Keep every existing public name as a concrete alias of its static instantiation;
-do not make existing struct literals infer an unconstrained generic parameter.
-Add owned `IndexModel` with `String`,
-`Vec<String>`, owned directions/predicate members, and the same semantics.
-For example `SchemaModel = PhysicalSchemaModel<IndexMetadata>`,
-`OwnedSchemaModel = PhysicalSchemaModel<IndexModel>`, and corresponding aliases
-for TableModel, MigrationStep, and the intervening diff/plan containers. They
-are storage instantiations of one canonical physical IR, not parallel models.
-`OwnedPlannedMigration` wraps the owned instantiation of that same canonical
-plan with private ownership/integrity data and read-only plan/hash accessors.
-Static `IndexDef` and its const constructors remain unchanged. Existing
-planning entry points retain their current signatures. Generalize existing
-`apply_migration` over an additive `MigrationPlanSource` implemented for the
-legacy PlannedMigration and the scoped OwnedPlannedMigration, with the same
-report type and existing apply machinery. A host applies runtime plans through
-the existing method. Compile existing direct struct literals, explicit type
-annotations, enum matches, custom backends, and function pointers to prove
-compatibility before accepting this approach. Do not change static hashes.
+Keep the existing public SchemaModel, TableModel, MigrationStep, SchemaDiff,
+MigrationPlan, PlannedMigrationStep and PlannedMigration definitions and
+namespaces intact. In particular MigrationStep remains an enum, not a type
+alias: `use MigrationStep::CreateTable` and `use MigrationStep::*` must compile.
+The previous alias proposal was incorrect; a Rust type alias cannot serve as
+an importable enum module. Keep all existing function signatures intact too.
+
+Add owned index storage (`IndexModel`: String names, Vec<String> columns and
+owned directions/predicates) as the owned storage form of the same canonical
+physical contract. OwnedSchemaModel/owned step storage expose that contract
+without requiring static strings. Private borrowed schema/index/step views
+adapt both existing models and owned storage into **one** comparison,
+classification, hashing, rendering and apply implementation. Compatibility
+adapters contain storage conversion only, no planner decisions. Do not
+convert an owned index back to IndexDef by leaking memory or replace existing
+enum variants. No second semantic schema IR or parallel SQL/planning engine.
+Document the owned storage types and legacy adapters together as one contract.
+
+OwnedPlannedMigration contains private owned canonical steps and
+ownership/integrity data, with read-only inspection and hash accessors. Add
+`apply_owned_migration` as a compatibility adapter into the existing guarded
+apply machinery. The existing `apply_migration(&PlannedMigration, ApplyOptions)`
+retains its exact signature, avoiding changes to existing function pointers or
+inference. Both methods share policy, risk, baseline, transaction and history
+checks; the owned method adds explicit scope verification. Static IndexDef,
+const constructors, enum namespace, public struct literals and hashes stay
+unchanged.
+
+The [external migration compatibility fixture](../../../../crates/graphql-orm/tests/fixtures/migration-api-compatibility/src/lib.rs) in this contract PR compiles
+variant/glob imports, qualified constructors, exhaustive matches, unannotated
+values, original struct literals and public function/method pointers against
+the actual ORM. Its SQLite, PostgreSQL and MSSQL tests pass without database
+I/O; A must retain this executable source-compatibility evidence. A must retain that exact fixture across every backend lane
+and test owned/static adapters against the same semantic implementation.
 
 Proposed public surface, re-exported through `graphql_orm::graphql::orm`:
 
@@ -158,13 +173,15 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         &self, version: impl Into<String>, description: impl Into<String>,
         target: &OwnedSchemaModel, ownership: &ManagedTableSet, options: PlanOptions,
     ) -> Result<OwnedPlannedMigration, RuntimeMigrationError>;
+    pub async fn apply_owned_migration(
+        &self, plan: &OwnedPlannedMigration, options: ApplyOptions,
+    ) -> Result<AppliedMigrationReport, RuntimeMigrationError>;
+    pub async fn runtime_mutation_environment(
+        &self, schema: Arc<ValidatedRuntimeSchema>, target: &OwnedSchemaModel,
+        ownership: &ManagedTableSet,
+    ) -> Result<RuntimeMutationEnvironment, RuntimeMigrationError>;
 }
-// Existing apply_migration accepts both static and owned scoped plans.
-impl<'db, B: MigrationBackend> SchemaManager<'db, B> {
-    pub async fn apply_migration<P: MigrationPlanSource>(
-        &self, plan: &P, options: ApplyOptions,
-    ) -> crate::Result<AppliedMigrationReport>;
-}
+// Existing apply_migration retains its original signature and enum types.
 ```
 
 `RuntimeMigrationBackend` is an additive capability implemented for SQLite and
@@ -237,6 +254,32 @@ hash, additive-only, destructive authorization, transactional execution, and
 history. Runtime conversion does not create/clear host RLS declarations;
 system entities remain on the host's existing SchemaTarget/RLS path where used.
 
+Owned apply must not run a target-RLS reconciliation with an empty RLS target.
+Execute only reviewed owned table steps; preserve existing PostgreSQL RLS
+enable/force bits, policy definitions, owners, grants and functions on surviving
+tables. Reject a table rebuild/alter whose RLS/dependency preservation is not
+provable rather than silently clearing it. Tests install host/system RLS and
+unrelated tables/policies, compare catalog state before/after owned apply and
+prove policies still enforce the same access. Unrelated objects are never
+touched. An explicit reviewed deletion of an owned table naturally removes
+that table's own dependent objects; this is a destructive gate, not RLS
+reconciliation authority.
+
+At composition, build incoming FK dependencies from the **complete composed
+physical target**, including static/system tables, using ordered physical
+key pairs and declared delete actions, not runtime relation names alone.
+Owned live introspection also checks the full physical schema for external
+incoming dependencies. A rejects unsafe unmanaged dependencies. B consumes
+an immutable verified RuntimeMutationEnvironment derived from this composed
+target plus its managed ownership and live-validation identity. It is bound
+to the runtime schema fingerprint, but is not another schema IR: it is an
+execution-capability/dependency certificate. The host installs it only after
+A validation/apply and replaces it with its pinned schema generation.
+Runtime-only schema metadata cannot certify absent system-table FKs. Missing,
+stale or incomplete dependency verification fails closed before DML. If live
+physical schema can change outside the host's migration fence, revalidate the
+certificate or refuse writes; there is no implicit assumption of ownership.
+
 Minimal host flow (proposed API; `Journal` is a host repository entity):
 
 ```rust,ignore
@@ -248,7 +291,7 @@ let plan = database.schema().plan_owned_migration(
     "host-schema-2", "customer schema", &target, &ownership, PlanOptions::strict(),
 ).await?;
 // Host reviews diagnostics/risks and retains the exact reviewed plan.
-let applied = database.schema().apply_migration(&plan, ApplyOptions {
+let applied = database.schema().apply_owned_migration(&plan, ApplyOptions {
     expected_current_schema_hash: plan.source_schema_hash().cloned(),
     ..ApplyOptions::default()
 }).await?;
@@ -282,7 +325,7 @@ impl ValidatedRuntimeSchema {
         limits: RuntimeMutationLimits) -> Result<RuntimeMutationRequest, RuntimeMutationError>;
 }
 impl<'tx, B: RuntimeMutationBackend> MutationContext<'tx, B> {
-    pub async fn mutate_runtime(&mut self, schema: &ValidatedRuntimeSchema,
+    pub async fn mutate_runtime(&mut self, environment: &RuntimeMutationEnvironment,
         request: &RuntimeMutationRequest, authority: &dyn RuntimeWriteAuthority<B>)
         -> Result<RuntimeMutationEffect, RuntimeMutationError>;
 }
@@ -372,9 +415,40 @@ modifying FK actions (`unsupported_cascade`) before DML unless a later reviewed
 contract authorizes every affected record. Restricting FKs remain supported;
 static cascade behavior is unchanged.
 
-Mutation errors poison the encompassing runtime transaction: catching denial,
-CAS failure, hook failure, or decoding/limit errors cannot commit staged work.
-Introduce an internal rollback-only flag and preserve existing static behavior.
+An operation guard starts on the first poll of mutate_runtime, **before any
+await or DML**, recording an unfinished operation in transaction-owned state.
+It does not hold another mutable borrow of MutationContext. Only successful
+completion of all operation validation/authorization/DML/decoding explicitly
+disarms it. Error or guard Drop marks rollback-only; forgetting the guard
+leaves an outstanding-operation count, which also prevents commit. State is
+monotonic: later successes cannot clear rollback-only. An unpolled future
+cannot have staged work. This preserves static-only transaction behavior.
+
+The outer runner and commit_and_emit check both rollback-only and unfinished
+operations immediately before commit, refuse commit even if the callback
+returns Ok, roll back record/journal work, and discard queued side effects.
+This explicitly covers cancellation of only the operation future while the
+outer transaction stays alive. Catching a timeout, denial, CAS failure, hook
+failure, or decode/limit error cannot commit staged runtime work.
+
+Before-commit host hooks run through a guarded
+`MutationContext::run_runtime_before_commit(hook, pending_effect)` method.
+The wrapper holds a separate unfinished-operation guard across the hook's
+future, including repository journal writes and awaits. Dropping/timing out
+that future poisons the transaction even after mutate_runtime succeeded.
+D must use this wrapper; a direct unguarded callback invocation is not the
+supported hook path. A guard's Drop never performs async work: the runner
+performs rollback. Cancellation of the whole runner retains transaction-drop
+rollback; cancellation while committing can still be ambiguous.
+
+Required owned SQLite/PostgreSQL tests stage DML, suspend authorize_result,
+time out/drop mutate_runtime, catch the timeout **inside** the still-running
+callback, then return Ok. Assert the runner rejects/rolls back, both record
+and host journal remain unchanged, events are absent, and the connection is
+reusable. Repeat with a before-commit hook that inserts a journal row then
+suspends and is canceled. Also test caught denial, forgotten/incomplete
+operations and cancellation before DML. No blind retry after unknown commit.
+
 Returning NULL instead of denying a requested protected field is not allowed.
 Delete return projection applies to the authorized preimage; create/update
 return projections apply to the staged result. `returning: None` supports writes
@@ -408,7 +482,7 @@ let request = schema.runtime_update_request(key,
 
 let committed = database.transaction_with_auth(TransactionMode::StateMachine,
     db_auth.as_ref(), |tx| Box::pin(async move {
-        let pending = tx.mutate_runtime(&schema, &request, authority.as_ref()).await
+        let pending = tx.mutate_runtime(&environment, &request, authority.as_ref()).await
             .map_err(OrmPublicError::from)?;
         tx.insert::<Journal>(CreateJournalInput {
             id: journal_id, operation_id, action: "update".into(),
@@ -427,6 +501,29 @@ propagate from the callback, rolling back both changes. GraphQL D offers a
 Send BoxFuture. It performs this same journal insert, without using `defer`.
 The hook is host-provided and product-neutral; hooks must not send external
 notifications during the callback.
+
+For a Customer with a required non-generated integer id, create must supply
+that id. Every non-generated composite-key member is likewise included;
+generated/server-managed keys alone are excluded. Keys remain absent from
+update patches. Representative repository operations, to become compiled and
+executed examples in B on both backends:
+
+```rust,ignore
+let create = schema.runtime_create_request(&customers, &[
+    (id.clone(), RuntimeValue::Integer(7)),
+    (status.clone(), RuntimeValue::String("draft".into())),
+], Some(public_projection.clone()), mutation_limits)?;
+let update = schema.runtime_update_request(
+    schema.runtime_key(&customers, &[(id.clone(), RuntimeValue::Integer(7))])?,
+    &[(status.clone(), RuntimeValue::String("published".into()))],
+    Some(expected_draft), Some(public_projection.clone()), mutation_limits)?;
+let delete = schema.runtime_delete_request(
+    schema.runtime_key(&customers, &[(id.clone(), RuntimeValue::Integer(7))])?,
+    Some(expected_published), Some(public_projection), mutation_limits)?;
+// Run each request through its own transaction_with_auth callback, calling
+// mutate_runtime(&environment, &request, authority), then tx.insert::<Journal>.
+// For registered hooks use tx.run_runtime_before_commit(hook, &pending).
+```
 
 Cancellation/drop before commit rolls back; no detached mutation task. During
 commit, cancellation or a transport error can leave the outcome unknown.
@@ -468,6 +565,9 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         -> Result<Self, RuntimeGraphqlError>;
     pub fn install(self, module: RuntimeGraphqlModule)
         -> Result<Self, RuntimeGraphqlDiagnostics>;
+    pub fn cursor_protection(self, protector: Arc<dyn RuntimeCursorProtector>,
+        audience: RuntimeCursorAudience, limits: RuntimeCursorProtectionLimits)
+        -> Result<Self, RuntimeGraphqlError>;
     pub fn finish(self) -> Result<async_graphql::dynamic::Schema, RuntimeGraphqlError>;
 }
 ```
@@ -547,7 +647,7 @@ fails validation; do not silently clamp the existing runtime contract.
 | Float | GraphQL Float, finite `RuntimeFloat` rules |
 | String | GraphQL String, no normalization |
 | UUID | RuntimeUuid: parse UUID strings, emit canonical UUID |
-| JSON | RuntimeJson: bounded JSON values; JSON null is distinct from SQL NULL internally |
+| JSON | RuntimeJson: bounded valid JSON-text string on input **and output**; GraphQL null is SQL NULL, string `"null"` is JSON null |
 | Bytes | RuntimeBytes: canonical base64 string, bounded decoded bytes |
 | DateTime | RuntimeDateTime: existing RFC3339 parser, emit canonical UTC microseconds |
 
@@ -558,23 +658,142 @@ values using the documented scalar mapping, and separately snapshots existing
 static SDL unchanged. Review must explicitly accept the full-i64 decimal-string
 and bytes-base64 forms rather than imply identical static wire types.
 
-SQL NULL uses GraphQL null. JSON null also serializes as GraphQL null on output;
-document this representational limitation. To preserve JSON null versus SQL
-NULL for D inputs, RuntimeJson input uses an exact JSON-text string (the string
-`"null"` is JSON null; GraphQL null is SQL NULL); ordinary JSON output stays
-structured. Unloaded fields are never coerced to NULL: selection/project
-mismatch is an internal safe error. Existing `gormrq1` and `gormrr1` encodings
-pass through unchanged, with full underlying stale/order/parent validation.
-Cursor envelopes are opaque but neither secret nor authorization tokens;
-internally selected keys stay out of records/GraphQL fields/errors and are
-never added as extra output. Hosts needing secret cursors require a separate
-reviewed protection contract, not an undocumented encoding change here.
-This is a material review boundary: current cursor envelopes contain typed
-order values. Keeping those fields Unloaded does not provide cryptographic
-confidentiality of cursor contents. If "private keys" means secret even to a
-client decoding its cursor, C needs an explicitly reviewed cursor-protection
-addition; preserving the current envelope alone cannot meet that stronger
-requirement. Do not declare the privacy gate closed without resolving it.
+RuntimeJson is symmetric and lossless over RuntimeValue::Json values. Inputs
+must be strings containing valid bounded JSON, not GraphQL object/list values;
+outputs are compact JSON-text strings. `RuntimeValue::Null` alone emits
+GraphQL null. `RuntimeValue::Json(serde_json::Value::Null)` emits the non-null
+GraphQL string `"null"`, including for non-null JSON fields. Input omission is
+a third state; explicit GraphQL null never means JSON null. JSON strings are
+JSON-encoded within the scalar text (for JSON string `hello`, the scalar's
+text is `"hello"`, including those JSON quotes). Whitespace/key-order spelling
+need not round-trip, but parsing the output must reproduce the exact supported
+serde_json::Value; no lossy conversion through JavaScript numbers. Invalid JSON,
+out-of-range numbers, depth/node/text-byte bounds fail before DML/I/O. Existing
+runtime JSON filter restrictions remain unchanged. Unloaded fields are never
+coerced to NULL: selection/project mismatch is a safe internal error.
+
+RuntimeInt64 accepts/emits only canonical signed decimal strings, grammar
+`0|-?[1-9][0-9]*`, length at most 20, checked against i64 bounds. Reject plus,
+leading zeros, negative zero, decimals/exponents, and numeric GraphQL inputs.
+Counts use the same scalar. UUID accepts valid UUID strings and emits lowercase
+hyphenated canonical form. Float accepts finite GraphQL numeric values and
+uses RuntimeFloat normalization, including negative zero; reject NaN/infinity
+and overflow. Bytes use RFC4648 standard alphabet and canonical padding;
+check encoded/decoded byte bounds before allocation and reject noncanonical
+encoding. DateTime input is an RFC3339 string, processed by RuntimeDateTime's
+existing UTC normalization and microsecond rounding (including carry into the
+next second); output is `YYYY-MM-DDTHH:MM:SS.ffffffZ`. Reject invalid or oversized
+datetime text. Tests include i64 extrema and ±(2^53+1), JSON null versus SQL
+NULL and non-null JSON, Unicode/structured JSON, exact byte boundaries, offsets,
+six-digit precision and existing sub-microsecond rounding/carry semantics.
+
+SDK scalar mapping is explicit: TypeScript maps RuntimeInt64/RuntimeJson/
+RuntimeUuid/RuntimeBytes/RuntimeDateTime to string (nullable only for SQL NULL).
+Use BigInt for integer arithmetic, exact JSON parsing when numeric fidelity is
+required, Uint8Array after base64 decoding, and a string/precision-preserving
+datetime parser rather than JavaScript Date for microseconds. Rust wire DTOs
+use String newtypes and fallible conversions to i64, serde_json::Value, UUID,
+Vec<u8>, and RuntimeDateTime. Neither SDK generation nor product client changes
+belong here; document these mappings and compile host examples. Static
+GraphQL scalars/SDL remain unchanged.
+
+### Confidential cursor adapter
+
+Preserve framework-neutral `gormrq1`/`gormrr1` encodings and static cursor APIs.
+At the **dynamic GraphQL boundary**, introduce generic host-managed cursor
+protection with explicit RuntimeCursorProfile::AuthenticatedEncryption and
+an object-safe `RuntimeCursorProtector: Send + Sync + 'static`. The confidential
+profile is required for Digibase and the default for this new module; module
+installation fails without a provider. An explicitly chosen Unprotected
+profile may preserve original cursor behavior for other hosts; profiles never
+auto-detect or downgrade and no individual protected operation accepts raw
+internal cursors. Signing or encoding readable values does not satisfy the
+AuthenticatedEncryption provider contract.
+
+```rust,ignore
+pub trait RuntimeCursorProtector: Send + Sync {
+    fn seal<'a>(&'a self, context: &'a RuntimeCursorContext,
+        plaintext: &'a str, limits: RuntimeCursorProtectionLimits)
+        -> BoxFuture<'a, Result<RuntimeSealedCursor, RuntimeCursorProtectionError>>;
+    fn open<'a>(&'a self, context: &'a RuntimeCursorContext,
+        key_id: &'a str, ciphertext: &'a [u8], limits: RuntimeCursorProtectionLimits)
+        -> BoxFuture<'a, Result<String, RuntimeCursorProtectionError>>;
+}
+```
+
+The trusted host implements authenticated encryption of the **entire** internal
+cursor envelope with unique nonces and authenticates the supplied canonical
+associated-data context. It owns the algorithm, keys, nonce management,
+encryption-key selection, bounded decryption key ring, and expiry/revocation
+policy. ORM never stores keys or assumes a signed token is confidential.
+Provider results are redacted, validated/bounded by ORM, and never logged.
+RuntimeSealedCursor carries a validated public key ID and opaque ciphertext
+including provider nonce/tag/framing. ORM emits
+`gormgqlc1.<key-id>.<base64url-no-padding-ciphertext>`; no order/parent/schema/
+tenant values appear in public framing. Key IDs are bounded public labels,
+not URLs or instructions to fetch untrusted keys.
+
+Protect **every** edge cursor, startCursor and endCursor at every top-level
+and relation layer; page-info absent cursors remain NULL. Reuse the same sealed
+token for an edge and matching page-info cursor. Incoming after/before must
+have the protected framing; check size/version/structure before decoding,
+authenticate/decrypt before invoking the unchanged runtime cursor decoder.
+Raw gormrq1/gormrr1/static cursors fail `invalid_cursor` in this profile with
+no fallback. Decrypted envelopes still undergo all runtime schema/order/key
+checks. Ciphertext cannot be used as a relation cache/authority identity.
+
+RuntimeCursorContext is constructed privately from trusted module/request and
+validated execution state, never from client claims about scope. Its bounded
+canonical associated data includes protection version, host cursor audience
+(application/project/endpoint namespace), schema fingerprint, collection,
+cursor kind, and complete effective logical order signature. Relation scope
+additionally includes relation/source/target identity and the exact typed
+parent identity from its opaque ORM anchor. The host provides a stable trusted
+authorization partition (principal/tenant/security realm) that is bound as
+associated data; equal client-provided strings are not authority. Scope values
+are redacted and not in token framing. Bind logical order, not page direction
+or page size: the same edge can resume forward or backward. A wrong audience,
+auth partition, relation, parent, order or schema cannot open the token.
+
+For nested paging, validate encrypted input shape before the parent query;
+derive parent-bound context only after an authorized parent anchor exists,
+and open before the child-layer query. No client-supplied raw parent key is
+trusted. A cursor scoped to one parent cannot resume another parent; host
+queries/aliases must scope nested resume to that selected parent. Exact
+parent-context verification cannot precede acquiring that trusted anchor, so
+the guarantee is no child I/O on mismatch, not no preceding parent read.
+
+Default protection bounds: internal plaintext at most 16 KiB and additionally
+the underlying query/relation cursor bound, key ID at most 64 ASCII identifier
+bytes, associated data at most 16 KiB, provider framing/tag overhead at most
+512 bytes, and public token at most 32 KiB. Check lengths with checked
+arithmetic before base64 allocation, and cap decoded ciphertext accordingly.
+Host providers honor these supplied bounds. Lower host limits are supported;
+overheads exceeding them fail closed. Aggregate response/request budgets
+include all protected cursor bytes and crypto calls; no unbounded per-edge
+task spawning. Callback errors/oversized outputs return safe stable codes.
+
+Rotation seals new tokens with the active key ID and resumes old tokens only
+while their decryption key remains in the host's bounded allowed ring and
+host expiry/revocation rules allow it. Associated-data encoding is versioned
+and stable across compatible key rotations. A retired/unknown key or expired
+token returns safe `cursor_unavailable`; invalid framing, authentication,
+context mismatch and tampering return indistinguishable `invalid_cursor`.
+Do not include crypto errors or plaintext in public errors/tracing. An active
+key change alone need not prevent resume; schema/order/audience changes do.
+Request cancellation or provider outage does not downgrade protection.
+
+Reapply current collection/field/relation/count authority and current row
+predicates for **every** resume before executing its layer. A cursor grants
+no access, and no old grants/predicates are restored from the token. Policy
+changes can reduce rows even when crypto/schema scope still accepts the token;
+hosts may deliberately change the trusted scope to revoke all old cursors.
+Tests prove ciphertext hides distinctive hidden order and parent values,
+bit flips and substituted scopes fail, raw inputs fail, all edge/page-info
+positions are protected, and forward/backward/nested resume, key rotation,
+retirement, bounded provider failures and policy changes obey these rules.
+Use a real AEAD test provider and a compiled host-provider example; encode-only
+or signing-only mocks cannot establish confidentiality.
 
 ### Request authority, limits, and batches
 
@@ -656,12 +875,13 @@ Minimal read host composition (proposed APIs):
 ```rust,ignore
 let module = RuntimeGraphqlModule::compile(schema.clone(), RuntimeGraphqlOptions::default())?;
 let dynamic = RuntimeGraphqlComposer::new(database.clone(), "Query", graphql_limits)?
+    .cursor_protection(host_aead_provider, trusted_audience, cursor_limits)?
     .query_field(RuntimeHostField::new("health", TypeRef::named_nn("Boolean"),
         |_| FieldFuture::new(async { Ok(Some(FieldValue::value(true))) })))?
     .install(module)?.finish()?;
 let request_context = RuntimeGraphqlRequest::<SqliteBackend>::new(
     schema.fingerprint(), read_authority, db_auth, request_budget,
-);
+).with_cursor_scope(trusted_auth_partition);
 let response = dynamic.execute(Request::new(
     "{ customers(first: 20) { edges { node { status } } totalCount } }",
 ).data(request_context)).await;
@@ -706,7 +926,7 @@ authority or journal API.
 
 ```graphql
 input CustomerKeyInput { id: RuntimeInt64! }
-input CreateCustomerInput { status: String! }
+input CreateCustomerInput { id: RuntimeInt64!, status: String! }
 input UpdateCustomerInput { status: String }
 type CustomerMutationPayload { record: Customer }
 type Mutation {
@@ -726,11 +946,27 @@ from create/update; keys absent from update; extra fields fail normal input
 validation. CAS uses C's typed filters and B's field authorization. Per-request
 denied fields need not disappear from global SDL, but cannot be submitted.
 
+The example integer id is explicitly non-generated: CreateCustomerInput must
+include it. Required non-generated composite-key members are also required
+create fields. A generated UUID variant would omit that generated key instead;
+do not infer generation merely from primary-key status or an integer type.
+Compile and execute create(input: {id: "7", status: "draft"}), the CAS update,
+and exact-key delete examples on both backends, plus composite-key variants.
+
 Compare expectedSchema and the request expectation against the module's
 fingerprint before I/O. The host chooses/pins its active catalog revision and
 maps that broader product identity to the fingerprint; the ORM cannot know
 that a newer activation occurred, or enforce a product lease. Fingerprints do
-not encode policy identity or authenticate clients.
+not encode policy identity or authenticate clients. For Digibase's profile,
+the host also validates the client's expected **complete public revision**,
+including policy-only changes, before granting a mutation intent. Capture that
+host revision expectation in request-scoped authority, compare it with current
+host state inside the pinned transaction where the state is repository-backed,
+and pin/fence the corresponding policy snapshot through commit. A policy-only
+revision change can reject the mutation even when expectedSchema still matches.
+ORM does not invent the host revision format, persistence or activation fence.
+Document this host obligation and test a host authority rejecting an old
+policy-only revision before DML, without conflating revision with fingerprint.
 
 Resolve selected payload record fields into an independently authorized
 RuntimeProjection before mutation. If only `__typename` is selected, request
@@ -750,11 +986,15 @@ let module = RuntimeGraphqlModule::compile(schema.clone(),
     RuntimeGraphqlOptions::default()
         .with_mutations(RuntimeGraphqlMutationOptions::default()))?;
 let dynamic = RuntimeGraphqlComposer::new(database, "Query", graphql_limits)?
+    .cursor_protection(host_aead_provider, trusted_audience, cursor_limits)?
     .mutation_root("Mutation")?.install(module)?.finish()?;
 let request_context = RuntimeGraphqlRequest::<SqliteBackend>::new(
     schema.fingerprint(), read_authority, db_auth, request_budget,
-).with_write_authority(write_authority).with_mutation_hook(journal_hook);
-// journal_hook.before_commit uses tx.insert::<Journal>(...) as in B.
+).with_cursor_scope(trusted_auth_partition)
+ .with_mutation_environment(environment)
+ .with_write_authority(write_authority).with_mutation_hook(journal_hook);
+// The adapter invokes the journal hook through run_runtime_before_commit;
+// the hook uses tx.insert::<Journal>(...) as in B.
 let response = dynamic.execute(Request::new(
     "mutation($schema: String!) { updateCustomer(key: {id: \"7\"}, \
       input: {status: \"published\"}, expected: {status: {eq: \"draft\"}}, \
@@ -787,17 +1027,17 @@ the ORM dependency graph.
 Every functional PR includes public reference documentation, runnable examples
 on SQLite and PostgreSQL, root changelog/migration notes, owning package README
 updates and aligned versions; regenerate the workspace inventory after manifest
-changes. The contract PR changes documentation only and requires no version
-bump. Existing accepted ADRs remain immutable; add an ADR only if review adopts
+changes. The contract PR changes documentation and external compatibility fixtures only
+and requires no version bump. Existing accepted ADRs remain immutable; add an ADR only if review adopts
 a durable new boundary requiring one.
 
 | PR | Required focused evidence |
 | --- | --- |
 | Fix | External dependency-minimal builds on three backends; Rust aggregate helpers; GraphQL SDL unchanged |
-| A | Static/runtime physical equivalence; no-op replans both origin directions; defaults/keys/indexes/FKs; public rename no DDL; unsupported diagnostics; read-only plan/history; explicit ownership removal; destructive/additive/source-hash guards; rollback on failed apply; repeated schema conversion memory bounded |
-| B | Omission/null/default/generated inputs; denied inputs/CAS/preimage/result/return fields; append-only; exact composite keys; two competing writers; stale CAS; authoritative transactional policy reads; journal/hook/commit rollback; swallowed-error poisoning; cancellation; ambiguity; RLS cleanup; safe errors |
-| C | Exact SDL/scalars/null/cursors; composition collision permutations; missing authority; tenant predicate before page/count; denied projection/filter/order/relation/count before SQL; fragments/aliases; stale handles/cursors; hidden keys; auth scope isolation; nested relation query counts; schema and operation budgets |
-| D | B/C engine delegation; missing versus null/default; generated/key input exclusions; expected schema; CAS; hook journal rollback; independently denied return fields; committed payloads only; competing GraphQL writers; host mutation collision; ambiguous commit errors |
+| A | External legacy imports/constructors/matches/literals/inference/function pointers; static/runtime physical equivalence; no-op replans both origin directions; defaults/keys/indexes/FKs; public rename no DDL; unsupported diagnostics; read-only plan/history; explicit ownership removal; destructive/additive/source-hash guards; rollback on failed apply; repeated schema conversion memory bounded; PostgreSQL RLS preservation; unrelated objects untouched; composed system-table incoming dependencies |
+| B | Omission/null/default/generated inputs; required scalar/composite create keys; denied inputs/CAS/preimage/result/return fields; append-only; exact composite keys; two competing writers; stale CAS; authoritative transactional policy reads; journal/hook/commit rollback; canceled operation/hook caught inside a live callback then Ok must roll back on SQLite/PostgreSQL; swallowed-error poisoning; ambiguity; RLS cleanup; verified incoming dependencies; RESTRICT usable; safe errors |
+| C | Exact SDL and symmetric scalar wire forms, i64 extrema/JS-unsafe values, both JSON null states/non-null JSON, byte bounds and datetime precision; AEAD hides every cursor and parent value; tampering/wrong scopes/raw inputs rejected; forward/backward/nested resume; rotation/retirement/policy changes; composition collision permutations; missing authority; tenant predicate before page/count; denied projection/filter/order/relation/count before layer SQL; fragments/aliases; stale handles/cursors; auth scope isolation; nested relation query counts; schema and operation budgets |
+| D | B/C engine delegation; compiled/executed create/update/delete examples; required non-generated/composite create keys and keys absent from update; missing versus null/default; expected schema and host policy-only revision; CAS; guarded hook cancellation/journal rollback; independently denied return fields; committed payloads only; competing GraphQL writers; host mutation collision; ambiguous commit errors |
 
 Use shared owned-database fixture infrastructure for new parity tests, with
 test-created labelled containers, loopback ports, unique database/credentials,
@@ -852,25 +1092,33 @@ is advertised until its contract is committed and reviewed.
    the explicit persisted managed table set including intentionally removed
    tables, validate/plan, review exact risks/hashes, then explicitly apply.
    Product approval, activation and backfills remain host-owned.
-4. B: implement RuntimeWriteAuthority and static system repository policies;
+4. B: establish RuntimeMutationEnvironment from the verified composed physical
+   target (including system tables), implement RuntimeWriteAuthority and static system repository policies;
    use state-machine transactions and tx.insert for journal work. Publish a
    success only after the runner returns successfully. Reconcile ambiguous
    commits using host operation IDs without blind retries.
-5. C: compile/install a module through the checked composer; supply per-request
+5. C: compile/install a module through the checked composer, install a
+   host-managed authenticated-encryption cursor provider and trusted audience/
+   auth partition, and supply per-request
    read authority, row predicates, schema expectation, RLS context and budgets.
    Host constructs and publishes the active GraphQL schema/transport.
 6. D: explicitly enable mutation registration, attach write authority and the
    before-commit journal hook, send expectedSchema and optional structural CAS,
-   and authorize the selected return projection independently.
+   and authorize the selected return projection independently. Validate the
+   complete expected host public revision (including policy-only changes) in
+   host intent authority before DML; schema fingerprint checking is additional.
 7. Run downstream SQLite/PostgreSQL adapter contracts. Upstream green checks
    establish mechanisms, not product readiness or durable event replay.
 
 ## Current checkpoint
 
 Proposal prepared against the exact remote base; no functional APIs implemented.
-Contract review must settle the concrete-alias generic owned-index model and static
-source compatibility, explicit ownership plan integrity, generated/default
-mapping, conservative cascade rejection, authority/poisoning/commit-outcome
-surface, checked dynamic composer, exact scalar wire forms, naming profile,
-cursor privacy interpretation, and request cost/batching rules. Then implement the independent fix and each
-bounded functional PR with its own committed evidence and handoff.
+The independent repository aggregate fix is approved for implementation in
+its own PR. A–D remain pending review of this revised contract: preserved enum
+namespaces with shared internal storage adapters, ownership/RLS/dependency
+verification, guarded operation/hook cancellation, host-managed AEAD cursor
+protection, symmetric lossless JSON-text scalars, required create keys, and
+host policy-only revision validation. Other accepted boundaries, including
+initial unsupported_cascade with RESTRICT supported, are retained. No A–D
+interfaces are implemented by this proposal. Each approved functional PR must
+provide its own compiled examples, isolated evidence and exact handoff.
