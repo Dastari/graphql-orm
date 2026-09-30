@@ -19,6 +19,15 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.105.1 to 0.105.2
+
+The Codex actor now stages a bounded thread target supplied by a startup `warning`
+before the first response or started notification. The sole outstanding start RPC
+remains required, both lifecycle events must bind the same exact target, and
+conflicting targets fail closed. Warning text is discarded and grants no thread
+or tool authority. Hosts already handling `RuntimeWarning` need no changes. No
+data migration, schema-module bump, public Rust API or GraphQL change is needed.
+
 ## 0.105.0 to 0.105.1
 
 The Codex protocol actor now admits schema-defined, bounded `warning` notifications

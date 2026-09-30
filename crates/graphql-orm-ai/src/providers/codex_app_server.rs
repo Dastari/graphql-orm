@@ -3597,6 +3597,7 @@ pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
     pending: BTreeMap<u64, ClientMethod>,
     active_thread_id: Option<String>,
+    pending_start_warning_thread_id: Option<String>,
     pending_turn_thread_id: Option<String>,
     active_turn_id: Option<String>,
     retained_model: Option<String>,
@@ -3647,6 +3648,7 @@ impl AiCodexAppServerProtocolActor {
             next_id: 1,
             pending: BTreeMap::new(),
             active_thread_id: None,
+            pending_start_warning_thread_id: None,
             pending_turn_thread_id: None,
             active_turn_id: None,
             retained_model: None,
@@ -3796,6 +3798,7 @@ impl AiCodexAppServerProtocolActor {
 
     fn begin_new_thread_lifecycle(&mut self) {
         self.active_thread_id = None;
+        self.pending_start_warning_thread_id = None;
         self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
         self.thread_lifecycle_operation = Some(ThreadLifecycleOperation::Start);
         self.retained_usage_snapshot_observed = false;
@@ -3805,6 +3808,7 @@ impl AiCodexAppServerProtocolActor {
 
     fn begin_resume_lifecycle(&mut self, thread_id: &str) {
         self.active_thread_id = Some(thread_id.to_owned());
+        self.pending_start_warning_thread_id = None;
         self.thread_lifecycle_phase = ThreadLifecyclePhase::AwaitingResponseAndStarted;
         self.thread_lifecycle_operation = Some(ThreadLifecycleOperation::Resume);
         self.retained_usage_snapshot_observed = false;
@@ -5060,10 +5064,15 @@ impl AiCodexAppServerProtocolActor {
                     .active_thread_id
                     .as_deref()
                     .is_some_and(|expected| expected != thread_id)
+                    || self
+                        .pending_start_warning_thread_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != thread_id)
                 {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
+                self.pending_start_warning_thread_id = None;
                 self.thread_lifecycle_phase = match self.thread_lifecycle_phase {
                     ThreadLifecyclePhase::AwaitingResponseAndStarted => {
                         if self.thread_lifecycle_operation == Some(ThreadLifecycleOperation::Resume)
@@ -5321,8 +5330,9 @@ impl AiCodexAppServerProtocolActor {
                 ThreadLifecyclePhase::Ready | ThreadLifecyclePhase::Deleted => false,
             };
         // A schema-defined warning may precede the first thread/start response.
-        // Before its ID is known, only an unthreaded notice can be correlated to
-        // the sole outstanding start RPC. It never completes that lifecycle.
+        // A thread target preceding the first binding is staged against the sole
+        // outstanding start RPC. The response and started notification must
+        // subsequently bind that exact ID; the warning grants no active thread.
         let start_correlated = self.thread_lifecycle_operation
             == Some(ThreadLifecycleOperation::Start)
             && self.pending_turn_thread_id.is_none()
@@ -5355,10 +5365,19 @@ impl AiCodexAppServerProtocolActor {
             || self.deleting_thread_id.is_some()
             || self.thread_absence_scan.is_some()
             || (!start_correlated && !resume_correlated && !turn_correlated)
-            || params
-                .thread_id
-                .as_deref()
-                .is_some_and(|thread_id| Some(thread_id) != active_thread_id)
+            || params.thread_id.as_deref().is_some_and(|thread_id| {
+                !valid_reference(thread_id)
+                    || match active_thread_id {
+                        Some(expected) => thread_id != expected,
+                        None => {
+                            !start_correlated
+                                || self
+                                    .pending_start_warning_thread_id
+                                    .as_deref()
+                                    .is_some_and(|expected| thread_id != expected)
+                        }
+                    }
+            })
             || params.message.trim().is_empty()
             || message_bytes > MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES
             || params.message.chars().any(char::is_control)
@@ -5366,6 +5385,9 @@ impl AiCodexAppServerProtocolActor {
             || next_bytes > MAXIMUM_RUNTIME_WARNING_BYTES_PER_WINDOW
         {
             return Err(ProviderError::Rejected);
+        }
+        if start_correlated && active_thread_id.is_none() && params.thread_id.is_some() {
+            self.pending_start_warning_thread_id = params.thread_id;
         }
         self.runtime_warning_count += 1;
         self.runtime_warning_bytes = next_bytes;
@@ -5410,10 +5432,15 @@ impl AiCodexAppServerProtocolActor {
                         .active_thread_id
                         .as_deref()
                         .is_some_and(|expected| expected != thread_id)
+                    || self
+                        .pending_start_warning_thread_id
+                        .as_deref()
+                        .is_some_and(|expected| expected != thread_id)
                 {
                     return Err(ProviderError::Rejected);
                 }
                 self.active_thread_id = Some(thread_id.to_owned());
+                self.pending_start_warning_thread_id = None;
                 if optional_late_resume_started {
                     self.thread_lifecycle_operation = None;
                     return Ok(());
@@ -12257,12 +12284,10 @@ pub(crate) mod tests {
             );
             assert!(actor.active_thread_id.is_none());
             assert!(matches!(
-                actor.accept(&runtime_warning_notification(
-                    Some("unbound-thread"),
-                    "bounded"
-                )),
-                Err(ProviderError::Rejected)
+                actor.accept(&runtime_warning_notification(Some("thread-1"), "bounded")),
+                Ok(AiCodexAppServerInbound::RuntimeWarning)
             ));
+            assert!(actor.active_thread_id.is_none());
 
             let response = br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#;
             let started = thread_started_notification("thread-1");
@@ -12292,6 +12317,84 @@ pub(crate) mod tests {
                 actor.accept(&warning),
                 Err(ProviderError::Rejected)
             ));
+        }
+    }
+
+    #[test]
+    fn protocol_binds_threaded_startup_warnings_only_to_the_exact_lifecycle() {
+        for response_first in [true, false] {
+            let mut actor = initialized_protocol_actor();
+            actor.start_fresh_thread(&turn()).unwrap();
+            let warning = runtime_warning_without_timestamp(Some("thread-1"), "bounded");
+            actor.accept(&warning).unwrap();
+            assert!(actor.active_thread_id.is_none());
+            assert_eq!(actor.pending.len(), 1);
+            assert_eq!(
+                actor.thread_lifecycle_phase,
+                ThreadLifecyclePhase::AwaitingResponseAndStarted
+            );
+            assert!(matches!(
+                actor.accept(&runtime_warning_notification(
+                    Some("other-thread"),
+                    "bounded"
+                )),
+                Err(ProviderError::Rejected)
+            ));
+            actor.accept(&warning).unwrap();
+            let response = br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#;
+            let started = thread_started_notification("thread-1");
+            if response_first {
+                actor.accept(response).unwrap();
+                assert_eq!(
+                    actor.thread_lifecycle_phase,
+                    ThreadLifecyclePhase::AwaitingStarted
+                );
+                actor.accept(&started).unwrap();
+            } else {
+                actor.accept(&started).unwrap();
+                assert_eq!(
+                    actor.thread_lifecycle_phase,
+                    ThreadLifecyclePhase::AwaitingResponse
+                );
+                actor.accept(response).unwrap();
+            }
+            assert_eq!(actor.thread_lifecycle_phase, ThreadLifecyclePhase::Complete);
+            assert!(actor.pending_start_warning_thread_id.is_none());
+            assert!(matches!(
+                actor.accept(&warning),
+                Err(ProviderError::Rejected)
+            ));
+        }
+    }
+
+    #[test]
+    fn protocol_rejects_startup_warning_targets_mismatching_either_first_binding() {
+        for response_first in [true, false] {
+            let mut actor = initialized_protocol_actor();
+            actor.start_fresh_thread(&turn()).unwrap();
+            actor
+                .accept(&runtime_warning_notification(Some("thread-1"), "bounded"))
+                .unwrap();
+            let binding = if response_first {
+                br#"{"id":2,"result":{"thread":{"id":"other-thread"}}}"#.to_vec()
+            } else {
+                thread_started_notification("other-thread")
+            };
+            assert!(matches!(
+                actor.accept(&binding),
+                Err(ProviderError::Rejected)
+            ));
+            assert!(actor.active_thread_id.is_none());
+            assert_ne!(actor.thread_lifecycle_phase, ThreadLifecyclePhase::Complete);
+        }
+        for target in ["", " ", "bad\nthread", "bad\u{0}thread"] {
+            let mut actor = initialized_protocol_actor();
+            actor.start_fresh_thread(&turn()).unwrap();
+            assert!(matches!(
+                actor.accept(&runtime_warning_notification(Some(target), "bounded")),
+                Err(ProviderError::Rejected)
+            ));
+            assert!(actor.pending_start_warning_thread_id.is_none());
         }
     }
 
