@@ -19,6 +19,15 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.105.0 to 0.105.1
+
+The Codex protocol actor now admits schema-defined, bounded `warning` notifications
+while the sole `thread/start` RPC is pending. Before a thread ID is established only
+unthreaded warnings are admitted; afterwards any supplied ID must match. Warnings
+are discarded, never prove successful startup, and retain the existing count/text
+limits. Hosts already handling `RuntimeWarning` need no changes. No data migration,
+schema-module bump, public Rust API or GraphQL change is needed.
+
 ## 0.104.0 to 0.105.0
 
 `AiToolAuthorizationPolicy` gains a compatible `authorize_request` default method.

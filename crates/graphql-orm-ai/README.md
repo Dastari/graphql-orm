@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.105.1` admits bounded, discarded runtime warnings during the sole
+Codex thread-start RPC without relaxing startup completion or tool authority.
+No data migration is needed.
+
 Version `0.105.0` adds a compatible request-aware tool authorization hook. Hosts
 can resolve current run/session policy through public services before execution
 and after approval, without extracting runtime tables or accepting model-owned

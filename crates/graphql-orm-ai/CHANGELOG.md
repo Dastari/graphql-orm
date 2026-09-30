@@ -33,6 +33,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Fixed
 
+- Bounded Codex runtime warnings emitted during the sole outstanding `thread/start`
+  RPC no longer abort startup. Unthreaded warnings before the first thread binding
+  and exact matching warnings during either response/notification ordering are
+  discarded without completing startup, granting tools, or exposing text. Unknown
+  thread IDs, idle/late warnings, malformed content and warning floods remain denied.
+
 - Proved pre-execution application refusals close the exact automatic or approved
   tool call and return a protected, egress-authorized `not_started_*` result to
   the model. Native completed-turn checkpoints admit those exact failure

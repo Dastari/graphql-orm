@@ -5294,10 +5294,7 @@ impl AiCodexAppServerProtocolActor {
     ) -> Result<AiCodexAppServerInbound, ProviderError> {
         let params: RuntimeWarningParams =
             serde_json::from_value(notification.params).map_err(|_| ProviderError::Rejected)?;
-        let active_thread_id = self
-            .active_thread_id
-            .as_deref()
-            .ok_or(ProviderError::Rejected)?;
+        let active_thread_id = self.active_thread_id.as_deref();
         let message_bytes = params.message.len();
         let next_bytes = self
             .runtime_warning_bytes
@@ -5309,6 +5306,7 @@ impl AiCodexAppServerProtocolActor {
             .any(|method| *method == ClientMethod::ThreadResume);
         let resume_correlated = self.thread_lifecycle_operation
             == Some(ThreadLifecycleOperation::Resume)
+            && active_thread_id.is_some()
             && self.pending_turn_thread_id.is_none()
             && self.active_turn_id.is_none()
             && match self.thread_lifecycle_phase {
@@ -5322,8 +5320,30 @@ impl AiCodexAppServerProtocolActor {
                 }
                 ThreadLifecyclePhase::Ready | ThreadLifecyclePhase::Deleted => false,
             };
-        let turn_correlated = self.thread_lifecycle_phase == ThreadLifecyclePhase::Complete
-            && self.pending_turn_thread_id.as_deref() == Some(active_thread_id)
+        // A schema-defined warning may precede the first thread/start response.
+        // Before its ID is known, only an unthreaded notice can be correlated to
+        // the sole outstanding start RPC. It never completes that lifecycle.
+        let start_correlated = self.thread_lifecycle_operation
+            == Some(ThreadLifecycleOperation::Start)
+            && self.pending_turn_thread_id.is_none()
+            && self.active_turn_id.is_none()
+            && match self.thread_lifecycle_phase {
+                ThreadLifecyclePhase::AwaitingResponseAndStarted
+                | ThreadLifecyclePhase::AwaitingResponse => {
+                    self.pending.len() == 1
+                        && self
+                            .pending
+                            .values()
+                            .any(|method| *method == ClientMethod::ThreadStart)
+                }
+                ThreadLifecyclePhase::AwaitingStarted => self.pending.is_empty(),
+                ThreadLifecyclePhase::Ready
+                | ThreadLifecyclePhase::Complete
+                | ThreadLifecyclePhase::Deleted => false,
+            };
+        let turn_correlated = active_thread_id.is_some()
+            && self.thread_lifecycle_phase == ThreadLifecyclePhase::Complete
+            && self.pending_turn_thread_id.as_deref() == active_thread_id
             && (self
                 .pending
                 .values()
@@ -5334,11 +5354,11 @@ impl AiCodexAppServerProtocolActor {
             || !self.initialization_complete
             || self.deleting_thread_id.is_some()
             || self.thread_absence_scan.is_some()
-            || (!resume_correlated && !turn_correlated)
+            || (!start_correlated && !resume_correlated && !turn_correlated)
             || params
                 .thread_id
                 .as_deref()
-                .is_some_and(|thread_id| thread_id != active_thread_id)
+                .is_some_and(|thread_id| Some(thread_id) != active_thread_id)
             || params.message.trim().is_empty()
             || message_bytes > MAXIMUM_RUNTIME_WARNING_MESSAGE_BYTES
             || params.message.chars().any(char::is_control)
@@ -12215,6 +12235,89 @@ pub(crate) mod tests {
             let frame = serde_json::to_vec(&invalid).expect("invalid fixture should encode");
             assert!(matches!(actor.accept(&frame), Err(ProviderError::Rejected)));
         }
+    }
+
+    #[test]
+    fn protocol_admits_bounded_startup_runtime_warnings_without_completing_thread_start() {
+        for response_first in [true, false] {
+            let mut actor = initialized_protocol_actor();
+            actor.start_fresh_thread(&turn()).unwrap();
+            let warning =
+                runtime_warning_without_timestamp(None, "Optional capability is disabled.");
+            let inbound = actor
+                .accept(&warning)
+                .expect("sole start RPC correlates an unthreaded warning");
+            assert_eq!(
+                format!("{inbound:?}"),
+                "AiCodexAppServerInbound::RuntimeWarning"
+            );
+            assert_eq!(
+                actor.thread_lifecycle_phase,
+                ThreadLifecyclePhase::AwaitingResponseAndStarted
+            );
+            assert!(actor.active_thread_id.is_none());
+            assert!(matches!(
+                actor.accept(&runtime_warning_notification(
+                    Some("unbound-thread"),
+                    "bounded"
+                )),
+                Err(ProviderError::Rejected)
+            ));
+
+            let response = br#"{"id":2,"result":{"thread":{"id":"thread-1"}}}"#;
+            let started = thread_started_notification("thread-1");
+            if response_first {
+                actor.accept(response).unwrap();
+            } else {
+                actor.accept(&started).unwrap();
+            }
+            assert!(matches!(
+                actor.accept(&runtime_warning_notification(Some("thread-1"), "bounded")),
+                Ok(AiCodexAppServerInbound::RuntimeWarning)
+            ));
+            assert!(matches!(
+                actor.accept(&runtime_warning_notification(
+                    Some("other-thread"),
+                    "bounded"
+                )),
+                Err(ProviderError::Rejected)
+            ));
+            if response_first {
+                actor.accept(&started).unwrap();
+            } else {
+                actor.accept(response).unwrap();
+            }
+            assert_eq!(actor.thread_lifecycle_phase, ThreadLifecyclePhase::Complete);
+            assert!(matches!(
+                actor.accept(&warning),
+                Err(ProviderError::Rejected)
+            ));
+        }
+    }
+
+    #[test]
+    fn protocol_rejects_out_of_window_or_flooding_startup_runtime_warnings() {
+        let warning = runtime_warning_without_timestamp(None, "bounded");
+        let mut unbound = initialized_protocol_actor();
+        assert!(matches!(
+            unbound.accept(&warning),
+            Err(ProviderError::Rejected)
+        ));
+        unbound.start_fresh_thread(&turn()).unwrap();
+        for _ in 0..MAXIMUM_RUNTIME_WARNINGS_PER_WINDOW {
+            assert!(matches!(
+                unbound.accept(&warning),
+                Ok(AiCodexAppServerInbound::RuntimeWarning)
+            ));
+        }
+        assert!(matches!(
+            unbound.accept(&warning),
+            Err(ProviderError::Rejected)
+        ));
+        assert_eq!(
+            unbound.thread_lifecycle_phase,
+            ThreadLifecyclePhase::AwaitingResponseAndStarted
+        );
     }
 
     #[test]
