@@ -123,6 +123,19 @@ Computed SQL Server grouping/totals, joined/computed reads and private generated
 views remain missing. Its private visibility accessor matches #98's shared
 accessor; combine the independent reviewed branches without a new policy layer.
 
+A separate synthetic compatibility checkout combines corrected #97 with the
+committed #96/#98/#99 implementation sources, leaving all review heads unchanged.
+It passes 107 SQLite and 78 PostgreSQL core/migration/group/profile tests, one
+additional actually executed PostgreSQL aggregate regression, and six generated
+relationship regressions on each SQLite/PostgreSQL lane. Each two-crate relation
+workspace also has two illustrative generated doctests ignored; these are not
+backend execution evidence. The combined MSSQL lane passes 31 library tests and
+two pre-I/O rejection tests, with no live server execution. Warnings-denied
+combined core/macros Clippy passes independently on all three backends. This
+checks shared implementation compatibility; it is not a merged/reviewed release
+or a substitute for owner review. #99's focused CI and normal ORM check are green;
+the broader companion check is still running at this checkpoint.
+
 Preferred package identity order is #96 (0.33.4), #98 (0.33.5), #97 (0.34.0),
 then #99 (0.35.0).
 If owner review chooses another order, realign the unpublished patches and rerun
