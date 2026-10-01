@@ -1,4 +1,4 @@
-#![cfg(feature = "sqlite")]
+#![cfg(any(feature = "sqlite", feature = "postgres"))]
 
 #[test]
 fn generated_relationships_execute_across_real_crate_boundaries() {
@@ -7,6 +7,11 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
         "/../graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml"
     );
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let backend = if cfg!(feature = "postgres") {
+        "postgres"
+    } else {
+        "sqlite"
+    };
     let status = std::process::Command::new(cargo)
         .env("CARGO_BUILD_JOBS", "2")
         .env("CARGO_INCREMENTAL", "0")
@@ -19,7 +24,7 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
             "cross-crate-source-models",
             "--no-default-features",
             "--features",
-            "sqlite",
+            backend,
             "--lib",
         ])
         .status()

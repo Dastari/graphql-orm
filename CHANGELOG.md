@@ -14,6 +14,25 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.33.5 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.5**.
+
+- Fix generated relationship resolvers returning preloaded objects before current
+  target authorization and complete ownership-key resolution. Resolve the
+  authoritative database target even when a snapshot/cache was populated.
+- Check current entity, row and selected-field policies. Nullable target denial
+  preserves the parent and reports a sanitized error on the relationship path.
+  Missing or ownership-mismatched targets ordinarily return null without errors.
+- Apply SQL visibility before relation pages/counts, partition batches by current
+  predicate and database identity, and retain the existing uncached loader type.
+  Callback-only to-many policies require an explicit host scan budget and fail
+  closed on exhaustion; retain only the bounded visible page in memory.
+- Add executable cross-crate SQLite/PostgreSQL regressions and a SQL-free
+  authoritative relationship example. Existing SDL/cursor formats are unchanged.
+
+No stored-data migration or release publication is included.
+
 ## 0.33.4 - 2026-10-01
 
 Companion macros crate: `graphql-orm-macros` **0.33.4**.

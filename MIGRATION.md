@@ -13,6 +13,32 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.33.4 to 0.33.5: authoritative generated relationship access
+
+Adopt runtime and macros 0.33.5 together. Generated relationship resolvers no
+longer trust preloaded objects as authoritative targets. Install `Database` in
+request/schema data; target tables must remain available for current resolution.
+Declare complete tenant/identity bindings. Existing public declarations, SDL and
+cursor formats are unchanged; snapshots and cached objects grant no authority.
+
+Entity, current row and selected field policies are enforced at traversal.
+A denied nullable target is null with a safe child-path error; missing or moved
+ownership targets ordinarily return null without errors. Field policy callbacks
+may run during traversal preflight as well as ordinary field resolution; both
+receive the actual child field context, including its arguments and alias/path.
+
+For bounded batched pages/counts prefer a `ReadVisibility::Complete` SQL predicate.
+Callback-only/prefilter policies on to-many links now require the existing
+`AuthorizedScanConfig` on `Database`. The resolver scans bounded candidate batches,
+counts authorized rows across the complete result and retains only the requested
+visible window. Missing configuration or insufficient budget returns a safe error
+instead of a partial count/exhaustion claim. This corrective behavior replaces
+previously unchecked relation row policies. Concurrent external DML is not a
+snapshot-isolation guarantee across separate read statements.
+
+See [the authoritative relationship example](crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/examples/authorized_links.rs)
+and [the relation contract](docs/reference/graphql-orm/entities-and-relations.md).
+
 ## 0.33.3 to 0.33.4: generated cross-crate relationships
 
 Adopt runtime and macros 0.33.4 together from the same reviewed published tag.
