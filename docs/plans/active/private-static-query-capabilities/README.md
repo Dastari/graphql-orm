@@ -51,9 +51,25 @@ cross-crate compilation defect through the existing public backend trait, at
 SQLite fixture binds complete tenant/endpoint ownership, retains historical
 snapshots, measures two real target SELECTs for multiple parents and demonstrates
 nullable target entity denial. PostgreSQL/MSSQL lanes are compile-only. This
-unpublished draft does not establish all of #7's row/field/cache/preload checks,
+unpublished reviewable PR does not establish all of #7's row/field/cache/preload checks,
 implement #6's private generated adapters or close #1–4. Its package identity
 must be realigned if independent 0.34.0 PR A merges before this patch.
+
+[PR A / #97](https://github.com/Dastari/graphql-orm/pull/97) is independently ready
+for review at `1581df980af962edd50cb34659ceea185cc0016d`, ORM/macros 0.34.0.
+Its focused verification passed 91 SQLite tests, 32 PostgreSQL tests (including
+owned disposable database execution), and one MSSQL pre-I/O rejection test;
+MSSQL runtime migration execution remains unsupported. It implements the accepted
+owned migration target contract, including the approved scoped rejection of
+legacy epoch-second DateTime defaults. Static Integer epoch defaults remain
+supported. B–D are still approved proposals and wait for reviewed predecessors.
+
+An independent actual GraphQL regression now reproduces #7's preloaded-target
+policy bypass: with target entity access denied, a manually preloaded child is
+returned before current target authorization. The aliased child also carries a
+mismatched ownership tuple. This confirms a generated resolver defect beyond
+#96's compile fix; the authorization change and its broader acceptance fixtures
+remain a separate workstream. No fix or complete #7 support is claimed here.
 
 ## Overlap and dependency matrix
 
@@ -70,7 +86,7 @@ execution tests must confirm each remaining diagnosis.
 | 4. External read-only computed pages, SQL Server | Existing typed source reads/keysets and schema-policy boundary are reusable; trusted SQL order fragments do not meet this contract | None | C's cursor/authorization principles overlap, but runtime APIs initially reject MSSQL | Typed computed multi-column boundary, conversion/date arithmetic/null/collation support; owned synthetic MSSQL source fixture; prove no schema-management calls | Shares query machinery with #1/#2 and expression renderer with #3b; independent of A–D |
 | 5. Generated cross-crate relations | Source-level defect: generated target `__gom_placeholder` is `pub(crate)` and relations invoke it from the source entity's crate | None; aggregate fix must stay narrow | C's runtime relation executor is separate and does not establish generated static compilation | PR #96 reproduces E0624 in two real crates and fixes generated calls through existing `OrmBackend::placeholder`; SQLite execution proves composite ownership, current entity denial and measured batches. Broader row/field/cache authority checks remain #7 | No runtime dependency; test with #7 authorization fixtures |
 | 6. Private repository-backed redacted views | Explicit `RepositoryEntity` + `GraphQLRelations` rejection; runtime relation availability does not establish a generated adapter | Keeps repository aggregate helpers private; does not add an adapter | C dynamic composition is not a replacement | Generated view adapter that retains repository policy metadata and exposes only reviewed fields/relations; release/artifact fixture with organization ownership and stable bounded continuation | New adapter contract; depends on #5's cross-crate contract and #7's authorization verification, not A–D |
-| 7. Nullable target denial and loaders | Actual nullable target entity denial is supported: #96's fixture preserves parent fields, returns null and reports sanitized child-path errors; missing targets return null without error. Row/field/preload/cache/identity cases remain to reproduce | None | C independently requires current authority and identity-isolated batches | First add actual GraphQL response regressions distinguishing generated resolver and calling adapter behavior; change ORM only for demonstrated violations; policy/cache/alias/composite/batch/page/count fixtures | Preserves outer scope guards; shared verification for #5/#6, not dynamic-schema adoption |
+| 7. Nullable target denial and loaders | Actual nullable target entity denial is supported: #96's fixture preserves parent fields, returns null and reports sanitized child-path errors; missing targets return null without error. Preloaded-target entity policy bypass is reproduced independently; row/field/cache/identity cases still need their own execution evidence | None | C independently requires current authority and identity-isolated batches | First add actual GraphQL response regressions distinguishing generated resolver and calling adapter behavior; change ORM only for demonstrated violations; policy/cache/alias/composite/batch/page/count fixtures | Preserves outer scope guards; shared verification for #5/#6, not dynamic-schema adoption |
 
 ## Source evidence and reusable contracts
 
