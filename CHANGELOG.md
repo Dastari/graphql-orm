@@ -14,6 +14,19 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.35.2 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.35.2** (alignment only).
+
+- Allow transaction-bound repository `count` and `exists` with an installed
+  row policy when its current visibility is explicitly unrestricted or complete
+  SQL authorization. Intersect complete predicates with caller filters before
+  the database count, on the same pinned transaction as surrounding writes.
+- Retain entity authorization and reject callback-only/prefilter policies,
+  wrong-entity predicates and residual filters under an installed row policy.
+  Counts do not decode rows or invoke per-row callbacks. Existing no-policy
+  behavior, public APIs, GraphQL SDL and stored data are unchanged.
+
 ## 0.35.1 - 2026-10-01
 
 Companion macros crate: `graphql-orm-macros` **0.35.1**.

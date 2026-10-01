@@ -4078,12 +4078,36 @@ where
     where
         B: WriteBackend,
     {
+        self.count_with_visibility_in_transaction(context, None)
+            .await
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) async fn count_with_visibility_in_transaction(
+        &self,
+        context: &mut MutationContext<'_, B>,
+        visibility: Option<&FilterExpression>,
+    ) -> crate::Result<i64>
+    where
+        B: WriteBackend,
+    {
         if self.requires_in_memory_filtering() {
+            if visibility.is_some() {
+                return Err(sqlx::Error::Protocol(
+                    "SQL-authorized counts require database-visible query filters".to_string(),
+                ));
+            }
             let mut query = self.clone();
             query.page = None;
             return Ok(query.fetch_all_in_transaction(context).await?.len() as i64);
         }
         let mut query = self.build_select_query()?;
+        if let Some(predicate) = visibility {
+            query.filter = Some(match query.filter {
+                Some(filter) => FilterExpression::And(vec![filter, predicate.clone()]),
+                None => predicate.clone(),
+            });
+        }
         query.count_only = true;
         query.pagination = None;
         query.sorts.clear();

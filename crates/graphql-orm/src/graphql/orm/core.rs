@@ -983,13 +983,22 @@ where
             )
             .await
             .map_err(|error| sqlx::Error::Protocol(format!("{error:?}")))?;
-        if self.hook_ctx.database().row_policy().is_some() {
+        let database = self.hook_ctx.database();
+        let visibility = database
+            .read_visibility::<T>(None, EntityAccessSurface::Repository)
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        if visibility.requires_residual_checks()
+            || (database.row_policy().is_some() && self.query.requires_in_memory_filtering())
+        {
             return Err(sqlx::Error::Protocol(
                 "repository count reads require database-visible row-policy predicates".to_string(),
             ));
         }
         let query = self.query;
-        query.count_in_transaction(self.hook_ctx).await
+        query
+            .count_with_visibility_in_transaction(self.hook_ctx, visibility.predicate_expression())
+            .await
     }
 
     pub async fn exists(self) -> crate::Result<bool> {
