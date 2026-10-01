@@ -34,6 +34,44 @@ Existing PostgreSQL/MSSQL aggregate behavior remains unchanged. Computed summari
 joined/computed source reads and private generated GraphQL views remain independent
 work; no runtime-schema/dynamic GraphQL adoption is required for this API.
 
+## 0.33.4 to 0.33.5: authoritative generated relationship access
+
+Adopt runtime and macros 0.33.5 together. Generated relationship resolvers no
+longer trust preloaded objects as authoritative targets. Install `Database` in
+request/schema data; target tables must remain available for current resolution.
+Declare complete tenant/identity bindings. Existing public declarations, SDL and
+cursor formats are unchanged; snapshots and cached objects grant no authority.
+
+Entity, current row and selected field policies are enforced at traversal.
+A denied nullable target is null with a safe child-path error; missing or moved
+ownership targets ordinarily return null without errors. Field policy callbacks
+may run during traversal preflight as well as ordinary field resolution; both
+receive the actual child field context, including its arguments and alias/path.
+
+For bounded batched pages/counts prefer a `ReadVisibility::Complete` SQL predicate.
+Callback-only/prefilter policies on to-many links now require the existing
+`AuthorizedScanConfig` on `Database`. The resolver scans bounded candidate batches,
+counts authorized rows across the complete result and retains only the requested
+visible window. Missing configuration or insufficient budget returns a safe error
+instead of a partial count/exhaustion claim. This corrective behavior replaces
+previously unchecked relation row policies. Concurrent external DML is not a
+snapshot-isolation guarantee across separate read statements.
+
+See [the authoritative relationship example](crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/examples/authorized_links.rs)
+and [the relation contract](docs/reference/graphql-orm/entities-and-relations.md).
+
+## 0.33.3 to 0.33.4: generated cross-crate relationships
+
+Adopt runtime and macros 0.33.4 together from the same reviewed published tag.
+Generated relationships no longer call the target entity's private placeholder
+helper. Existing declarations compile across crate boundaries without application
+calls to ORM implementation helpers, duplicate table entities or dynamic schemas.
+No call-site, SDL, cursor or stored-data migration is required. Bind every tenant
+and target identity member in `from`/`to`; a link grants no target authority.
+See [the runnable external fixture](crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/examples/cross_crate_links.rs).
+This focused fix does not add repository-backed GraphQL adapters or establish the
+complete cached/preloaded row and field authorization contract.
+
 ## 0.33.2 to 0.33.3: repository aggregate enum compatibility
 
 Pin runtime and macros 0.33.3 to the same reviewed full workspace revision.

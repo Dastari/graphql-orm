@@ -28,10 +28,43 @@ Companion macros crate: `graphql-orm-macros` **0.35.0** (alignment only).
   async-graphql and SQLite execution/unsupported-backend regressions. Other scalar
   groups/backends and computed SQL Server summaries remain separate capabilities.
 
-This independent static feature uses the published 0.33.3 baseline and does not
-require runtime A–D. The unpublished 0.35.0 identity anticipates the independently
-reviewed 0.33.4/0.33.5 fixes and 0.34.0 migrations; owners may realign identities
-when choosing merge/publication order. No release publication is authorized.
+This static feature remains independent of runtime A–D. The 0.35.0 package
+identity preserves the independently reviewed 0.33.4/0.33.5 compatibility fixes;
+release coordination does not imply completion of the broader static query plan.
+
+## 0.33.5 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.5**.
+
+- Fix generated relationship resolvers returning preloaded objects before current
+  target authorization and complete ownership-key resolution. Resolve the
+  authoritative database target even when a snapshot/cache was populated.
+- Check current entity, row and selected-field policies. Nullable target denial
+  preserves the parent and reports a sanitized error on the relationship path.
+  Missing or ownership-mismatched targets ordinarily return null without errors.
+- Apply SQL visibility before relation pages/counts, partition batches by current
+  predicate and database identity, and retain the existing uncached loader type.
+  Callback-only to-many policies require an explicit host scan budget and fail
+  closed on exhaustion; retain only the bounded visible page in memory.
+- Add executable cross-crate SQLite/PostgreSQL regressions and a SQL-free
+  authoritative relationship example. Existing SDL/cursor formats are unchanged.
+
+No stored-data migration or release publication is included.
+
+## 0.33.4 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.4**.
+
+- Fix generated relationships to an entity defined in another Rust crate.
+  Placeholder rendering uses the existing public `OrmBackend` contract, avoiding
+  calls to the target's crate-private helper. Existing helper visibility, backend
+  SQL, static SDL and application APIs remain unchanged.
+- Add an external two-crate fixture and a SQL-free disposable example. SQLite
+  execution tests complete tenant/endpoint bindings, historical snapshots,
+  missing/optional targets, independently checked target entity denial and native
+  statement tracing of batched reads. PostgreSQL/MSSQL lanes are compile checks.
+
+No stored-data migration or release publication is included.
 
 ## 0.33.3 - 2026-10-01
 

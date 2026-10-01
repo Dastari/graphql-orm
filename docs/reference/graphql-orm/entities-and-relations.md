@@ -535,3 +535,106 @@ migration if a production table needs a concurrent index build.
 
 On SQLite, `index = true` is accepted for cross-backend schema portability but no spatial index is
 created. Future SQLite indexing options are documented in [Backend Features](backends.md).
+
+## Entities across Rust crate boundaries
+
+Generated relationships can reference a real target entity imported from another
+crate. Import the target type into the source declaration's scope and provide its
+ordinary public `BatchLoadEntity<B>` implementation when using relationship
+loaders. Generated placeholder rendering uses `OrmBackend::placeholder`; consumers
+never call the target's crate-private `__gom_*` helpers. Existing generated SQL,
+static SDL and helper visibility are unchanged.
+
+Bind complete ownership keys, for example:
+
+```rust,ignore
+#[graphql(skip)]
+#[relation(target = "Endpoint", from = ["endpoint_id", "tenant_id"],
+           to = ["id", "tenant_id"], emit_fk = false)]
+endpoint: Option<Endpoint>,
+```
+
+An optional source key member or missing/mismatched target resolves to null. A
+current endpoint in another tenant cannot match an old session/history binding.
+Keep historical display snapshots as source fields. To omit target storage fields
+from an automatically generated GraphQL object while retaining repository writes,
+use `#[graphql_orm(read = false, filter = false, order = false, subscribe = false)]`.
+The example exposes target identity/name and registers no target CRUD roots.
+
+The standalone [two-crate fixture](../../../crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/src/lib.rs)
+uses independently compiled target/source packages, composite bindings, actual
+nullable child selections and SQLite native statement traces. Multiple parents
+execute two target SELECTs, one dispatch for each source relationship. Current
+target entity denial leaves the authorized parent present, returns a null child
+and attaches a sanitized error to that child path. Missing targets cause no error.
+The original compilation-only fix did not establish the complete row/field/cache/preload authorization
+contract; the independent authority fix and its executable checks are described below.
+
+```sh
+cargo run --manifest-path crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml \
+  --locked -p cross-crate-source-models --no-default-features --features sqlite \
+  --example cross_crate_links
+cargo test --manifest-path crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml \
+  --locked -p cross-crate-source-models --no-default-features --features sqlite
+```
+
+The runnable example owns an in-memory SQLite database. Schema setup, insert and
+relationship reads use supported ORM APIs; no application query SQL is needed.
+PostgreSQL and MSSQL fixture lanes compile the same generated declarations with
+`--no-default-features --features postgres` or `mssql`. This focused compatibility
+fix has SQLite execution evidence; these other lanes are compile-only, with no live
+SQL Server execution claimed. Private repository-backed generated view adapters
+and computed queries are independent capabilities, not added by this fix.
+
+
+## Current authority for generated relationship targets
+
+Preloaded relationship fields are snapshots. Generated resolvers resolve the
+current target from the database using every declared `from`/`to` member;
+manually populated or cached objects cannot supply target authority or bypass
+ownership reassignment. No additional public CRUD roots are required. Keep
+immutable historical fields separate from current links.
+
+Every traversal checks target entity access and current request row visibility.
+Callback row denial and selected-field denial return a safe error on the
+relationship path. For nullable links the parent remains present and the child
+is null. A missing target or mismatched ownership tuple ordinarily returns null
+without error. SQL-complete visibility hides nonmatching targets as absent;
+resolvers never probe around the predicate to distinguish hidden from missing.
+Selected target fields are preflighted before returning the target; ordinary
+field resolvers retain their checks. Preflight supplies the actual target field context, including arguments and
+alias/path; providers may be evaluated again during ordinary field resolution. Aliases, fragments,
+and execution-pruned skip/include selections retain their field identities.
+
+The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its default
+`NoCache` storage. It batches concurrent loads without reusing results across
+requests; other cache types are not accepted as authoritative targets and the
+resolver falls back to a fresh typed query. Current visibility predicates and
+canonical `DbAuthContext` participate in SQL batch grouping. A cursor, snapshot,
+source record or cached row never grants target access.
+
+To-many SQL-complete visibility is applied before page windows and counts.
+Callback-only/prefilter visibility uses the existing host-owned
+`AuthorizedScanConfig`; bounded batches are examined to exhaustion, only the
+requested visible page is retained, and counts include every authorized row.
+Absent configuration or budget exhaustion fails closed with
+`AUTHORIZATION_MISCONFIGURED`, without a partial count or false end-of-data.
+These residual scans run per parent; SQL-complete batches remain shared across
+parents. Generated parent operations no longer issue pool-only eager target preloads: a
+nullable target denial is handled by its resolver rather than failing its parent
+before traversal. Existing explicit bulk preload APIs remain source compatible but their snapshots
+are not reused for GraphQL authority, so callers may avoid redundant preloads.
+No cross-statement snapshot isolation under concurrent external DML is promised.
+
+Run the SQL-free standalone example:
+
+```sh
+cargo run --manifest-path crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml --locked -p cross-crate-source-models --no-default-features --features sqlite --example authorized_links
+```
+
+The [two-crate executable fixture](../../../crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/src/lib.rs)
+checks current entity/row/field policies, preloaded forgeries, moved ownership,
+reused schema/loader requests, two identities, expired/source-denied identities,
+nullable error paths, alias/fragment selection and bounded page/count semantics
+on SQLite and test-owned disposable PostgreSQL. SQLite tracing also measures
+real multi-parent target dispatches. MSSQL coverage is compilation only.

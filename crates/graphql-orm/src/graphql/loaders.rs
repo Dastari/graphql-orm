@@ -164,6 +164,245 @@ pub struct RelationLoadResult<T> {
     pub offset: i64,
 }
 
+/// Generated resolver support. Sanitize host policy failures at a relationship
+/// boundary while retaining the public authorization-misconfiguration code.
+#[doc(hidden)]
+pub fn relation_authorization_error(error: async_graphql::Error) -> async_graphql::Error {
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    let code = if error
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.get("code"))
+        == Some(&async_graphql::Value::String(
+            "AUTHORIZATION_MISCONFIGURED".into(),
+        )) {
+        OrmErrorCode::AuthorizationMisconfigured
+    } else {
+        OrmErrorCode::Forbidden
+    };
+    OrmPublicError::new(code)
+        .with_internal(format!("{error:?}"))
+        .into_graphql_error()
+}
+
+/// Generated resolver support for current SQL visibility and batch partitioning.
+#[doc(hidden)]
+pub fn with_relation_visibility<T, B>(
+    mut key: CompositeRelationQueryKey,
+    visibility: &crate::graphql::orm::ReadVisibility,
+) -> async_graphql::Result<CompositeRelationQueryKey>
+where
+    T: crate::graphql::orm::Entity + 'static,
+    B: OrmBackend,
+{
+    visibility.validate::<T, B>()?;
+    if let Some(predicate) = visibility.predicate_expression() {
+        key.filter = Some(match key.filter {
+            Some(filter) => {
+                crate::graphql::orm::FilterExpression::And(vec![filter, predicate.clone()])
+            }
+            None => predicate.clone(),
+        });
+        key.where_signature = Some(format!("{:?}", key.filter));
+    }
+    Ok(key)
+}
+
+/// Generated resolver support. Check selected target fields on authoritative
+/// rows before returning a relationship object. This also keeps a field denial
+/// on a nullable target from exposing a partially resolved target object.
+#[doc(hidden)]
+pub async fn authorize_relation_fields<T, B>(
+    db: &crate::db::Database<B>,
+    ctx: &async_graphql::Context<'_>,
+    rows: &[T],
+    connection: bool,
+) -> async_graphql::Result<()>
+where
+    T: crate::graphql::orm::Entity + Send + Sync + 'static,
+    B: OrmBackend,
+{
+    // Use execution-pruned selections while retaining the real child context:
+    // field arguments, aliases, and path-dependent host policies must agree
+    // with ordinary target field resolution.
+    let fields = relation_selected_fields(ctx, &ctx.item.node.selection_set.node);
+    if connection {
+        for edge in fields
+            .iter()
+            .filter(|field| field.node.name.node.as_str().eq_ignore_ascii_case("edges"))
+        {
+            let edge_ctx = ctx.with_field(edge);
+            for node in relation_selected_fields(ctx, &edge.node.selection_set.node)
+                .into_iter()
+                .filter(|field| field.node.name.node.as_str().eq_ignore_ascii_case("node"))
+            {
+                let selected = relation_selected_fields(ctx, &node.node.selection_set.node);
+                for (index, row) in rows.iter().enumerate() {
+                    let indexed_ctx = edge_ctx.with_index(index);
+                    let node_ctx = indexed_ctx.with_field(node);
+                    check_relation_fields(db, &node_ctx, &selected, ::std::slice::from_ref(row))
+                        .await?;
+                }
+            }
+        }
+    } else {
+        check_relation_fields(db, ctx, &fields, rows).await?;
+    }
+    Ok(())
+}
+
+fn relation_selected_fields<'a>(
+    ctx: &'a async_graphql::Context<'_>,
+    selection: &'a async_graphql::parser::types::SelectionSet,
+) -> Vec<&'a async_graphql::Positioned<async_graphql::parser::types::Field>> {
+    use async_graphql::parser::types::Selection;
+    let mut fields = Vec::new();
+    for item in &selection.items {
+        match &item.node {
+            Selection::Field(field) => fields.push(field),
+            Selection::FragmentSpread(spread) => {
+                if let Some(fragment) = ctx.query_env.fragments.get(&spread.node.fragment_name.node)
+                {
+                    fields.extend(relation_selected_fields(
+                        ctx,
+                        &fragment.node.selection_set.node,
+                    ));
+                }
+            }
+            Selection::InlineFragment(fragment) => fields.extend(relation_selected_fields(
+                ctx,
+                &fragment.node.selection_set.node,
+            )),
+        }
+    }
+    fields
+}
+
+async fn check_relation_fields<T, B>(
+    db: &crate::db::Database<B>,
+    ctx: &async_graphql::Context<'_>,
+    selected: &[&async_graphql::Positioned<async_graphql::parser::types::Field>],
+    rows: &[T],
+) -> async_graphql::Result<()>
+where
+    T: crate::graphql::orm::Entity + Send + Sync + 'static,
+    B: OrmBackend,
+{
+    for row in rows {
+        for selection in selected {
+            let Some(field) = T::repository_field_policies().iter().find(|field| {
+                field.api_name == selection.node.name.node.as_str() && field.read_policy.is_some()
+            }) else {
+                continue;
+            };
+            let field_ctx = ctx.with_field(selection);
+            db.ensure_readable_field(
+                &field_ctx,
+                T::entity_name(),
+                field.api_name,
+                field.read_policy,
+                Some(row),
+            )
+            .await
+            .map_err(relation_authorization_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// Generated resolver support for callback-only/prefiltered target policies.
+/// Count authorized rows before paging, retaining only the requested window.
+/// Exhausting the host's scan budget fails closed rather than publishing a
+/// partial count or treating denied rows as end-of-data.
+#[doc(hidden)]
+pub async fn scan_authorized_relation<T, B>(
+    db: &crate::db::Database<B>,
+    ctx: &async_graphql::Context<'_>,
+    mut query: crate::graphql::orm::EntityQuery<T, B>,
+    auth: Option<&DbAuthContext>,
+    visibility: &crate::graphql::orm::ReadVisibility,
+    page: crate::graphql::orm::PaginationRequest,
+) -> async_graphql::Result<RelationLoadResult<T>>
+where
+    B: OrmBackend,
+    T: BatchLoadEntity<B> + crate::graphql::orm::Entity,
+{
+    use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
+    use crate::graphql::orm::{EntityAccessSurface, PageInput, PaginationConfig, SqlDialect};
+    let invalid =
+        || OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured).into_graphql_error();
+    let config = db.authorized_scan_config().ok_or_else(invalid)?;
+    if config.batch_size == 0
+        || config.max_scanned_rows == 0
+        || query.requires_in_memory_filtering()
+    {
+        return Err(invalid());
+    }
+    query = query.with_read_visibility(visibility)?;
+    // Stable source batches must not depend on non-unique caller ordering alone.
+    for column in T::PRIMARY_KEYS {
+        if !query
+            .order_clauses
+            .iter()
+            .any(|clause| crate::graphql::orm::sort_clause_mentions_column(clause, column))
+        {
+            query
+                .order_clauses
+                .push(format!("{} ASC", B::DIALECT.quote_identifier(column)));
+        }
+    }
+    let offset = page.offset.max(0);
+    let limit = page.limit.ok_or_else(invalid)?.max(0);
+    let mut entities = Vec::new();
+    let mut total_count = 0_i64;
+    let mut scanned = 0_u32;
+    loop {
+        let size = config.batch_size.min(config.max_scanned_rows - scanned);
+        if size == 0 {
+            return Err(invalid());
+        }
+        let rows = query
+            .clone()
+            .paginate(&PageInput {
+                limit: Some(i64::from(size)),
+                offset: Some(i64::from(scanned)),
+            })
+            .fetch_all_with_auth_and_pagination(db, auth, PaginationConfig::unbounded())
+            .await
+            .map_err(|error| OrmPublicError::from(error).into_graphql_error())?;
+        let short = rows.len() < size as usize;
+        scanned += rows.len() as u32;
+        for row in rows {
+            if db
+                .can_read_row(
+                    Some(ctx),
+                    T::entity_name(),
+                    T::metadata().read_policy,
+                    EntityAccessSurface::GraphqlRelation,
+                    &row,
+                )
+                .await
+                .map_err(relation_authorization_error)?
+            {
+                if total_count >= offset && entities.len() < limit as usize {
+                    entities.push(row);
+                }
+                total_count += 1;
+            }
+        }
+        if short {
+            break;
+        }
+    }
+    Ok(RelationLoadResult {
+        has_next_page: offset.saturating_add(entities.len() as i64) < total_count,
+        has_previous_page: offset > 0,
+        entities,
+        total_count,
+        offset,
+    })
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct RelationGroupKey {
     relation: &'static str,

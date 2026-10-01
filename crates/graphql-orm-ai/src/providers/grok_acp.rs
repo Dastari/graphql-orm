@@ -14,7 +14,7 @@ use crate::{
 };
 
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const MAX_DEFINITIONS: usize = 64;
+const MAX_DEFINITIONS: usize = 128;
 pub(super) const MAX_SDK_CALLS: usize = 4096;
 
 fn rejected() -> ProviderError {
@@ -81,7 +81,7 @@ impl AiGrokAcpSdkBroker {
     ///
     /// # Errors
     /// Rejects malformed identities, duplicate or invalid definitions, more
-    /// than 64 definitions or 4096 callbacks, frames over 16 MiB, or total
+    /// than 128 definitions or 4096 callbacks, frames over 16 MiB, or total
     /// bytes over 64 MiB.
     pub fn new(
         server_id: String,
@@ -473,6 +473,39 @@ mod tests {
             )),
             Ok(AiGrokAcpSdkInbound::Response(_))
         ));
+    }
+
+    #[test]
+    fn exact_definition_capacity_admits_large_bootstrap_and_rejects_overflow() {
+        let make = |count: usize| {
+            let tools = (0..count)
+                .map(|index| {
+                    let mut tool = definition();
+                    tool.tool_id = format!("test.tool.{index}");
+                    tool.provider_name = format!("tool_{index}");
+                    tool.fingerprint = format!("{index:064x}");
+                    tool
+                })
+                .collect();
+            AiGrokAcpSdkBroker::new(
+                "sdk-1".into(),
+                "prompt-1".into(),
+                tools,
+                1,
+                1024 * 1024,
+                4 * 1024 * 1024,
+            )
+        };
+        for count in [65, 90, 128] {
+            let mut broker = make(count).expect("bounded exact definitions should be admitted");
+            initialize(&mut broker);
+            assert!(matches!(
+                broker.accept(&request(2, "tools/list", json!({}))),
+                Ok(AiGrokAcpSdkInbound::Response(_))
+            ));
+            assert_eq!(broker.tools.len(), count);
+        }
+        assert!(matches!(make(129), Err(ProviderError::InvalidRequest)));
     }
 
     #[test]
