@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.5.3 to 0.5.4
+
+No code, configuration or stored-data migration is needed. Rebuild to retain
+warnings-denied compilation on current Rust without raising the Rust 1.90 MSRV.
+Metrics preserve their atomic saturating decrement and relaxed ordering.
+
 ## Workspace release dependency alignment
 
 For workspace releases selecting `agql-auth` v0.19.1, direct consumers must use
