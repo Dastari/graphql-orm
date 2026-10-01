@@ -3,7 +3,7 @@ title: Private static query and generated relationship capabilities
 kind: plan
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2026-12-31
 supersedes: []
 ---
@@ -19,8 +19,12 @@ implementation and verification plan; missing interfaces below are not implement
 capabilities. No release publication or consumer deployment is authorized.
 
 The latest published baseline verified through GitHub is
-[workspace-2026.09.30.4](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.09.30.4),
-resolved to `a90f229da66416e70f094c27e01f0bf4b4edc6bd`, ORM/macros 0.33.1.
+[workspace-2026.10.01.1](https://github.com/Dastari/graphql-orm/releases/tag/workspace-2026.10.01.1),
+resolved from annotated tag object `6f42a4fbc948cd066280818154660ca7dd2001e2`
+to `82503290c0d0b96b78c687b4e75e5e279439eb59`, ORM/macros 0.33.3. The attached
+JSON/Markdown release manifests match their published SHA256SUMS. This owner-
+published baseline includes the aggregate compatibility fix; it adds no joined or
+computed query, grouped continuation or generated-view adapter capability.
 [PR #86](https://github.com/Dastari/graphql-orm/pull/86)'s approved contract head is
 `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`; its merge commit is
 `9ed46db5d1c5c6214f83ef9084352030e14905ad`. This approval covers its bounded A–D
@@ -41,6 +45,16 @@ Its inherited schema-module fixture assertion was corrected independently in
 [PR #95](https://github.com/Dastari/graphql-orm/pull/95);
 [issue #93](https://github.com/Dastari/graphql-orm/issues/93) is closed.
 
+[PR #96](https://github.com/Dastari/graphql-orm/pull/96) independently fixes the
+cross-crate compilation defect through the existing public backend trait, at
+`4617b332014758387a3c271a7b30a5aff4873453`, ORM/macros 0.33.4. Its executable
+SQLite fixture binds complete tenant/endpoint ownership, retains historical
+snapshots, measures two real target SELECTs for multiple parents and demonstrates
+nullable target entity denial. PostgreSQL/MSSQL lanes are compile-only. This
+unpublished draft does not establish all of #7's row/field/cache/preload checks,
+implement #6's private generated adapters or close #1–4. Its package identity
+must be realigned if independent 0.34.0 PR A merges before this patch.
+
 ## Overlap and dependency matrix
 
 Source references point into the audited upstream code. A supported subprimitive
@@ -54,9 +68,9 @@ execution tests must confirm each remaining diagnosis.
 | 3a. Complete event identities, SQLite | Grouped aggregates are bounded by configured group limit. Increasing a finite limit does not prove complete continuation. Native field grouping does not express blank-only trim exclusion with distinct original identities and independent NOCASE ordering | Plain repository aggregate enums become usable without direct async-graphql; no continuation or distinct semantics added | None | First test existing grouped APIs. Add stable bounded distinct/group continuation only where missing; fixture exceeds configured maximum and retains case/padding identities | Shares typed predicate/collation support with #1/#2; no runtime dependency |
 | 3b. Labour summary, SQL Server | Grouping/metrics use native generated fields; computed widened arithmetic, label grouping and whole-set total before top-25 are not established | Same enum compatibility only | None | Typed computed grouping/metrics and whole-set totals in existing aggregate engine; disposable SQL Server execution including overflow and groups outside displayed 25 | Shares expression renderer with #4; no A–D dependency |
 | 4. External read-only computed pages, SQL Server | Existing typed source reads/keysets and schema-policy boundary are reusable; trusted SQL order fragments do not meet this contract | None | C's cursor/authorization principles overlap, but runtime APIs initially reject MSSQL | Typed computed multi-column boundary, conversion/date arithmetic/null/collation support; owned synthetic MSSQL source fixture; prove no schema-management calls | Shares query machinery with #1/#2 and expression renderer with #3b; independent of A–D |
-| 5. Generated cross-crate relations | Source-level defect: generated target `__gom_placeholder` is `pub(crate)` and relations invoke it from the source entity's crate | None; aggregate fix must stay narrow | C's runtime relation executor is separate and does not establish generated static compilation | Separate focused macro fix after an external two-crate reproducer; public supported backend metadata/helper contract, composite ownership, independently authorized targets and measured batching | No runtime dependency; test with #7 authorization fixtures |
+| 5. Generated cross-crate relations | Source-level defect: generated target `__gom_placeholder` is `pub(crate)` and relations invoke it from the source entity's crate | None; aggregate fix must stay narrow | C's runtime relation executor is separate and does not establish generated static compilation | PR #96 reproduces E0624 in two real crates and fixes generated calls through existing `OrmBackend::placeholder`; SQLite execution proves composite ownership, current entity denial and measured batches. Broader row/field/cache authority checks remain #7 | No runtime dependency; test with #7 authorization fixtures |
 | 6. Private repository-backed redacted views | Explicit `RepositoryEntity` + `GraphQLRelations` rejection; runtime relation availability does not establish a generated adapter | Keeps repository aggregate helpers private; does not add an adapter | C dynamic composition is not a replacement | Generated view adapter that retains repository policy metadata and exposes only reviewed fields/relations; release/artifact fixture with organization ownership and stable bounded continuation | New adapter contract; depends on #5's cross-crate contract and #7's authorization verification, not A–D |
-| 7. Nullable target denial and loaders | Integration report requires executable reproduction. Do not classify an ORM bug before selecting a nullable child in an actual GraphQL response | None | C independently requires current authority and identity-isolated batches | First add actual GraphQL response regressions distinguishing generated resolver and calling adapter behavior; change ORM only for demonstrated violations; policy/cache/alias/composite/batch/page/count fixtures | Preserves outer scope guards; shared verification for #5/#6, not dynamic-schema adoption |
+| 7. Nullable target denial and loaders | Actual nullable target entity denial is supported: #96's fixture preserves parent fields, returns null and reports sanitized child-path errors; missing targets return null without error. Row/field/preload/cache/identity cases remain to reproduce | None | C independently requires current authority and identity-isolated batches | First add actual GraphQL response regressions distinguishing generated resolver and calling adapter behavior; change ORM only for demonstrated violations; policy/cache/alias/composite/batch/page/count fixtures | Preserves outer scope guards; shared verification for #5/#6, not dynamic-schema adoption |
 
 ## Source evidence and reusable contracts
 
