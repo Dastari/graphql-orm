@@ -95,7 +95,36 @@ checks. This is an implementation PR based on #96 for its cross-crate fixture,
 not a published/adoptable release or a private-view adapter. All ten CI checks
 are green at the exact #98 head; owner review/merge is still pending.
 
-Preferred package identity order is #96 (0.33.4), #98 (0.33.5), then #97 (0.34.0).
+[PR #99](https://github.com/Dastari/graphql-orm/pull/99) implements complete bounded
+SQLite text-group pages at `ae67b01d9222fae5787e02b553e9a24c21e31797`, aligned
+ORM/macros 0.35.0 (macros alignment only). It extends the existing aggregate
+builder with `fetch_group_page`, one TEXT-affinity group, optional existing
+metrics, native grouping equality, ascending BINARY/NOCASE order and typed
+host-context continuation. Source authorization precedes grouping; HAVING
+continuation preserves complete metrics. SQL NULL sorts first, native TRIM
+blank exclusion preserves padded nonblank strings, and every page is bounded
+by 1–1,000 plus one lookahead under the existing stricter configuration.
+
+The [standalone private consumer](https://github.com/Dastari/graphql-orm/blob/ae67b01d9222fae5787e02b553e9a24c21e31797/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/complete_events.rs)
+executes 225 original event types without query SQL/direct async-graphql/public
+roots. Six new SQLite regressions and existing library/aggregate tests pass
+(38 tests); PostgreSQL and MSSQL unsupported profiles reject before pool I/O
+(29/32 library/profile tests). One existing PostgreSQL aggregate regression
+actually executes on a disposable owned container via `--ignored`, with no
+skipped execution misrepresented. No live MSSQL execution is claimed. The
+external consumer compiles all three backend lanes and executes on SQLite.
+Warnings-denied Clippy/Rustdoc, documentation, inventory, dependency and package
+checks pass. Explicit package-selected patch-level semver analysis passes 223
+checks (30 inapplicable checks skipped), independent of version-bump heuristics.
+The [canonical reference at its exact head](https://github.com/Dastari/graphql-orm/blob/ae67b01d9222fae5787e02b553e9a24c21e31797/docs/reference/graphql-orm/typed-aggregates.md)
+specifies cursor bounds, current SQL policy checks and storage/collation limits.
+This is reviewable implementation, not a published/adoptable capability.
+Computed SQL Server grouping/totals, joined/computed reads and private generated
+views remain missing. Its private visibility accessor matches #98's shared
+accessor; combine the independent reviewed branches without a new policy layer.
+
+Preferred package identity order is #96 (0.33.4), #98 (0.33.5), #97 (0.34.0),
+then #99 (0.35.0).
 If owner review chooses another order, realign the unpublished patches and rerun
 combined checks. Functional query/group/private-view work has no dependency on
 B–D completion; only shared generated-relation fixes require committed
@@ -111,7 +140,7 @@ execution tests must confirm each remaining diagnosis.
 | --- | --- | --- | --- | --- | --- |
 | 1. Private token/user query, SQLite | Partial primitives: repository models, parameter binds, literal LIKE escaping, configurable 1,000-row bounds. No demonstrated typed joined/computed query, mixed-direction computed boundary, or status expression | Removes accidental GraphQL dependency from private aggregate enums only | C shares authorization, bounded pagination and private cursor concerns; dynamic registration is not required | Typed bounded join/projection/expression support in existing query engine; synthetic token/user execution fixture for exact prefix, DB clock status, literal search, sort ties, nulls and pre-I/O cursor rejection | New static query surface must preserve existing backend/query contracts; no dependency on A–D completion |
 | 2. Computed activity query, SQLite | Same primitives; trusted `order_expression` SQL is not an acceptable consumer solution. No demonstrated typed safe-JSON/fallback/NOCASE continuation | None | C shares bounded reads and relation batching only | Reuse #1's typed query support; LEFT join, safe JSON property, trim/nonblank/coalesce/case and collation expressions; execution fixture proving tenant isolation and complete pages | Shared query expression design with #1; independent of A–D |
-| 3a. Complete event identities, SQLite | Grouped aggregates are bounded by configured group limit. Increasing a finite limit does not prove complete continuation. Native field grouping does not express blank-only trim exclusion with distinct original identities and independent NOCASE ordering | Plain repository aggregate enums become usable without direct async-graphql; no continuation or distinct semantics added | None | First test existing grouped APIs. Add stable bounded distinct/group continuation only where missing; fixture exceeds configured maximum and retains case/padding identities | Shares typed predicate/collation support with #1/#2; no runtime dependency |
+| 3a. Complete event identities, SQLite | Missing in published 0.33.3: existing group limit truncates the complete set | Plain repository aggregate enums become usable without direct async-graphql; no continuation or distinct semantics added | None | PR #99 implements existing-builder text-group pages, original native identities, independent NOCASE/BINARY ordering, complete SQL visibility, HAVING continuation and a private SQL-free executable example; SQLite tests exceed the secure cap and exercise 1,000 groups plus lookahead | Independently reviewable; no runtime or joined-query prerequisite |
 | 3b. Labour summary, SQL Server | Grouping/metrics use native generated fields; computed widened arithmetic, label grouping and whole-set total before top-25 are not established | Same enum compatibility only | None | Typed computed grouping/metrics and whole-set totals in existing aggregate engine; disposable SQL Server execution including overflow and groups outside displayed 25 | Shares expression renderer with #4; no A–D dependency |
 | 4. External read-only computed pages, SQL Server | Existing typed source reads/keysets and schema-policy boundary are reusable; trusted SQL order fragments do not meet this contract | None | C's cursor/authorization principles overlap, but runtime APIs initially reject MSSQL | Typed computed multi-column boundary, conversion/date arithmetic/null/collation support; owned synthetic MSSQL source fixture; prove no schema-management calls | Shares query machinery with #1/#2 and expression renderer with #3b; independent of A–D |
 | 5. Generated cross-crate relations | Source-level defect: generated target `__gom_placeholder` is `pub(crate)` and relations invoke it from the source entity's crate | None; aggregate fix must stay narrow | C's runtime relation executor is separate and does not establish generated static compilation | PR #96 reproduces E0624 in two real crates and fixes generated calls through existing `OrmBackend::placeholder`; SQLite execution proves composite ownership, current entity denial and measured batches. Broader row/field/cache authority checks remain #7 | No runtime dependency; test with #7 authorization fixtures |
