@@ -5564,6 +5564,9 @@ fn generate_projection_definitions(
                 type Entity = #entity;
                 type Filter = #where_input;
                 type Order = #order_input;
+                fn entity_type_id() -> Option<::std::any::TypeId> {
+                    Some(::std::any::TypeId::of::<#entity>())
+                }
                 const COLUMNS: &'static [&'static str] = &[#(#selected_columns),*];
                 const FIELD_NAMES: &'static [&'static str] = &[#(#selected_field_names),*];
                 const UNIQUE_COLUMNS: &'static [&'static str] = &[#(#unique_columns),*];

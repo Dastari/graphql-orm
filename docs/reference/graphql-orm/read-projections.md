@@ -3,7 +3,7 @@ title: "Typed Read Projections"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,7 +16,7 @@ discarded—would be unacceptable.
 
 ## Declaration
 
-Declare one or more projections on a `GraphQLEntity`:
+Declare one or more projections on a `GraphQLEntity` or private `RepositoryEntity`:
 
 ```rust
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
@@ -130,11 +130,50 @@ explicit-policy modes therefore fail closed exactly as full-entity repository re
 `query_with_auth` uses backend-neutral `DbAuthContext`, and `transaction_with_auth` installs the
 same transaction-local PostgreSQL settings used by generated RLS reads.
 
-An application `RowPolicy` receives a full Rust entity. Evaluating it would require selecting every
-field, defeating a projection's memory boundary, so projection reads fail closed whenever an
-application row-policy provider is registered. Use PostgreSQL RLS or an explicit generated typed
-filter for projection-compatible tenant/soft-delete enforcement. Filters requiring residual
-in-memory entity evaluation are likewise rejected rather than silently loading excluded columns.
+With a global `RowPolicy`, projections use its current `read_visibility` decision
+for the entity and `Repository` surface on every call:
+
+| Visibility | Projection/group-page behavior |
+| --- | --- |
+| `Unrestricted` | Explicitly permit all matching rows; retain entity/selected-field checks. |
+| `Complete(predicate)` | Validate entity/backend and parameterize the typed predicate before ordering/limits/grouping. No residual callback. |
+| `CallbackOnly` (default), `Prefilter(predicate)` | Reject before query I/O: evaluating a full entity would violate the excluded-column boundary. |
+
+For example, a global provider can deliberately mark public inventory unrestricted,
+or return `ReadVisibility::Complete(ReadPredicate::from_filter::<SqliteBackend, _>(
+&PrivateIssuerWhereInput { tenant: Some(StringFilter { eq: Some(verified_tenant),
+..Default::default() }), ..Default::default() })?)` for a verified tenant. Never
+mark a partial predicate complete. Reapply current policy/ownership each request;
+previous projection values and cursors do not grant access. Filters requiring
+residual in-memory evaluation remain rejected. Repository field checks still run
+without a full-record value; policies needing that value must fail closed.
+
+Pool and pinned-transaction projections have the same behavior, including generated
+primary/unique-key helpers. SQLite and PostgreSQL generated projections execute this
+contract; PostgreSQL `DbAuthContext`/RLS handling remains unchanged. Generated
+MSSQL projections are still unsupported; this change does not add that macro profile.
+Complete group pages remain SQLite-only, independently of projection support.
+
+Generated projections supply the associated entity's identity to validate SQL
+visibility. The provided `ReadProjection::entity_type_id` defaults to `None` for
+existing handwritten implementations, keeping them source compatible. Those
+implementations can use unrestricted reads; complete visibility requires returning
+`Some(TypeId::of::<Self::Entity>())`. An absent/mismatched identity fails closed.
+
+Run the standalone dependency-minimal private repository example (no application
+query SQL, GraphQL roots or direct async-graphql dependency):
+
+```sh
+cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example policy_projections
+cargo test -p graphql-orm --locked --no-default-features --features sqlite --test projection_visibility
+cargo test -p graphql-orm --locked --no-default-features --features postgres --test projection_visibility
+```
+
+The PostgreSQL command creates and removes its own labelled disposable container
+using `tests/support/owned_postgres.rs`; it never consumes an application URL and
+fails if infrastructure is unavailable. Regression views raise an error if the
+excluded private-key expression is selected, proving the projection boundary.
+The observer records actual bounded projection SELECTs without bind values.
 
 Projections and their methods are never added to GraphQL schemas. `private = true` is the only
 supported mode in this release; `private = false` is a compile error. Existing GraphQL field-policy

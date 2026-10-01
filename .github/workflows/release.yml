@@ -155,6 +155,10 @@ jobs:
           cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features --locked
           cargo check -p graphql-orm --no-default-features --features postgres --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --locked
+          cargo test -p graphql-orm --no-default-features --features postgres --test projection_visibility --test cross_crate_relations_fixture --locked
+          cargo test -p graphql-orm --no-default-features --features postgres --test grouped_aggregates_postgres --locked -- --ignored --test-threads=1
+          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example policy_projections
+          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example complete_events
           cargo check -p graphql-orm --no-default-features --features mssql --locked
           cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --locked
           cargo clippy -p graphql-orm --all-targets --locked -- -D warnings

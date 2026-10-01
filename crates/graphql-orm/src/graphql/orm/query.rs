@@ -141,6 +141,13 @@ pub trait ReadProjection<B: OrmBackend = DefaultBackend>:
     const COLUMNS: &'static [&'static str];
     /// Rust field identities selected by this projection, in decode order.
     const FIELD_NAMES: &'static [&'static str] = &[];
+    /// Generated identity for validating SQL visibility without fetching an entity.
+    /// Handwritten projections remain compatible; SQL-complete visibility requires
+    /// opting into the associated entity identity. Unrestricted reads need no token.
+    #[doc(hidden)]
+    fn entity_type_id() -> Option<std::any::TypeId> {
+        None
+    }
     #[doc(hidden)]
     const UNIQUE_COLUMNS: &'static [&'static str];
 }
@@ -2996,6 +3003,7 @@ where
         &self,
         pagination_config: PaginationConfig,
         forced_limit: Option<i64>,
+        visibility: Option<&FilterExpression>,
     ) -> RenderedQuery {
         let entity_default = <P::Entity as DatabaseEntity>::DEFAULT_SORT;
         let mut sorts = if self.order_clauses.is_empty() {
@@ -3033,7 +3041,16 @@ where
                     .iter()
                     .map(|column| (*column).to_string())
                     .collect(),
-                filter: filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+                filter: match (
+                    filter_expression_from_raw_parts(&self.where_clauses, &self.values),
+                    visibility,
+                ) {
+                    (Some(filter), Some(policy)) => {
+                        Some(FilterExpression::And(vec![filter, policy.clone()]))
+                    }
+                    (filter, None) => filter,
+                    (None, Some(policy)) => Some(policy.clone()),
+                },
                 sorts,
                 pagination: Some(pagination_config.resolve_page(Some(&page), true)),
                 count_only: false,
@@ -3059,7 +3076,9 @@ where
     }
 }
 
-async fn ensure_projection_access<P, B>(db: &crate::db::Database<B>) -> crate::Result<()>
+async fn ensure_projection_access<P, B>(
+    db: &crate::db::Database<B>,
+) -> crate::Result<super::ReadVisibility>
 where
     B: OrmBackend,
     P: ReadProjection<B>,
@@ -3094,13 +3113,17 @@ where
         .await
         .map_err(crate::graphql::errors::sqlx_error_from_public)?;
     }
-    if db.row_policy().is_some() {
+    let visibility = db
+        .projection_read_visibility::<P>()
+        .await
+        .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+    if visibility.requires_residual_checks() {
         return Err(sqlx::Error::Protocol(
-            "projection reads are denied when an application row policy requires a full entity; use database RLS or a typed SQL-renderable filter"
+            "projection reads are denied when an application row policy requires a full entity; use complete SQL visibility or explicit unrestricted visibility"
                 .to_string(),
         ));
     }
-    Ok(())
+    Ok(visibility)
 }
 
 /// Backend-neutral repository query for one macro-generated projection DTO.
@@ -3167,9 +3190,13 @@ where
     }
 
     pub async fn fetch_all(self) -> crate::Result<Vec<P>> {
-        ensure_projection_access::<P, B>(self.db).await?;
+        let visibility = ensure_projection_access::<P, B>(self.db).await?;
         self.state.validate()?;
-        let rendered = self.state.render(self.db.pagination_config(), None);
+        let rendered = self.state.render(
+            self.db.pagination_config(),
+            None,
+            visibility.predicate_expression(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -3177,13 +3204,18 @@ where
             self.auth.as_ref(),
         )
         .await?;
+        self.db.observe_read(&rendered.sql, rows.len());
         ProjectionQueryState::<P, B>::decode(rows)
     }
 
     pub async fn fetch_first(self) -> crate::Result<Option<P>> {
-        ensure_projection_access::<P, B>(self.db).await?;
+        let visibility = ensure_projection_access::<P, B>(self.db).await?;
         self.state.validate()?;
-        let rendered = self.state.render(self.db.pagination_config(), Some(1));
+        let rendered = self.state.render(
+            self.db.pagination_config(),
+            Some(1),
+            visibility.predicate_expression(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -3191,15 +3223,20 @@ where
             self.auth.as_ref(),
         )
         .await?;
+        self.db.observe_read(&rendered.sql, rows.len());
         Ok(ProjectionQueryState::<P, B>::decode(rows)?
             .into_iter()
             .next())
     }
 
     pub async fn fetch_optional_one(self) -> crate::Result<Option<P>> {
-        ensure_projection_access::<P, B>(self.db).await?;
+        let visibility = ensure_projection_access::<P, B>(self.db).await?;
         self.state.validate()?;
-        let rendered = self.state.render(self.db.pagination_config(), Some(2));
+        let rendered = self.state.render(
+            self.db.pagination_config(),
+            Some(2),
+            visibility.predicate_expression(),
+        );
         let rows = B::fetch_rows_with_auth(
             self.db.pool(),
             &rendered.sql,
@@ -3207,6 +3244,7 @@ where
             self.auth.as_ref(),
         )
         .await?;
+        self.db.observe_read(&rendered.sql, rows.len());
         let mut values = ProjectionQueryState::<P, B>::decode(rows)?;
         if values.len() > 1 {
             return Err(sqlx::Error::Protocol(
@@ -3273,15 +3311,20 @@ where
     }
 
     async fn fetch(self, forced_limit: Option<i64>) -> crate::Result<Vec<P>> {
-        ensure_projection_access::<P, B>(self.context.database()).await?;
+        let visibility = ensure_projection_access::<P, B>(self.context.database()).await?;
         self.state.validate()?;
-        let rendered = self
-            .state
-            .render(self.context.database().pagination_config(), forced_limit);
+        let rendered = self.state.render(
+            self.context.database().pagination_config(),
+            forced_limit,
+            visibility.predicate_expression(),
+        );
         let rows = self
             .context
             .fetch_rows(&rendered.sql, &rendered.values)
             .await?;
+        self.context
+            .database()
+            .observe_read(&rendered.sql, rows.len());
         ProjectionQueryState::<P, B>::decode(rows)
     }
 
