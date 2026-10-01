@@ -364,3 +364,11 @@ impl Job {
 ```
 
 If a computed field needs database access, use request-scoped `DataLoader` or another batching mechanism. Generated relation fields already use the relation batching runtime; custom computed fields should follow the same rule to avoid N+1 behavior.
+
+Transaction count regressions run on memory SQLite and individually owned
+PostgreSQL containers (never an ambient application database):
+
+```bash
+cargo test -p graphql-orm --locked --no-default-features --features sqlite --test repository_counts
+cargo test -p graphql-orm --locked --no-default-features --features postgres --test repository_counts -- --test-threads=1
+```
