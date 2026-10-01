@@ -35,9 +35,9 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
 name = "android_system_properties"
-version = "0.1.6"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae221649c9976a6f6c56ae1facf410f3ddb33cc661c4b7b61020a912d4237fbc"
+checksum = "819e7219dbd41043ac279b19830f2efc897156490d7fd6ea916720117ee66311"
 dependencies = [
  "libc",
 ]
@@ -459,6 +459,30 @@ name = "critical-section"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
+
+[[package]]
+name = "cross-crate-source-models"
+version = "0.0.0"
+dependencies = [
+ "async-graphql",
+ "cross-crate-target-models",
+ "graphql-orm",
+ "libsqlite3-sys",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "cross-crate-target-models"
+version = "0.0.0"
+dependencies = [
+ "async-graphql",
+ "graphql-orm",
+ "serde",
+ "serde_json",
+ "tokio",
+]
 
 [[package]]
 name = "crossbeam-queue"
@@ -2011,15 +2035,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "repository-aggregate-consumer"
-version = "0.0.0"
-dependencies = [
- "graphql-orm",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "ring"
 version = "0.17.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3417,9 +3432,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -598,7 +598,7 @@ pub(crate) fn generate_graphql_relations(
                         Some::<String>(format!(
                             "{} = {}",
                             #target_column_sql,
-                            #target_type::__gom_placeholder(#placeholder_index),
+                            <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(#placeholder_index),
                         ))
                     },
                     quote! { Some::<::graphql_orm::graphql::orm::SqlValue>(#target_value) },
@@ -742,7 +742,7 @@ pub(crate) fn generate_graphql_relations(
             .map(|(index, column)| {
                 let placeholder_index = index + 1;
                 quote! {
-                    format!("{} = {}", #column, #target_type::__gom_placeholder(#placeholder_index))
+                    format!("{} = {}", #column, <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(#placeholder_index))
                 }
             })
             .collect::<Vec<_>>();
@@ -1224,7 +1224,7 @@ pub(crate) fn generate_graphql_relations(
                             .collect::<Vec<_>>();
                         let mut relation_predicate = if #relation_key_arity == 1 {
                             let placeholders = (0..unique_relation_keys.len())
-                                .map(|index| <#target_type>::__gom_placeholder(index + 1))
+                                .map(|index| <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(index + 1))
                                 .collect::<Vec<_>>();
                             format!("{} IN ({})", #first_fk_column_sql, placeholders.join(", "))
                         } else {
@@ -1234,7 +1234,7 @@ pub(crate) fn generate_graphql_relations(
                                 .map(|_| {
                                     let predicates = vec![
                                         #({
-                                            let placeholder = <#target_type>::__gom_placeholder(next_placeholder);
+                                            let placeholder = <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(next_placeholder);
                                             next_placeholder += 1;
                                             format!("{} = {}", #fk_columns_sql, placeholder)
                                         }),*
@@ -1248,7 +1248,7 @@ pub(crate) fn generate_graphql_relations(
                             (#bulk_target_column, #bulk_target_value)
                         {
                             let placeholder =
-                                <#target_type>::__gom_placeholder(bind_values.len() + 1);
+                                <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::placeholder(bind_values.len() + 1);
                             relation_predicate = format!(
                                 "({}) AND {} = {}",
                                 relation_predicate, column, placeholder,
