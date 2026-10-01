@@ -2511,8 +2511,8 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
     /// Describe read visibility for this request, entity, and access surface.
     /// The default preserves callback-only authorization. A complete predicate
-    /// (or `Unrestricted`) replaces row callbacks only on pagination paths that
-    /// explicitly support this contract. Errors fail the request closed.
+    /// (or `Unrestricted`) replaces row callbacks only on read paths that
+    /// explicitly support this contract (including typed projections and group pages). Errors fail the request closed.
     fn read_visibility<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,

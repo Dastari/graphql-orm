@@ -137,12 +137,25 @@ pub enum ReadVisibility {
     Unrestricted,
 }
 impl ReadVisibility {
+    pub(crate) fn predicate_expression(&self) -> Option<&FilterExpression> {
+        match self {
+            Self::Prefilter(predicate) | Self::Complete(predicate) => Some(&predicate.expression),
+            _ => None,
+        }
+    }
     pub fn requires_residual_checks(&self) -> bool {
         matches!(self, Self::CallbackOnly | Self::Prefilter(_))
     }
     pub(crate) fn validate<T: Entity + 'static, B: OrmBackend>(&self) -> async_graphql::Result<()> {
+        self.validate_identity(Some(TypeId::of::<T>()), B::DIALECT)
+    }
+    pub(crate) fn validate_identity(
+        &self,
+        entity: Option<TypeId>,
+        backend: DatabaseBackend,
+    ) -> async_graphql::Result<()> {
         if let Self::Prefilter(p) | Self::Complete(p) = self
-            && (p.entity != TypeId::of::<T>() || p.backend != B::DIALECT)
+            && (Some(p.entity) != entity || p.backend != backend)
         {
             return Err(invalid());
         }

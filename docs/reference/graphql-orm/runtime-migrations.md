@@ -10,7 +10,7 @@ supersedes: []
 
 # Owned runtime migration targets
 
-ORM/macros 0.34.0 adds migration targets from the existing validated runtime
+ORM/macros 0.36.0 adds migration targets from the existing validated runtime
 schema on SQLite and PostgreSQL. These APIs are separate from schema activation,
 catalog persistence, public revision selection, authorization policy and transport,
 which remain host responsibilities. Dynamic GraphQL and runtime record mutations
