@@ -137,6 +137,12 @@ pub enum ReadVisibility {
     Unrestricted,
 }
 impl ReadVisibility {
+    pub(crate) fn predicate_expression(&self) -> Option<&FilterExpression> {
+        match self {
+            Self::Prefilter(predicate) | Self::Complete(predicate) => Some(&predicate.expression),
+            _ => None,
+        }
+    }
     pub fn requires_residual_checks(&self) -> bool {
         matches!(self, Self::CallbackOnly | Self::Prefilter(_))
     }
