@@ -19,6 +19,22 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.106.0 to 0.106.1
+
+Provider-session bindings now admit up to 128 static bootstrap fingerprints;
+the Grok SDK broker admits up to 128 exact definitions. Count the complete
+projected provider surface, including fixed broker definitions, against its
+own limit. This fixes admission of reviewed catalogues above the former 64-tool
+ceiling without granting discovery or execution authority. Existing session
+fingerprints remain byte-identical for unchanged inputs.
+
+No data migration, DDL, GraphQL SDL, protected payload or schema-module change
+is required. The widened bound affects construction only; the persisted format
+and fingerprint computation are unchanged. Older readers cannot construct a
+new session with more than 64 bootstrap fingerprints, so retain this release
+when configuring such a catalogue. All current-principal, approval, egress,
+budget, provider byte/frame and callback checks remain authoritative.
+
 ## 0.105.2 to 0.106.0
 
 Hosts can return `AiToolAuthorizationDecision::require_authentication` for an

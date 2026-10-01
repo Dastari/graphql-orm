@@ -481,7 +481,9 @@ impl AiProviderCapabilitySessionBinding {
     ///
     /// # Errors
     ///
-    /// Rejects missing, unbounded, or control-character-bearing values.
+    /// Rejects missing, unbounded, or control-character-bearing values and more
+    /// than 128 static bootstrap fingerprints. Provider-specific definition and
+    /// byte limits still apply independently to the complete projected surface.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         delivery_mode: AiCapabilityDeliveryMode,
@@ -505,7 +507,7 @@ impl AiProviderCapabilitySessionBinding {
         }
         if !crate::valid_sha256(&capability_index_fingerprint)
             || !crate::valid_sha256(&registration_identity)
-            || static_bootstrap_tool_fingerprints.len() > 64
+            || static_bootstrap_tool_fingerprints.len() > 128
             || static_bootstrap_tool_fingerprints
                 .iter()
                 .any(|value| !crate::valid_sha256(value))
@@ -2785,6 +2787,30 @@ mod tests {
             ),
             Err(AiError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn provider_binding_accepts_large_exact_bootstrap_and_keeps_a_finite_limit() {
+        let make = |count: usize| {
+            AiProviderCapabilitySessionBinding::new(
+                AiCapabilityDeliveryMode::FixedBroker,
+                "a".repeat(64),
+                (0..count).map(|index| format!("{index:064x}")).collect(),
+                "test-projection/v1",
+                "test-model",
+                ModelReasoningEffort::Low,
+                "b".repeat(64),
+            )
+        };
+        for count in [64, 65, 86, 128] {
+            let binding = make(count).expect("bounded larger host bootstrap should be admitted");
+            assert_eq!(binding.static_bootstrap_tool_fingerprints().len(), count);
+        }
+        assert!(make(129).is_err());
+        assert_ne!(
+            make(85).unwrap().fingerprint(),
+            make(86).unwrap().fingerprint()
+        );
     }
 
     #[test]
