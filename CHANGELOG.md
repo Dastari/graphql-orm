@@ -16,6 +16,10 @@ for historical context.
 
 ## 0.35.2 - 2026-10-01
 
+- Keep standalone fixture lockfiles aligned with this package set and execute
+  transaction count authorization regressions on test-owned PostgreSQL as well
+  as SQLite during release validation.
+
 Companion macros crate: `graphql-orm-macros` **0.35.2** (alignment only).
 
 - Allow transaction-bound repository `count` and `exists` with an installed
