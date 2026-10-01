@@ -14,6 +14,21 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.33.4 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.4**.
+
+- Fix generated relationships to an entity defined in another Rust crate.
+  Placeholder rendering uses the existing public `OrmBackend` contract, avoiding
+  calls to the target's crate-private helper. Existing helper visibility, backend
+  SQL, static SDL and application APIs remain unchanged.
+- Add an external two-crate fixture and a SQL-free disposable example. SQLite
+  execution tests complete tenant/endpoint bindings, historical snapshots,
+  missing/optional targets, independently checked target entity denial and native
+  statement tracing of batched reads. PostgreSQL/MSSQL lanes are compile checks.
+
+No stored-data migration or release publication is included.
+
 ## 0.33.3 - 2026-10-01
 
 Companion macros crate: `graphql-orm-macros` **0.33.3**.

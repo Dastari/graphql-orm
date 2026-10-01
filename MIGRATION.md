@@ -13,6 +13,18 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.33.3 to 0.33.4: generated cross-crate relationships
+
+Adopt runtime and macros 0.33.4 together from the same reviewed published tag.
+Generated relationships no longer call the target entity's private placeholder
+helper. Existing declarations compile across crate boundaries without application
+calls to ORM implementation helpers, duplicate table entities or dynamic schemas.
+No call-site, SDL, cursor or stored-data migration is required. Bind every tenant
+and target identity member in `from`/`to`; a link grants no target authority.
+See [the runnable external fixture](crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/examples/cross_crate_links.rs).
+This focused fix does not add repository-backed GraphQL adapters or establish the
+complete cached/preloaded row and field authorization contract.
+
 ## 0.33.2 to 0.33.3: repository aggregate enum compatibility
 
 Pin runtime and macros 0.33.3 to the same reviewed full workspace revision.

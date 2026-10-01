@@ -535,3 +535,53 @@ migration if a production table needs a concurrent index build.
 
 On SQLite, `index = true` is accepted for cross-backend schema portability but no spatial index is
 created. Future SQLite indexing options are documented in [Backend Features](backends.md).
+
+## Entities across Rust crate boundaries
+
+Generated relationships can reference a real target entity imported from another
+crate. Import the target type into the source declaration's scope and provide its
+ordinary public `BatchLoadEntity<B>` implementation when using relationship
+loaders. Generated placeholder rendering uses `OrmBackend::placeholder`; consumers
+never call the target's crate-private `__gom_*` helpers. Existing generated SQL,
+static SDL and helper visibility are unchanged.
+
+Bind complete ownership keys, for example:
+
+```rust,ignore
+#[graphql(skip)]
+#[relation(target = "Endpoint", from = ["endpoint_id", "tenant_id"],
+           to = ["id", "tenant_id"], emit_fk = false)]
+endpoint: Option<Endpoint>,
+```
+
+An optional source key member or missing/mismatched target resolves to null. A
+current endpoint in another tenant cannot match an old session/history binding.
+Keep historical display snapshots as source fields. To omit target storage fields
+from an automatically generated GraphQL object while retaining repository writes,
+use `#[graphql_orm(read = false, filter = false, order = false, subscribe = false)]`.
+The example exposes target identity/name and registers no target CRUD roots.
+
+The standalone [two-crate fixture](../../../crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/src/lib.rs)
+uses independently compiled target/source packages, composite bindings, actual
+nullable child selections and SQLite native statement traces. Multiple parents
+execute two target SELECTs, one dispatch for each source relationship. Current
+target entity denial leaves the authorized parent present, returns a null child
+and attaches a sanitized error to that child path. Missing targets cause no error.
+This fixture does not establish the complete row/field/cache/preload authorization
+contract; those checks remain a separate workstream.
+
+```sh
+cargo run --manifest-path crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml \
+  --locked -p cross-crate-source-models --no-default-features --features sqlite \
+  --example cross_crate_links
+cargo test --manifest-path crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml \
+  --locked -p cross-crate-source-models --no-default-features --features sqlite
+```
+
+The runnable example owns an in-memory SQLite database. Schema setup, insert and
+relationship reads use supported ORM APIs; no application query SQL is needed.
+PostgreSQL and MSSQL fixture lanes compile the same generated declarations with
+`--no-default-features --features postgres` or `mssql`. This focused compatibility
+fix has SQLite execution evidence; these other lanes are compile-only, with no live
+SQL Server execution claimed. Private repository-backed generated view adapters
+and computed queries are independent capabilities, not added by this fix.
