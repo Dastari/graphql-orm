@@ -2,6 +2,11 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+mod native_preflight;
+pub(crate) use native_preflight::{
+    NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
+};
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -731,6 +736,7 @@ impl OrmAiApplicationToolCallService {
                 tool_id: descriptor.id.as_str().to_owned(),
                 tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
                 execution_provenance,
+                native_preflight_refusal: None,
                 protected_arguments,
                 argument_hash: canonical_json_hash(provider_call.arguments())?,
                 risk: risk_value(descriptor.risk).to_owned(),
@@ -980,7 +986,33 @@ impl OrmAiApplicationToolCallService {
         provider_result: &AiProviderCallResult,
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
+        code: crate::AiApplicationToolFailureCode,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        self.persist_unexecuted_failure(
+            lease,
+            provider_result,
+            context,
+            route,
+            code,
+            "read_only",
+            false,
+        )
+        .await
+    }
+
+    // Called only by the read rejection path or the crate-owned native
+    // classification boundary, before that boundary dispatches any executor.
+    // This receipt does not attest absence of earlier domain/idempotency work.
+    #[allow(clippy::too_many_arguments)]
+    async fn persist_unexecuted_failure(
+        &self,
+        lease: &AiRunLease,
+        provider_result: &AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
         mut code: crate::AiApplicationToolFailureCode,
+        risk: &str,
+        native_preflight: bool,
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
         self.validate_outer_binding(lease, provider_result, &context, &route)?;
         let provider_call = provider_result
@@ -990,6 +1022,11 @@ impl OrmAiApplicationToolCallService {
         let encoded_arguments = serde_json::to_vec(provider_call.arguments())
             .map_err(|_| AiError::InvalidInput("invalid tool arguments".to_owned()))?;
         if encoded_arguments.len() > self.limits.maximum_argument_bytes {
+            if native_preflight {
+                return Err(AiError::InvalidInput(
+                    "tool arguments exceed the configured limit".to_owned(),
+                ));
+            }
             code = crate::AiApplicationToolFailureCode::InvalidArguments;
         }
         let session =
@@ -1023,6 +1060,9 @@ impl OrmAiApplicationToolCallService {
             .await
             .is_allowed();
         if !scope_allowed || !session_allowed {
+            if native_preflight {
+                return Err(AiError::Forbidden);
+            }
             code = crate::AiApplicationToolFailureCode::AuthorizationDenied;
         }
         let policy = self
@@ -1085,6 +1125,13 @@ impl OrmAiApplicationToolCallService {
                 lease,
                 PreparedToolCallStart {
                     execution_provenance: None,
+                    native_preflight_refusal: native_preflight.then(|| {
+                        native_preflight::receipt(
+                            code,
+                            provider_call.tool_fingerprint(),
+                            &argument_hash,
+                        )
+                    }),
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
                     provider_call_id: provider_call.call_id().to_owned(),
@@ -1099,7 +1146,7 @@ impl OrmAiApplicationToolCallService {
                     tool_fingerprint: provider_call.tool_fingerprint().to_owned(),
                     protected_arguments,
                     argument_hash,
-                    risk: "read_only".to_owned(),
+                    risk: risk.to_owned(),
                     idempotency_key: Some(format!("ai-tool:{provider_call_key}")),
                     correlation_id: context.correlation_id.clone(),
                     causation_id: context.causation_id.clone(),
@@ -1465,6 +1512,7 @@ impl OrmAiApplicationToolCallService {
                 lease,
                 PreparedToolCallStart {
                     execution_provenance: None,
+                    native_preflight_refusal: None,
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
                     provider_call_id: provider_call.call_id().to_owned(),
@@ -2151,6 +2199,7 @@ impl OrmAiApplicationToolCallService {
                 lease,
                 PreparedToolCallStart {
                     execution_provenance: provenance.clone(),
+                    native_preflight_refusal: None,
                     id: id.0,
                     provider_call_key: provider_call_key.clone(),
                     provider_call_id: provider_call.call_id().to_owned(),
@@ -3123,6 +3172,7 @@ impl OrmAiConsequentialToolCallService {
         };
         let call = PreparedToolCallStart {
             execution_provenance: provenance,
+            native_preflight_refusal: None,
             id: id.0,
             provider_call_key,
             provider_call_id: provider_call.call_id().to_owned(),

@@ -10,6 +10,21 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.106.1` admits up to 128 exact static bootstrap fingerprints and
+Grok SDK definitions, matching the existing Codex definition ceiling. Hosts
+with larger reviewed tool catalogues no longer fail provider-session admission
+at the former 64-tool limit. Complete projected surfaces, including broker tools,
+still obey each provider’s definition and byte limits.
+
+Version `0.106.0` lets trusted host policy distinguish required authentication
+renewal from permission denial before native tool admission. The model receives
+a protected, audited, non-retryable preflight failure and can continue permitted
+reads and finish its answer. Clients can offer their existing reauthentication
+flow for `preflight_authentication_required`. No command is automatically replayed.
+Schema module `0.71.0` validates the exact private undispatched callback receipt;
+no table/column migration is needed. Earlier idempotency work and ambiguous
+execution retain their existing uncertainty boundary. See [MIGRATION.md](MIGRATION.md).
+
 Version `0.105.1` admits bounded, discarded runtime warnings during the sole
 Codex thread-start RPC without relaxing startup completion or tool authority.
 No data migration is needed.

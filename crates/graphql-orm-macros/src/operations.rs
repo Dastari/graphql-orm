@@ -3265,10 +3265,6 @@ pub(crate) fn generate_graphql_operations(
     let update_input_str = format!("Update{}Input", struct_name);
     let result_type_str = format!("{}Result", struct_name);
     let changed_event_str = format!("{}ChangedEvent", struct_name);
-    let has_relations = fields
-        .iter()
-        .filter_map(|f| parse_field_metadata(f).ok())
-        .any(|m| m.is_relation);
     let has_search = fields
         .iter()
         .filter_map(|f| parse_field_metadata(f).ok())
@@ -3325,89 +3321,12 @@ pub(crate) fn generate_graphql_operations(
         serde_rename_all,
         auto_generated_pk,
     )?;
-    let relation_preload_list = if has_relations {
-        quote! {
-            let selection = ctx.field().selection_set().collect::<Vec<_>>();
-            if !generic_conn.edges.is_empty() {
-                let cursors = generic_conn
-                    .edges
-                    .iter()
-                    .map(|edge| edge.cursor.clone())
-                    .collect::<Vec<_>>();
-                let mut entities = std::mem::take(&mut generic_conn.edges)
-                    .into_iter()
-                    .map(|edge| edge.node)
-                    .collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::bulk_load_relations_with_auth(
-                    &mut entities,
-                    pool,
-                    &selection,
-                    auth_context.as_ref(),
-                )
-                .await
-                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-                generic_conn.edges = cursors
-                    .into_iter()
-                    .zip(entities.into_iter())
-                    .map(|(cursor, node)| ::graphql_orm::graphql::pagination::Edge { cursor, node })
-                    .collect();
-            }
-        }
-    } else {
-        quote! {}
-    };
-    let relation_preload_search_list = if has_relations {
-        quote! {
-            let selection = ctx.field().selection_set().collect::<Vec<_>>();
-            if !generic_conn.edges.is_empty() {
-                let edge_meta = generic_conn
-                    .edges
-                    .iter()
-                    .map(|edge| (edge.cursor.clone(), edge.score))
-                    .collect::<Vec<_>>();
-                let mut entities = std::mem::take(&mut generic_conn.edges)
-                    .into_iter()
-                    .map(|edge| edge.node)
-                    .collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::bulk_load_relations_with_auth(
-                    &mut entities,
-                    pool,
-                    &selection,
-                    auth_context.as_ref(),
-                )
-                .await
-                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-                generic_conn.edges = edge_meta
-                    .into_iter()
-                    .zip(entities.into_iter())
-                    .map(|((cursor, score), node)| ::graphql_orm::graphql::orm::SearchConnectionEdge {
-                        cursor,
-                        score,
-                        node,
-                    })
-                    .collect();
-            }
-        }
-    } else {
-        quote! {}
-    };
-    let relation_preload_single = if has_relations {
-        quote! {
-            if let Some(entity) = entity.as_mut() {
-                let selection = ctx.field().selection_set().collect::<Vec<_>>();
-                <#struct_name as ::graphql_orm::graphql::orm::RelationLoader<#backend_marker>>::load_relations_with_auth(
-                    entity,
-                    pool,
-                    &selection,
-                    auth_context.as_ref(),
-                )
-                .await
-                .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-            }
-        }
-    } else {
-        quote! {}
-    };
+    // Target authority belongs to the relationship resolver. Pool-only eager
+    // preloads cannot evaluate current request policies and may fail a parent
+    // before its nullable child can report a sanitized traversal error.
+    let relation_preload_list = quote! {};
+    let relation_preload_search_list = quote! {};
+    let relation_preload_single = quote! {};
 
     let find_by_id_method = if has_composite_primary_key {
         quote! {}

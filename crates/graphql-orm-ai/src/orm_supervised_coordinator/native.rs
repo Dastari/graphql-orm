@@ -104,11 +104,26 @@ impl AiProviderDynamicToolExecution for NativeExecution {
                     .await?,
             ))
         } else {
-            let disposition = self
+            let classification = self
                 .services
                 .applications
-                .classify_tool_call(lease, result, &context)
+                .classify_native_tool_call(lease, result, &context, self.route.clone())
                 .await?;
+            let disposition = match classification {
+                crate::orm_tools::NativeToolClassification::Admitted(disposition) => disposition,
+                crate::orm_tools::NativeToolClassification::Rejected(persisted) => {
+                    self.state.lock().await.failure_lease = Some(persisted.lease().clone());
+                    if self
+                        .run_control
+                        .cancellation(persisted.lease())
+                        .await?
+                        .is_some()
+                    {
+                        return Err(AiError::Conflict);
+                    }
+                    return Ok(AiProviderDynamicToolOutcome::Application(persisted));
+                }
+            };
             match (disposition, pending) {
                 (AiApplicationToolDisposition::ReadOnly, _) => {
                     AiProviderDynamicToolOutcome::Application(Box::new(

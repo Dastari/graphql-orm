@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.33.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.35.1", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -177,3 +177,18 @@ list/keyset pagination, and opt-in bounded callback scans on keyset-enabled
 entities. Existing callback list offsets/counts remain exact. See the
 [pagination guide](../../docs/reference/graphql-orm/pagination-migration.md)
 for configuration, generic examples, continuation semantics, and limitations.
+
+`RepositoryEntity` aggregate-field enums retain plain Rust `Clone`, `Copy`,
+`Debug`, `Eq`, `Hash` and `PartialEq` traits and typed aggregate builders without
+implementing GraphQL input/output traits. A repository consumer needs no direct
+`async-graphql` dependency. The
+[external consumer](tests/fixtures/repository-aggregate-consumer/src/lib.rs)
+compiles scalar and composite keys on SQLite/PostgreSQL/MSSQL; its
+[owned-backend tests](tests/fixtures/repository-aggregate-consumer/tests/owned_backend.rs)
+execute grouped aggregates and denial before SQL on disposable SQLite/PostgreSQL.
+Ordinary `GraphQLEntity` aggregate SDL remains unchanged.
+
+Complete bounded SQLite text-group pages reuse generated aggregate enums and the
+existing aggregate builder. See [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md)
+and the SQL-free private consumer example for native distinct identities, current
+SQL visibility and typed continuation. Existing aggregate SDL/cursors are unchanged.

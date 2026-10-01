@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,108 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## Policy-aware typed projections (0.35.1)
+
+Adopt aligned ORM/macros 0.35.1. No schema or GraphQL SDL migration is required.
+A global `RowPolicy` no longer automatically rejects every projection: return
+`ReadVisibility::Unrestricted` deliberately for an unrestricted model or
+`Complete(ReadPredicate::from_filter(...))` for visibility fully expressed in SQL.
+This is the same contract supported by complete SQLite group pages. The default
+`CallbackOnly` and `Prefilter` continue to reject these reads before query I/O;
+there is no full-entity fallback. Entity and selected-field policies remain active.
+
+Re-evaluate visibility for every call using verified identity/current ownership.
+A complete predicate replaces the residual callback on these supported paths;
+do not label a partial predicate complete. Generated projections carry their
+associated entity identity. Existing handwritten `ReadProjection` implementations
+remain source compatible and support unrestricted visibility; complete predicates
+require the provided `entity_type_id` hook to return that associated entity's
+`TypeId`. No public GraphQL roots or private model fields are added.
+
+See [typed projections](docs/reference/graphql-orm/read-projections.md) for a
+compiled SQL-free private repository example and exact backend/authorization rules.
+
+## Complete text-group pages (0.35.0)
+
+Adopt aligned ORM/macros 0.35.0 after owner review/publication. This is an additive
+static aggregate API with no stored-data, existing aggregate SDL or cursor-format
+migration. Loop over `fetch_group_page` with a bounded `group_limit`, one text
+grouping field and trusted host context. Existing bounded `fetch` remains unchanged;
+use pages when the complete distinct set exceeds the group cap.
+
+The initial page profile is SQLite only, with native group equality and explicit
+BINARY/NOCASE ordering. Complete SQL row policies are reapplied before grouping;
+residual callbacks cannot authorize groups after aggregation. Include verified
+identity/public revision in host context and protect the bounded cursor JSON in
+an application-owned envelope when required. This fingerprint is not authority.
+See [typed aggregates](docs/reference/graphql-orm/typed-aggregates.md) and its
+compiled private consumer example for exact null, collation and continuation rules.
+
+Other backends/scalar/multi-key groups fail before query I/O for this new method.
+Existing PostgreSQL/MSSQL aggregate behavior remains unchanged. Computed summaries,
+joined/computed source reads and private generated GraphQL views remain independent
+work; no runtime-schema/dynamic GraphQL adoption is required for this API.
+
+## 0.33.4 to 0.33.5: authoritative generated relationship access
+
+Adopt runtime and macros 0.33.5 together. Generated relationship resolvers no
+longer trust preloaded objects as authoritative targets. Install `Database` in
+request/schema data; target tables must remain available for current resolution.
+Declare complete tenant/identity bindings. Existing public declarations, SDL and
+cursor formats are unchanged; snapshots and cached objects grant no authority.
+
+Entity, current row and selected field policies are enforced at traversal.
+A denied nullable target is null with a safe child-path error; missing or moved
+ownership targets ordinarily return null without errors. Field policy callbacks
+may run during traversal preflight as well as ordinary field resolution; both
+receive the actual child field context, including its arguments and alias/path.
+
+For bounded batched pages/counts prefer a `ReadVisibility::Complete` SQL predicate.
+Callback-only/prefilter policies on to-many links now require the existing
+`AuthorizedScanConfig` on `Database`. The resolver scans bounded candidate batches,
+counts authorized rows across the complete result and retains only the requested
+visible window. Missing configuration or insufficient budget returns a safe error
+instead of a partial count/exhaustion claim. This corrective behavior replaces
+previously unchecked relation row policies. Concurrent external DML is not a
+snapshot-isolation guarantee across separate read statements.
+
+See [the authoritative relationship example](crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/examples/authorized_links.rs)
+and [the relation contract](docs/reference/graphql-orm/entities-and-relations.md).
+
+## 0.33.3 to 0.33.4: generated cross-crate relationships
+
+Adopt runtime and macros 0.33.4 together from the same reviewed published tag.
+Generated relationships no longer call the target entity's private placeholder
+helper. Existing declarations compile across crate boundaries without application
+calls to ORM implementation helpers, duplicate table entities or dynamic schemas.
+No call-site, SDL, cursor or stored-data migration is required. Bind every tenant
+and target identity member in `from`/`to`; a link grants no target authority.
+See [the runnable external fixture](crates/graphql-orm-macros/fixtures/cross-crate-relations/source-models/examples/cross_crate_links.rs).
+This focused fix does not add repository-backed GraphQL adapters or establish the
+complete cached/preloaded row and field authorization contract.
+
+## 0.33.2 to 0.33.3: repository aggregate enum compatibility
+
+Pin runtime and macros 0.33.3 to the same reviewed full workspace revision.
+`RepositoryEntity` aggregate-field enums now remain plain Rust enums, matching
+its documented repository-only surface. No direct `async-graphql` dependency
+is needed. Existing Rust aggregate calls, field traits, SQL and authorization
+remain unchanged; ordinary GraphQL aggregate SDL is preserved. No stored-data
+migration or runtime-schema API adoption is required.
+
+Consumers that deliberately exposed a repository enum through GraphQL should
+own a GraphQL wrapper or use `GraphQLEntity`; repository enums do not implement
+GraphQL input/output traits. See the compiled
+[external consumer fixture](crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs).
+
+## 0.33.1 to 0.33.2: migration compatibility fixture release identity
+
+Adopt runtime and macros 0.33.2 together from the same published workspace tag.
+The patch records the merged external migration compatibility fixture under a
+new immutable package source identity. No application call-site, generated-code,
+GraphQL SDL, configuration or stored-data changes are required.
+
 
 ## 0.33.0 to 0.33.1: Federation fixture release identity
 

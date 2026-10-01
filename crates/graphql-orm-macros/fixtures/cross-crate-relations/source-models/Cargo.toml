@@ -1,0 +1,22 @@
+[package]
+name = "cross-crate-source-models"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = ["graphql-orm/sqlite", "cross-crate-target-models/sqlite"]
+postgres = ["graphql-orm/postgres", "cross-crate-target-models/postgres"]
+mssql = ["graphql-orm/mssql", "cross-crate-target-models/mssql"]
+
+[dependencies]
+graphql-orm.workspace = true
+async-graphql.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+cross-crate-target-models = { path = "../target-models", default-features = false }
+
+[dev-dependencies]
+libsqlite3-sys = "=0.30.1"

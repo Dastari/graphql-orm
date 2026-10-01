@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-28
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,97 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.35.1 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.35.1**.
+
+- Allow typed repository projections under an installed global row-policy provider
+  when current visibility is explicitly unrestricted or complete SQL authorization.
+  Apply entity-bound predicates before limits and primary/unique-key lookups,
+  including pinned transactions, without selecting excluded private fields.
+- Retain fail-closed callback-only/prefilter policies and normal entity/selected-field
+  checks. Add a provided generated-identity hook without changing existing trait
+  implementation requirements, static GraphQL SDL, storage or cursor formats.
+- Add executable private repository projection/group examples and isolated
+  SQLite/PostgreSQL regression evidence; observe actual projection query counts.
+
+## 0.35.0 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.35.0** (alignment only).
+
+- Add complete bounded SQLite text-group enumeration through the existing
+  aggregate builder, with native group equality, stable NOCASE/BINARY ordering,
+  typed host-context cursors and continuation after grouping.
+- Apply current complete SQL row visibility before grouping, retaining field/entity
+  authorization and fail-closed residual policies; bound pages to 1–1,000 plus
+  one lookahead. Keep ordinary aggregate APIs/GraphQL SDL/cursors unchanged.
+- Add a standalone private repository consumer example without query SQL/direct
+  async-graphql and SQLite execution/unsupported-backend regressions. Other scalar
+  groups/backends and computed SQL Server summaries remain separate capabilities.
+
+This static feature remains independent of runtime A–D. The 0.35.0 package
+identity preserves the independently reviewed 0.33.4/0.33.5 compatibility fixes;
+release coordination does not imply completion of the broader static query plan.
+
+## 0.33.5 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.5**.
+
+- Fix generated relationship resolvers returning preloaded objects before current
+  target authorization and complete ownership-key resolution. Resolve the
+  authoritative database target even when a snapshot/cache was populated.
+- Check current entity, row and selected-field policies. Nullable target denial
+  preserves the parent and reports a sanitized error on the relationship path.
+  Missing or ownership-mismatched targets ordinarily return null without errors.
+- Apply SQL visibility before relation pages/counts, partition batches by current
+  predicate and database identity, and retain the existing uncached loader type.
+  Callback-only to-many policies require an explicit host scan budget and fail
+  closed on exhaustion; retain only the bounded visible page in memory.
+- Add executable cross-crate SQLite/PostgreSQL regressions and a SQL-free
+  authoritative relationship example. Existing SDL/cursor formats are unchanged.
+
+No stored-data migration or release publication is included.
+
+## 0.33.4 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.4**.
+
+- Fix generated relationships to an entity defined in another Rust crate.
+  Placeholder rendering uses the existing public `OrmBackend` contract, avoiding
+  calls to the target's crate-private helper. Existing helper visibility, backend
+  SQL, static SDL and application APIs remain unchanged.
+- Add an external two-crate fixture and a SQL-free disposable example. SQLite
+  execution tests complete tenant/endpoint bindings, historical snapshots,
+  missing/optional targets, independently checked target entity denial and native
+  statement tracing of batched reads. PostgreSQL/MSSQL lanes are compile checks.
+
+No stored-data migration or release publication is included.
+
+## 0.33.3 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.3**.
+
+- Fix `RepositoryEntity` aggregate-field enums retaining the async-graphql
+  `Enum` derive and helper attribute. Repository consumers compile without a
+  direct async-graphql dependency; plain Rust aggregate enums/builders retain
+  their existing traits, fields, SQL behavior and authorization checks.
+- Preserve ordinary `GraphQLEntity` aggregate SDL. Add external scalar/composite
+  consumer fixtures and disposable SQLite/PostgreSQL aggregate evidence.
+- Correct package identities after the independently merged compatibility-fixture
+  release bump had already consumed 0.33.2. Runtime and macros remain aligned.
+
+No data migration is required. This maintenance change publishes no release.
+
+## 0.33.2 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.33.2**.
+
+- Advance runtime and macros together after the external migration compatibility
+  fixture changed the runtime package source tree. This preserves immutable
+  package-release identities and refreshes fixture lockfiles.
+- Runtime and generated-code behavior, public APIs, GraphQL SDL and stored-data
+  contracts remain unchanged. No data migration is required.
 
 ## 0.33.1 - 2026-09-28
 

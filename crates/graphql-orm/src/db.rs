@@ -975,7 +975,7 @@ impl<B: OrmBackend> Database<B> {
     }
 
     /// Observe SQL text (without bind values) and database rows fetched by
-    /// EntityQuery reads. Intended for diagnostics and query-behavior tests.
+    /// EntityQuery, projection and aggregate-page reads. Intended for diagnostics and query-behavior tests.
     pub fn with_read_query_observer(
         mut self,
         observer: impl crate::graphql::orm::ReadQueryObserver + 'static,
@@ -997,8 +997,35 @@ impl<B: OrmBackend> Database<B> {
         ctx: Option<&async_graphql::Context<'_>>,
         surface: crate::graphql::orm::EntityAccessSurface,
     ) -> async_graphql::Result<crate::graphql::orm::ReadVisibility> {
+        let visibility = self
+            .read_visibility_for(T::metadata(), ctx, surface)
+            .await?;
+        visibility.validate::<T, B>()?;
+        Ok(visibility)
+    }
+
+    pub(crate) async fn projection_read_visibility<P: crate::graphql::orm::ReadProjection<B>>(
+        &self,
+    ) -> async_graphql::Result<crate::graphql::orm::ReadVisibility> {
+        use crate::graphql::orm::Entity;
+        let visibility = self
+            .read_visibility_for(
+                P::Entity::metadata(),
+                None,
+                crate::graphql::orm::EntityAccessSurface::Repository,
+            )
+            .await?;
+        visibility.validate_identity(P::entity_type_id(), B::DIALECT)?;
+        Ok(visibility)
+    }
+
+    async fn read_visibility_for(
+        &self,
+        metadata: &'static crate::graphql::orm::EntityMetadata,
+        ctx: Option<&async_graphql::Context<'_>>,
+        surface: crate::graphql::orm::EntityAccessSurface,
+    ) -> async_graphql::Result<crate::graphql::orm::ReadVisibility> {
         use crate::graphql::orm::ReadVisibility;
-        let metadata = T::metadata();
         let visibility = if let Some(policy) = &self.row_policy {
             policy
                 .read_visibility(
@@ -1013,7 +1040,6 @@ impl<B: OrmBackend> Database<B> {
             // No RowPolicy is installed: retain the existing entity-policy-only contract.
             ReadVisibility::Unrestricted
         };
-        visibility.validate::<T, B>()?;
         Ok(visibility)
     }
 

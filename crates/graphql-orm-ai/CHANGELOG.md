@@ -18,9 +18,28 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.106.1] - 2026-10-01
+
+### Fixed
+
+- Raise the finite provider-session static bootstrap and Grok SDK definition
+  bounds from 64 to 128. Larger reviewed catalogues can start native sessions
+  without omitting tools; exact fingerprints, duplicate/schema rejection,
+  provider frame/byte limits and callback bounds remain mandatory.
+
 ## [Unreleased]
 
 ### Added
+
+- `AiToolAuthorizationDecision::require_authentication` distinguishes current
+  authentication renewal from permission denial without granting execution.
+  Native classification returns protected, audited non-retryable
+  `preflight_authentication_required` or `preflight_authorization_denied` results.
+  The model can continue permitted diagnostics and finish with a useful answer.
+  Native finalization requires the exact crate-owned undispatched callback receipt,
+  protected arguments/result, current rules, egress proof and transaction fences.
+  This receipt does not attest absence of earlier idempotent application work;
+  ambiguous dispatch and execution failures retain existing recovery behavior.
 
 - Compatible `AiToolAuthorizationPolicy::authorize_request` hook supplies exact
   server-authored invocation metadata to current host policy, both before normal
