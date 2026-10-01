@@ -134,7 +134,14 @@ two pre-I/O rejection tests, with no live server execution. Warnings-denied
 combined core/macros Clippy passes independently on all three backends. This
 checks shared implementation compatibility; it is not a merged/reviewed release
 or a substitute for owner review. #99's focused CI and normal ORM check are green;
-the broader companion check is still running at this checkpoint.
+the broader companion check is still running at this checkpoint. Explicit
+package-selected patch-level API analysis separately passes 223 checks for
+corrected #97 against published 0.33.3 and #98 against #96 (30 inapplicable
+checks skipped in each). [Issue #100](https://github.com/Dastari/graphql-orm/issues/100)
+tracks the local runner's observed no-analysis pass without explicit package
+selection; the functional evidence uses commands that actually analyze the
+Git-only libraries. Keep this verification correction separate from feature
+PRs and preserve publication/license policy.
 
 Preferred package identity order is #96 (0.33.4), #98 (0.33.5), #97 (0.34.0),
 then #99 (0.35.0).
