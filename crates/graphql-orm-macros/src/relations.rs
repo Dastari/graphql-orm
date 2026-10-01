@@ -497,7 +497,6 @@ pub(crate) fn generate_graphql_relations(
             .map(|column| backend_quote_identifier_path(backend, column))
             .collect::<Vec<_>>();
         let source_supports_dataloader = r.source_supports_dataloader;
-        let storage_kind = r.storage_kind;
         let source_fields = &r.source_field_idents;
         let source_kinds = &r.source_kinds;
         let source_optional = &r.source_optional;
@@ -757,22 +756,6 @@ pub(crate) fn generate_graphql_relations(
         };
 
         if r.is_multiple {
-            let preloaded_entities = match storage_kind {
-                RelationStorageKind::BoxedMany => {
-                    quote! {
-                        let entities: Vec<#target_type> = self.#field_name
-                            .iter()
-                            .cloned()
-                            .map(|entity| *entity)
-                            .collect();
-                    }
-                }
-                _ => {
-                    quote! {
-                        let entities = self.#field_name.clone();
-                    }
-                }
-            };
             // One-to-many relation with smart batching
             Ok(quote! {
                 #[doc = #description]
@@ -798,7 +781,10 @@ pub(crate) fn generate_graphql_relations(
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
-                    ).await?;
+                    ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
+                    let visibility = db.read_visibility::<#target_type>(
+                        Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
+                    ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
 
                     if let Some(filter) = &where_input {
                         filter
@@ -806,30 +792,14 @@ pub(crate) fn generate_graphql_relations(
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                     }
 
-                    if where_input.is_none() && order_by.is_none() && page.is_none() && !self.#field_name.is_empty() {
-                        #preloaded_entities
-                        let edges: Vec<#edge_type> = entities
-                            .into_iter()
-                            .enumerate()
-                            .map(|(i, entity)| #edge_type {
-                                cursor: ::graphql_orm::graphql::pagination::encode_cursor(i as i64),
-                                node: entity,
-                            })
-                            .collect();
-                        let page_info = ::graphql_orm::graphql::pagination::PageInfo {
-                            has_next_page: false,
-                            has_previous_page: false,
-                            start_cursor: edges.first().map(|e| e.cursor.clone()),
-                            end_cursor: edges.last().map(|e| e.cursor.clone()),
-                            total_count: Some(edges.len() as i64),
-                        };
-                        return Ok(#connection_type { edges, page_info });
-                    }
-
                     // Use DataLoader whenever the relation key can be batched.
                     #source_binding_multiple
 
                     let use_dataloader = #source_supports_dataloader
+                        && !visibility.requires_residual_checks()
+                        && ctx.data_opt::<::graphql_orm::async_graphql::dataloader::DataLoader<
+                            ::graphql_orm::graphql::loaders::RelationLoader<#target_type, #backend_marker>
+                        >>().is_some()
                         && order_by
                             .as_ref()
                             .is_none_or(|order| !order.requires_context());
@@ -840,9 +810,11 @@ pub(crate) fn generate_graphql_relations(
 
                         let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
                         loader
-                            .load_one(#relation_query_key)
+                            .load_one(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
+                                #relation_query_key, &visibility,
+                            )?)
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {
                                 entities: Vec::new(),
                                 total_count: 0,
@@ -880,19 +852,25 @@ pub(crate) fn generate_graphql_relations(
                             });
                         }
 
+                        if visibility.requires_residual_checks() {
+                            ::graphql_orm::graphql::loaders::scan_authorized_relation(
+                                db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
+                            ).await?
+                        } else {
+                        query = query.with_read_visibility(&visibility)?;
                         // Count must be computed before/independent of pagination window.
                         // EntityQuery::count ignores limit/offset and uses only WHERE clauses.
                         let total = query
                             .count_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?;
 
                         let offset = resolved_page.offset.max(0) as usize;
 
                         let entities = query
                             .fetch_all_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?;
 
                         ::graphql_orm::graphql::loaders::RelationLoadResult {
                             has_next_page: (offset as i64 + entities.len() as i64) < total,
@@ -901,8 +879,10 @@ pub(crate) fn generate_graphql_relations(
                             total_count: total,
                             offset: offset as i64,
                         }
+                        }
                     };
 
+                    ::graphql_orm::graphql::loaders::authorize_relation_fields(db, ctx, &loaded.entities, true).await?;
                     let edges: Vec<#edge_type> = loaded.entities
                         .into_iter()
                         .enumerate()
@@ -924,18 +904,6 @@ pub(crate) fn generate_graphql_relations(
                 }
             })
         } else {
-            let preloaded_single = match storage_kind {
-                RelationStorageKind::BoxedSingle => {
-                    quote! {
-                        return Ok(self.#field_name.clone().map(|entity| *entity));
-                    }
-                }
-                _ => {
-                    quote! {
-                        return Ok(self.#field_name.clone());
-                    }
-                }
-            };
             // Single relation (many-to-one) - uses DataLoader when the source key supports it
             Ok(quote! {
                 #[doc = #description]
@@ -948,10 +916,6 @@ pub(crate) fn generate_graphql_relations(
 
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_single_guard
-                    if self.#field_name.is_some() {
-                        #preloaded_single
-                    }
-
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
@@ -962,18 +926,27 @@ pub(crate) fn generate_graphql_relations(
                         <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
-                    ).await?;
+                    ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
+                    let visibility = db.read_visibility::<#target_type>(
+                        Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation,
+                    ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
                     #source_binding_single
 
-                    let result = if #source_supports_dataloader {
+                    let result = if #source_supports_dataloader && ctx.data_opt::<
+                        ::graphql_orm::async_graphql::dataloader::DataLoader<
+                            ::graphql_orm::graphql::loaders::RelationLoader<#target_type, #backend_marker>
+                        >
+                    >().is_some() {
                         use ::graphql_orm::graphql::loaders::RelationLoader;
                         use ::graphql_orm::async_graphql::dataloader::DataLoader;
 
                         let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
                         loader
-                            .load_one(#single_relation_query_key)
+                            .load_one(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
+                                #single_relation_query_key, &visibility,
+                            )?)
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?
                             .and_then(|mut result| result.entities.drain(..).next())
                     } else {
                         let mut relation_sql_values = relation_sql_values.clone();
@@ -982,11 +955,26 @@ pub(crate) fn generate_graphql_relations(
                         }
                         EntityQuery::<#target_type, #backend_marker>::new()
                             .where_values(&#fallback_relation_clause, relation_sql_values)
+                            .with_read_visibility(&visibility)?
                             .fetch_one_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?
                     };
 
+                    if visibility.requires_residual_checks() {
+                        if let Some(row) = result.as_ref() {
+                            if !db.can_read_row(
+                                Some(ctx), <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                                <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation, row,
+                            ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)? {
+                                return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                            }
+                        }
+                    }
+                    if let Some(row) = result.as_ref() {
+                        ::graphql_orm::graphql::loaders::authorize_relation_fields(db, ctx, ::std::slice::from_ref(row), false).await?;
+                    }
                     Ok(result)
                 }
             })

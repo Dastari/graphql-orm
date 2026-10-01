@@ -39,6 +39,7 @@ pub struct Endpoint {
     pub tenant_id: String,
     #[filterable(type = "string")]
     #[sortable]
+    #[graphql_orm(read_policy = "endpoint.name.read")]
     pub name: String,
 }
 

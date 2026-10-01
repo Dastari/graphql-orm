@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.33.4"
+version = "0.33.5"
 dependencies = [
  "async-graphql",
  "chacha20poly1305",
@@ -1030,7 +1030,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.33.4"
+version = "0.33.5"
 dependencies = [
  "convert_case",
  "proc-macro2",

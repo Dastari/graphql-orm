@@ -58,6 +58,8 @@ impl OwnedPostgres {
                     "exec",
                     &owned.container_id,
                     "pg_isready",
+                    "-h",
+                    "127.0.0.1",
                     "-U",
                     "graphql_orm_owner",
                     "-d",
