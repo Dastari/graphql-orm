@@ -55,6 +55,8 @@ pub struct Customer {
 
     #[date_field]
     #[sortable]
+    // A representable datetime declaration has no legacy integer epoch default.
+    #[graphql_orm(default = false)]
     pub created_at: String,
 
     #[graphql(skip)]
@@ -70,6 +72,7 @@ pub struct Customer {
 #[graphql_entity(
     table = "contact_details",
     plural = "ContactDetails",
+    default_sort = "id ASC",
     unique_composite = "customer_id,kind",
     index = "customer_id"
 )]
@@ -135,6 +138,7 @@ pub struct CustomerNote {
 #[graphql_entity(
     table = "note_attachments",
     plural = "NoteAttachments",
+    default_sort = "id ASC",
     index = "customer_id,note_seq"
 )]
 pub struct NoteAttachment {
@@ -318,7 +322,6 @@ fn fixture_runtime_schema() -> RuntimeSchema {
             },
             RuntimeField {
                 sortable: true,
-                default: Some(RuntimeDefault::CurrentTimestamp),
                 ..field(
                     "fld_customer_created_at",
                     "createdAt",
@@ -1093,4 +1096,30 @@ fn renamed_fields_convert_with_their_public_api_name() {
         .find(|f| f.physical_column == "internal_name")
         .expect("field present");
     assert_eq!(field.api_name, "customName");
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+#[test]
+fn representable_static_graph_converts_to_equivalent_physical_target() {
+    use graphql_orm::graphql::orm::{OwnedSchemaModel, SchemaModel};
+    let metadata = [
+        Customer::metadata(),
+        ContactDetail::metadata(),
+        CustomerNote::metadata(),
+        NoteAttachment::metadata(),
+    ];
+    let schema = RuntimeSchema::from_static_entities(&metadata)
+        .unwrap()
+        .validate()
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    let target: OwnedSchemaModel = schema
+        .physical_schema::<graphql_orm::SqliteBackend>(Default::default())
+        .unwrap();
+    #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+    let target: OwnedSchemaModel = schema
+        .physical_schema::<graphql_orm::PostgresBackend>(Default::default())
+        .unwrap();
+    let static_target = SchemaModel::from_entities(&metadata);
+    assert_eq!(target.stable_hash(), static_target.stable_hash());
 }

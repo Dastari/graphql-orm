@@ -14,6 +14,35 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.36.0 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.36.0** (alignment only).
+
+- Add owned canonical physical targets from `ValidatedRuntimeSchema`, checked
+  static/system composition, explicit `ManagedTableSet`, read-only owned planning
+  and validation, and separate guarded `apply_owned_migration` on SQLite/PostgreSQL.
+- Keep the public legacy `MigrationStep` enum and struct literals unchanged.
+  Static and owned storage share validation, hashing, diffing, risk classification,
+  rendering and transactional history application; runtime conversion and owned
+  catalog introspection do not leak index storage.
+- Bind immutable plans to complete live baselines and ownership, retain destructive
+  and additive guards, preserve host PostgreSQL RLS, and reject unsupported live
+  preservation cases. Add a verified incoming-dependency environment for later
+  runtime mutations; record mutation and dynamic GraphQL are still later slices.
+- Reject unrepresentable live FK actions, deferral and dependency scopes with
+  `UnsupportedForeignKey`, including incoming system/unowned sources. Recheck on
+  the pinned apply transaction so SQLite rebuilds cannot drop omitted constraints
+  and runtime dependency certificates cannot mistake `SET DEFAULT` for `Restrict`.
+- Preserve a single-connection SQLite in-memory database after a successful owned
+  rebuild; discard suspended connections on cancellation or failed restoration.
+- Respect SQLite composite primary-key ordinal order during introspection.
+- Reject legacy epoch-second DateTime default conversion with scoped structured
+  diagnostics while preserving static storage and supported Integer defaults;
+  preserve escaped quote semantics in converted literal defaults.
+
+No automatic application, host catalog, transport, durable delivery or release
+publication is introduced. See the owned runtime migration reference and example.
+
 ## 0.35.1 - 2026-10-01
 
 Companion macros crate: `graphql-orm-macros` **0.35.1**.

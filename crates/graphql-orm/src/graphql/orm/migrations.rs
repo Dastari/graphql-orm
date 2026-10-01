@@ -1,5 +1,7 @@
 #[cfg(feature = "mssql")]
 use super::OrmBackend;
+#[cfg(feature = "mssql")]
+use super::TableModel;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::core::ForeignKeyColumnPairModel;
 #[cfg(feature = "postgres")]
@@ -9,13 +11,17 @@ use super::core::SqlValue;
 use super::core::{
     ColumnModel, ForeignKeyModel, IndexMethod, MigrationPlan, MigrationRisk, MigrationStep,
     PlannedMigrationStep, SchemaDiff, SchemaModel, SearchIndexModel, SearchIndexStrategy,
-    TableModel,
 };
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::core::{SearchFieldModel, SearchJsonPathModel, SearchRelationFieldModel, SearchWeight};
 #[cfg(feature = "postgres")]
 use super::core::{SpatialColumnDef, SpatialGeometryType};
 use super::dialect::{DatabaseBackend, SqlDialect};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use super::owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
+use super::owned_schema::{
+    IndexRef, OwnedMigrationPlan, OwnedMigrationStep, SchemaRef, StepRef, TableRef,
+};
 use super::query::PoolProvider;
 #[cfg(feature = "postgres")]
 use super::rls::{LiveRlsPolicy, LiveRlsTable};
@@ -395,13 +401,13 @@ fn render_column_definition(
     parts.join(" ")
 }
 
-fn render_create_table_statement(backend: DatabaseBackend, table: &TableModel) -> String {
-    render_create_table_statement_for_name(backend, table, &table.table_name)
+fn render_create_table_statement(backend: DatabaseBackend, table: &TableRef<'_>) -> String {
+    render_create_table_statement_for_name(backend, table, table.table_name)
 }
 
 fn render_create_table_statement_for_name(
     backend: DatabaseBackend,
-    table: &TableModel,
+    table: &TableRef<'_>,
     table_name: &str,
 ) -> String {
     let has_composite_primary_key = table.primary_keys().len() > 1;
@@ -443,7 +449,7 @@ fn render_create_table_statement_for_name(
     format!("CREATE TABLE {} ({})", table_name, parts.join(", "))
 }
 
-fn append_only_name(table_name: &str) -> String {
+pub(super) fn append_only_name(table_name: &str) -> String {
     let sanitized = table_name
         .chars()
         .map(|ch| {
@@ -559,7 +565,7 @@ fn decode_constraint_comment(comment: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-fn render_constraint_comments(backend: DatabaseBackend, table: &TableModel) -> Vec<String> {
+fn render_constraint_comments(backend: DatabaseBackend, table: &TableRef<'_>) -> Vec<String> {
     if backend != DatabaseBackend::Postgres {
         return Vec::new();
     }
@@ -577,7 +583,7 @@ fn render_constraint_comments(backend: DatabaseBackend, table: &TableModel) -> V
         .collect()
 }
 
-fn column_changed_for_backend(
+pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
     before: &ColumnModel,
     after: &ColumnModel,
@@ -610,14 +616,14 @@ fn column_changed_for_backend(
 }
 
 fn order_tables_by_foreign_keys<'a>(
-    tables: &std::collections::BTreeMap<String, &'a TableModel>,
-) -> Vec<&'a TableModel> {
+    tables: &std::collections::BTreeMap<String, &'a TableRef<'a>>,
+) -> Vec<&'a TableRef<'a>> {
     fn visit<'a>(
         table_name: &str,
-        tables: &std::collections::BTreeMap<String, &'a TableModel>,
+        tables: &std::collections::BTreeMap<String, &'a TableRef<'a>>,
         visiting: &mut std::collections::BTreeSet<String>,
         visited: &mut std::collections::BTreeSet<String>,
-        ordered: &mut Vec<&'a TableModel>,
+        ordered: &mut Vec<&'a TableRef<'a>>,
     ) {
         if visited.contains(table_name) || visiting.contains(table_name) {
             return;
@@ -627,7 +633,7 @@ fn order_tables_by_foreign_keys<'a>(
         };
 
         visiting.insert(table_name.to_string());
-        for foreign_key in &table.foreign_keys {
+        for foreign_key in table.foreign_keys {
             if tables.contains_key(&foreign_key.target_table) {
                 visit(
                     &foreign_key.target_table,
@@ -667,6 +673,18 @@ pub fn diff_schema_models_for_backend(
     current: &SchemaModel,
     target: &SchemaModel,
 ) -> SchemaDiff {
+    SchemaDiff {
+        steps: diff_schema_views(backend, &SchemaRef::from(current), &SchemaRef::from(target))
+            .into_iter()
+            .map(|step| step.into_legacy(current, target))
+            .collect(),
+    }
+}
+pub(super) fn diff_schema_views(
+    backend: DatabaseBackend,
+    current: &SchemaRef<'_>,
+    target: &SchemaRef<'_>,
+) -> Vec<OwnedMigrationStep> {
     let current_tables = current
         .tables
         .iter()
@@ -685,18 +703,18 @@ pub fn diff_schema_models_for_backend(
         .iter()
         .map(|extension| extension.to_ascii_lowercase())
         .collect::<std::collections::BTreeSet<_>>();
-    for extension in &target.extensions {
+    for extension in target.extensions {
         if !current_extensions.contains(&extension.to_ascii_lowercase()) {
-            steps.push(MigrationStep::EnableExtension {
+            steps.push(OwnedMigrationStep::EnableExtension {
                 name: extension.clone(),
             });
         }
     }
 
     for table in order_tables_by_foreign_keys(&target_tables) {
-        let table_name = &table.table_name;
+        let table_name = table.table_name;
         if !current_tables.contains_key(table_name) {
-            steps.push(MigrationStep::CreateTable(table.clone()));
+            steps.push(OwnedMigrationStep::CreateTable(table.to_owned()));
         }
     }
 
@@ -704,15 +722,15 @@ pub fn diff_schema_models_for_backend(
         .into_iter()
         .rev()
     {
-        let table_name = &table.table_name;
+        let table_name = table.table_name;
         if !target_tables.contains_key(table_name) {
-            for search_index in &table.search_indexes {
-                steps.push(MigrationStep::DropSearchIndex {
+            for search_index in table.search_indexes {
+                steps.push(OwnedMigrationStep::DropSearchIndex {
                     table_name: table_name.clone(),
                     index_name: search_index.name.clone(),
                 });
             }
-            steps.push(MigrationStep::DropTable {
+            steps.push(OwnedMigrationStep::DropTable {
                 table_name: table_name.clone(),
             });
             continue;
@@ -732,7 +750,7 @@ pub fn diff_schema_models_for_backend(
 
         for (column_name, column) in &target_columns {
             if !current_columns.contains_key(column_name) {
-                steps.push(MigrationStep::AddColumn {
+                steps.push(OwnedMigrationStep::AddColumn {
                     table_name: table_name.clone(),
                     column: (*column).clone(),
                 });
@@ -741,7 +759,7 @@ pub fn diff_schema_models_for_backend(
 
         for (column_name, column) in &current_columns {
             if !target_columns.contains_key(column_name) {
-                steps.push(MigrationStep::DropColumn {
+                steps.push(OwnedMigrationStep::DropColumn {
                     table_name: table_name.clone(),
                     column_name: column_name.clone(),
                 });
@@ -750,7 +768,7 @@ pub fn diff_schema_models_for_backend(
 
             let target_column = target_columns[column_name];
             if column_changed_for_backend(backend, column, target_column) {
-                steps.push(MigrationStep::AlterColumn {
+                steps.push(OwnedMigrationStep::AlterColumn {
                     table_name: table_name.clone(),
                     before: (*column).clone(),
                     after: (*target_column).clone(),
@@ -772,26 +790,26 @@ pub fn diff_schema_models_for_backend(
         for (index_name, index) in &target_indexes {
             if let Some(current_index) = current_indexes.get(index_name) {
                 if *current_index != *index {
-                    steps.push(MigrationStep::DropIndex {
+                    steps.push(OwnedMigrationStep::DropIndex {
                         table_name: table_name.clone(),
                         index_name: index_name.clone(),
                     });
-                    steps.push(MigrationStep::CreateIndex {
+                    steps.push(OwnedMigrationStep::CreateIndex {
                         table_name: table_name.clone(),
-                        index: (*index).clone(),
+                        index: (*index).to_owned(),
                     });
                 }
             } else {
-                steps.push(MigrationStep::CreateIndex {
+                steps.push(OwnedMigrationStep::CreateIndex {
                     table_name: table_name.clone(),
-                    index: (*index).clone(),
+                    index: (*index).to_owned(),
                 });
             }
         }
 
         for index_name in current_indexes.keys() {
             if !target_indexes.contains_key(index_name) {
-                steps.push(MigrationStep::DropIndex {
+                steps.push(OwnedMigrationStep::DropIndex {
                     table_name: table_name.clone(),
                     index_name: index_name.clone(),
                 });
@@ -812,23 +830,23 @@ pub fn diff_schema_models_for_backend(
         for (index_name, index) in &target_search_indexes {
             if let Some(current_index) = current_search_indexes.get(index_name) {
                 if *current_index != *index {
-                    steps.push(MigrationStep::AlterSearchIndex {
+                    steps.push(OwnedMigrationStep::AlterSearchIndex {
                         table_name: table_name.clone(),
                         before: (*current_index).clone(),
                         after: (*index).clone(),
                     });
                 }
             } else {
-                steps.push(MigrationStep::CreateSearchIndex {
+                steps.push(OwnedMigrationStep::CreateSearchIndex {
                     table_name: table_name.clone(),
-                    index: (*index).clone(),
+                    index: (*index).to_owned(),
                 });
             }
         }
 
         for index_name in current_search_indexes.keys() {
             if !target_search_indexes.contains_key(index_name) {
-                steps.push(MigrationStep::DropSearchIndex {
+                steps.push(OwnedMigrationStep::DropSearchIndex {
                     table_name: table_name.clone(),
                     index_name: index_name.clone(),
                 });
@@ -875,13 +893,13 @@ pub fn diff_schema_models_for_backend(
             target.sort_by_key(|foreign_key| &foreign_key.constraint_name);
             let common = current.len().min(target.len());
             for foreign_key in current.into_iter().skip(common) {
-                steps.push(MigrationStep::DropForeignKey {
+                steps.push(OwnedMigrationStep::DropForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: foreign_key.clone(),
                 });
             }
             for foreign_key in target.into_iter().skip(common) {
-                steps.push(MigrationStep::AddForeignKey {
+                steps.push(OwnedMigrationStep::AddForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: foreign_key.clone(),
                 });
@@ -890,15 +908,14 @@ pub fn diff_schema_models_for_backend(
         if table.append_only != target_table.append_only
             || table.retention_purge != target_table.retention_purge
         {
-            steps.push(MigrationStep::SetAppendOnly {
+            steps.push(OwnedMigrationStep::SetAppendOnly {
                 table_name: table_name.clone(),
                 enabled: target_table.append_only,
                 retention_purge: target_table.retention_purge,
             });
         }
-        if !check_constraints_equivalent(&table.check_constraints, &target_table.check_constraints)
-        {
-            steps.push(MigrationStep::SetCheckConstraints {
+        if !check_constraints_equivalent(table.check_constraints, target_table.check_constraints) {
+            steps.push(OwnedMigrationStep::SetCheckConstraints {
                 table_name: table_name.clone(),
                 before: table.check_constraints.clone(),
                 after: target_table.check_constraints.clone(),
@@ -906,7 +923,7 @@ pub fn diff_schema_models_for_backend(
         }
     }
 
-    SchemaDiff { steps }
+    steps
 }
 
 fn foreign_key_constraint_name(table_name: &str, foreign_key: &ForeignKeyModel) -> String {
@@ -930,41 +947,41 @@ fn foreign_key_constraint_name(table_name: &str, foreign_key: &ForeignKeyModel) 
     format!("{}_{}", &full[..prefix_len], hash)
 }
 
-fn migration_step_table_name(step: &MigrationStep) -> Option<&str> {
+pub(super) fn migration_step_table_name<'a>(step: &StepRef<'a>) -> Option<&'a str> {
     match step {
-        MigrationStep::EnableExtension { .. } => None,
-        MigrationStep::CreateTable(table) => Some(&table.table_name),
-        MigrationStep::DropTable { table_name } => Some(table_name),
-        MigrationStep::AddColumn { table_name, .. } => Some(table_name),
-        MigrationStep::DropColumn { table_name, .. } => Some(table_name),
-        MigrationStep::AlterColumn { table_name, .. } => Some(table_name),
-        MigrationStep::CreateIndex { table_name, .. } => Some(table_name),
-        MigrationStep::DropIndex { table_name, .. } => Some(table_name),
-        MigrationStep::CreateSearchIndex { table_name, .. } => Some(table_name),
-        MigrationStep::DropSearchIndex { table_name, .. } => Some(table_name),
-        MigrationStep::AlterSearchIndex { table_name, .. } => Some(table_name),
-        MigrationStep::AddForeignKey { table_name, .. } => Some(table_name),
-        MigrationStep::DropForeignKey { table_name, .. } => Some(table_name),
-        MigrationStep::SetAppendOnly { table_name, .. } => Some(table_name),
-        MigrationStep::SetCheckConstraints { table_name, .. } => Some(table_name),
+        StepRef::EnableExtension { .. } => None,
+        StepRef::CreateTable(table) => Some(table.table_name),
+        StepRef::DropTable { table_name } => Some(table_name),
+        StepRef::AddColumn { table_name, .. } => Some(table_name),
+        StepRef::DropColumn { table_name, .. } => Some(table_name),
+        StepRef::AlterColumn { table_name, .. } => Some(table_name),
+        StepRef::CreateIndex { table_name, .. } => Some(table_name),
+        StepRef::DropIndex { table_name, .. } => Some(table_name),
+        StepRef::CreateSearchIndex { table_name, .. } => Some(table_name),
+        StepRef::DropSearchIndex { table_name, .. } => Some(table_name),
+        StepRef::AlterSearchIndex { table_name, .. } => Some(table_name),
+        StepRef::AddForeignKey { table_name, .. } => Some(table_name),
+        StepRef::DropForeignKey { table_name, .. } => Some(table_name),
+        StepRef::SetAppendOnly { table_name, .. } => Some(table_name),
+        StepRef::SetCheckConstraints { table_name, .. } => Some(table_name),
     }
 }
 
-fn sqlite_requires_table_rebuild(step: &MigrationStep) -> bool {
+fn sqlite_requires_table_rebuild(step: &StepRef<'_>) -> bool {
     matches!(
         step,
-        MigrationStep::DropColumn { .. }
-            | MigrationStep::AlterColumn { .. }
-            | MigrationStep::AddForeignKey { .. }
-            | MigrationStep::DropForeignKey { .. }
-            | MigrationStep::SetCheckConstraints { .. }
+        StepRef::DropColumn { .. }
+            | StepRef::AlterColumn { .. }
+            | StepRef::AddForeignKey { .. }
+            | StepRef::DropForeignKey { .. }
+            | StepRef::SetCheckConstraints { .. }
     )
 }
 
 fn render_create_index_statement(
     backend: DatabaseBackend,
     table_name: &str,
-    index: &super::core::IndexDef,
+    index: &IndexRef<'_>,
 ) -> String {
     let unique = if index.is_unique { "UNIQUE " } else { "" };
     let method = match (backend, index.method) {
@@ -1169,7 +1186,7 @@ fn parse_structural_string_value(
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-fn parse_closed_set_index_predicate(expression: &str) -> Option<super::core::IndexPredicateDef> {
+pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<IndexPredicateModel> {
     let tokens = tokenize_structural_sql(expression)?;
     let tokens = strip_redundant_outer_parentheses(&tokens);
     let StructuralSqlToken::Ident(column) = tokens.first()? else {
@@ -1231,15 +1248,10 @@ fn parse_closed_set_index_predicate(expression: &str) -> Option<super::core::Ind
     }
     values.sort();
     values.dedup();
-    let column = Box::leak(column.clone().into_boxed_str()) as &'static str;
-    let values = Box::leak(
-        values
-            .into_iter()
-            .map(|value| Box::leak(value.into_boxed_str()) as &'static str)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    );
-    Some(super::core::IndexPredicateDef { column, values })
+    Some(IndexPredicateModel {
+        column: column.clone(),
+        values,
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -1699,7 +1711,7 @@ fn parse_search_index_config(config_json: &str) -> Option<SearchIndexModel> {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-fn attach_search_indexes(tables: &mut [TableModel], search_indexes: Vec<SearchIndexModel>) {
+fn attach_search_indexes(tables: &mut [OwnedTableModel], search_indexes: Vec<SearchIndexModel>) {
     for search_index in search_indexes {
         if let Some(table) = tables
             .iter_mut()
@@ -1711,8 +1723,8 @@ fn attach_search_indexes(tables: &mut [TableModel], search_indexes: Vec<SearchIn
 }
 
 fn render_sqlite_table_rebuild_statements(
-    current_table: &TableModel,
-    target_table: &TableModel,
+    current_table: &TableRef<'_>,
+    target_table: &TableRef<'_>,
 ) -> Vec<String> {
     let temp_table_name = format!("__graphql_orm_{}_new", target_table.table_name);
     let target_table_sql = render_create_table_statement_for_name(
@@ -1746,12 +1758,12 @@ fn render_sqlite_table_rebuild_statements(
         temp_table_name, target_table.table_name
     ));
     statements.extend(target_table.indexes.iter().map(|index| {
-        render_create_index_statement(DatabaseBackend::Sqlite, &target_table.table_name, index)
+        render_create_index_statement(DatabaseBackend::Sqlite, target_table.table_name, index)
     }));
     if target_table.append_only {
         statements.extend(render_append_only_statements(
             DatabaseBackend::Sqlite,
-            &target_table.table_name,
+            target_table.table_name,
             true,
             target_table.retention_purge,
         ));
@@ -1760,8 +1772,14 @@ fn render_sqlite_table_rebuild_statements(
 }
 
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
+    render_migration_step_view(backend, &StepRef::from(step))
+}
+pub(super) fn render_migration_step_view(
+    backend: DatabaseBackend,
+    step: &StepRef<'_>,
+) -> Vec<String> {
     match step {
-        MigrationStep::EnableExtension { name } => match backend {
+        StepRef::EnableExtension { name } => match backend {
             DatabaseBackend::Postgres => vec![format!("CREATE EXTENSION IF NOT EXISTS {name}")],
             DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
                 vec![format!(
@@ -1771,13 +1789,13 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 )]
             }
         },
-        MigrationStep::CreateTable(table) => {
+        StepRef::CreateTable(table) => {
             let mut statements = vec![render_create_table_statement(backend, table)];
             statements.extend(
                 table
                     .indexes
                     .iter()
-                    .map(|index| render_create_index_statement(backend, &table.table_name, index)),
+                    .map(|index| render_create_index_statement(backend, table.table_name, index)),
             );
             statements.extend(
                 table
@@ -1788,7 +1806,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             if table.append_only {
                 statements.extend(render_append_only_statements(
                     backend,
-                    &table.table_name,
+                    table.table_name,
                     true,
                     table.retention_purge,
                 ));
@@ -1796,15 +1814,15 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             statements.extend(render_constraint_comments(backend, table));
             statements
         }
-        MigrationStep::DropTable { table_name } => {
+        StepRef::DropTable { table_name } => {
             vec![format!("DROP TABLE {}", table_name)]
         }
-        MigrationStep::AddColumn { table_name, column } => vec![format!(
+        StepRef::AddColumn { table_name, column } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",
             table_name,
             render_column_definition(backend, column, true)
         )],
-        MigrationStep::DropColumn {
+        StepRef::DropColumn {
             table_name,
             column_name,
         } => match backend {
@@ -1821,7 +1839,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 table_name, column_name
             )],
         },
-        MigrationStep::AlterColumn {
+        StepRef::AlterColumn {
             table_name,
             before: _,
             after,
@@ -1852,10 +1870,10 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 table_name, after.name, after.sql_type
             )],
         },
-        MigrationStep::CreateIndex { table_name, index } => {
+        StepRef::CreateIndex { table_name, index } => {
             vec![render_create_index_statement(backend, table_name, index)]
         }
-        MigrationStep::DropIndex {
+        StepRef::DropIndex {
             table_name,
             index_name,
         } => match backend {
@@ -1882,15 +1900,15 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 )]
             }
         },
-        MigrationStep::CreateSearchIndex {
+        StepRef::CreateSearchIndex {
             table_name: _,
             index,
         } => render_create_search_index_statement(backend, index),
-        MigrationStep::DropSearchIndex {
+        StepRef::DropSearchIndex {
             table_name,
             index_name,
         } => render_drop_search_index_statement(backend, table_name, index_name),
-        MigrationStep::AlterSearchIndex {
+        StepRef::AlterSearchIndex {
             table_name,
             before,
             after,
@@ -1900,7 +1918,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
             statements.extend(render_create_search_index_statement(backend, after));
             statements
         }
-        MigrationStep::AddForeignKey {
+        StepRef::AddForeignKey {
             table_name,
             foreign_key,
         } => {
@@ -1933,7 +1951,7 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 )],
             }
         }
-        MigrationStep::DropForeignKey {
+        StepRef::DropForeignKey {
             table_name,
             foreign_key,
         } => {
@@ -1958,12 +1976,12 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
                 )],
             }
         }
-        MigrationStep::SetAppendOnly {
+        StepRef::SetAppendOnly {
             table_name,
             enabled,
             retention_purge,
         } => render_append_only_statements(backend, table_name, *enabled, *retention_purge),
-        MigrationStep::SetCheckConstraints {
+        StepRef::SetCheckConstraints {
             table_name,
             before,
             after,
@@ -2007,32 +2025,40 @@ pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> 
 }
 
 pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
+    let (risk, reason) = classify_migration_step_view(&StepRef::from(step));
+    PlannedMigrationStep {
+        step: step.clone(),
+        risk,
+        reason: reason.into(),
+    }
+}
+pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk, &'static str) {
     let (risk, reason) = match step {
-        MigrationStep::EnableExtension { .. } => (
+        StepRef::EnableExtension { .. } => (
             MigrationRisk::Additive,
             "enables a database extension without changing row data",
         ),
-        MigrationStep::CreateTable(_) => (
+        StepRef::CreateTable(_) => (
             MigrationRisk::Additive,
             "creates a new table without changing existing data",
         ),
-        MigrationStep::DropTable { .. } => (
+        StepRef::DropTable { .. } => (
             MigrationRisk::Destructive,
             "drops an existing table and its data",
         ),
-        MigrationStep::AddColumn { column, .. } if column.nullable || column.default.is_some() => (
+        StepRef::AddColumn { column, .. } if column.nullable || column.default.is_some() => (
             MigrationRisk::Additive,
             "adds a nullable or defaulted column",
         ),
-        MigrationStep::AddColumn { .. } => (
+        StepRef::AddColumn { .. } => (
             MigrationRisk::Risky,
             "adds a required column without a default",
         ),
-        MigrationStep::DropColumn { .. } => (
+        StepRef::DropColumn { .. } => (
             MigrationRisk::Destructive,
             "drops an existing column and its data",
         ),
-        MigrationStep::AlterColumn { before, after, .. } => {
+        StepRef::AlterColumn { before, after, .. } => {
             if before.nullable && !after.nullable {
                 (
                     MigrationRisk::Risky,
@@ -2047,49 +2073,45 @@ pub fn classify_migration_step(step: &MigrationStep) -> PlannedMigrationStep {
                 (MigrationRisk::Risky, "changes an existing column type")
             }
         }
-        MigrationStep::CreateIndex { .. } => (
+        StepRef::CreateIndex { .. } => (
             MigrationRisk::Additive,
             "creates an index without changing row data",
         ),
-        MigrationStep::DropIndex { .. } => (MigrationRisk::Risky, "drops an existing index"),
-        MigrationStep::CreateSearchIndex { .. } => (
+        StepRef::DropIndex { .. } => (MigrationRisk::Risky, "drops an existing index"),
+        StepRef::CreateSearchIndex { .. } => (
             MigrationRisk::Additive,
             "creates full-text search structures without backfilling row data",
         ),
-        MigrationStep::DropSearchIndex { .. } => {
+        StepRef::DropSearchIndex { .. } => {
             (MigrationRisk::Risky, "drops full-text search structures")
         }
-        MigrationStep::AlterSearchIndex { .. } => (
+        StepRef::AlterSearchIndex { .. } => (
             MigrationRisk::Risky,
             "recreates full-text search structures and requires an explicit rebuild",
         ),
-        MigrationStep::AddForeignKey { .. } => (
+        StepRef::AddForeignKey { .. } => (
             MigrationRisk::Risky,
             "adds a constraint that may reject existing rows",
         ),
-        MigrationStep::DropForeignKey { .. } => (
+        StepRef::DropForeignKey { .. } => (
             MigrationRisk::Risky,
             "drops an existing referential constraint",
         ),
-        MigrationStep::SetAppendOnly { enabled: true, .. } => (
+        StepRef::SetAppendOnly { enabled: true, .. } => (
             MigrationRisk::Additive,
             "adds database enforcement that prevents row mutation",
         ),
-        MigrationStep::SetAppendOnly { enabled: false, .. } => (
+        StepRef::SetAppendOnly { enabled: false, .. } => (
             MigrationRisk::Risky,
             "removes append-only database enforcement",
         ),
-        MigrationStep::SetCheckConstraints { .. } => (
+        StepRef::SetCheckConstraints { .. } => (
             MigrationRisk::Risky,
             "adds, removes, or changes same-row check constraints",
         ),
     };
 
-    PlannedMigrationStep {
-        step: step.clone(),
-        risk,
-        reason: reason.to_string(),
-    }
+    (risk, reason)
 }
 
 pub fn classify_migration_steps(steps: &[MigrationStep]) -> Vec<PlannedMigrationStep> {
@@ -2101,11 +2123,29 @@ pub fn build_migration_plan(
     current: &SchemaModel,
     target: &SchemaModel,
 ) -> MigrationPlan {
+    let plan =
+        build_migration_plan_views(backend, &SchemaRef::from(current), &SchemaRef::from(target));
+    MigrationPlan {
+        backend: plan.backend,
+        steps: plan
+            .steps
+            .into_iter()
+            .map(|step| step.into_legacy(current, target))
+            .collect(),
+        statements: plan.statements,
+    }
+}
+pub(super) fn build_migration_plan_views(
+    backend: DatabaseBackend,
+    current: &SchemaRef<'_>,
+    target: &SchemaRef<'_>,
+) -> OwnedMigrationPlan {
+    let empty_extensions = Vec::new();
     let mut target_for_backend = target.clone();
     if backend != DatabaseBackend::Postgres {
-        target_for_backend.extensions.clear();
+        target_for_backend.extensions = &empty_extensions;
     }
-    let diff = diff_schema_models_for_backend(backend, current, &target_for_backend);
+    let steps = diff_schema_views(backend, current, &target_for_backend);
     let statements = match backend {
         DatabaseBackend::Sqlite => {
             let current_tables = current
@@ -2118,11 +2158,10 @@ pub fn build_migration_plan(
                 .iter()
                 .map(|table| (table.table_name.as_str(), table))
                 .collect::<std::collections::BTreeMap<_, _>>();
-            let rebuild_tables = diff
-                .steps
+            let rebuild_tables = steps
                 .iter()
-                .filter(|step| sqlite_requires_table_rebuild(step))
-                .filter_map(migration_step_table_name)
+                .filter(|step| sqlite_requires_table_rebuild(&StepRef::from(*step)))
+                .filter_map(|step| migration_step_table_name(&StepRef::from(step)))
                 .collect::<std::collections::BTreeSet<_>>();
             let mut statements = Vec::new();
             let mut rebuilt_tables = std::collections::BTreeSet::new();
@@ -2131,8 +2170,8 @@ pub fn build_migration_plan(
                 statements.push("PRAGMA foreign_keys = OFF".to_string());
             }
 
-            for step in &diff.steps {
-                let table_name = migration_step_table_name(step);
+            for step in &steps {
+                let table_name = migration_step_table_name(&StepRef::from(step));
                 if let Some(table_name) = table_name {
                     if rebuild_tables.contains(table_name) {
                         if rebuilt_tables.insert(table_name.to_string()) {
@@ -2149,7 +2188,7 @@ pub fn build_migration_plan(
                         continue;
                     }
                 }
-                statements.extend(render_migration_step(backend, step));
+                statements.extend(render_migration_step_view(backend, &StepRef::from(step)));
             }
 
             if !rebuild_tables.is_empty() {
@@ -2158,16 +2197,15 @@ pub fn build_migration_plan(
 
             statements
         }
-        _ => diff
-            .steps
+        _ => steps
             .iter()
-            .flat_map(|step| render_migration_step(backend, step))
+            .flat_map(|step| render_migration_step_view(backend, &StepRef::from(step)))
             .collect::<Vec<_>>(),
     };
 
-    MigrationPlan {
+    OwnedMigrationPlan {
         backend,
-        steps: diff.steps,
+        steps,
         statements,
     }
 }
@@ -2226,17 +2264,19 @@ where
 }
 
 #[cfg(feature = "sqlite")]
-async fn sqlite_retention_context_is_valid(pool: &sqlx::SqlitePool) -> crate::Result<bool> {
+async fn sqlite_retention_context_is_valid(
+    connection: &mut sqlx::SqliteConnection,
+) -> crate::Result<bool> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '__graphql_orm_retention_context')",
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     if !exists {
         return Ok(false);
     }
     let columns = sqlx::query("PRAGMA table_info(__graphql_orm_retention_context)")
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
     if columns.len() != 1 {
         return Ok(false);
@@ -2249,7 +2289,7 @@ async fn sqlite_retention_context_is_valid(pool: &sqlx::SqlitePool) -> crate::Re
         && column.try_get::<i64, _>("notnull")? == 1
         && column.try_get::<i64, _>("pk")? == 1;
     let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_retention_context")
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await?;
     Ok(valid_column && rows == 0)
 }
@@ -2258,24 +2298,62 @@ async fn sqlite_retention_context_is_valid(pool: &sqlx::SqlitePool) -> crate::Re
 pub async fn introspect_sqlite_schema(
     provider: &impl PoolProvider<super::SqliteBackend>,
 ) -> crate::Result<SchemaModel> {
-    let pool = provider.pool();
-    let retention_context_valid = sqlite_retention_context_is_valid(pool).await?;
+    introspect_owned_sqlite_schema(provider)
+        .await
+        .map(OwnedSchemaModel::into_legacy)
+}
+#[cfg(feature = "sqlite")]
+pub(super) async fn introspect_owned_sqlite_schema(
+    provider: &impl PoolProvider<super::SqliteBackend>,
+) -> crate::Result<OwnedSchemaModel> {
+    let mut connection = provider.pool().acquire().await?;
+    introspect_owned_sqlite_connection(&mut connection).await
+}
+#[cfg(feature = "sqlite")]
+pub(super) async fn introspect_owned_sqlite_connection(
+    connection: &mut sqlx::SqliteConnection,
+) -> crate::Result<OwnedSchemaModel> {
+    introspect_owned_sqlite_connection_with_internal(connection, false).await
+}
+#[cfg(feature = "sqlite")]
+pub(super) async fn introspect_owned_sqlite_connection_with_internal(
+    connection: &mut sqlx::SqliteConnection,
+    include_internal: bool,
+) -> crate::Result<OwnedSchemaModel> {
+    let retention_context_valid = sqlite_retention_context_is_valid(&mut *connection).await?;
     let table_rows = sqlx::query(
         "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut tables = Vec::new();
     for row in table_rows {
         let table_name: String = row.try_get("name")?;
         let create_sql: String = row.try_get::<Option<String>, _>("sql")?.unwrap_or_default();
-        if is_internal_graphql_orm_table(&table_name) {
+        if !include_internal && is_internal_graphql_orm_table(&table_name) {
             continue;
         }
 
         let pragma_table_info = format!("PRAGMA table_info({})", table_name);
-        let column_rows = sqlx::query(&pragma_table_info).fetch_all(pool).await?;
+        let column_rows = sqlx::query(&pragma_table_info)
+            .fetch_all(&mut *connection)
+            .await?;
+        let mut ordered_keys = column_rows
+            .iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<i64, _>("pk")?,
+                    row.try_get::<String, _>("name")?,
+                ))
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        ordered_keys.retain(|(ordinal, _)| *ordinal > 0);
+        ordered_keys.sort_by_key(|(ordinal, _)| *ordinal);
+        let primary_keys = ordered_keys
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>();
         let mut columns = column_rows
             .into_iter()
             .map(|row| {
@@ -2298,18 +2376,15 @@ pub async fn introspect_sqlite_schema(
                 })
             })
             .collect::<crate::Result<Vec<_>>>()?;
-        let primary_keys = columns
-            .iter()
-            .filter(|column| column.is_primary_key)
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
         let primary_key = primary_keys
             .first()
             .cloned()
             .unwrap_or_else(|| "id".to_string());
 
         let pragma_index_list = format!("PRAGMA index_list({})", table_name);
-        let index_rows = sqlx::query(&pragma_index_list).fetch_all(pool).await?;
+        let index_rows = sqlx::query(&pragma_index_list)
+            .fetch_all(&mut *connection)
+            .await?;
         let mut indexes = Vec::new();
         let mut composite_unique_indexes = Vec::new();
         for row in index_rows {
@@ -2322,7 +2397,9 @@ pub async fn introspect_sqlite_schema(
                 .unwrap_or_else(|_| "c".to_string());
 
             let pragma_index_info = format!("PRAGMA index_xinfo({})", index_name);
-            let index_info_rows = sqlx::query(&pragma_index_info).fetch_all(pool).await?;
+            let index_info_rows = sqlx::query(&pragma_index_info)
+                .fetch_all(&mut *connection)
+                .await?;
             let mut index_columns = Vec::new();
             for index_row in index_info_rows {
                 // index_xinfo also returns the auxiliary rowid column with
@@ -2384,7 +2461,7 @@ pub async fn introspect_sqlite_schema(
                 "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
             )
             .bind(&index_name)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *connection)
             .await?
             .flatten();
             let predicate = index_sql.as_deref().and_then(|sql| {
@@ -2394,20 +2471,10 @@ pub async fn introspect_sqlite_schema(
                     .and_then(|offset| parse_closed_set_index_predicate(&sql[offset + 7..]))
             });
 
-            let leaked_name: &'static str = Box::leak(index_name.into_boxed_str());
-            let leaked_columns: &'static [&'static str] = Box::leak(
-                column_names
-                    .into_iter()
-                    .map(|column| Box::leak(column.into_boxed_str()) as &'static str)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let leaked_directions: &'static [super::core::IndexDirection] =
-                Box::leak(column_directions.into_boxed_slice());
-            indexes.push(super::core::IndexDef {
-                name: leaked_name,
-                columns: leaked_columns,
-                column_directions: leaked_directions,
+            indexes.push(IndexModel {
+                name: index_name,
+                columns: column_names,
+                column_directions,
                 is_unique: unique,
                 method: IndexMethod::Default,
                 is_spatial: false,
@@ -2416,7 +2483,9 @@ pub async fn introspect_sqlite_schema(
         }
 
         let pragma_fk_list = format!("PRAGMA foreign_key_list({})", table_name);
-        let foreign_key_rows = sqlx::query(&pragma_fk_list).fetch_all(pool).await?;
+        let foreign_key_rows = sqlx::query(&pragma_fk_list)
+            .fetch_all(&mut *connection)
+            .await?;
         let mut grouped_foreign_keys =
             std::collections::BTreeMap::<i64, Vec<(i64, String, String, String, String)>>::new();
         for row in foreign_key_rows {
@@ -2486,7 +2555,7 @@ pub async fn introspect_sqlite_schema(
         )
         .bind(format!("{append_name}_update"))
         .bind(format!("{append_name}_delete"))
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let mut valid_update = false;
         let mut valid_delete = false;
@@ -2519,7 +2588,7 @@ pub async fn introspect_sqlite_schema(
             }
         }
 
-        tables.push(TableModel {
+        tables.push(OwnedTableModel {
             entity_name: table_name.clone(),
             table_name,
             primary_key: primary_key.clone(),
@@ -2539,14 +2608,14 @@ pub async fn introspect_sqlite_schema(
     let metadata_exists = sqlx::query(
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__graphql_orm_search_metadata'",
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?
     .is_some();
     if metadata_exists {
         let rows = sqlx::query(
             "SELECT config_json FROM __graphql_orm_search_metadata ORDER BY entity_name",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let search_indexes = rows
             .into_iter()
@@ -2559,9 +2628,10 @@ pub async fn introspect_sqlite_schema(
         attach_search_indexes(&mut tables, search_indexes);
     }
 
-    Ok(SchemaModel {
+    Ok(OwnedSchemaModel {
         extensions: Vec::new(),
         tables,
+        limits: Default::default(),
     })
 }
 
@@ -2641,14 +2711,35 @@ mod postgres_unique_constraint_tests {
 pub async fn introspect_postgres_schema(
     provider: &impl PoolProvider<super::PostgresBackend>,
 ) -> crate::Result<SchemaModel> {
-    let pool = provider.pool();
+    introspect_owned_postgres_schema(provider)
+        .await
+        .map(OwnedSchemaModel::into_legacy)
+}
+#[cfg(feature = "postgres")]
+pub(super) async fn introspect_owned_postgres_schema(
+    provider: &impl PoolProvider<super::PostgresBackend>,
+) -> crate::Result<OwnedSchemaModel> {
+    let mut connection = provider.pool().acquire().await?;
+    introspect_owned_postgres_connection(&mut connection).await
+}
+#[cfg(feature = "postgres")]
+pub(super) async fn introspect_owned_postgres_connection(
+    connection: &mut sqlx::PgConnection,
+) -> crate::Result<OwnedSchemaModel> {
+    introspect_owned_postgres_connection_with_internal(connection, false).await
+}
+#[cfg(feature = "postgres")]
+pub(super) async fn introspect_owned_postgres_connection_with_internal(
+    connection: &mut sqlx::PgConnection,
+    include_internal: bool,
+) -> crate::Result<OwnedSchemaModel> {
     let schema_name = sqlx::query("SELECT current_schema() AS schema_name")
-        .fetch_one(pool)
+        .fetch_one(&mut *connection)
         .await?
         .try_get::<Option<String>, _>("schema_name")?
         .unwrap_or_else(|| "public".to_string());
     let extension_rows = sqlx::query("SELECT extname FROM pg_extension ORDER BY extname")
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
     let extensions = extension_rows
         .into_iter()
@@ -2662,13 +2753,13 @@ pub async fn introspect_postgres_schema(
          ORDER BY table_name",
     )
     .bind(&schema_name)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     let mut tables = Vec::new();
     for row in table_rows {
         let table_name: String = row.try_get("table_name")?;
-        if is_internal_graphql_orm_table(&table_name) {
+        if !include_internal && is_internal_graphql_orm_table(&table_name) {
             continue;
         }
         let column_rows = sqlx::query(
@@ -2690,7 +2781,7 @@ pub async fn introspect_postgres_schema(
         )
         .bind(&table_name)
         .bind(&schema_name)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
 
         let primary_key_rows = sqlx::query(
@@ -2705,7 +2796,7 @@ pub async fn introspect_postgres_schema(
         )
         .bind(&table_name)
         .bind(&schema_name)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let primary_key_columns = primary_key_rows
             .into_iter()
@@ -2731,7 +2822,7 @@ pub async fn introspect_postgres_schema(
         )
         .bind(&table_name)
         .bind(&schema_name)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let unique_members = unique_rows
             .into_iter()
@@ -2798,7 +2889,7 @@ pub async fn introspect_postgres_schema(
         )
         .bind(&table_name)
         .bind(&schema_name)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let mut indexes = Vec::new();
         for row in index_rows {
@@ -2831,31 +2922,20 @@ pub async fn introspect_postgres_schema(
                         .iter()
                         .any(|column| column.name == *column_name && column.spatial.is_some())
                 });
-            let leaked_name: &'static str = Box::leak(index_name.into_boxed_str());
-            let leaked_columns: &'static [&'static str] = Box::leak(
-                column_names
-                    .into_iter()
-                    .map(|column| Box::leak(column.into_boxed_str()) as &'static str)
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let leaked_directions: &'static [super::core::IndexDirection] = Box::leak(
-                descending
-                    .into_iter()
-                    .map(|descending| {
-                        if descending {
-                            super::core::IndexDirection::Desc
-                        } else {
-                            super::core::IndexDirection::Asc
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            indexes.push(super::core::IndexDef {
-                name: leaked_name,
-                columns: leaked_columns,
-                column_directions: leaked_directions,
+            let column_directions = descending
+                .into_iter()
+                .map(|desc| {
+                    if desc {
+                        super::core::IndexDirection::Desc
+                    } else {
+                        super::core::IndexDirection::Asc
+                    }
+                })
+                .collect();
+            indexes.push(IndexModel {
+                name: index_name,
+                columns: column_names,
+                column_directions,
                 is_unique: unique,
                 method,
                 is_spatial,
@@ -2897,7 +2977,7 @@ pub async fn introspect_postgres_schema(
         )
         .bind(&table_name)
         .bind(&schema_name)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let foreign_keys = foreign_key_rows
             .into_iter()
@@ -2968,7 +3048,7 @@ pub async fn introspect_postgres_schema(
         .bind(&table_name)
         .bind(&schema_name)
         .bind(&append_trigger_name)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *connection)
         .await?;
         let append_only = append_function_body.as_deref().is_some_and(|body| {
             postgres_append_only_function_body_matches(body)
@@ -2989,7 +3069,7 @@ pub async fn introspect_postgres_schema(
         )
         .bind(&table_name)
         .bind(&schema_name)
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let check_constraints = check_rows
             .into_iter()
@@ -3014,7 +3094,7 @@ pub async fn introspect_postgres_schema(
             })
             .collect::<crate::Result<Vec<_>>>()?;
 
-        tables.push(TableModel {
+        tables.push(OwnedTableModel {
             entity_name: table_name.clone(),
             table_name,
             primary_key: primary_key.clone(),
@@ -3042,14 +3122,14 @@ pub async fn introspect_postgres_schema(
     )
     .bind(&schema_name)
     .bind(super::search_metadata_table_name())
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?
     .try_get::<bool, _>("exists")?;
     if metadata_exists {
         let rows = sqlx::query(
             "SELECT config_json::text AS config_json FROM __graphql_orm_search_metadata ORDER BY entity_name",
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await?;
         let search_indexes = rows
             .into_iter()
@@ -3062,7 +3142,11 @@ pub async fn introspect_postgres_schema(
         attach_search_indexes(&mut tables, search_indexes);
     }
 
-    Ok(SchemaModel { extensions, tables })
+    Ok(OwnedSchemaModel {
+        extensions,
+        tables,
+        limits: Default::default(),
+    })
 }
 
 #[cfg(feature = "postgres")]
