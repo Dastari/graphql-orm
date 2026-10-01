@@ -98,7 +98,7 @@ jobs:
         with:
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -121,7 +121,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -144,7 +144,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -209,7 +209,7 @@ jobs:
         # the exhaustion; reclaiming the unused preinstalled toolchains keeps
         # headroom for the crate that originally filled the disk.
         uses: ./.github/actions/reclaim-runner-disk
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -232,7 +232,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming --locked
 
@@ -245,7 +245,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
         run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity --locked -- --test-threads=1
@@ -259,7 +259,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: Verify alternate AI, storage, and backup lanes
         run: |
@@ -279,7 +279,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.target_ref }}
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -377,7 +377,7 @@ jobs:
         # Only the optional router artifact compiles anything in this job.
         if: inputs.include_router_artifact
         uses: ./.github/actions/reclaim-runner-disk
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: Generate deterministic release bundle
         env:
