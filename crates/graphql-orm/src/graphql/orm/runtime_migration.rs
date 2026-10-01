@@ -30,6 +30,8 @@ pub enum RuntimeMigrationDiagnosticCode {
     UnsupportedGeneration,
     /// Default semantics cannot be represented faithfully.
     UnsupportedDefault,
+    /// Live foreign-key semantics cannot be represented without changing behavior.
+    UnsupportedForeignKey,
     /// Invalid or unsupported canonical physical definition.
     InvalidPhysicalContract,
     /// Physical or diagnostic names collide across composed targets.
@@ -808,6 +810,15 @@ pub trait RuntimeMigrationBackend: OrmBackend {
         let _ = pool;
         Err(rejection(RuntimeMigrationDiagnosticCode::UnsupportedBackend).into())
     }
+    /// Validate complete live FK semantics, including external and internal incoming sources.
+    #[doc(hidden)]
+    async fn validate_owned_dependencies(
+        pool: &Self::Pool,
+        ownership: &ManagedTableSet,
+    ) -> Result<(), RuntimeMigrationError> {
+        let _ = (pool, ownership);
+        Err(rejection(RuntimeMigrationDiagnosticCode::UnsupportedBackend).into())
+    }
     /// Reject live semantics that cannot be safely preserved by owned application.
     #[doc(hidden)]
     async fn validate_owned_plan(
@@ -866,6 +877,13 @@ impl RuntimeMigrationBackend for super::SqliteBackend {
             .await?,
         )
     }
+    async fn validate_owned_dependencies(
+        pool: &Self::Pool,
+        ownership: &ManagedTableSet,
+    ) -> Result<(), RuntimeMigrationError> {
+        let mut connection = pool.acquire().await?;
+        super::owned_foreign_keys::validate_sqlite(&mut connection, ownership).await
+    }
     async fn validate_owned_plan(
         pool: &Self::Pool,
         plan: &OwnedPlannedMigration,
@@ -903,6 +921,13 @@ impl RuntimeMigrationBackend for super::PostgresBackend {
             .await?,
         )
     }
+    async fn validate_owned_dependencies(
+        pool: &Self::Pool,
+        ownership: &ManagedTableSet,
+    ) -> Result<(), RuntimeMigrationError> {
+        let mut connection = pool.acquire().await?;
+        super::owned_foreign_keys::validate_postgres(&mut connection, ownership).await
+    }
     async fn validate_owned_plan(
         pool: &Self::Pool,
         plan: &OwnedPlannedMigration,
@@ -934,6 +959,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         target
             .validate_physical_contract()
             .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
+        B::validate_owned_dependencies(self.database.pool(), ownership).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
         validate_owned_effects(B::DIALECT, &current, target, ownership)?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);
@@ -966,6 +992,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         if version.trim().is_empty() || version.len() > 256 || description.len() > 4096 {
             return Err(rejection(RuntimeMigrationDiagnosticCode::LimitExceeded).into());
         }
+        B::validate_owned_dependencies(self.database.pool(), ownership).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
         validate_owned_effects(B::DIALECT, &current, target, ownership)?;
         let scoped = scoped_current(&current, ownership, options, target);
@@ -1039,6 +1066,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         target
             .validate_physical_contract()
             .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
+        B::validate_owned_dependencies(self.database.pool(), ownership).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
         validate_owned_effects(B::DIALECT, &current, target, ownership)?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);

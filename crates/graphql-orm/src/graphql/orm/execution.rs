@@ -744,6 +744,35 @@ async fn cleanup_stale_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> crate::
     Ok(())
 }
 
+// Own the lease so cancellation can mark its connection for discard. Successful
+// restoration disarms the guard synchronously, retaining single-connection memory DBs.
+#[cfg(feature = "sqlite")]
+struct SqliteMigrationConnection {
+    connection: sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    close_if_unrestored: bool,
+}
+#[cfg(feature = "sqlite")]
+impl std::ops::Deref for SqliteMigrationConnection {
+    type Target = sqlx::SqliteConnection;
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+#[cfg(feature = "sqlite")]
+impl std::ops::DerefMut for SqliteMigrationConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.connection
+    }
+}
+#[cfg(feature = "sqlite")]
+impl Drop for SqliteMigrationConnection {
+    fn drop(&mut self) {
+        if self.close_if_unrestored {
+            self.connection.close_on_drop();
+        }
+    }
+}
+
 #[cfg(feature = "sqlite")]
 async fn apply_sqlite_migration_statements_transactionally<S>(
     pool: &sqlx::SqlitePool,
@@ -757,9 +786,12 @@ async fn apply_sqlite_migration_statements_transactionally<S>(
 where
     S: AsRef<str>,
 {
-    use sqlx::{Acquire, Connection};
+    use sqlx::Connection;
 
-    let mut conn = pool.acquire().await?;
+    let mut conn = SqliteMigrationConnection {
+        connection: pool.acquire().await?,
+        close_if_unrestored: false,
+    };
     let suspend_foreign_keys = statements.iter().any(|statement| {
         statement
             .as_ref()
@@ -769,7 +801,7 @@ where
 
     if suspend_foreign_keys {
         if owned.is_some() {
-            conn.close_on_drop();
+            conn.close_if_unrestored = true;
         }
         sqlx::query("PRAGMA foreign_keys = OFF")
             .execute(&mut *conn)
@@ -842,6 +874,17 @@ where
         sqlx::query("PRAGMA foreign_keys = ON")
             .execute(&mut *conn)
             .await?;
+        if owned.is_some() {
+            let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+                .fetch_one(&mut *conn)
+                .await?;
+            if enabled != 1 {
+                return Err(
+                    sqlx::Error::Protocol("SQLite FK enforcement was not restored".into()).into(),
+                );
+            }
+        }
+        conn.close_if_unrestored = false;
     }
 
     final_result
@@ -1166,6 +1209,7 @@ pub(super) async fn validate_owned_sqlite_plan(
     connection: &mut sqlx::SqliteConnection,
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {
+    super::owned_foreign_keys::validate_sqlite(connection, plan.ownership()).await?;
     use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
     use sqlx::Row;
     // The canonical index model has no expression or collation storage. Never
@@ -1271,6 +1315,7 @@ pub(super) async fn validate_owned_postgres_plan(
     connection: &mut sqlx::PgConnection,
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {
+    super::owned_foreign_keys::validate_postgres(connection, plan.ownership()).await?;
     use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
     for table in plan.ownership().tables() {
         let indexes: Vec<(bool, String, Option<String>, bool)> = sqlx::query_as(
@@ -1307,4 +1352,44 @@ pub(super) async fn validate_owned_postgres_plan(
         return Err(rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into());
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod sqlite_migration_connection_tests {
+    use super::SqliteMigrationConnection;
+
+    #[tokio::test]
+    async fn canceled_fk_suspension_does_not_return_disabled_enforcement_to_pool() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let (staged_tx, staged_rx) = tokio::sync::oneshot::channel();
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move {
+            let mut guard = SqliteMigrationConnection {
+                connection: task_pool.acquire().await.unwrap(),
+                close_if_unrestored: true,
+            };
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&mut *guard)
+                .await
+                .unwrap();
+            staged_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        staged_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            enabled, 1,
+            "canceled suspended connections must be discarded"
+        );
+        pool.close().await;
+    }
 }

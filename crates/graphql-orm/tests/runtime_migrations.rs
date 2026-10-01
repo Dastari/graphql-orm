@@ -1205,3 +1205,557 @@ fn static_quoted_literal_defaults_convert_losslessly() {
         == RuntimeSchemaDiagnosticCode::UnsupportedDefault
         && d.subject.as_deref() == Some("label")));
 }
+
+#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(backend = "sqlite", table = "fk_sources", plural = "FkSources")
+)]
+#[cfg_attr(
+    all(feature = "postgres", not(feature = "sqlite")),
+    graphql_entity(backend = "postgres", table = "fk_sources", plural = "FkSources")
+)]
+struct FkSource {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    parent_id: String,
+    label: String,
+}
+
+fn fk_target() -> OwnedSchemaModel {
+    let mut metadata = FkSource::metadata().clone();
+    metadata.relations = vec![RelationMetadata {
+        field_name: "parent",
+        target_type: "owned_notes",
+        source_column: "parent_id",
+        target_column: "id",
+        source_columns: &["parent_id"],
+        target_columns: &["id"],
+        is_multiple: false,
+        emit_foreign_key: true,
+        on_delete: DeletePolicy::Restrict,
+        propagate_change: RelationChangePropagation::None,
+        search_fields: None,
+    }]
+    .into_boxed_slice();
+    let mut model = SchemaModel::from_entities(&[Note::metadata(), &metadata]);
+    model
+        .tables
+        .iter_mut()
+        .find(|t| t.table_name == "fk_sources")
+        .unwrap()
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "parent_id")
+        .unwrap()
+        .default = Some("'fallback'".into());
+    // This unrelated column alteration requires a SQLite source-table rebuild.
+    model
+        .tables
+        .iter_mut()
+        .find(|t| t.table_name == "fk_sources")
+        .unwrap()
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "label")
+        .unwrap()
+        .nullable = true;
+    OwnedSchemaModel::from(&model)
+}
+
+fn rejected_fk(error: RuntimeMigrationError, source: &str) {
+    match error {
+        RuntimeMigrationError::Diagnostics(d) => {
+            assert_eq!(
+                d.0[0].code,
+                RuntimeMigrationDiagnosticCode::UnsupportedForeignKey
+            );
+            assert!(d.0[0].subject.as_ref().unwrap().contains(source), "{d:?}");
+            assert!(d.0[0].collection.is_none());
+        }
+        other => panic!("expected structured FK rejection, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_fk_semantics_reject_rebuild_and_incoming_certification()
+-> Result<(), Box<dyn std::error::Error>> {
+    for clause in [
+        "ON DELETE SET DEFAULT",
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+        "ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+        "ON DELETE NO ACTION",
+    ] {
+        let db = sqlite().await;
+        let manager = db.schema();
+        let parent = target::<SqliteBackend>();
+        let plan = manager
+            .plan_owned_migration(
+                "parent",
+                "fixture",
+                &parent,
+                &ownership(),
+                PlanOptions::strict(),
+            )
+            .await?;
+        manager
+            .apply_owned_migration(&plan, Default::default())
+            .await?;
+        let create = format!(
+            "CREATE TABLE fk_sources(id TEXT PRIMARY KEY NOT NULL, parent_id TEXT NOT NULL DEFAULT 'fallback', label TEXT NOT NULL, FOREIGN KEY(parent_id) REFERENCES owned_notes(id) {clause})"
+        );
+        sqlx::query(&create).execute(db.pool()).await?;
+        sqlx::query("CREATE INDEX idx_fk_sources_parent_id ON fk_sources(parent_id)")
+            .execute(db.pool())
+            .await?;
+        sqlx::query(
+            "INSERT INTO owned_notes(id,label) VALUES('parent','parent'),('fallback','fallback')",
+        )
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO fk_sources(id,parent_id,label) VALUES('child','parent','history')",
+        )
+        .execute(db.pool())
+        .await?;
+        let before: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='fk_sources'")
+                .fetch_one(db.pool())
+                .await?;
+        let managed = ManagedTableSet::new(["owned_notes".into(), "fk_sources".into()])?;
+        rejected_fk(
+            manager
+                .plan_owned_migration(
+                    "rebuild",
+                    "change label only",
+                    &fk_target(),
+                    &managed,
+                    PlanOptions::strict(),
+                )
+                .await
+                .unwrap_err(),
+            "fk_sources",
+        );
+        rejected_fk(
+            manager
+                .validate_owned_schema(&fk_target(), &managed)
+                .await
+                .unwrap_err(),
+            "fk_sources",
+        );
+        // The source is now unowned, yet its incoming modifying/deferrable FK must
+        // still prevent an unsafe mutation certificate for the runtime parent.
+        rejected_fk(
+            manager
+                .runtime_mutation_environment(std::sync::Arc::new(schema()), &parent, &ownership())
+                .await
+                .unwrap_err(),
+            "fk_sources",
+        );
+        let after: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='fk_sources'")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(before, after);
+        let value: String = sqlx::query_scalar("SELECT label FROM fk_sources WHERE id='child'")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(value, "history");
+        // Demonstrate the constraint semantics the ORM refused to reinterpret.
+        if clause.contains("UPDATE CASCADE") {
+            sqlx::query("UPDATE owned_notes SET id='moved' WHERE id='parent'")
+                .execute(db.pool())
+                .await?;
+            let value: String = sqlx::query_scalar("SELECT parent_id FROM fk_sources")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(value, "moved");
+        } else if clause.contains("SET DEFAULT") {
+            sqlx::query("DELETE FROM owned_notes WHERE id='parent'")
+                .execute(db.pool())
+                .await?;
+            let value: String = sqlx::query_scalar("SELECT parent_id FROM fk_sources")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(value, "fallback");
+        } else if clause.contains("DEFERRED") {
+            let mut tx = db.pool().begin().await?;
+            sqlx::query("UPDATE fk_sources SET parent_id='later'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO owned_notes(id,label) VALUES('later','later')")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_apply_rechecks_reserved_incoming_fk_inside_transaction()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    let manager = db.schema();
+    let parent = target::<SqliteBackend>();
+    let plan = manager
+        .plan_owned_migration(
+            "parent",
+            "fixture",
+            &parent,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    let mut upgraded = schema().schema().clone();
+    let mut extra = upgraded.collections[0].fields[3].clone();
+    extra.id = FieldId::new("extra")?;
+    extra.api_name = "extra".into();
+    extra.physical_column = "extra".into();
+    upgraded.collections[0].fields.push(extra);
+    let upgraded = upgraded
+        .validate()?
+        .physical_schema::<SqliteBackend>(RuntimeMigrationLimits::default())?;
+    sqlx::query("CREATE TABLE unrelated_parent(id TEXT PRIMARY KEY)")
+        .execute(db.pool())
+        .await?;
+    sqlx::query("CREATE TABLE unrelated_child(id TEXT PRIMARY KEY, parent_id TEXT REFERENCES unrelated_parent(id) ON DELETE SET DEFAULT DEFERRABLE INITIALLY DEFERRED)").execute(db.pool()).await?;
+    // Unrelated unsupported FKs remain untouched, and cannot block an owned no-op.
+    assert!(
+        manager
+            .plan_owned_migration(
+                "unrelated",
+                "bounded scope",
+                &parent,
+                &ownership(),
+                PlanOptions::strict()
+            )
+            .await?
+            .steps()
+            .is_empty()
+    );
+    // Replan to bind the unrelated tables, which still belong to the full baseline.
+    let plan = manager
+        .plan_owned_migration(
+            "upgrade",
+            "add field",
+            &upgraded,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    // Reserved sources are omitted from the legacy baseline hash. Only the
+    // complete live capability check on the pinned apply connection can catch this.
+    for clause in [
+        "ON DELETE SET DEFAULT",
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+        "ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+    ] {
+        sqlx::query(&format!("CREATE TABLE __graphql_orm_external_link(id TEXT PRIMARY KEY NOT NULL, parent_id TEXT DEFAULT 'fallback' REFERENCES owned_notes(id) {clause})")).execute(db.pool()).await?;
+        rejected_fk(
+            manager
+                .apply_owned_migration(&plan, Default::default())
+                .await
+                .unwrap_err(),
+            "__graphql_orm_external_link",
+        );
+        let columns: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pragma_table_info('owned_notes') WHERE name='extra'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(columns, 0);
+        let history: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM __graphql_orm_migrations WHERE version='upgrade'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(history, 0);
+        sqlx::query("DROP TABLE __graphql_orm_external_link")
+            .execute(db.pool())
+            .await?;
+    }
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    assert!(
+        manager
+            .plan_owned_migration(
+                "noop",
+                "replan",
+                &upgraded,
+                &ownership(),
+                PlanOptions::strict()
+            )
+            .await?
+            .steps()
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_owned_fk_semantics_and_reserved_apply_recheck()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("owned-fk-semantics")?;
+    let db = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
+    let manager = db.schema();
+    let parent = target::<PostgresBackend>();
+    let plan = manager
+        .plan_owned_migration(
+            "parent",
+            "fixture",
+            &parent,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    let managed = ManagedTableSet::new(["owned_notes".into(), "fk_sources".into()])?;
+    for clause in [
+        "ON DELETE SET DEFAULT",
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+        "ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+        "ON DELETE NO ACTION",
+    ] {
+        sqlx::query(&format!("CREATE TABLE fk_sources(id TEXT PRIMARY KEY NOT NULL, parent_id TEXT NOT NULL DEFAULT 'fallback', label TEXT NOT NULL, FOREIGN KEY(parent_id) REFERENCES owned_notes(id) {clause})")).execute(db.pool()).await?;
+        sqlx::query(
+            "INSERT INTO owned_notes(id,label) VALUES('parent','parent'),('fallback','fallback')",
+        )
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            "INSERT INTO fk_sources(id,parent_id,label) VALUES('child','parent','history')",
+        )
+        .execute(db.pool())
+        .await?;
+        let before: String = sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='fk_sources'::regclass AND contype='f'").fetch_one(db.pool()).await?;
+        rejected_fk(
+            manager
+                .plan_owned_migration(
+                    "change",
+                    "change label",
+                    &fk_target(),
+                    &managed,
+                    PlanOptions::strict(),
+                )
+                .await
+                .unwrap_err(),
+            "fk_sources",
+        );
+        rejected_fk(
+            manager
+                .validate_owned_schema(&fk_target(), &managed)
+                .await
+                .unwrap_err(),
+            "fk_sources",
+        );
+        rejected_fk(
+            manager
+                .runtime_mutation_environment(std::sync::Arc::new(schema()), &parent, &ownership())
+                .await
+                .unwrap_err(),
+            "fk_sources",
+        );
+        let after: String = sqlx::query_scalar("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='fk_sources'::regclass AND contype='f'").fetch_one(db.pool()).await?;
+        assert_eq!(before, after);
+        // Demonstrate the constraint semantics the ORM refused to reinterpret.
+        if clause.contains("UPDATE CASCADE") {
+            sqlx::query("UPDATE owned_notes SET id='moved' WHERE id='parent'")
+                .execute(db.pool())
+                .await?;
+            let value: String = sqlx::query_scalar("SELECT parent_id FROM fk_sources")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(value, "moved");
+        } else if clause.contains("SET DEFAULT") {
+            sqlx::query("DELETE FROM owned_notes WHERE id='parent'")
+                .execute(db.pool())
+                .await?;
+            let value: String = sqlx::query_scalar("SELECT parent_id FROM fk_sources")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(value, "fallback");
+        } else if clause.contains("DEFERRED") {
+            let mut tx = db.pool().begin().await?;
+            sqlx::query("UPDATE fk_sources SET parent_id='later'")
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("INSERT INTO owned_notes(id,label) VALUES('later','later')")
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+        sqlx::query("DROP TABLE fk_sources")
+            .execute(db.pool())
+            .await?;
+        sqlx::query("DELETE FROM owned_notes")
+            .execute(db.pool())
+            .await?;
+    }
+    let mut upgraded = schema().schema().clone();
+    let mut extra = upgraded.collections[0].fields[3].clone();
+    extra.id = FieldId::new("extra")?;
+    extra.api_name = "extra".into();
+    extra.physical_column = "extra".into();
+    upgraded.collections[0].fields.push(extra);
+    let upgraded = upgraded
+        .validate()?
+        .physical_schema::<PostgresBackend>(RuntimeMigrationLimits::default())?;
+    let plan = manager
+        .plan_owned_migration(
+            "upgrade",
+            "add field",
+            &upgraded,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    for clause in [
+        "ON DELETE SET DEFAULT",
+        "ON DELETE RESTRICT ON UPDATE CASCADE",
+        "ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED",
+    ] {
+        sqlx::query(&format!("CREATE TABLE __graphql_orm_external_link(id TEXT PRIMARY KEY NOT NULL, parent_id TEXT DEFAULT 'fallback' REFERENCES owned_notes(id) {clause})")).execute(db.pool()).await?;
+        rejected_fk(
+            manager
+                .apply_owned_migration(&plan, Default::default())
+                .await
+                .unwrap_err(),
+            "__graphql_orm_external_link",
+        );
+        let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='owned_notes' AND column_name='extra'").fetch_one(db.pool()).await?;
+        assert_eq!(columns, 0);
+        let history: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM __graphql_orm_migrations WHERE version='upgrade'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(history, 0);
+        sqlx::query("DROP TABLE __graphql_orm_external_link")
+            .execute(db.pool())
+            .await?;
+    }
+    // Cross-schema incoming sources are visible in pg_catalog and cannot be
+    // certified by the schema-local canonical dependency model.
+    sqlx::query("CREATE SCHEMA external_owner")
+        .execute(db.pool())
+        .await?;
+    sqlx::query("CREATE TABLE external_owner.links(id TEXT PRIMARY KEY, parent_id TEXT REFERENCES owned_notes(id) ON DELETE RESTRICT)").execute(db.pool()).await?;
+    rejected_fk(
+        manager
+            .runtime_mutation_environment(std::sync::Arc::new(schema()), &parent, &ownership())
+            .await
+            .unwrap_err(),
+        "external_owner.links",
+    );
+    sqlx::query("DROP SCHEMA external_owner CASCADE")
+        .execute(db.pool())
+        .await?;
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    db.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_successful_owned_rebuild_retains_memory_database_and_enforcement()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    let manager = db.schema();
+    let initial = target::<SqliteBackend>();
+    let plan = manager
+        .plan_owned_migration(
+            "initial",
+            "fixture",
+            &initial,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    sqlx::query("INSERT INTO owned_notes(id,label) VALUES('retained','history')")
+        .execute(db.pool())
+        .await?;
+    let mut definition = schema().schema().clone();
+    definition.collections[0].fields[1].nullable = true;
+    let updated = definition
+        .validate()?
+        .physical_schema::<SqliteBackend>(RuntimeMigrationLimits::default())?;
+    let plan = manager
+        .plan_owned_migration(
+            "rebuild",
+            "nullable label only",
+            &updated,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(
+        plan.statements()
+            .iter()
+            .any(|sql| sql.starts_with("PRAGMA foreign_keys = OFF"))
+    );
+    manager
+        .apply_owned_migration(&plan, Default::default())
+        .await?;
+    let retained: (String, i64) =
+        sqlx::query_as("SELECT label,score FROM owned_notes WHERE id='retained'")
+            .fetch_one(db.pool())
+            .await?;
+    assert_eq!(retained, ("history".into(), 7));
+    let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(enabled, 1);
+    assert!(
+        manager
+            .plan_owned_migration(
+                "noop",
+                "runtime",
+                &updated,
+                &ownership(),
+                PlanOptions::strict()
+            )
+            .await?
+            .steps()
+            .is_empty()
+    );
+    let mut static_target = SchemaModel::from_entities(&[Note::metadata()]);
+    static_target.tables[0]
+        .columns
+        .iter_mut()
+        .find(|field| field.name == "label")
+        .unwrap()
+        .nullable = true;
+    assert!(
+        manager
+            .plan_schema_target(
+                "noop-static",
+                "static",
+                &SchemaTarget {
+                    schema: static_target,
+                    rls: RlsSchemaModel { entities: vec![] },
+                }
+            )
+            .await?
+            .migration
+            .steps
+            .is_empty()
+    );
+    Ok(())
+}

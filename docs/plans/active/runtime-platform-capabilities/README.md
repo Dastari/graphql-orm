@@ -1116,13 +1116,27 @@ is advertised until its contract is committed and reviewed.
 
 ## Current checkpoint
 
-Proposal prepared against the exact remote base; no functional APIs implemented.
-The independent repository aggregate fix is approved for implementation in
-its own PR. A–D remain pending review of this revised contract: preserved enum
-namespaces with shared internal storage adapters, ownership/RLS/dependency
-verification, guarded operation/hook cancellation, host-managed AEAD cursor
-protection, symmetric lossless JSON-text scalars, required create keys, and
-host policy-only revision validation. Other accepted boundaries, including
-initial unsupported_cascade with RESTRICT supported, are retained. No A–D
-interfaces are implemented by this proposal. Each approved functional PR must
-provide its own compiled examples, isolated evidence and exact handoff.
+The revised A–D contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`
+is approved. The independent repository aggregate fix is merged and included
+in the owner-published 0.33.3 baseline. PR A implements owned targets and
+read-only planning, explicit ownership and separate guarded application in
+ORM/macros 0.34.0; its compiled host example and isolated SQLite/PostgreSQL
+tests accompany the implementation. It remains subject to owner review.
+
+A's live FK capability checks reject unsupported actions/deferral with scoped
+`UnsupportedForeignKey` diagnostics, including relevant system/unowned incoming
+sources, and recheck them on the pinned apply transaction. The legacy physical
+model/static APIs are unchanged. Successful SQLite FK restoration retains its
+connection; cancellation or failed restoration discards an unsafe lease. ORM API
+reproductions at the reviewed head confirm constraint loss. Regressions cover
+structured FK rejection, successful in-memory rebuild/no-op replanning,
+cancellation, incoming constraints introduced after planning, and unchanged
+PostgreSQL system RLS. The approved legacy datetime rejection and
+representable static/runtime equivalence gates remain covered.
+
+B–D remain approved proposals with unimplemented interfaces and require reviewed
+committed predecessors. Keep the operation/hook cancellation, host-managed AEAD
+cursor protection, lossless JSON text, required create keys and host policy-only
+revision guarantees during implementation. Independent compiled static
+relationships/query/view work is coordinated separately and does not require
+B–D or dynamic GraphQL. No releases or consumer repository changes are included.

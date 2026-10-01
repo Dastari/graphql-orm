@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,6 +29,12 @@ Companion macros crate: `graphql-orm-macros` **0.34.0** (alignment only).
   and additive guards, preserve host PostgreSQL RLS, and reject unsupported live
   preservation cases. Add a verified incoming-dependency environment for later
   runtime mutations; record mutation and dynamic GraphQL are still later slices.
+- Reject unrepresentable live FK actions, deferral and dependency scopes with
+  `UnsupportedForeignKey`, including incoming system/unowned sources. Recheck on
+  the pinned apply transaction so SQLite rebuilds cannot drop omitted constraints
+  and runtime dependency certificates cannot mistake `SET DEFAULT` for `Restrict`.
+- Preserve a single-connection SQLite in-memory database after a successful owned
+  rebuild; discard suspended connections on cancellation or failed restoration.
 - Respect SQLite composite primary-key ordinal order during introspection.
 - Reject legacy epoch-second DateTime default conversion with scoped structured
   diagnostics while preserving static storage and supported Integer defaults;

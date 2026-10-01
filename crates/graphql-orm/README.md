@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -190,3 +190,6 @@ Ordinary `GraphQLEntity` aggregate SDL remains unchanged.
 
 Owned runtime targets, explicit table ownership, read-only plans and guarded apply
 are documented in [runtime migrations](../../docs/reference/graphql-orm/runtime-migrations.md).
+Live capability checks reject FK actions/deferral the physical model cannot retain,
+including incoming system/unowned constraints, and recheck on the apply transaction.
+Static migration APIs remain unchanged.

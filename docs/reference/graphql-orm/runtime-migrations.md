@@ -108,6 +108,34 @@ referenced definition with an unowned incoming FK are rejected; an unchanged
 definition can gain indexes. Compose host-owned system tables explicitly to plan
 changes to the owned dependency graph together. No `CASCADE` DDL bypass is added.
 
+Owned runtime validation supplements the legacy FK model with live capability
+checks. `UnsupportedForeignKey` identifies the physical source table and SQLite
+source column or PostgreSQL constraint in `subject`; `collection` is absent for
+catalog sources that need not belong to the runtime schema. A modifying
+`ON DELETE SET DEFAULT` is never classified as `Restrict` for a runtime dependency
+certificate. Initial owned support accepts explicit delete `RESTRICT`, `CASCADE`
+and `SET NULL`, default update `NO ACTION`, and non-deferrable constraints.
+Delete `NO ACTION` is rejected because its constraint-check timing differs from
+`RESTRICT`; nondefault update actions and any deferrable FK are also rejected.
+The static physical model and static migration behavior remain unchanged.
+
+Checks include relevant incoming sources from unowned/system/ORM tables. Unrelated
+unsupported FKs outside the owned dependency graph do not block planning or change
+those tables. SQLite reads action metadata from its FK PRAGMA and scans unquoted,
+non-comment DDL words for deferral; if a relevant source table contains a deferrable
+FK, it conservatively rejects that table. PostgreSQL reads `pg_constraint`, including
+cross-schema incoming sources, and rejects cross-schema bindings, non-simple match
+rules, unvalidated constraints and partial-column delete actions that the canonical
+model cannot represent. SQLite physical names with case variants of owned names are
+also rejected rather than losing dependency identity.
+
+These checks run during read-only validation/planning and mutation-environment
+certification, and again on the pinned apply transaction before target DDL/history
+success. The legacy source hash omits reserved infrastructure tables and omitted FK
+attributes, so that hash alone is insufficient for these checks. Unsupported FK
+adapters or extended canonical FK semantics remain separate follow-ups; hosts may
+surface this diagnostic in capability/admin previews.
+
 After applying and replanning to no-op, hosts can obtain a
 `RuntimeMutationEnvironment` through `runtime_mutation_environment(Arc<ValidatedRuntimeSchema>,
 &target, &ownership)`. It verifies that the schema matches the live composed
@@ -134,8 +162,10 @@ does not weaken this binding. A changed live physical source requires a new plan
 
 Application rechecks the baseline on the pinned transaction before DDL. SQLite
 uses `BEGIN IMMEDIATE`; controlled rebuilds check FKs before commit and restore
-connection state. A connection whose FKs were suspended is closed on drop so
-cancellation cannot return that state to the pool. PostgreSQL uses a cooperative
+connection state. An operation guard closes a connection whose FK enforcement was not restored,
+so cancellation cannot return that state to the pool. Successful restoration
+disarms the guard and retains the connection, including a one-connection in-memory
+database. PostgreSQL uses a cooperative
 migration advisory lock plus locks on existing owned tables. Hosts must coordinate
 DDL issued outside ORM migration execution. DDL and the successful history row
 commit together. A recorded version is an already-applied success only after a

@@ -13,6 +13,7 @@ mod lease;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
 mod operation_metadata;
+mod owned_foreign_keys;
 mod owned_schema;
 mod query;
 mod rls;

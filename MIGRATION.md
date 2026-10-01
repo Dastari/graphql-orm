@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,6 +28,15 @@ immutable baseline binding. Replan after drift and after successful application.
 Owned application does not reconcile PostgreSQL RLS. Unsupported backends fail
 before connection acquisition; unsupported live preservation cases return structured
 rejections. See [owned runtime migrations](docs/reference/graphql-orm/runtime-migrations.md).
+
+Owned runtime operations reject unsupported live FK semantics with a scoped
+`UnsupportedForeignKey` diagnostic. Use explicit delete `RESTRICT`, `CASCADE` or
+`SET NULL`, default update `NO ACTION` and non-deferrable constraints in the initial
+profile. Delete `SET DEFAULT`/`NO ACTION`, nondefault update actions and deferral
+cannot be faithfully represented by the legacy model. Relevant system/unowned
+incoming constraints are checked, including on the pinned apply transaction;
+unrelated tables are left intact. Static migration APIs/storage behavior are
+unchanged. See the reference for additional PostgreSQL scope/match limitations.
 
 The physical dependency environment is not a record-write API or an authorization
 certificate. Hosts must fence external DDL and validate their complete public/policy
