@@ -55,14 +55,20 @@ unpublished reviewable PR does not establish all of #7's row/field/cache/preload
 implement #6's private generated adapters or close #1–4. Its package identity
 must be realigned if independent 0.34.0 PR A merges before this patch.
 
-[PR A / #97](https://github.com/Dastari/graphql-orm/pull/97) is independently ready
-for review at `1581df980af962edd50cb34659ceea185cc0016d`, ORM/macros 0.34.0.
-Its focused verification passed 91 SQLite tests, 32 PostgreSQL tests (including
-owned disposable database execution), and one MSSQL pre-I/O rejection test;
-MSSQL runtime migration execution remains unsupported. It implements the accepted
-owned migration target contract, including the approved scoped rejection of
-legacy epoch-second DateTime defaults. Static Integer epoch defaults remain
-supported. B–D are still approved proposals and wait for reviewed predecessors.
+[PR A / #97](https://github.com/Dastari/graphql-orm/pull/97) has corrected
+review head `aeb07b1b631b3aa9901c4a06b70b31a7ace10ff3`, ORM/macros 0.34.0.
+Focused verification passes 96 SQLite and 77 PostgreSQL tests (including seven
+owned disposable execution cases), plus one MSSQL pre-I/O rejection test.
+Actual ORM apply at the earlier reviewed head reproduced omitted FK action/
+deferral loss. Runtime-only checks now reject unsupported FK semantics with scoped
+`UnsupportedForeignKey` diagnostics, including relevant unowned/system incoming
+sources, and recheck on the pinned apply transaction. Successful SQLite rebuilds
+retain a restored connection and in-memory data; canceled/unrestored leases are
+discarded. Static APIs and the approved scoped legacy DateTime rejection remain
+unchanged; Integer epoch defaults and representable equivalence remain supported.
+B remains gated on corrected, reviewed A. B–D are approved proposals, not implemented
+interfaces. MSSQL runtime migrations remain unsupported; static query/view work
+continues independently of these review gates.
 
 [PR #98](https://github.com/Dastari/graphql-orm/pull/98) independently fixes the
 confirmed preloaded-target authorization defect at
@@ -86,7 +92,8 @@ one illustrative generated doctest is ignored in each execution lane. Existing
 core relation/authorization regressions pass (54 tests; one large benchmark
 ignored), along with six macro tests and warnings-denied/backend compatibility
 checks. This is an implementation PR based on #96 for its cross-crate fixture,
-not a published/adoptable release or a private-view adapter.
+not a published/adoptable release or a private-view adapter. All ten CI checks
+are green at the exact #98 head; owner review/merge is still pending.
 
 Preferred package identity order is #96 (0.33.4), #98 (0.33.5), then #97 (0.34.0).
 If owner review chooses another order, realign the unpublished patches and rerun
