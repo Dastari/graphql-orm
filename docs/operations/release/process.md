@@ -59,6 +59,23 @@ sets `publish = false`, and `scripts/check-release-state.py` enforces that
 boundary. Registry publication would be a separate distribution project, not
 a side effect of this process.
 
+## Reviewed compiler baseline
+
+CI and workspace release lanes select Rust **1.97.1** explicitly. The independent
+router MSRV lane remains Rust **1.90.0**. Floating `stable` previously selected
+Rust 1.99.0 on hosted runners while local acceptance used 1.97.1, producing
+non-comparable evidence and new Clippy diagnostics in `async-trait`-generated
+`must_use` attributes. The selected compiler retains all warnings-denied gates;
+no lint is disabled and no test/provider/backend lane is removed.
+
+Changing this compiler baseline requires a separately reviewed build change and
+full provider/backend validation before publication. Rust 1.99.0 ordinary ORM
+and router test execution has passed, but companion Clippy compatibility remains
+an open follow-up. Do not claim the pinned lane demonstrates current floating
+stable Clippy support. Workflow configuration at the release source SHA records
+the selected compiler; consumers may compile the Rust source themselves within
+the documented package support contracts.
+
 ## Prepare the release commit
 
 1. Start from a clean branch based on current `main`.
