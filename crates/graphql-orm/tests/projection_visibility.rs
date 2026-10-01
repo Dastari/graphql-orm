@@ -440,3 +440,73 @@ async fn legacy_projection_implementation_stays_compatible_and_missing_identity_
     assert_eq!(fixture.reads.0.lock().unwrap().len(), 1);
     fixture.close().await
 }
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn current_sql_visibility_intersects_rls_and_preserves_pool_and_pinned_auth() -> TestResult {
+    use std::str::FromStr;
+    let fixture = Fixture::start().await?;
+    for ddl in [
+        "ALTER TABLE issuer_base ENABLE ROW LEVEL SECURITY",
+        "ALTER TABLE issuer_base FORCE ROW LEVEL SECURITY",
+        "CREATE POLICY issuer_partition ON issuer_base FOR SELECT USING (tenant = current_setting('app.tenant_id', true))",
+        "ALTER VIEW private_issuers SET (security_invoker = true)",
+        "CREATE ROLE projection_reader LOGIN PASSWORD 'owned-fixture-only'",
+        "GRANT USAGE ON SCHEMA public TO projection_reader",
+        "GRANT SELECT ON issuer_base, private_issuers TO projection_reader",
+    ] {
+        sqlx::query(ddl).execute(fixture.db.pool()).await?;
+    }
+    let options = sqlx::postgres::PgConnectOptions::from_str(&fixture.owned.url)?
+        .username("projection_reader")
+        .password("owned-fixture-only");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await?;
+    let mut reader = Database::<Backend>::new(pool.clone());
+    reader.set_entity_policy(EntityAccess(true));
+    reader.set_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
+    reader.set_row_policy(fixture.visibility.clone());
+    assert!(PublicIssuer::query(&reader).fetch_all().await?.is_empty());
+    let mut auth = DbAuthContext {
+        tenant_id: Some("beta".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        PublicIssuer::query_with_auth(&reader, Some(&auth))
+            .fetch_first()
+            .await?
+            .unwrap()
+            .id,
+        "a"
+    );
+    *fixture.visibility.mode.lock().unwrap() = Mode::Complete;
+    assert!(
+        PublicIssuer::query_with_auth(&reader, Some(&auth))
+            .fetch_all()
+            .await?
+            .is_empty(),
+        "SQL row policy does not override RLS"
+    );
+    auth.tenant_id = Some("alpha".into());
+    let public = reader
+        .transaction_with_auth(TransactionMode::Default, Some(&auth), |tx| {
+            Box::pin(async move {
+                tx.project::<PublicIssuer>()
+                    .limit(1)
+                    .fetch_all()
+                    .await
+                    .map_err(OrmPublicError::from)
+            })
+        })
+        .await?;
+    assert_eq!(public.len(), 1);
+    assert_eq!(public[0].id, "b");
+    assert!(
+        PublicIssuer::query(&reader).fetch_all().await?.is_empty(),
+        "auth settings do not leak after commit"
+    );
+    pool.close().await;
+    fixture.close().await
+}
