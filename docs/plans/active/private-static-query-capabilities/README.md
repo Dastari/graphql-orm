@@ -57,13 +57,17 @@ The implementation reviewed at `4617b332014758387a3c271a7b30a5aff4873453`
 remains unchanged; only the current main/AI release and generated inventory were reconciled. Its executable
 SQLite fixture binds complete tenant/endpoint ownership, retains historical
 snapshots, measures two real target SELECTs for multiple parents and demonstrates
-nullable target entity denial. PostgreSQL/MSSQL lanes are compile-only. This
-unpublished reviewable PR does not establish all of #7's row/field/cache/preload checks,
+nullable target entity denial. PostgreSQL/MSSQL lanes are compile-only. Merged at `c2cd8b71de20f925d102d6a686bc4b9eff45e23c` after all ten checks
+passed, this fix does not establish all of #7's row/field/cache/preload checks,
 implement #6's private generated adapters or close #1–4. Its package identity
 is preserved by the subsequent 0.33.5/0.35.0/0.35.1 independent release set.
 
 [PR A / #97](https://github.com/Dastari/graphql-orm/pull/97) has corrected
-review head `aeb07b1b631b3aa9901c4a06b70b31a7ace10ff3`, ORM/macros 0.34.0.
+review head `e41866d582c36fd920044f6461cb15c6bd446f17`, ORM/macros 0.36.0.
+It incorporates the committed static 0.35.1 predecessor while leaving migration,
+owned-FK scanning and guarded-apply modules byte-identical to corrected
+`aeb07b1b631b3aa9901c4a06b70b31a7ace10ff3`. The unpublished identity advances
+without changing the approved contract or legacy datetime/FK corrections.
 Focused verification passes 96 SQLite and 77 PostgreSQL tests (including seven
 owned disposable execution cases), plus one MSSQL pre-I/O rejection test.
 Actual ORM apply at the earlier reviewed head reproduced omitted FK action/
@@ -101,8 +105,9 @@ one illustrative generated doctest is ignored in each execution lane. Existing
 core relation/authorization regressions pass (54 tests; one large benchmark
 ignored), along with six macro tests and warnings-denied/backend compatibility
 checks. This is an implementation PR based on #96 for its cross-crate fixture,
-not a published/adoptable release or a private-view adapter. All ten CI checks
-are green at the exact #98 head; owner review/merge is still pending.
+not a private-view adapter. All ten CI checks passed at the reconciled #98 head;
+it merged at `6e7a3eafe2630ccd3fa23a2788a4d430b1e389e7`. Publication of the
+combined release remains required before consumer adoption.
 
 [PR #99](https://github.com/Dastari/graphql-orm/pull/99) implements complete bounded
 SQLite text-group pages at `0e48a76197b39ef62ac43fbf7cd083d866cc79cc`, aligned
@@ -127,7 +132,9 @@ checks pass. Explicit package-selected patch-level semver analysis passes 223
 checks (30 inapplicable checks skipped), independent of version-bump heuristics.
 The [canonical reference at its exact head](https://github.com/Dastari/graphql-orm/blob/ae67b01d9222fae5787e02b553e9a24c21e31797/docs/reference/graphql-orm/typed-aggregates.md)
 specifies cursor bounds, current SQL policy checks and storage/collation limits.
-This is reviewable implementation, not a published/adoptable capability.
+All eleven checks passed at the reconciled head; it merged at
+`6bfd52212f4b77d712c9e9916bdeeaf1c0336096`. This remains an unpublished
+capability until the coordinated release completes.
 Computed SQL Server grouping/totals, joined/computed reads and private generated
 views remain missing. Its private visibility accessor matches #98's shared
 accessor; its reconciled head incorporates committed #96/#98/current main without a
@@ -157,8 +164,8 @@ PRs and preserve publication/license policy.
 The independent merge/release order is #96 (0.33.4), #98 (0.33.5), #99 (0.35.0),
 then #102 (0.35.1). Functional query/group/private-view work has no dependency on
 B–D completion. PR A remains gated on corrected migration review; its unpublished
-0.34.0 identity must be advanced before a later merge rather than downgrade the
-published independent package set. Keep the approved datetime/FK/ownership
+identity is now advanced to 0.36.0, preserving the prospective independent
+package set rather than downgrading it. Keep the approved datetime/FK/ownership
 acceptance requirements intact during that reconciliation.
 
 [PR #102](https://github.com/Dastari/graphql-orm/pull/102) fixes the additional
@@ -171,6 +178,9 @@ transactions. `CallbackOnly`/`Prefilter` still reject before SELECTs, without fu
 entity fallback or private-key retrieval. Existing trait implementations remain
 source compatible through a provided identity hook; a missing/wrong identity for
 complete visibility fails closed. No static SDL, storage or cursor changes.
+All twelve checks passed at the exact head; merged at
+`73ef09dbdb58b756ad0466900b905c08c282a2b4`. The coordinated source-only `.3`
+release selects that immutable source; publication remains required for adoption.
 
 Four new SQLite and four isolated PostgreSQL regressions execute actual views
 that fail if the private-key expression is selected. They test all pool/transaction
