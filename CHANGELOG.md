@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.35.1 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.35.1**.
+
+- Allow typed repository projections under an installed global row-policy provider
+  when current visibility is explicitly unrestricted or complete SQL authorization.
+  Apply entity-bound predicates before limits and primary/unique-key lookups,
+  including pinned transactions, without selecting excluded private fields.
+- Retain fail-closed callback-only/prefilter policies and normal entity/selected-field
+  checks. Add a provided generated-identity hook without changing existing trait
+  implementation requirements, static GraphQL SDL, storage or cursor formats.
+- Add executable private repository projection/group examples and isolated
+  SQLite/PostgreSQL regression evidence; observe actual projection query counts.
+
 ## 0.35.0 - 2026-10-01
 
 Companion macros crate: `graphql-orm-macros` **0.35.0** (alignment only).

@@ -13,6 +13,27 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## Policy-aware typed projections (0.35.1)
+
+Adopt aligned ORM/macros 0.35.1. No schema or GraphQL SDL migration is required.
+A global `RowPolicy` no longer automatically rejects every projection: return
+`ReadVisibility::Unrestricted` deliberately for an unrestricted model or
+`Complete(ReadPredicate::from_filter(...))` for visibility fully expressed in SQL.
+This is the same contract supported by complete SQLite group pages. The default
+`CallbackOnly` and `Prefilter` continue to reject these reads before query I/O;
+there is no full-entity fallback. Entity and selected-field policies remain active.
+
+Re-evaluate visibility for every call using verified identity/current ownership.
+A complete predicate replaces the residual callback on these supported paths;
+do not label a partial predicate complete. Generated projections carry their
+associated entity identity. Existing handwritten `ReadProjection` implementations
+remain source compatible and support unrestricted visibility; complete predicates
+require the provided `entity_type_id` hook to return that associated entity's
+`TypeId`. No public GraphQL roots or private model fields are added.
+
+See [typed projections](docs/reference/graphql-orm/read-projections.md) for a
+compiled SQL-free private repository example and exact backend/authorization rules.
+
 ## Complete text-group pages (0.35.0)
 
 Adopt aligned ORM/macros 0.35.0 after owner review/publication. This is an additive
