@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.106.1` admits up to 128 exact static bootstrap fingerprints and
+Grok SDK definitions, matching the existing Codex definition ceiling. Hosts
+with larger reviewed tool catalogues no longer fail provider-session admission
+at the former 64-tool limit. Complete projected surfaces, including broker tools,
+still obey each provider’s definition and byte limits.
+
 Version `0.106.0` lets trusted host policy distinguish required authentication
 renewal from permission denial before native tool admission. The model receives
 a protected, audited, non-retryable preflight failure and can continue permitted
