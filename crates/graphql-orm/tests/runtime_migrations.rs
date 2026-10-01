@@ -8,13 +8,25 @@ use graphql_orm::graphql::orm::*;
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 
-#[cfg_attr(feature = "sqlite", graphql_entity(backend = "sqlite"))]
+#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "owned_notes",
+        plural = "Notes",
+        default_sort = "id ASC"
+    )
+)]
 #[cfg_attr(
     all(feature = "postgres", not(feature = "sqlite")),
-    graphql_entity(backend = "postgres")
+    graphql_entity(
+        backend = "postgres",
+        table = "owned_notes",
+        plural = "Notes",
+        default_sort = "id ASC"
+    )
 )]
-#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "owned_notes", plural = "Notes", default_sort = "id ASC")]
 struct Note {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -708,9 +720,9 @@ async fn sqlite_composite_keys_all_runtime_types_and_timestamp_defaults()
 }
 
 #[cfg(feature = "sqlite")]
-#[graphql_entity(backend = "sqlite")]
 #[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
+    backend = "sqlite",
     table = "host_journal",
     plural = "HostJournal",
     default_sort = "id ASC",
@@ -969,4 +981,227 @@ async fn postgres_competing_baselines_destructive_guards_and_atomic_failure()
     db.pool().close().await;
     owned.cleanup()?;
     Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(backend = "sqlite", table = "legacy_times", plural = "LegacyTimes")]
+struct LegacyTime {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    #[date_field]
+    created_at: String,
+}
+#[cfg(feature = "sqlite")]
+#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "integer_times",
+    plural = "IntegerTimes",
+    default_sort = "id ASC"
+)]
+struct IntegerTime {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    created_at: i64,
+}
+#[cfg(feature = "sqlite")]
+#[test]
+fn legacy_datetime_default_conversion_fails_closed_without_changing_static_storage() {
+    let static_target = SchemaModel::from_entities(&[LegacyTime::metadata()]);
+    let legacy = static_target.tables[0]
+        .columns
+        .iter()
+        .find(|c| c.name == "created_at")
+        .unwrap();
+    assert_eq!(legacy.default.as_deref(), Some("unixepoch()"));
+    let error = RuntimeSchema::from_static_entities(&[LegacyTime::metadata()]).unwrap_err();
+    let diagnostic = error
+        .diagnostics()
+        .iter()
+        .find(|d| d.code == RuntimeSchemaDiagnosticCode::UnsupportedDefault)
+        .unwrap();
+    assert_eq!(
+        diagnostic.collection.as_ref().map(CollectionId::as_str),
+        Some("legacy_times")
+    );
+    assert_eq!(diagnostic.subject.as_deref(), Some("created_at"));
+    assert!(diagnostic.message.contains("epoch-second datetime"));
+    assert!(diagnostic.message.contains("RFC3339/native timestamp"));
+
+    let runtime = RuntimeSchema::from_static_entities(&[IntegerTime::metadata()])
+        .unwrap()
+        .validate()
+        .unwrap();
+    let target = runtime
+        .physical_schema::<SqliteBackend>(Default::default())
+        .unwrap();
+    let column = target.tables()[0]
+        .columns()
+        .iter()
+        .find(|c| c.name == "created_at")
+        .unwrap();
+    assert_eq!(column.sql_type, "INTEGER");
+    assert_eq!(column.default.as_deref(), Some("unixepoch()"));
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_plans_reject_unrepresentable_indexes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    let db = Database::<SqliteBackend>::new(pool);
+    let manager = db.schema();
+    let target = target::<SqliteBackend>();
+    let initial = manager
+        .plan_owned_migration(
+            "initial",
+            "owned",
+            &target,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&initial, ApplyOptions::default())
+        .await?;
+    for sql in [
+        "CREATE INDEX unsupported ON owned_notes(label) WHERE score > 0",
+        "CREATE INDEX unsupported ON owned_notes(label COLLATE NOCASE)",
+        "CREATE INDEX unsupported ON owned_notes(lower(label))",
+    ] {
+        sqlx::query(sql).execute(db.pool()).await?;
+        rejected(
+            manager
+                .plan_owned_migration(
+                    "unsafe",
+                    "cannot preserve",
+                    &target,
+                    &ownership(),
+                    PlanOptions::strict(),
+                )
+                .await
+                .unwrap_err(),
+            RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+        );
+        let retained: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name='unsupported'")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(
+            retained, 1,
+            "planning does not alter unsupported catalog state"
+        );
+        sqlx::query("DROP INDEX unsupported")
+            .execute(db.pool())
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_owned_plans_reject_unrepresentable_indexes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("owned-index-guards")?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&owned.url)
+        .await?;
+    let db = Database::<PostgresBackend>::new(pool);
+    let manager = db.schema();
+    let target = target::<PostgresBackend>();
+    let initial = manager
+        .plan_owned_migration(
+            "initial",
+            "owned",
+            &target,
+            &ownership(),
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&initial, ApplyOptions::default())
+        .await?;
+    for sql in [
+        "CREATE INDEX unsupported ON owned_notes(label) WHERE score > 0",
+        "CREATE INDEX unsupported ON owned_notes(lower(label))",
+        "CREATE INDEX unsupported ON owned_notes(label COLLATE \"C\")",
+        "CREATE INDEX unsupported ON owned_notes(label DESC NULLS LAST)",
+        "CREATE INDEX unsupported ON owned_notes(label) INCLUDE (score)",
+        "CREATE INDEX unsupported ON owned_notes(label text_pattern_ops)",
+    ] {
+        sqlx::query(sql).execute(db.pool()).await?;
+        rejected(
+            manager
+                .plan_owned_migration(
+                    "unsafe",
+                    "cannot preserve",
+                    &target,
+                    &ownership(),
+                    PlanOptions::strict(),
+                )
+                .await
+                .unwrap_err(),
+            RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+        );
+        let retained: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname='unsupported'").fetch_one(db.pool()).await?;
+        assert_eq!(retained, 1);
+        sqlx::query("DROP INDEX unsupported")
+            .execute(db.pool())
+            .await?;
+    }
+    db.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}
+
+#[test]
+fn static_quoted_literal_defaults_convert_losslessly() {
+    let mut metadata = Note::metadata().clone();
+    metadata
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "label")
+        .unwrap()
+        .default = Some("'a''b'");
+    let static_target = SchemaModel::from_entities(&[&metadata]);
+    let runtime = RuntimeSchema::from_static_entities(&[&metadata])
+        .unwrap()
+        .validate()
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    let owned = runtime
+        .physical_schema::<SqliteBackend>(Default::default())
+        .unwrap();
+    #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+    let owned = runtime
+        .physical_schema::<PostgresBackend>(Default::default())
+        .unwrap();
+    assert_eq!(owned.stable_hash(), static_target.stable_hash());
+    assert_eq!(
+        owned.tables()[0]
+            .columns()
+            .iter()
+            .find(|c| c.name == "label")
+            .unwrap()
+            .default
+            .as_deref(),
+        Some("'a''b'")
+    );
+    metadata
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "label")
+        .unwrap()
+        .default = Some("'a'b'");
+    let diagnostics = RuntimeSchema::from_static_entities(&[&metadata]).unwrap_err();
+    assert!(diagnostics.diagnostics().iter().any(|d| d.code
+        == RuntimeSchemaDiagnosticCode::UnsupportedDefault
+        && d.subject.as_deref() == Some("label")));
 }

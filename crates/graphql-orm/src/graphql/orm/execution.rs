@@ -1167,6 +1167,61 @@ pub(super) async fn validate_owned_sqlite_plan(
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {
     use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
+    use sqlx::Row;
+    // The canonical index model has no expression or collation storage. Never
+    // silently replace a managed index after lossy catalog interpretation.
+    for table in plan.ownership().tables() {
+        let indexes = sqlx::query("SELECT name, partial FROM pragma_index_list(?)")
+            .bind(table)
+            .fetch_all(&mut *connection)
+            .await?;
+        for index in indexes {
+            let name: String = index.try_get("name")?;
+            let members = sqlx::query("SELECT cid, coll FROM pragma_index_xinfo(?) WHERE key = 1")
+                .bind(&name)
+                .fetch_all(&mut *connection)
+                .await?;
+            if members.iter().any(|member| {
+                member.try_get::<i64, _>("cid").is_ok_and(|cid| cid < 0)
+                    || member
+                        .try_get::<String, _>("coll")
+                        .is_ok_and(|coll| !coll.eq_ignore_ascii_case("BINARY"))
+            }) {
+                return Err(
+                    rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into(),
+                );
+            }
+            if index.try_get::<i64, _>("partial")? != 0 {
+                let sql: String = sqlx::query_scalar(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                )
+                .bind(&name)
+                .fetch_one(&mut *connection)
+                .await?;
+                let recognized = sql.to_ascii_uppercase().find(" WHERE ").and_then(|offset| {
+                    super::migrations::parse_closed_set_index_predicate(&sql[offset + 7..])
+                });
+                if recognized.is_none() {
+                    return Err(
+                        rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into(),
+                    );
+                }
+            }
+        }
+    }
+    if plan
+        .statements()
+        .iter()
+        .any(|sql| sql == "DROP TABLE IF EXISTS __graphql_orm_retention_context")
+    {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='__graphql_orm_retention_context')")
+            .fetch_one(&mut *connection).await?;
+        if exists {
+            // This shared infrastructure may serve unowned append-only tables.
+            // The legacy repair/drop operation cannot prove bounded ownership.
+            return Err(rejection(RuntimeMigrationDiagnosticCode::OwnershipMismatch).into());
+        }
+    }
     let rebuilt = plan.rebuilt_sqlite_tables().collect::<Vec<_>>();
     if !rebuilt.is_empty() {
         // Without a SQL view-dependency IR, preserving arbitrary view definitions
@@ -1217,8 +1272,34 @@ pub(super) async fn validate_owned_postgres_plan(
     plan: &OwnedPlannedMigration,
 ) -> Result<(), RuntimeMigrationError> {
     use super::runtime_migration::{RuntimeMigrationDiagnosticCode, rejection};
+    for table in plan.ownership().tables() {
+        let indexes: Vec<(bool, String, Option<String>, bool)> = sqlx::query_as(
+            "SELECT ix.indexprs IS NOT NULL, am.amname, pg_get_expr(ix.indpred, ix.indrelid),
+                    EXISTS(SELECT 1 FROM unnest(ix.indclass::oid[]) cls JOIN pg_opclass opc ON opc.oid=cls WHERE NOT opc.opcdefault)
+                    OR EXISTS(SELECT 1 FROM unnest(ix.indcollation::oid[]) coll WHERE coll NOT IN (0, 100))
+                    OR ix.indnatts <> ix.indnkeyatts OR i.reloptions IS NOT NULL
+                    OR EXISTS(SELECT 1 FROM unnest(ix.indoption::smallint[]) opt WHERE ((opt & 1) = 1) <> ((opt & 2) = 2))
+             FROM pg_class t JOIN pg_namespace n ON n.oid=t.relnamespace
+             JOIN pg_index ix ON ix.indrelid=t.oid
+             JOIN pg_class i ON i.oid=ix.indexrelid JOIN pg_am am ON am.oid=i.relam
+             WHERE n.nspname=current_schema() AND t.relname=$1"
+        ).bind(table).fetch_all(&mut *connection).await?;
+        for (expression, method, predicate, unsupported_storage) in indexes {
+            if expression
+                || !matches!(method.as_str(), "btree" | "gist")
+                || unsupported_storage
+                || predicate.as_deref().is_some_and(|predicate| {
+                    super::migrations::parse_closed_set_index_predicate(predicate).is_none()
+                })
+            {
+                return Err(
+                    rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into(),
+                );
+            }
+        }
+    }
     let protected: Vec<(String,)> = sqlx::query_as("SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND c.relkind='r' AND (c.relrowsecurity OR c.relforcerowsecurity OR EXISTS(SELECT 1 FROM pg_policy p WHERE p.polrelid=c.oid))")
-        .fetch_all(connection).await?;
+        .fetch_all(&mut *connection).await?;
     if protected
         .iter()
         .any(|(table,)| plan.changes_protected_rls_structure(table))

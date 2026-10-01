@@ -832,13 +832,27 @@ pub trait RuntimeMigrationBackend: OrmBackend {
 impl RuntimeMigrationBackend for super::MssqlBackend {}
 impl RuntimeMigrationBackend for NoDefaultBackend {}
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn owned_introspection_error(error: sqlx::Error) -> RuntimeMigrationError {
+    match error {
+        // Catalog semantics rejected by the canonical parser are capability
+        // diagnostics; transport/database errors retain their original source.
+        sqlx::Error::Protocol(_) | sqlx::Error::ColumnDecode { .. } => {
+            rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into()
+        }
+        other => RuntimeMigrationError::Database(other),
+    }
+}
+
 #[cfg(feature = "sqlite")]
 impl RuntimeMigrationBackend for super::SqliteBackend {
     const RUNTIME_MIGRATIONS_SUPPORTED: bool = true;
     async fn introspect_owned(
         pool: &Self::Pool,
     ) -> Result<OwnedSchemaModel, RuntimeMigrationError> {
-        Ok(super::migrations::introspect_owned_sqlite_schema(pool).await?)
+        super::migrations::introspect_owned_sqlite_schema(pool)
+            .await
+            .map_err(owned_introspection_error)
     }
     async fn introspect_dependencies(
         pool: &Self::Pool,
@@ -873,7 +887,9 @@ impl RuntimeMigrationBackend for super::PostgresBackend {
     async fn introspect_owned(
         pool: &Self::Pool,
     ) -> Result<OwnedSchemaModel, RuntimeMigrationError> {
-        Ok(super::migrations::introspect_owned_postgres_schema(pool).await?)
+        super::migrations::introspect_owned_postgres_schema(pool)
+            .await
+            .map_err(owned_introspection_error)
     }
     async fn introspect_dependencies(
         pool: &Self::Pool,
@@ -899,7 +915,7 @@ impl RuntimeMigrationBackend for super::PostgresBackend {
         plan: &OwnedPlannedMigration,
         options: &ApplyOptions,
     ) -> Result<AppliedMigrationReport, RuntimeMigrationError> {
-        Ok(super::execution::apply_owned_postgres_migration(pool, plan, options).await?)
+        super::execution::apply_owned_postgres_migration(pool, plan, options).await
     }
 }
 
@@ -911,6 +927,13 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         ownership: &ManagedTableSet,
     ) -> Result<SchemaValidationReport, RuntimeMigrationError> {
         supported::<B>()?;
+        if !self.policy().allows_validation() {
+            return Err(rejection(RuntimeMigrationDiagnosticCode::PolicyDenied).into());
+        }
+        target.check_limits(target.limits)?;
+        target
+            .validate_physical_contract()
+            .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
         let current = B::introspect_owned(self.database.pool()).await?;
         validate_owned_effects(B::DIALECT, &current, target, ownership)?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);

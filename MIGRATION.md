@@ -33,6 +33,12 @@ The physical dependency environment is not a record-write API or an authorizatio
 certificate. Hosts must fence external DDL and validate their complete public/policy
 revision before future mutations; ORM fingerprints exclude host policy revisions.
 
+Static-to-runtime conversion now rejects an epoch-second default on a DateTime
+field with a scoped `UnsupportedDefault` diagnostic. Existing static defaults and
+storage remain unchanged; Integer epoch-second defaults remain supported. Canonical
+runtime datetime defaults retain RFC3339/native timestamp semantics. No implicit
+legacy datetime storage conversion or data migration is performed.
+
 ## 0.33.2 to 0.33.3: repository aggregate enum compatibility
 
 Pin runtime and macros 0.33.3 to the same reviewed full workspace revision.

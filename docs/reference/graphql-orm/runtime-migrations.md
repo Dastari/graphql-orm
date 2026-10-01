@@ -79,7 +79,7 @@ explicit ownership. Hashes are drift detectors, not signatures or authorization.
 
 Public collection/field names are diagnostic/query identities. Physical table and
 column names determine DDL. Changing public names alone never plans physical
-renames or record deletion. Equivalent static/owned targets use the same SQL/risk
+renames or record deletion. Equivalent representable static/owned targets use the same SQL/risk
 semantics and replan to an empty step/statement list after application in either
 origin direction. SQLite introspection respects primary-key member ordinals,
 including a composite key whose order differs from column declaration order.
@@ -147,7 +147,12 @@ flags, policies, table ownership/grants, host helper functions and unrelated tab
 remain intact. Removal/type changes on existing RLS-protected definitions are
 rejected when preservation cannot be established. SQLite controlled rebuilds
 reject host triggers, view preservation cases and reserved temporary-name collisions
-instead of running the legacy global stale-table cleanup.
+instead of running the legacy global stale-table cleanup. Managed expression,
+non-default-collation and unsupported partial indexes are rejected instead of
+losing semantics through catalog interpretation. PostgreSQL index INCLUDE members,
+non-default operator classes/null ordering/storage options and unsupported methods
+are also rejected. SQLite plans that would drop an existing shared retention
+context are rejected to preserve infrastructure serving other tables.
 
 ## Scalar/default and capability limits
 
@@ -161,6 +166,17 @@ Integer `CurrentTimestamp` uses backend epoch seconds. SQLite datetime defaults
 emit UTC RFC 3339 with six fractional digits (`strftime` has millisecond resolution,
 so the final three are zero); PostgreSQL uses its native timestamp default. SQL
 NULL and JSON null semantics remain those of the runtime record API.
+
+Static-to-runtime conversion rejects legacy epoch-second defaults on fields
+marked DateTime with a scoped `RuntimeSchemaDiagnosticCode::UnsupportedDefault`.
+The diagnostic identifies the collection and field and explains the incompatible
+storage semantic. In particular, SQLite `#[date_field] created_at: String` keeps
+its existing static `unixepoch()` default; it is never reinterpreted as RFC3339.
+Supported Integer timestamp fields keep epoch-second defaults. For representable
+static datetime declarations, use an explicitly compatible default or suppress
+the legacy implicit default with `#[graphql_orm(default = false)]`. Suppression
+changes that declaration's target and is not an automatic existing-data migration.
+A legacy datetime adapter remains a separate follow-up.
 
 `RuntimeMigrationLimits` bounds collections, per-table fields/indexes/relations,
 key arity, default bytes, total target bytes and rendered plan steps/statements/bytes.

@@ -296,7 +296,7 @@ let plan = database.schema().plan_owned_migration(
 ).await?;
 // Host reviews diagnostics/risks and retains the exact reviewed plan.
 let applied = database.schema().apply_owned_migration(&plan, ApplyOptions {
-    expected_current_schema_hash: plan.source_schema_hash().cloned(),
+    expected_current_schema_hash: Some(plan.source_schema_hash().to_owned()),
     ..ApplyOptions::default()
 }).await?;
 ```

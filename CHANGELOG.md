@@ -30,6 +30,9 @@ Companion macros crate: `graphql-orm-macros` **0.34.0** (alignment only).
   preservation cases. Add a verified incoming-dependency environment for later
   runtime mutations; record mutation and dynamic GraphQL are still later slices.
 - Respect SQLite composite primary-key ordinal order during introspection.
+- Reject legacy epoch-second DateTime default conversion with scoped structured
+  diagnostics while preserving static storage and supported Integer defaults;
+  preserve escaped quote semantics in converted literal defaults.
 
 No automatic application, host catalog, transport, durable delivery or release
 publication is introduced. See the owned runtime migration reference and example.

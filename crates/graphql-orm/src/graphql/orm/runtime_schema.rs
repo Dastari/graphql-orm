@@ -1463,24 +1463,29 @@ const EPOCH_DEFAULT_EXPRESSIONS: &[&str] = &[
     "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
 ];
 
-fn convert_default(raw: &str) -> Option<RuntimeDefault> {
+fn convert_default(raw: &str, kind: RuntimeValueKind) -> Option<RuntimeDefault> {
     if EPOCH_DEFAULT_EXPRESSIONS.contains(&raw) {
-        return Some(RuntimeDefault::CurrentTimestamp);
+        return (kind == RuntimeValueKind::Integer).then_some(RuntimeDefault::CurrentTimestamp);
+    }
+    if let Some(quoted) = raw
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        let mut value = String::with_capacity(quoted.len());
+        let mut characters = quoted.chars();
+        while let Some(character) = characters.next() {
+            if character == '\'' && characters.next() != Some('\'') {
+                return None;
+            }
+            value.push(character);
+        }
+        return Some(RuntimeDefault::Literal(value));
     }
     let literal = raw.parse::<i64>().is_ok()
         || raw.parse::<f64>().is_ok()
         || raw.eq_ignore_ascii_case("true")
-        || raw.eq_ignore_ascii_case("false")
-        || (raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\''));
-    if literal {
-        let value = raw
-            .strip_prefix('\'')
-            .and_then(|v| v.strip_suffix('\''))
-            .unwrap_or(raw);
-        Some(RuntimeDefault::Literal(value.to_string()))
-    } else {
-        None
-    }
+        || raw.eq_ignore_ascii_case("false");
+    literal.then(|| RuntimeDefault::Literal(raw.to_owned()))
 }
 
 fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
@@ -1514,6 +1519,8 @@ impl RuntimeSchema {
     ///
     /// Static declarations using capabilities the IR does not represent yet (spatial, search,
     /// partial/GiST indexes, check constraints) are reported as diagnostics rather than dropped.
+    /// Legacy epoch-second defaults on DateTime fields are rejected with `UnsupportedDefault`;
+    /// integer epoch-second defaults remain supported. Static declarations/storage are unchanged.
     pub fn from_static_entities(
         entities: &[&EntityMetadata],
     ) -> Result<Self, RuntimeSchemaDiagnostics> {
@@ -1633,15 +1640,16 @@ impl RuntimeSchema {
                 };
                 let default = match field.default {
                     None => None,
-                    Some(raw) => match convert_default(raw) {
+                    Some(raw) => match convert_default(raw, value_kind) {
                         Some(default) => Some(default),
                         None => {
                             diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                                 RuntimeSchemaDiagnosticCode::UnsupportedDefault,
-                                format!(
-                                    "column `{}` default `{raw}` is not a portable literal or known timestamp expression",
-                                    field.name
-                                ),
+                                if value_kind == RuntimeValueKind::DateTime && EPOCH_DEFAULT_EXPRESSIONS.contains(&raw) {
+                                    format!("column `{}` uses legacy epoch-second datetime default `{raw}`; canonical runtime DateTime requires RFC3339/native timestamp storage, not epoch seconds", field.name)
+                                } else {
+                                    format!("column `{}` default `{raw}` is not a portable literal or supported timestamp expression for its value kind", field.name)
+                                },
                                 &cid,
                                 Some(field.name),
                             ));

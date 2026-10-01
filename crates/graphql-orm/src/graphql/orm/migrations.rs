@@ -1186,7 +1186,7 @@ fn parse_structural_string_value(
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
-fn parse_closed_set_index_predicate(expression: &str) -> Option<IndexPredicateModel> {
+pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<IndexPredicateModel> {
     let tokens = tokenize_structural_sql(expression)?;
     let tokens = strip_redundant_outer_parentheses(&tokens);
     let StructuralSqlToken::Ident(column) = tokens.first()? else {
