@@ -18,6 +18,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.106.1] - 2026-10-01
+
+### Fixed
+
+- Raise the finite provider-session static bootstrap and Grok SDK definition
+  bounds from 64 to 128. Larger reviewed catalogues can start native sessions
+  without omitting tools; exact fingerprints, duplicate/schema rejection,
+  provider frame/byte limits and callback bounds remain mandatory.
+
 ## [Unreleased]
 
 ### Added
