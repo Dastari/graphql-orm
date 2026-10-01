@@ -13,7 +13,7 @@ supersedes: []
 ## Outcome and current checkpoint
 
 Provide supported, parameterized repository queries and generated redacted
-relationships for the self-contained consumer consumer contract, without application
+relationships for the self-contained consumer contract, without application
 query SQL, application databases, or dynamic runtime schema adoption. This is an
 implementation and verification plan; missing interfaces below are not implemented
 capabilities. No release publication or consumer deployment is authorized.
@@ -32,13 +32,14 @@ and independently merged AI/release maintenance. The reviewed fix,
 dependency-minimal consumer, static SDL and plain aggregate behavior are retained.
 The independent fixture maintenance [PR #92](https://github.com/Dastari/graphql-orm/pull/92)
 had already consumed 0.33.2; [PR #94](https://github.com/Dastari/graphql-orm/pull/94)
-corrects the aggregate fix's aligned package identity to 0.33.3 without behavior changes.
+merged at `82503290c0d0b96b78c687b4e75e5e279439eb59` and corrects the aggregate fix's aligned package identity to 0.33.3 without behavior changes.
 Neither PR implements the query or generated-adapter gaps below.
 [PR #90](https://github.com/Dastari/graphql-orm/pull/90), merged at
 `ad054a66abdcdb1b7fb7e06479cc3e8a985985d9`, concerns native AI authentication
 preflight. It adds no query, aggregate continuation or generated-view capability.
-Its inherited schema-module fixture assertion is tracked separately in
-[issue #93](https://github.com/Dastari/graphql-orm/issues/93).
+Its inherited schema-module fixture assertion was corrected independently in
+[PR #95](https://github.com/Dastari/graphql-orm/pull/95);
+[issue #93](https://github.com/Dastari/graphql-orm/issues/93) is closed.
 
 ## Overlap and dependency matrix
 
