@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## 0.5.4 - 2026-10-01
+
+- Replace the deprecated atomic `fetch_update` in saturating metrics decrements
+  with an equivalent compare-exchange loop supported by Rust 1.90. Preserve
+  relaxed ordering and saturation while allowing warnings-denied builds on
+  current Rust. Public APIs, counters and router behavior remain unchanged.
+
 ## 0.5.3 - 2026-09-27
 
 - Updated the private Hive runtime from 0.0.87 to published 0.2.19, including
