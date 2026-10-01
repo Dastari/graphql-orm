@@ -3,7 +3,7 @@ title: Typed grouped aggregates
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -73,7 +73,7 @@ execution keeps the supplied `DbAuthContext`, so transaction-local RLS is
 applied before aggregation.
 
 An application-side `RowPolicy` cannot safely inspect rows after aggregation;
-the builder therefore rejects that configuration. Move the restriction into a
+ordinary `fetch` therefore retains its rejection of that configuration. Move the restriction into a
 typed SQL filter or database RLS instead of aggregating unauthorized rows and
 filtering the result.
 
@@ -121,3 +121,98 @@ and generated decimal filters bind validated values rather than interpolating
 them into SQL. Logical backup rows retain the exact Decimal value together with
 its definition, allowing SQLite and PostgreSQL exports to restore without
 rounding or treating a native numeric as text.
+
+## Complete SQLite text-group pages
+
+ORM/macros 0.35.0 adds `fetch_group_page` to the existing generated aggregate
+builder. Its initial profile supports exactly one SQLite TEXT-affinity grouping
+field, optional existing metrics, and ascending `Binary` or `SqliteNoCase`
+comparison. Other scalar families, multi-key groups and other backends reject
+before the aggregate query; ordinary `fetch` and GraphQL aggregate SDL/cursors
+remain unchanged. Repository-only entities remain private and need no direct
+async-graphql dependency.
+
+```rust,ignore
+let page = PrivateEvent::aggregate(&database)
+    .filter(PrivateEventWhereInput {
+        tenant: Some(StringFilter { eq: Some(verified_tenant.clone()), ..Default::default() }),
+        ..Default::default()
+    })
+    .group_by(PrivateEventAggregateField::Event)?
+    .group_limit(37)?
+    .fetch_group_page(AggregateGroupPageOptions {
+        order: AggregateGroupOrder::SqliteNoCase,
+        exclude_blank: true,
+        context: trusted_authorization_partition_and_public_revision,
+    }, previous_cursor.as_ref())
+    .await?;
+```
+
+Metrics may be omitted to enumerate distinct original values. Repeat with the
+returned `end_cursor` until `has_next_page` is false. Each query returns at most
+`group_limit + 1` groups and the page exposes at most `group_limit`; the limit is
+1–1,000 and respects a stricter database maximum. The secure default is unchanged.
+Use existing `PaginationConfig::legacy()` or an explicit 1,000-row maximum only
+when that larger bound is intended. A complete set larger than a single-page cap
+does not require increasing that cap or loading the ledger into Rust.
+
+Group equality remains the original column's native SQL equality. Ordering does
+not case-fold or trim group identities. For deterministic representative values,
+paging selects the BINARY minimum original text in each native group. On ordinary
+BINARY text storage that is the exact original distinct string. NOCASE storage
+can merge text variants under its native equality and returns the original BINARY
+minimum variant. `SqliteNoCase` uses SQLite's ASCII folding followed by a BINARY
+tie-breaker; SQL NULL sorts first. `exclude_blank` applies native SQL
+`TRIM(field) <> ''` before grouping: ordinary spaces/empty strings and SQL NULL
+are excluded, padded nonblank strings are retained unchanged, and tabs/newlines
+are not removed by SQLite's default TRIM.
+
+Continuation uses HAVING over the same grouping representative and comparisons
+as ordering. It never filters source rows with a group cursor, which could
+truncate metrics or split a group. Metrics include every authorized source row
+in each returned group before the group limit. The database computes groups on
+each request; this API does not promise a cross-request snapshot under concurrent
+ledger writes.
+
+Every request rechecks entity and group/metric/filter field authority. The page
+path permits current `ReadVisibility::Complete` SQL predicates or explicit
+`Unrestricted`; callback-only or prefilter/residual policies fail closed because
+post-aggregate row callbacks cannot produce correct groups/counts. Ordinary
+aggregate `fetch` keeps its previous row-policy contract. SQL visibility is
+applied before grouping and pagination, and contributes to cursor identity.
+
+`AggregateGroupCursor::to_json`/`from_json` provide a strict framework-neutral
+boundary for host-owned opaque envelopes. The wire object has exactly
+`format_version: 1`, a lowercase 64-digit SHA-256 `fingerprint`, and required
+`key` (original string or JSON null for SQL NULL). Missing/unknown fields, other
+key types and versions are rejected. JSON is at most 256 KiB, text keys at most
+64 KiB UTF-8, and the trusted context is 1–4,096 bytes. A last returned grouping
+key outside these bounds fails the page rather than emitting an unusable cursor.
+These are cursor bounds, not a new record field storage limit.
+
+The fingerprint binds backend, entity/table/group/metric definitions, active
+filters, complete row predicate, ordering, blank exclusion, supplied
+`DbAuthContext` identity and trusted host context. Changing page size is allowed;
+changing these bindings rejects a cursor before the aggregate SELECT. The host
+must include its verified authorization partition and complete public/policy
+revision in context and validate its outer envelope. Fingerprints do not grant
+authority or provide encryption. Protect the complete envelope when the host
+requires confidentiality; existing static/runtime cursor formats are unchanged.
+
+The [standalone private consumer example](../../../crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/complete_events.rs)
+creates its own disposable SQLite database through ORM migrations/typed inserts
+and collects 225 original event types in 37-group pages without application query
+SQL or public GraphQL roots:
+
+```sh
+cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml   --locked --no-default-features --features sqlite --example complete_events
+```
+
+[Execution regressions](../../../crates/graphql-orm/tests/complete_group_pages.rs)
+cover native identities, SQL NULL/blank/padding, literal characters, more groups
+than the secure maximum, 1,000 groups plus lookahead, tenant/current policy
+isolation, denied fields/entities, strict cursors and complete metrics after
+continuation. PostgreSQL/MSSQL only compile and reject this new capability before
+pool I/O; existing PostgreSQL aggregate behavior is separately executed against
+test-owned infrastructure. Computed SQL Server grouping/whole-set totals and
+joined/computed record queries remain separate capabilities.

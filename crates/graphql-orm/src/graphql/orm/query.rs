@@ -1929,12 +1929,30 @@ fn render_grouped_aggregate_query(
     dialect: DatabaseBackend,
     query: &GroupedAggregateSqlQuery,
 ) -> RenderedQuery {
+    render_grouped_aggregate_query_page(dialect, query, None)
+}
+
+fn render_grouped_aggregate_query_page(
+    dialect: DatabaseBackend,
+    query: &GroupedAggregateSqlQuery,
+    page: Option<(AggregateGroupOrder, Option<&AggregateGroupCursor>)>,
+) -> RenderedQuery {
     let quoted_groups = query
         .groups
         .iter()
         .map(|field| dialect.quote_identifier_path(field.column_name))
         .collect::<Vec<_>>();
-    let mut projections = quoted_groups
+    // Preserve native GROUP BY equality. A deterministic original representative
+    // makes continuation stable even if native equality folds text variants.
+    let ordered_groups = if page.is_some() {
+        quoted_groups
+            .iter()
+            .map(|column| format!("MIN({column} COLLATE BINARY)"))
+            .collect::<Vec<_>>()
+    } else {
+        quoted_groups.clone()
+    };
+    let mut projections = ordered_groups
         .iter()
         .enumerate()
         .map(|(index, column)| {
@@ -1958,15 +1976,47 @@ fn render_grouped_aggregate_query(
     if !quoted_groups.is_empty() {
         sql.push_str(" GROUP BY ");
         sql.push_str(&quoted_groups.join(", "));
+        if let Some((order, Some(cursor))) = page {
+            let column = &ordered_groups[0];
+            let boundary = match &cursor.key {
+                None => FilterExpression::trusted_fragment(format!("{column} IS NOT NULL"), vec![]),
+                Some(key) => match order {
+                    AggregateGroupOrder::Binary => FilterExpression::trusted_fragment(
+                        format!("{column} COLLATE BINARY > ?"),
+                        vec![SqlValue::String(key.clone())],
+                    ),
+                    AggregateGroupOrder::SqliteNoCase => FilterExpression::trusted_fragment(
+                        format!(
+                            "({column} COLLATE NOCASE > ? OR ({column} COLLATE NOCASE = ? AND {column} COLLATE BINARY > ?))"
+                        ),
+                        vec![SqlValue::String(key.clone()); 3],
+                    ),
+                },
+            };
+            sql.push_str(" HAVING ");
+            sql.push_str(&render_filter_expression(
+                dialect,
+                &boundary,
+                &mut next_index,
+                &mut values,
+            ));
+        }
         sql.push_str(" ORDER BY ");
         sql.push_str(
-            &quoted_groups
+            &ordered_groups
                 .iter()
                 .flat_map(|column| {
-                    [
-                        format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END ASC"),
-                        format!("{column} ASC"),
-                    ]
+                    let mut order =
+                        vec![format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END ASC")];
+                    if let Some((mode, _)) = page {
+                        if mode == AggregateGroupOrder::SqliteNoCase {
+                            order.push(format!("{column} COLLATE NOCASE ASC"));
+                        }
+                        order.push(format!("{column} COLLATE BINARY ASC"));
+                    } else {
+                        order.push(format!("{column} ASC"));
+                    }
+                    order
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -1974,6 +2024,102 @@ fn render_grouped_aggregate_query(
         sql.push_str(&dialect.render_pagination(Some(query.group_limit), 0));
     }
     RenderedQuery { sql, values }
+}
+
+/// Ascending SQLite text-group comparison. Group equality remains native.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AggregateGroupOrder {
+    /// SQLite BINARY byte comparison, with SQL NULL first.
+    #[default]
+    Binary,
+    /// SQLite NOCASE comparison (ASCII folding), then BINARY for deterministic ties.
+    SqliteNoCase,
+}
+
+/// Request-local settings for complete bounded string-group enumeration.
+#[derive(Clone, Debug)]
+pub struct AggregateGroupPageOptions {
+    /// Comparison applied to grouping representatives; not to group equality.
+    pub order: AggregateGroupOrder,
+    /// Apply SQL TRIM(key) <> '' before grouping. Original nonblank keys are retained.
+    pub exclude_blank: bool,
+    /// Trusted host authorization partition/public revision, never an authority grant.
+    pub context: String,
+}
+
+/// Framework-neutral typed boundary. Hosts may wrap/protect its bounded JSON.
+/// No existing static or runtime cursor format is changed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct AggregateGroupCursor {
+    format_version: u8,
+    fingerprint: String,
+    key: Option<String>,
+}
+impl AggregateGroupCursor {
+    /// Parse bounded JSON with strict shape checking before allocating an unbounded cursor.
+    pub fn from_json(text: &str) -> crate::Result<Self> {
+        if text.len() > 256 * 1024 {
+            return Err(invalid_aggregate("invalid aggregate group cursor"));
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            format_version: u8,
+            fingerprint: String,
+            key: serde_json::Value,
+        }
+        let wire: Wire = serde_json::from_str(text)
+            .map_err(|_| invalid_aggregate("invalid aggregate group cursor"))?;
+        let cursor = Self {
+            format_version: wire.format_version,
+            fingerprint: wire.fingerprint,
+            key: match wire.key {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(key) => Some(key),
+                _ => return Err(invalid_aggregate("invalid aggregate group cursor")),
+            },
+        };
+        cursor.validate()?;
+        Ok(cursor)
+    }
+    /// Serialize the complete boundary for a host-owned cursor envelope.
+    pub fn to_json(&self) -> crate::Result<String> {
+        self.validate()?;
+        let text = serde_json::to_string(self)
+            .map_err(|_| invalid_aggregate("invalid aggregate group cursor"))?;
+        if text.len() > 256 * 1024 {
+            return Err(invalid_aggregate("invalid aggregate group cursor"));
+        }
+        Ok(text)
+    }
+    /// Exact original grouping representative; None means SQL NULL.
+    pub fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+    fn validate(&self) -> crate::Result<()> {
+        if self.format_version != 1
+            || self.fingerprint.len() != 64
+            || !self
+                .fingerprint
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+            || self.key.as_ref().is_some_and(|key| key.len() > 65536)
+        {
+            return Err(invalid_aggregate("invalid aggregate group cursor"));
+        }
+        Ok(())
+    }
+}
+
+/// At most group_limit result groups, with a database lookahead and typed continuation.
+#[derive(Clone, Debug)]
+pub struct AggregateGroupPage {
+    /// Ordered groups with exact original representatives and optional metric values.
+    pub rows: Vec<AggregateResultRow>,
+    /// True only when the database returned one additional authorized group.
+    pub has_next_page: bool,
+    /// Last returned boundary, including on the final nonempty page.
+    pub end_cursor: Option<AggregateGroupCursor>,
 }
 
 /// Policy-aware typed multi-expression aggregate builder.
@@ -2124,6 +2270,7 @@ where
     async fn authorize(
         &self,
         graphql_context: Option<&async_graphql::Context<'_>>,
+        sql_visibility: bool,
     ) -> crate::Result<()> {
         let metadata = T::metadata();
         let surface = if graphql_context.is_some() {
@@ -2141,7 +2288,7 @@ where
             )
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
-        if self.db.row_policy().is_some() {
+        if self.db.row_policy().is_some() && !sql_visibility {
             return Err(invalid_aggregate(
                 "aggregate queries require database row security or a typed SQL-renderable filter",
             ));
@@ -2204,6 +2351,160 @@ where
         Ok(())
     }
 
+    /// Enumerate all distinct string groups through bounded SQLite pages.
+    ///
+    /// Initial capability: exactly one TEXT-affinity group, ascending BINARY/NOCASE,
+    /// optional existing metrics and fully SQL-authorized rows. Other backends,
+    /// scalar groups and residual policies fail before the aggregate SELECT.
+    /// The existing group_limit bounds each page (1..=1000 plus one lookahead).
+    pub async fn fetch_group_page(
+        self,
+        options: AggregateGroupPageOptions,
+        after: Option<&AggregateGroupCursor>,
+    ) -> crate::Result<AggregateGroupPage>
+    where
+        T: 'static,
+    {
+        if B::DIALECT != DatabaseBackend::Sqlite || self.groups.len() != 1 {
+            return Err(invalid_aggregate(
+                "unsupported aggregate group pagination capability",
+            ));
+        }
+        let field = self.groups[0];
+        let text_storage = T::columns()
+            .iter()
+            .find(|c| c.name == field.column_name)
+            .is_some_and(|c| {
+                let ty = c.sql_type.to_ascii_uppercase();
+                ty.contains("TEXT") || ty.contains("CHAR") || ty.contains("CLOB")
+            });
+        if field.kind != AggregateFieldKind::Text || !text_storage {
+            return Err(invalid_aggregate(
+                "aggregate group pages require text storage",
+            ));
+        }
+        if !(1..=1000).contains(&self.group_limit)
+            || self
+                .db
+                .pagination_config()
+                .max_limit
+                .is_some_and(|max| self.group_limit > max)
+            || options.context.is_empty()
+            || options.context.len() > 4096
+        {
+            return Err(invalid_aggregate(
+                "invalid aggregate group page bounds or context",
+            ));
+        }
+        if let Some(cursor) = after {
+            cursor.validate()?;
+            if cursor.key.is_none() && !field.nullable {
+                return Err(invalid_aggregate("invalid aggregate group cursor"));
+            }
+        }
+        if let Some(filter) = &self.filter {
+            filter.validate()?;
+        }
+        self.authorize(None, true).await?;
+        let visibility = self
+            .db
+            .read_visibility::<T>(None, super::EntityAccessSurface::Repository)
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        if visibility.requires_residual_checks() {
+            return Err(invalid_aggregate(
+                "aggregate group pages require complete SQL row authorization",
+            ));
+        }
+        let mut filters: Vec<FilterExpression> = self
+            .filter
+            .as_ref()
+            .and_then(DatabaseFilter::to_filter_expression)
+            .into_iter()
+            .collect();
+        if let Some(predicate) = visibility.predicate_expression() {
+            filters.push(predicate.clone());
+        }
+        if options.exclude_blank {
+            filters.push(FilterExpression::trusted_fragment(
+                format!(
+                    "TRIM({}) <> ?",
+                    B::DIALECT.quote_identifier(field.column_name)
+                ),
+                vec![SqlValue::String(String::new())],
+            ));
+        }
+        let query = GroupedAggregateSqlQuery {
+            table: T::TABLE_NAME,
+            groups: self.groups.clone(),
+            metrics: self.metrics.clone(),
+            filter: if filters.is_empty() {
+                None
+            } else {
+                Some(FilterExpression::And(filters))
+            },
+            group_limit: self.group_limit + 1,
+        };
+        use sha2::Digest;
+        let identity = format!(
+            "aggregate-groups-v1:{:?}",
+            (
+                B::DIALECT,
+                T::metadata().entity_name,
+                query.table,
+                &query.groups,
+                &query.metrics,
+                &query.filter,
+                options.order,
+                options.exclude_blank,
+                &options.context,
+                self.auth.as_ref().map(DbAuthContext::canonical_key)
+            )
+        );
+        let fingerprint = format!("{:x}", sha2::Sha256::digest(identity.as_bytes()));
+        if after.is_some_and(|cursor| cursor.fingerprint != fingerprint) {
+            return Err(invalid_aggregate("invalid aggregate group cursor"));
+        }
+        let rendered =
+            render_grouped_aggregate_query_page(B::DIALECT, &query, Some((options.order, after)));
+        let fetched = B::fetch_rows_with_auth(
+            self.db.pool(),
+            &rendered.sql,
+            &rendered.values,
+            self.auth.as_ref(),
+        )
+        .await?;
+        self.db.observe_read(&rendered.sql, fetched.len());
+        let has_next_page = fetched.len() > self.group_limit as usize;
+        let rows: Vec<AggregateResultRow> = fetched
+            .iter()
+            .take(self.group_limit as usize)
+            .map(|row| decode_aggregate_row::<B>(row, &query.groups, &query.metrics))
+            .collect::<crate::Result<_>>()?;
+        let end_cursor = rows
+            .last()
+            .map(|row| {
+                let key = match &row.groups[0].value {
+                    AggregateValue::Null => None,
+                    AggregateValue::Text(key) => Some(key.clone()),
+                    _ => return Err(invalid_aggregate("invalid aggregate group value")),
+                };
+                let cursor = AggregateGroupCursor {
+                    format_version: 1,
+                    fingerprint,
+                    key,
+                };
+                cursor.to_json()?;
+                Ok(cursor)
+            })
+            .transpose()?;
+        Ok(AggregateGroupPage {
+            rows,
+            has_next_page,
+            end_cursor,
+        })
+    }
+
     /// Executes aggregation in the database and decodes bounded result groups.
     pub async fn fetch(self) -> crate::Result<Vec<AggregateResultRow>> {
         self.fetch_authorized(None).await
@@ -2230,7 +2531,7 @@ where
         if let Some(filter) = &self.filter {
             filter.validate()?;
         }
-        self.authorize(context).await?;
+        self.authorize(context, false).await?;
         let filter = self
             .filter
             .as_ref()

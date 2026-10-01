@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,24 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.35.0 - 2026-10-01
+
+Companion macros crate: `graphql-orm-macros` **0.35.0** (alignment only).
+
+- Add complete bounded SQLite text-group enumeration through the existing
+  aggregate builder, with native group equality, stable NOCASE/BINARY ordering,
+  typed host-context cursors and continuation after grouping.
+- Apply current complete SQL row visibility before grouping, retaining field/entity
+  authorization and fail-closed residual policies; bound pages to 1–1,000 plus
+  one lookahead. Keep ordinary aggregate APIs/GraphQL SDL/cursors unchanged.
+- Add a standalone private repository consumer example without query SQL/direct
+  async-graphql and SQLite execution/unsupported-backend regressions. Other scalar
+  groups/backends and computed SQL Server summaries remain separate capabilities.
+
+This static feature remains independent of runtime A–D. The 0.35.0 package
+identity preserves the independently reviewed 0.33.4/0.33.5 compatibility fixes;
+release coordination does not imply completion of the broader static query plan.
 
 ## 0.33.5 - 2026-10-01
 

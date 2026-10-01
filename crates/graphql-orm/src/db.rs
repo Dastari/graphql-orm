@@ -975,7 +975,7 @@ impl<B: OrmBackend> Database<B> {
     }
 
     /// Observe SQL text (without bind values) and database rows fetched by
-    /// EntityQuery reads. Intended for diagnostics and query-behavior tests.
+    /// EntityQuery and aggregate-page reads. Intended for diagnostics and query-behavior tests.
     pub fn with_read_query_observer(
         mut self,
         observer: impl crate::graphql::orm::ReadQueryObserver + 'static,

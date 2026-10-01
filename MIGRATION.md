@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,27 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## Complete text-group pages (0.35.0)
+
+Adopt aligned ORM/macros 0.35.0 after owner review/publication. This is an additive
+static aggregate API with no stored-data, existing aggregate SDL or cursor-format
+migration. Loop over `fetch_group_page` with a bounded `group_limit`, one text
+grouping field and trusted host context. Existing bounded `fetch` remains unchanged;
+use pages when the complete distinct set exceeds the group cap.
+
+The initial page profile is SQLite only, with native group equality and explicit
+BINARY/NOCASE ordering. Complete SQL row policies are reapplied before grouping;
+residual callbacks cannot authorize groups after aggregation. Include verified
+identity/public revision in host context and protect the bounded cursor JSON in
+an application-owned envelope when required. This fingerprint is not authority.
+See [typed aggregates](docs/reference/graphql-orm/typed-aggregates.md) and its
+compiled private consumer example for exact null, collation and continuation rules.
+
+Other backends/scalar/multi-key groups fail before query I/O for this new method.
+Existing PostgreSQL/MSSQL aggregate behavior remains unchanged. Computed summaries,
+joined/computed source reads and private generated GraphQL views remain independent
+work; no runtime-schema/dynamic GraphQL adoption is required for this API.
 
 ## 0.33.4 to 0.33.5: authoritative generated relationship access
 
