@@ -13,6 +13,20 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## Policy-aware transaction counts (0.35.2)
+
+Adopt aligned runtime/macros 0.35.2. No schema, stored-data, public API or
+GraphQL SDL migration is required. Transaction-bound repository `count` and
+`exists` now accept current explicit `Unrestricted` visibility or a complete
+SQL predicate from the installed row policy. Complete predicates are combined
+with caller filters before counting on the existing pinned transaction.
+
+Entity authorization remains required. Callback-only/prefilter visibility and
+residual query filters under an installed policy remain rejected; no full-row
+scan replaces SQL authorization. Re-evaluate verified identity and ownership
+for every call and never declare a partial predicate complete. Existing
+no-policy behavior is retained. See [repository helpers](docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
+
 ## Policy-aware typed projections (0.35.1)
 
 Adopt aligned ORM/macros 0.35.1. No schema or GraphQL SDL migration is required.
