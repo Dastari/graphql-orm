@@ -105,6 +105,11 @@ negotiation metadata, never authority.
 | `ProviderDeferred` | Already-filtered definitions marked for reviewed native deferred loading | Native provider tool search |
 | `FixedBroker` | Exact static bootstrap plus frozen discover/describe/execute definitions | Retained sessions whose generated definitions cannot change |
 
+Provider-session bindings admit at most 128 exact static bootstrap fingerprints.
+Grok SDK and Codex dynamic tools independently enforce 128-definition ceilings
+on the **complete** surface, including fixed broker definitions. Fingerprint
+admission does not relax provider byte/frame limits or application authority.
+
 `prepare_client_deferred_continuation` accepts only definitions matching the
 crate-owned loaded bindings and the configured selection count. Fixed broker
 arguments use a closed scalar argument list and public selection paths; the
