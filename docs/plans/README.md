@@ -32,3 +32,5 @@ An active plan has one canonical file at
 `docs/plans/active/<initiative>/README.md`. Update its current checkpoint rather
 than appending session chronology. On completion, move the initiative directory
 to `completed/`, set its status to `accepted`, and record the final evidence.
+
+- [Private static query and generated relationship capabilities](active/private-static-query-capabilities/README.md) — published-baseline audit, consumer overlap matrix and separate verification gates.
