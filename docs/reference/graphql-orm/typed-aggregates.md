@@ -178,17 +178,21 @@ are excluded, padded nonblank strings are retained unchanged, and tabs/newlines
 are not removed by SQLite's default TRIM.
 
 PostgreSQL pages group the original TEXT/VARCHAR value under explicit `C`
-comparison, even if the source column has a locale-dependent or nondeterministic
+comparison (`pg_catalog."C"`), even if the source column has a locale-dependent or nondeterministic
 collation. Case-distinct original strings therefore remain separate groups;
 there is no locale case conversion or identity trimming. `Binary` uses byte
 ordering. The historical `SqliteNoCase` spelling also works on PostgreSQL: it
-translates only ASCII A–Z to a–z, orders that expression under `C`, then uses
+uses `pg_catalog.translate` for only ASCII A–Z to a–z, orders that expression under
+`pg_catalog."C"`, then uses
 the original value under `C` as tie-breaker. Unicode is retained without folding
 or normalization. On UTF-8 databases this matches SQLite's ASCII NOCASE plus
 BINARY ordering. PostgreSQL NULL sorts first; default TRIM removes ordinary
 spaces only, matching blank exclusion on SQLite. PostgreSQL fixed-width CHAR,
 citext/custom storage, numeric and other nontext declarations are not supported
-page profiles; TEXT and VARCHAR are. Other database encodings are not a Unicode
+page profiles; TEXT and VARCHAR are. Built-in collation/function names are qualified, so a host search_path cannot
+substitute a user-defined C collation or translate function. Blank exclusion also
+uses byte comparison: non-empty Unicode values are retained even when a source
+ICU collation regards them as equal to empty. Other database encodings are not a Unicode
 parity claim. [PostgreSQL collation documentation](https://www.postgresql.org/docs/17/collation.html)
 and [ASCII translation](https://www.postgresql.org/docs/17/functions-string.html)
 describe the primitives; no application SQL fragment is required.

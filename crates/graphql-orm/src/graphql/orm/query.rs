@@ -1961,7 +1961,7 @@ fn render_grouped_aggregate_query_page(
     if page.is_some() && dialect == DatabaseBackend::Postgres {
         quoted_groups = quoted_groups
             .iter()
-            .map(|column| format!("CAST({column} AS TEXT) COLLATE \"C\""))
+            .map(|column| format!("CAST({column} AS TEXT) COLLATE pg_catalog.\"C\""))
             .collect();
     }
     // Preserve native SQLite GROUP BY equality. A deterministic original representative
@@ -2060,7 +2060,7 @@ fn render_grouped_aggregate_query_page(
 
 fn group_binary_comparison(dialect: DatabaseBackend, value: &str) -> String {
     match dialect {
-        DatabaseBackend::Postgres => format!("({value}) COLLATE \"C\""),
+        DatabaseBackend::Postgres => format!("({value}) COLLATE pg_catalog.\"C\""),
         _ => format!("{value} COLLATE BINARY"),
     }
 }
@@ -2068,7 +2068,7 @@ fn group_binary_comparison(dialect: DatabaseBackend, value: &str) -> String {
 fn group_ascii_comparison(dialect: DatabaseBackend, value: &str) -> String {
     match dialect {
         DatabaseBackend::Postgres => format!(
-            "translate(({value})::text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE \"C\""
+            "pg_catalog.translate(({value})::pg_catalog.text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE pg_catalog.\"C\""
         ),
         _ => format!("{value} COLLATE NOCASE"),
     }
@@ -2479,10 +2479,14 @@ where
         }
         if options.exclude_blank {
             filters.push(FilterExpression::trusted_fragment(
-                format!(
-                    "TRIM({}) <> ?",
-                    B::DIALECT.quote_identifier(field.column_name)
-                ),
+                {
+                    let trim = format!("TRIM({})", B::DIALECT.quote_identifier(field.column_name));
+                    if B::DIALECT == DatabaseBackend::Postgres {
+                        format!("{} <> ?", group_binary_comparison(B::DIALECT, &trim))
+                    } else {
+                        format!("{trim} <> ?")
+                    }
+                },
                 vec![SqlValue::String(String::new())],
             ));
         }
@@ -4701,12 +4705,12 @@ mod grouped_aggregate_tests {
         assert!(
             rendered
                 .sql
-                .contains("GROUP BY CAST(\"event\" AS TEXT) COLLATE \"C\" HAVING")
+                .contains("GROUP BY CAST(\"event\" AS TEXT) COLLATE pg_catalog.\"C\" HAVING")
         );
         assert!(!rendered.sql.contains("NOCASE"));
         assert!(!rendered.sql.contains("lower("));
-        assert!(rendered.sql.contains("translate(($2)::text"));
-        assert!(rendered.sql.contains("translate(($3)::text"));
+        assert!(rendered.sql.contains("translate(($2)::pg_catalog.text"));
+        assert!(rendered.sql.contains("translate(($3)::pg_catalog.text"));
         assert!(rendered.sql.contains(" > $4"));
         assert_eq!(rendered.values.len(), 4);
         assert!(rendered.sql.ends_with("LIMIT 101"));

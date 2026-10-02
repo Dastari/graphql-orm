@@ -684,7 +684,19 @@ async fn postgres_nondeterministic_source_collation_does_not_merge_original_grou
     let owned = Owned::start().await?;
     sqlx::query("CREATE COLLATION fixture_case_insensitive (provider = icu, locale = 'und-u-ks-level2', deterministic = false)").execute(owned.db.pool()).await?;
     sqlx::query("ALTER TABLE portable_history ALTER COLUMN event TYPE TEXT COLLATE fixture_case_insensitive").execute(owned.db.pool()).await?;
-    for (id, key) in [("a", "A"), ("b", "a"), ("c", "É"), ("d", "é")] {
+    // A legal host search_path may put a user collation named C ahead of
+    // pg_catalog. Fixed ordering must still select the built-in byte collation.
+    sqlx::query("CREATE COLLATION public.\"C\" (provider = icu, locale = 'und-u-ks-level2', deterministic = false)").execute(owned.db.pool()).await?;
+    sqlx::query("SET search_path TO public, pg_catalog")
+        .execute(owned.db.pool())
+        .await?;
+    for (id, key) in [
+        ("a", "A"),
+        ("b", "a"),
+        ("c", "É"),
+        ("d", "é"),
+        ("z", "\u{200b}"),
+    ] {
         insert(&owned.db, id, "alpha", Some(key), 1).await?;
     }
     let mut cursor = None;
@@ -705,7 +717,7 @@ async fn postgres_nondeterministic_source_collation_does_not_merge_original_grou
     }
     assert_eq!(
         keys,
-        ["A", "a", "É", "é"].map(|s| AggregateValue::Text(s.into()))
+        ["A", "a", "É", "é", "\u{200b}"].map(|s| AggregateValue::Text(s.into()))
     );
     owned.finish().await
 }
