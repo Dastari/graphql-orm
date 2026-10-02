@@ -14,7 +14,24 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## 0.38.0 - Unreleased
+## 0.39.0 - unreleased
+
+Companion macros crate: `graphql-orm-macros` **0.39.0**.
+
+- Add repository-only per-field `#[graphql_orm(timestamp = "host")]` for ordinary
+  signed Integer timestamp persistence, including Rust/physical aliases, nullable
+  inputs, existing conditional/bounded writes and upsert conflict updates.
+- Compare the known PostgreSQL-deparsed form of existing ORM epoch-second
+  defaults without false column alterations; preserve their values, units and
+  runtime Integer/DateTime distinctions.
+- Preserve legacy timestamp generation, GraphQL SDL, physical metadata/defaults,
+  explicit UUID keys and normal authorization/hooks. Fix generated repository
+  upsert field-policy calls to use the repository authorization surface.
+- Add owned SQLite/PostgreSQL exact-value, migration no-op, policy, rollback and
+  whole-transaction cancellation regressions plus standalone SQL-free consumers.
+  No unfinished-operation poisoning or runtime A–D capability is introduced.
+
+## 0.38.0 - 2026-10-03
 
 Companion macros crate: `graphql-orm-macros` **0.38.0**.
 

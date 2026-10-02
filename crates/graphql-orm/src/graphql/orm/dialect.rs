@@ -45,14 +45,25 @@ impl DatabaseBackend {
 /// - trim surrounding whitespace
 /// - strip balanced outer parentheses that wrap the entire expression
 /// - normalize SQL keyword defaults (`CURRENT_TIMESTAMP`, `NULL`, booleans)
-/// - leave string/blob literals and non-keyword identifiers untouched
+/// - recognize PostgreSQL's deparsed form of the ORM's known epoch-second default
+/// - leave string/blob literals and other non-keyword identifiers untouched
 ///
-/// Does **not** rewrite operators, function names, or argument order, so
+/// Apart from that exact known default, does **not** rewrite operators, function names, or argument order, so
 /// genuinely different expressions remain distinct.
 pub fn canonicalize_column_default_expression(default: &str) -> String {
     let mut value = default.trim().to_string();
     while is_fully_parenthesized(&value) {
         value = value[1..value.len() - 1].trim().to_string();
+    }
+
+    // PostgreSQL deparses the ORM's default with lowercase function/epoch names
+    // and parentheses around EXTRACT before its bigint cast. Whitelist only these
+    // exact equivalent forms; do not interpret arbitrary SQL or change units.
+    if matches!(
+        value.to_ascii_lowercase().as_str(),
+        "extract(epoch from now())::bigint" | "(extract(epoch from now()))::bigint"
+    ) {
+        return "EXTRACT(EPOCH FROM NOW())::bigint".to_string();
     }
 
     let uppercase = value.to_ascii_uppercase();
