@@ -1019,6 +1019,26 @@ impl<B: OrmBackend> Database<B> {
         Ok(visibility)
     }
 
+    pub(crate) async fn aggregate_read_visibility<T, A>(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+    ) -> async_graphql::Result<crate::graphql::orm::ReadVisibility>
+    where
+        T: crate::graphql::orm::Entity,
+        A: crate::graphql::orm::TypedAggregateField<T>,
+    {
+        let surface = if ctx.is_some() {
+            crate::graphql::orm::EntityAccessSurface::GraphqlQuery
+        } else {
+            crate::graphql::orm::EntityAccessSurface::Repository
+        };
+        let visibility = self
+            .read_visibility_for(T::metadata(), ctx, surface)
+            .await?;
+        visibility.validate_identity(A::entity_type_id(), B::DIALECT)?;
+        Ok(visibility)
+    }
+
     async fn read_visibility_for(
         &self,
         metadata: &'static crate::graphql::orm::EntityMetadata,

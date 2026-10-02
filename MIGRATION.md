@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,34 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## Portable group pages and SQL-visible aggregates (0.38.0)
+
+Adopt aligned ORM/macros 0.38.0. No physical schema, data, GraphQL SDL, existing
+SQLite cursor wire format or call-site change is required. `fetch_group_page`
+remains supported. PostgreSQL now supports single TEXT/VARCHAR group pages:
+`Binary` uses bytewise `C` comparison; the retained `SqliteNoCase` variant uses
+explicit ASCII A–Z folding then bytewise original-value tie-breaking. PostgreSQL
+page grouping uses exact original text equality, independently of source collation;
+ordinary aggregates and SQLite page native equality remain unchanged.
+
+An installed row policy no longer automatically blocks ordinary `fetch`: current
+`Unrestricted` or `Complete` visibility is required, with policy and caller filters
+intersected before aggregation. Residual/callback-only policies still fail closed.
+Generated aggregate-field enums supply an entity TypeId through a provided hook;
+handwritten enums remain compatible, but must implement `entity_type_id` correctly
+to use complete SQL visibility. Unrestricted visibility needs no token.
+
+Keep trusted authorization/public-revision context in page requests, protect
+host cursor envelopes as appropriate, and recheck current policy on every call.
+Page cursors do not pin a database snapshot. Concurrent insertion/deletion/renaming
+can change a multi-page enumeration; refresh from None when refreshing the dropdown.
+MSSQL pages and other scalar/multiple grouping keys reject before I/O. Existing
+MSSQL ordinary aggregate/provider/schema gates are unchanged.
+
+See [provider, authorization, wire and consistency contract](docs/reference/graphql-orm/typed-aggregates.md)
+and its executable standalone example and owned PostgreSQL test. This capability
+is independent of runtime contracts A–D and host-managed repository timestamps.
 
 ## Policy-aware transaction counts (0.35.2)
 
