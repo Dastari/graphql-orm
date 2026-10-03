@@ -697,6 +697,13 @@ impl AggregateFieldRef {
 pub trait TypedAggregateField<T: Entity>: Copy + Eq + Send + Sync + 'static {
     /// Returns immutable generated field evidence.
     fn aggregate_field(self) -> &'static AggregateFieldRef;
+    /// Generated entity identity for validating complete SQL visibility.
+    /// Handwritten implementations remain compatible; Complete visibility requires
+    /// this token, while explicitly Unrestricted reads need no token.
+    #[doc(hidden)]
+    fn entity_type_id() -> Option<std::any::TypeId> {
+        None
+    }
 }
 
 /// One requested aggregate expression.
@@ -1944,17 +1951,28 @@ fn render_grouped_aggregate_query_page(
     query: &GroupedAggregateSqlQuery,
     page: Option<(AggregateGroupOrder, Option<&AggregateGroupCursor>)>,
 ) -> RenderedQuery {
-    let quoted_groups = query
+    let mut quoted_groups = query
         .groups
         .iter()
         .map(|field| dialect.quote_identifier_path(field.column_name))
         .collect::<Vec<_>>();
-    // Preserve native GROUP BY equality. A deterministic original representative
+    // PostgreSQL page identities are exact text, independent of the source's
+    // locale/nondeterministic collation. Ordinary aggregates retain native equality.
+    if page.is_some() && dialect == DatabaseBackend::Postgres {
+        quoted_groups = quoted_groups
+            .iter()
+            .map(|column| format!("CAST({column} AS TEXT) COLLATE pg_catalog.\"C\""))
+            .collect();
+    }
+    // Preserve native SQLite GROUP BY equality. A deterministic original representative
     // makes continuation stable even if native equality folds text variants.
     let ordered_groups = if page.is_some() {
         quoted_groups
             .iter()
-            .map(|column| format!("MIN({column} COLLATE BINARY)"))
+            .map(|column| match dialect {
+                DatabaseBackend::Postgres => column.clone(),
+                _ => format!("MIN({column} COLLATE BINARY)"),
+            })
             .collect::<Vec<_>>()
     } else {
         quoted_groups.clone()
@@ -1987,18 +2005,25 @@ fn render_grouped_aggregate_query_page(
             let column = &ordered_groups[0];
             let boundary = match &cursor.key {
                 None => FilterExpression::trusted_fragment(format!("{column} IS NOT NULL"), vec![]),
-                Some(key) => match order {
-                    AggregateGroupOrder::Binary => FilterExpression::trusted_fragment(
-                        format!("{column} COLLATE BINARY > ?"),
-                        vec![SqlValue::String(key.clone())],
-                    ),
-                    AggregateGroupOrder::SqliteNoCase => FilterExpression::trusted_fragment(
-                        format!(
-                            "({column} COLLATE NOCASE > ? OR ({column} COLLATE NOCASE = ? AND {column} COLLATE BINARY > ?))"
-                        ),
-                        vec![SqlValue::String(key.clone()); 3],
-                    ),
-                },
+                Some(key) => {
+                    let binary = group_binary_comparison(dialect, column);
+                    let (clause, values) = match order {
+                        AggregateGroupOrder::Binary => {
+                            (format!("{binary} > ?"), vec![SqlValue::String(key.clone())])
+                        }
+                        AggregateGroupOrder::SqliteNoCase => {
+                            let folded = group_ascii_comparison(dialect, column);
+                            let bound = group_ascii_comparison(dialect, "?");
+                            (
+                                format!(
+                                    "({folded} > {bound} OR ({folded} = {bound} AND {binary} > ?))"
+                                ),
+                                vec![SqlValue::String(key.clone()); 3],
+                            )
+                        }
+                    };
+                    FilterExpression::trusted_fragment(clause, values)
+                }
             };
             sql.push_str(" HAVING ");
             sql.push_str(&render_filter_expression(
@@ -2017,9 +2042,9 @@ fn render_grouped_aggregate_query_page(
                         vec![format!("CASE WHEN {column} IS NULL THEN 0 ELSE 1 END ASC")];
                     if let Some((mode, _)) = page {
                         if mode == AggregateGroupOrder::SqliteNoCase {
-                            order.push(format!("{column} COLLATE NOCASE ASC"));
+                            order.push(format!("{} ASC", group_ascii_comparison(dialect, column)));
                         }
-                        order.push(format!("{column} COLLATE BINARY ASC"));
+                        order.push(format!("{} ASC", group_binary_comparison(dialect, column)));
                     } else {
                         order.push(format!("{column} ASC"));
                     }
@@ -2033,13 +2058,31 @@ fn render_grouped_aggregate_query_page(
     RenderedQuery { sql, values }
 }
 
-/// Ascending SQLite text-group comparison. Group equality remains native.
+fn group_binary_comparison(dialect: DatabaseBackend, value: &str) -> String {
+    match dialect {
+        DatabaseBackend::Postgres => format!("({value}) COLLATE pg_catalog.\"C\""),
+        _ => format!("{value} COLLATE BINARY"),
+    }
+}
+
+fn group_ascii_comparison(dialect: DatabaseBackend, value: &str) -> String {
+    match dialect {
+        DatabaseBackend::Postgres => format!(
+            "pg_catalog.translate(({value})::pg_catalog.text, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') COLLATE pg_catalog.\"C\""
+        ),
+        _ => format!("{value} COLLATE NOCASE"),
+    }
+}
+
+/// Ascending text-group comparison on supported page providers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AggregateGroupOrder {
-    /// SQLite BINARY byte comparison, with SQL NULL first.
+    /// Byte comparison (SQLite BINARY / PostgreSQL C), with SQL NULL first.
     #[default]
     Binary,
-    /// SQLite NOCASE comparison (ASCII folding), then BINARY for deterministic ties.
+    /// ASCII-only folding followed by byte comparison for deterministic ties.
+    /// The historical name is retained: PostgreSQL uses explicit ASCII translation
+    /// and C comparison, equivalent to SQLite NOCASE on UTF-8 text.
     SqliteNoCase,
 }
 
@@ -2277,7 +2320,6 @@ where
     async fn authorize(
         &self,
         graphql_context: Option<&async_graphql::Context<'_>>,
-        sql_visibility: bool,
     ) -> crate::Result<()> {
         let metadata = T::metadata();
         let surface = if graphql_context.is_some() {
@@ -2295,11 +2337,6 @@ where
             )
             .await
             .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
-        if self.db.row_policy().is_some() && !sql_visibility {
-            return Err(invalid_aggregate(
-                "aggregate queries require database row security or a typed SQL-renderable filter",
-            ));
-        }
         let mut fields = self
             .groups
             .iter()
@@ -2358,10 +2395,10 @@ where
         Ok(())
     }
 
-    /// Enumerate all distinct string groups through bounded SQLite pages.
+    /// Enumerate all distinct string groups through bounded SQLite/PostgreSQL pages.
     ///
-    /// Initial capability: exactly one TEXT-affinity group, ascending BINARY/NOCASE,
-    /// optional existing metrics and fully SQL-authorized rows. Other backends,
+    /// Exactly one text group, ascending byte/ASCII-folded ordering, optional
+    /// existing metrics and fully SQL-authorized rows. Unsupported backends,
     /// scalar groups and residual policies fail before the aggregate SELECT.
     /// The existing group_limit bounds each page (1..=1000 plus one lookahead).
     pub async fn fetch_group_page(
@@ -2372,7 +2409,11 @@ where
     where
         T: 'static,
     {
-        if B::DIALECT != DatabaseBackend::Sqlite || self.groups.len() != 1 {
+        if !matches!(
+            B::DIALECT,
+            DatabaseBackend::Sqlite | DatabaseBackend::Postgres
+        ) || self.groups.len() != 1
+        {
             return Err(invalid_aggregate(
                 "unsupported aggregate group pagination capability",
             ));
@@ -2383,7 +2424,11 @@ where
             .find(|c| c.name == field.column_name)
             .is_some_and(|c| {
                 let ty = c.sql_type.to_ascii_uppercase();
-                ty.contains("TEXT") || ty.contains("CHAR") || ty.contains("CLOB")
+                if B::DIALECT == DatabaseBackend::Postgres {
+                    ty == "TEXT" || ty.starts_with("VARCHAR") || ty.starts_with("CHARACTER VARYING")
+                } else {
+                    ty.contains("TEXT") || ty.contains("CHAR") || ty.contains("CLOB")
+                }
             });
         if field.kind != AggregateFieldKind::Text || !text_storage {
             return Err(invalid_aggregate(
@@ -2412,7 +2457,7 @@ where
         if let Some(filter) = &self.filter {
             filter.validate()?;
         }
-        self.authorize(None, true).await?;
+        self.authorize(None).await?;
         let visibility = self
             .db
             .read_visibility::<T>(None, super::EntityAccessSurface::Repository)
@@ -2434,10 +2479,14 @@ where
         }
         if options.exclude_blank {
             filters.push(FilterExpression::trusted_fragment(
-                format!(
-                    "TRIM({}) <> ?",
-                    B::DIALECT.quote_identifier(field.column_name)
-                ),
+                {
+                    let trim = format!("TRIM({})", B::DIALECT.quote_identifier(field.column_name));
+                    if B::DIALECT == DatabaseBackend::Postgres {
+                        format!("{} <> ?", group_binary_comparison(B::DIALECT, &trim))
+                    } else {
+                        format!("{trim} <> ?")
+                    }
+                },
                 vec![SqlValue::String(String::new())],
             ));
         }
@@ -2538,11 +2587,29 @@ where
         if let Some(filter) = &self.filter {
             filter.validate()?;
         }
-        self.authorize(context, false).await?;
-        let filter = self
+        self.authorize(context).await?;
+        let visibility = self
+            .db
+            .aggregate_read_visibility::<T, A>(context)
+            .await
+            .map_err(crate::graphql::errors::sqlx_error_from_graphql)?;
+        if visibility.requires_residual_checks() {
+            return Err(invalid_aggregate(
+                "aggregate queries require complete SQL row authorization",
+            ));
+        }
+        let filters: Vec<_> = self
             .filter
             .as_ref()
-            .and_then(DatabaseFilter::to_filter_expression);
+            .and_then(DatabaseFilter::to_filter_expression)
+            .into_iter()
+            .chain(visibility.predicate_expression().cloned())
+            .collect();
+        let filter = if filters.is_empty() {
+            None
+        } else {
+            Some(FilterExpression::And(filters))
+        };
         let query = GroupedAggregateSqlQuery {
             table: T::TABLE_NAME,
             groups: self.groups.clone(),
@@ -2558,6 +2625,7 @@ where
             self.auth.as_ref(),
         )
         .await?;
+        self.db.observe_read(&rendered.sql, rows.len());
         rows.iter()
             .map(|row| decode_aggregate_row::<B>(row, &query.groups, &query.metrics))
             .collect()
@@ -4610,6 +4678,42 @@ mod grouped_aggregate_tests {
 
     fn field(name: &'static str, kind: AggregateFieldKind) -> AggregateFieldRef {
         AggregateFieldRef::generated(name, name, name, kind, false, true, OPERATORS)
+    }
+
+    #[test]
+    fn postgres_page_comparisons_bind_ascii_folded_boundaries_and_exact_groups() {
+        let query = GroupedAggregateSqlQuery {
+            table: "history",
+            groups: vec![field("event", AggregateFieldKind::Text)],
+            metrics: vec![],
+            filter: Some(FilterExpression::trusted_fragment(
+                "tenant = ?",
+                vec![SqlValue::String("alpha".into())],
+            )),
+            group_limit: 101,
+        };
+        let cursor = AggregateGroupCursor {
+            format_version: 1,
+            fingerprint: "a".repeat(64),
+            key: Some("Event".into()),
+        };
+        let rendered = render_grouped_aggregate_query_page(
+            DatabaseBackend::Postgres,
+            &query,
+            Some((AggregateGroupOrder::SqliteNoCase, Some(&cursor))),
+        );
+        assert!(
+            rendered
+                .sql
+                .contains("GROUP BY CAST(\"event\" AS TEXT) COLLATE pg_catalog.\"C\" HAVING")
+        );
+        assert!(!rendered.sql.contains("NOCASE"));
+        assert!(!rendered.sql.contains("lower("));
+        assert!(rendered.sql.contains("translate(($2)::pg_catalog.text"));
+        assert!(rendered.sql.contains("translate(($3)::pg_catalog.text"));
+        assert!(rendered.sql.contains(" > $4"));
+        assert_eq!(rendered.values.len(), 4);
+        assert!(rendered.sql.ends_with("LIMIT 101"));
     }
 
     #[test]

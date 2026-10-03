@@ -1,4 +1,4 @@
-#![cfg(all(any(feature = "postgres", feature = "mssql"), not(feature = "sqlite")))]
+#![cfg(all(feature = "mssql", not(any(feature = "sqlite", feature = "postgres"))))]
 use graphql_orm::prelude::*;
 
 #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]

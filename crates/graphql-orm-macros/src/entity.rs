@@ -4573,6 +4573,9 @@ fn generate_entity_impl(
         impl ::graphql_orm::graphql::orm::TypedAggregateField<#struct_name>
             for #aggregate_field_name
         {
+            fn entity_type_id() -> Option<::std::any::TypeId> {
+                Some(::std::any::TypeId::of::<#struct_name>())
+            }
             fn aggregate_field(self) -> &'static ::graphql_orm::graphql::orm::AggregateFieldRef {
                 match self {
                     #(#aggregate_field_match_arms),*

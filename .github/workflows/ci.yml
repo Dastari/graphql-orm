@@ -75,20 +75,22 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Execute complete SQLite groups and unchanged aggregate behavior
-        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test complete_group_pages --test grouped_aggregates
+      - name: Execute complete SQLite groups and authorized aggregates
+        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test complete_group_pages --test portable_group_pages --test grouped_aggregates
       - name: Execute the dependency-minimal private repository example
         run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example complete_events
       - name: Verify unsupported profiles before pool I/O
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --lib --test complete_group_pages_unsupported
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --lib
           cargo test -p graphql-orm --locked --no-default-features --features mssql --lib --test complete_group_pages_unsupported
       - name: Execute existing aggregates on a test-owned PostgreSQL container
-        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test grouped_aggregates_postgres -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages -- --ignored --test-threads=1
+      - name: Execute the private PostgreSQL consumer without query SQL
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test portable_groups -- --ignored --test-threads=1
       - name: Check explicit backend Clippy and Rustdoc lanes
         run: |
           for backend in sqlite postgres mssql; do
-            cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --lib --test complete_group_pages --test complete_group_pages_unsupported -- -D warnings
+            cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --lib --test complete_group_pages --test portable_group_pages --test complete_group_pages_unsupported -- -D warnings
             RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --no-deps
           done
           cargo clippy --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --all-targets -- -D warnings
