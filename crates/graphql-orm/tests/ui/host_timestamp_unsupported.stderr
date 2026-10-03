@@ -1,0 +1,34 @@
+error: timestamp = "host" requires RepositoryEntity
+ --> tests/ui/host_timestamp_unsupported.rs:7:5
+  |
+7 | /     #[graphql_orm(timestamp = "host")]
+8 | |     created_at: i64,
+  | |___________________^
+
+error: timestamp = "host" requires RepositoryEntity
+  --> tests/ui/host_timestamp_unsupported.rs:15:5
+   |
+15 | /     #[graphql_orm(timestamp = "host")]
+16 | |     created_at: i64,
+   | |___________________^
+
+error: host timestamp requires an ordinary i64 or Option<i64> Integer field
+  --> tests/ui/host_timestamp_unsupported.rs:23:5
+   |
+23 | /     #[graphql_orm(timestamp = "host")]
+24 | |     updated_at: String,
+   | |______________________^
+
+error: timestamp = "host" requires RepositoryEntity
+  --> tests/ui/host_timestamp_unsupported.rs:31:5
+   |
+31 | /     #[graphql_orm(timestamp = "host")]
+32 | |     updated_at: i64,
+   | |___________________^
+
+error: host timestamp cannot be a relation, skipped database field, primary key, version, or generated field
+  --> tests/ui/host_timestamp_unsupported.rs:37:5
+   |
+37 | /     #[graphql_orm(timestamp = "host", db_column = "updated_at", auto_generated = false)]
+38 | |     id: i64,
+   | |___________^

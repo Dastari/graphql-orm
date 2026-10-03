@@ -268,7 +268,7 @@ fn repository_write_authorizers(
             .as_deref()
             .map(|policy| quote! { Some(#policy) })
             .unwrap_or_else(|| quote! { None });
-        let timestamp = rust_name == "created_at" || rust_name == "updated_at";
+        let timestamp = field_meta.timestamp_behavior(&rust_name).exclude_input;
         let include_create =
             (!field_meta.is_primary_key || !auto_generated_pk) && !timestamp && field_meta.write;
         if include_create {

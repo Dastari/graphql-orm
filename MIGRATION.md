@@ -13,6 +13,33 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## Repository host timestamps (0.39.0)
+
+Adopt aligned ORM/macros 0.39.0. Existing declarations require no edits and keep
+legacy seconds-based timestamp writes and GraphQL SDL. Add per-field
+`#[graphql_orm(timestamp = "host")]` only to `RepositoryEntity` Integer timestamp
+fields whose Rust/physical name is `created_at` or `updated_at`. Writable non-null
+create inputs now require that annotated field; update inputs use ordinary
+omission/null semantics. Explicit UUID keys and `auto_generated = false` remain
+unchanged. Host-managed creation timestamps are writable, including on upsert
+conflict: enforce immutability through existing restrictions/policies when needed.
+
+PostgreSQL's parentheses/capitalization when deparsing the known ORM epoch-second
+default now compare equivalent, avoiding false column alterations. The expression,
+storage units and runtime DateTime rules remain unchanged. Regenerate unapplied
+migration plans with this revision so their guarded hashes use the same default
+comparison.
+
+The annotation alone changes no physical metadata/default or stored value and
+replans to no-op. Database defaults remain available to other writers. Removing
+defaults is a separate migration. Runtime Integer/DateTime distinctions are not
+changed. Propagate transaction/hook/journal errors or cancel the whole transaction;
+catching an inner timeout then returning `Ok` does not guarantee rollback.
+
+See [repository timestamp behavior, examples and backend tests](docs/reference/graphql-orm/repository-only-entities.md#host-managed-integer-timestamps).
+This repository capability is independent of the runtime migration/mutation and
+dynamic GraphQL contracts; it does not implement those proposed APIs.
+
 ## Portable group pages and SQL-visible aggregates (0.38.0)
 
 Adopt aligned ORM/macros 0.38.0. No physical schema, data, GraphQL SDL, existing

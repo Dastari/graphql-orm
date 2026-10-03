@@ -1269,6 +1269,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) transform_read: Option<String>,
     pub(crate) default: Option<String>,
     pub(crate) suppress_implicit_default: bool,
+    pub(crate) host_managed_timestamp: bool,
     pub(crate) auto_generated: Option<bool>,
     pub(crate) backup_policy: Option<String>,
     /// If true, include in Create/Update inputs even if #[graphql(skip)] is set.
@@ -1434,6 +1435,7 @@ impl Default for FieldMetadata {
             transform_read: None,
             default: None,
             suppress_implicit_default: false,
+            host_managed_timestamp: false,
             auto_generated: None,
             backup_policy: None,
             input_only: false,
@@ -2027,6 +2029,15 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                                     ));
                                 }
                             }
+                        } else if nested.path.is_ident("timestamp") {
+                            if meta.host_managed_timestamp {
+                                return Err(nested.error("timestamp may only be declared once per field"));
+                            }
+                            let value: syn::LitStr = nested.value()?.parse()?;
+                            if value.value() != "host" {
+                                return Err(syn::Error::new(value.span(), "timestamp must be \"host\""));
+                            }
+                            meta.host_managed_timestamp = true;
                         } else if nested.path.is_ident("auto_generated") {
                             let value = nested.value()?;
                             let lit: syn::LitBool = value.parse()?;
@@ -2417,6 +2428,92 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
     }
 
     Ok(meta)
+}
+
+/// Keep legacy Rust-name input exclusion distinct from physical-column updates.
+/// Host management disables both; it never changes column/default metadata.
+#[derive(Clone, Copy)]
+pub(crate) struct TimestampBehavior {
+    pub(crate) exclude_input: bool,
+    pub(crate) update_updated_at: bool,
+}
+
+impl FieldMetadata {
+    pub(crate) fn timestamp_behavior(&self, rust_name: &str) -> TimestampBehavior {
+        TimestampBehavior {
+            exclude_input: !self.host_managed_timestamp
+                && matches!(rust_name, "created_at" | "updated_at"),
+            update_updated_at: !self.host_managed_timestamp
+                && !self.is_relation
+                && !self.skip_db
+                && self.db_column.as_deref().unwrap_or(rust_name) == "updated_at",
+        }
+    }
+}
+
+fn validate_host_timestamp(
+    field: &Field,
+    repository: bool,
+    inferred_primary_key: bool,
+) -> syn::Result<()> {
+    let meta = parse_field_metadata(field)?;
+    if !meta.host_managed_timestamp {
+        return Ok(());
+    }
+    let invalid = |message| syn::Error::new_spanned(field, message);
+    if !repository {
+        return Err(invalid("timestamp = \"host\" requires RepositoryEntity"));
+    }
+    let rust_name = field
+        .ident
+        .as_ref()
+        .expect("named fields validated")
+        .to_string();
+    let column = meta.db_column.as_deref().unwrap_or(&rust_name);
+    if !matches!(rust_name.as_str(), "created_at" | "updated_at")
+        && !matches!(column, "created_at" | "updated_at")
+    {
+        return Err(invalid(
+            "host timestamp requires a created_at or updated_at Rust field or physical column",
+        ));
+    }
+    let ty = option_inner_type(&field.ty).unwrap_or(&field.ty);
+    if !type_path_last_ident(ty).is_some_and(|ident| ident == "i64")
+        || meta.is_date_field
+        || meta.is_boolean_field
+        || meta.is_json_field
+    {
+        return Err(invalid(
+            "host timestamp requires an ordinary i64 or Option<i64> Integer field",
+        ));
+    }
+    if meta.is_relation
+        || meta.skip_db
+        || meta.is_primary_key
+        || inferred_primary_key
+        || meta.is_version
+        || meta.auto_generated == Some(true)
+    {
+        return Err(invalid(
+            "host timestamp cannot be a relation, skipped database field, primary key, version, or generated field",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_host_timestamp_fields(
+    fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
+    repository: bool,
+) -> syn::Result<()> {
+    let explicit_primary_key = fields
+        .iter()
+        .any(|field| parse_field_metadata(field).is_ok_and(|meta| meta.is_primary_key));
+    for field in fields {
+        let inferred_primary_key =
+            !explicit_primary_key && field.ident.as_ref().is_some_and(|ident| ident == "id");
+        validate_host_timestamp(field, repository, inferred_primary_key)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn collect_parsed_fields<'a>(
@@ -2820,6 +2917,10 @@ fn generate_entity_impl(
 
     let entity_name_lit = struct_name.to_string();
     let schema_only = schema_only_override || entity_meta.schema_only;
+    validate_host_timestamp_fields(
+        fields,
+        has_repository_entity_attribute(&input.attrs) && !schema_only,
+    )?;
     if schema_only && !entity_meta.projections.is_empty() {
         return Err(syn::Error::new_spanned(
             input,
@@ -4158,6 +4259,7 @@ fn generate_entity_impl(
         if field_meta.suppress_implicit_default
             && rust_name != "created_at"
             && rust_name != "updated_at"
+            && !field_meta.host_managed_timestamp
         {
             return Err(syn::Error::new(
                 field.span(),
@@ -6914,5 +7016,71 @@ fn decimal_default_sql(
             .map(|value| value.to_string())
             .map_err(|_| syn::Error::new(span, "decimal default exceeds SQLite's exact range")),
         BackendKind::Postgres | BackendKind::Mssql => Ok(normalized.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod host_timestamp_tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn classification_preserves_distinct_legacy_name_rules() {
+        let rust_timestamp: Field = parse_quote!(created_at: i64);
+        let physical_timestamp: Field =
+            parse_quote!(#[graphql_orm(db_column = "updated_at")] modified: i64);
+        let meta = parse_field_metadata(&rust_timestamp).unwrap();
+        assert!(meta.timestamp_behavior("created_at").exclude_input);
+        assert!(!meta.timestamp_behavior("created_at").update_updated_at);
+        let meta = parse_field_metadata(&physical_timestamp).unwrap();
+        assert!(!meta.timestamp_behavior("modified").exclude_input);
+        assert!(meta.timestamp_behavior("modified").update_updated_at);
+        let host: Field = parse_quote!(#[graphql_orm(timestamp = "host", db_column = "updated_at")] created_at: i64);
+        let meta = parse_field_metadata(&host).unwrap();
+        assert!(!meta.timestamp_behavior("created_at").exclude_input);
+        assert!(!meta.timestamp_behavior("created_at").update_updated_at);
+    }
+
+    #[test]
+    fn unsupported_modes_and_duplicate_annotations_fail() {
+        for field in [
+            parse_quote!(#[graphql_orm(timestamp = "automatic")] created_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host", timestamp = "host")] created_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host")] #[graphql_orm(timestamp = "host")] created_at: i64),
+        ] {
+            assert!(parse_field_metadata(&field).is_err());
+        }
+    }
+
+    #[test]
+    fn invalid_declarations_fail_before_emission() {
+        let invalid: Vec<Field> = vec![
+            parse_quote!(#[graphql_orm(timestamp = "host")] unrelated: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host")] created_at: String),
+            parse_quote!(#[graphql_orm(timestamp = "host")] created_at: Option<Option<i64>>),
+            parse_quote!(#[graphql_orm(timestamp = "host")] #[date_field] created_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host")] #[skip_db] created_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host")] #[primary_key] created_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host", version)] updated_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host", auto_generated = true)] created_at: i64),
+            parse_quote!(#[graphql_orm(timestamp = "host")] #[relation(target = "Other", from = "id", to = "id")] created_at: Option<i64>),
+        ];
+        for field in invalid {
+            assert!(validate_host_timestamp(&field, true, false).is_err());
+        }
+        let valid: Field = parse_quote!(#[graphql_orm(timestamp = "host", db_column = "updated_at", default = false, auto_generated = false)] modified: Option<i64>);
+        assert!(validate_host_timestamp(&valid, true, false).is_ok());
+        assert!(validate_host_timestamp(&valid, false, false).is_err());
+        let restricted: Field =
+            parse_quote!(#[graphql_orm(timestamp = "host", write = false)] created_at: i64);
+        assert!(validate_host_timestamp(&restricted, true, false).is_ok());
+        let inferred: Field = parse_quote!(#[graphql_orm(timestamp = "host", db_column = "updated_at", auto_generated = false)] id: i64);
+        assert!(validate_host_timestamp(&inferred, true, true).is_err());
+        assert!(validate_host_timestamp(&inferred, true, false).is_ok());
+        let fields = syn::punctuated::Punctuated::from_iter([inferred.clone()]);
+        assert!(validate_host_timestamp_fields(&fields, true).is_err());
+        let explicit: Field = parse_quote!(#[primary_key] key: String);
+        let fields = syn::punctuated::Punctuated::from_iter([explicit, inferred]);
+        assert!(validate_host_timestamp_fields(&fields, true).is_ok());
     }
 }
