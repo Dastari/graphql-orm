@@ -1079,7 +1079,12 @@ fn render_expr(
                     _ => {
                         let second = placeholder(backend, values.len() + 1, field.value_kind());
                         values.push(value_bind(value).expect("validated non-null literal"));
-                        format!("substr({column}, -length({bind})) = {second}")
+                        // Starting just after the value yields the empty suffix.
+                        // A negative-length start alone instead selects the whole
+                        // value when the operand is empty (SQLite treats -0 as 0).
+                        format!(
+                            "substr({column}, length({column}) - length({bind}) + 1) = {second}"
+                        )
                     }
                 },
             }

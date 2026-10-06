@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,31 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## Runtime string predicates and PostgreSQL binding (0.39.1)
+
+Adopt aligned ORM/macros 0.39.1. No data migration, declaration change, GraphQL
+SDL change, or cursor-format change is required. SQLite runtime empty suffixes
+now match every non-null string, as empty prefixes already do. SQL NULL remains
+unknown under comparisons and NOT; use an explicit null predicate to include it.
+
+`PostgresBackend::normalize_sql` is a complete-statement binding boundary:
+SQL using only native `$n` parameters retains each index and repeated identity.
+A positive rebasing start adds `start_index - 1` to each native index. Previously,
+repeated references were incorrectly allocated separate slots; out-of-order
+indices were also renumbered. Callers must supply values for the actual native
+slots, rather than relying on occurrence order. Ordinary generated static queries
+already compose contiguous native indices and require no call-site edits.
+
+Anonymous or mixed placeholder forms retain legacy occurrence-based rebasing;
+mixed forms do not express shared native identity. `SqlDialect::normalize_sql`
+retains static-fragment occurrence rebasing, including generated fragments with
+arbitrary or restarted native labels. Do not use fragment rebasing on a complete
+native statement whose repeated parameters share a bound value.
+
+See [runtime string semantics, executable consumer and backend checks](docs/reference/graphql-orm/runtime-queries.md).
+Runtime MSSQL remains unsupported before I/O. This independent query fix does
+not implement the proposed runtime migration/mutation/dynamic GraphQL contracts.
 
 ## Repository host timestamps (0.39.0)
 

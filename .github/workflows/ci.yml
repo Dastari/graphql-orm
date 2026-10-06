@@ -61,6 +61,16 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - run: cargo check -p graphql-orm --no-default-features --features postgres
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
+      - name: Execute runtime strings and binding identity on owned PostgreSQL
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_strings -- --include-ignored --test-threads=1
+      - name: Execute the private runtime string consumer on owned PostgreSQL
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
+      - name: Execute the private runtime string consumer on owned SQLite
+        run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example runtime_strings
       - name: Execute host timestamps on owned PostgreSQL
         run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - name: Execute the private PostgreSQL host timestamp consumer

@@ -289,11 +289,203 @@ fn normalize_sql_placeholders(backend: DatabaseBackend, sql: &str, start_index: 
     out
 }
 
+// Complete PostgreSQL statements already carry binding-slot identity. Static
+// fragments do not: generated field fragments can start at arbitrary indices,
+// and nested filters can restart numbering. Keep their existing occurrence
+// rebasing separate from this final driver-boundary normalization.
+pub(crate) fn normalize_postgres_statement(sql: &str, start_index: usize) -> String {
+    let bytes = sql.as_bytes();
+    let mut parameters = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' => {
+                let quote = bytes[i];
+                let escaped = quote == b'\''
+                    && i > 0
+                    && matches!(bytes[i - 1], b'e' | b'E')
+                    && (i == 1 || !postgres_identifier_byte(bytes[i - 2]));
+                i += 1;
+                while i < bytes.len() {
+                    if escaped && bytes[i] == b'\\' {
+                        i = (i + 2).min(bytes.len());
+                    } else if bytes[i] == quote {
+                        i += 1;
+                        if bytes.get(i) == Some(&quote) {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'-' if bytes.get(i + 1) == Some(&b'-') => {
+                i += 2;
+                while i < bytes.len() && !matches!(bytes[i], b'\n' | b'\r') {
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                let mut depth = 1usize;
+                while i < bytes.len() && depth > 0 {
+                    if bytes.get(i..i + 2) == Some(b"/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes.get(i..i + 2) == Some(b"*/") {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'$' if i == 0 || !postgres_identifier_byte(bytes[i - 1]) => {
+                let start = i;
+                i += 1;
+                if bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                    while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+                        i += 1;
+                    }
+                    parameters.push((start, i));
+                } else {
+                    // PostgreSQL dollar-quoted strings ($$ or $tag$).
+                    let tag_start = i;
+                    if bytes
+                        .get(i)
+                        .is_some_and(|ch| ch.is_ascii_alphabetic() || *ch == b'_' || *ch >= 0x80)
+                    {
+                        i += 1;
+                        while bytes.get(i).is_some_and(|ch| {
+                            ch.is_ascii_alphanumeric() || *ch == b'_' || *ch >= 0x80
+                        }) {
+                            i += 1;
+                        }
+                    }
+                    if bytes.get(i) == Some(&b'$') {
+                        i += 1;
+                        let delimiter = &sql[start..i];
+                        i = sql[i..]
+                            .find(delimiter)
+                            .map_or(bytes.len(), |offset| i + offset + delimiter.len());
+                    } else {
+                        // Not a parameter or quote delimiter; keep the original token.
+                        i = tag_start;
+                    }
+                }
+            }
+            b'?' => {
+                return normalize_sql_placeholders(DatabaseBackend::Postgres, sql, start_index);
+            }
+            b'@' if bytes
+                .get(i + 1)
+                .is_some_and(|ch| ch.eq_ignore_ascii_case(&b'p')) =>
+            {
+                return normalize_sql_placeholders(DatabaseBackend::Postgres, sql, start_index);
+            }
+            _ => i += 1,
+        }
+    }
+    let offset = start_index.saturating_sub(1);
+    if offset == 0 {
+        return sql.to_owned();
+    }
+    let mut out = String::with_capacity(sql.len());
+    let mut previous = 0;
+    for (start, end) in parameters {
+        out.push_str(&sql[previous..start]);
+        // Leave malformed/overflowing indices for the driver's normal safe error
+        // path rather than panicking or guessing a different binding identity.
+        if let Some(index) = sql[start + 1..end]
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_add(offset))
+        {
+            out.push_str(&DatabaseBackend::Postgres.placeholder(index));
+        } else {
+            out.push_str(&sql[start..end]);
+        }
+        previous = end;
+    }
+    out.push_str(&sql[previous..]);
+    out
+}
+
+fn postgres_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') || byte >= 0x80
+}
+
+#[cfg(test)]
+mod postgres_statement_tests {
+    use super::{DatabaseBackend, normalize_postgres_statement, normalize_sql_placeholders};
+
+    #[test]
+    fn native_identity_and_rebasing_are_idempotent_at_the_binding_boundary() {
+        for (sql, start, expected) in [
+            ("SELECT $1, $1", 1, "SELECT $1, $1"),
+            ("SELECT $2, $1, $2", 3, "SELECT $4, $3, $4"),
+            ("SELECT $10, $10, $1", 1, "SELECT $10, $10, $1"),
+            ("SELECT ?, ?", 3, "SELECT $3, $4"),
+        ] {
+            let normalized = normalize_postgres_statement(sql, start);
+            assert_eq!(normalized, expected);
+            assert_eq!(normalize_postgres_statement(&normalized, 1), expected);
+        }
+    }
+
+    #[test]
+    fn anonymous_mixed_and_static_fragment_rebasing_remain_compatible() {
+        for sql in ["SELECT ?, ?", "SELECT $8, ?, @P2, $8", "SELECT ?1, @p9, $4"] {
+            assert_eq!(
+                normalize_postgres_statement(sql, 4),
+                normalize_sql_placeholders(DatabaseBackend::Postgres, sql, 4)
+            );
+        }
+        assert_eq!(
+            normalize_sql_placeholders(DatabaseBackend::Postgres, "value = $9", 2),
+            "value = $2"
+        );
+    }
+
+    #[test]
+    fn native_scanner_skips_quotes_identifiers_comments_and_dollar_strings() {
+        let sql = "SELECT $2, '$1?', 'it''s $9?', \"$1?\", \"a\"\"$2\", $$ $9 ? $$, $tag$ $4 ? $tag$, $π$ $8 ? $π$, E'\\\'$8?', e'\\\\$9', col$1, π$3, $2 -- $9 ?\n/* $7 /* $6 ? */ */";
+        let expected = sql
+            .replacen("SELECT $2", "SELECT $4", 1)
+            .replace(", $2 --", ", $4 --");
+        assert_eq!(normalize_postgres_statement(sql, 3), expected);
+        assert_eq!(normalize_postgres_statement(sql, 1), sql);
+    }
+
+    #[test]
+    fn malformed_indices_and_unterminated_quotes_do_not_panic() {
+        for sql in [
+            "SELECT $99999999999999999999999999999999999999",
+            "SELECT $",
+            "SELECT $tag$",
+            "SELECT '$1",
+            "SELECT E'\\",
+            "SELECT /* $1",
+            "SELECT $0",
+        ] {
+            let _ = normalize_postgres_statement(sql, usize::MAX);
+        }
+    }
+}
+
 pub trait SqlDialect {
     fn backend(&self) -> DatabaseBackend;
     fn quote_identifier(&self, identifier: &str) -> String;
     fn quote_identifier_path(&self, identifier: &str) -> String;
     fn placeholder(&self, index: usize) -> String;
+    /// Rebase fragment placeholders by occurrence, starting at `start_index`.
+    ///
+    /// Native labels in fragments are not binding identities: generated nested
+    /// fragments may reuse labels with separate values. Complete statements with
+    /// native PostgreSQL identities use [`super::backend::OrmBackend::normalize_sql`]
+    /// at the driver boundary instead. Anonymous/mixed rebasing remains unchanged.
     fn normalize_sql(&self, sql: &str, start_index: usize) -> String;
     fn count_projection(&self) -> &'static str;
     fn render_pagination(&self, limit: Option<i64>, offset: i64) -> String;
