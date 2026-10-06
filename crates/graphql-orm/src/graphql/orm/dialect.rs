@@ -401,6 +401,7 @@ pub(crate) fn normalize_postgres_statement(sql: &str, start_index: usize) -> Str
         if let Some(index) = sql[start + 1..end]
             .parse::<usize>()
             .ok()
+            .filter(|n| *n > 0)
             .and_then(|n| n.checked_add(offset))
         {
             out.push_str(&DatabaseBackend::Postgres.placeholder(index));
@@ -426,6 +427,7 @@ mod postgres_statement_tests {
         for (sql, start, expected) in [
             ("SELECT $1, $1", 1, "SELECT $1, $1"),
             ("SELECT $2, $1, $2", 3, "SELECT $4, $3, $4"),
+            ("SELECT $01, $1", 3, "SELECT $3, $3"),
             ("SELECT $10, $10, $1", 1, "SELECT $10, $10, $1"),
             ("SELECT ?, ?", 3, "SELECT $3, $4"),
         ] {
@@ -461,6 +463,7 @@ mod postgres_statement_tests {
 
     #[test]
     fn malformed_indices_and_unterminated_quotes_do_not_panic() {
+        assert_eq!(normalize_postgres_statement("SELECT $0", 3), "SELECT $0");
         for sql in [
             "SELECT $99999999999999999999999999999999999999",
             "SELECT $",
