@@ -164,7 +164,7 @@ jobs:
           cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example complete_events
           cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test portable_groups --test host_timestamps -- --ignored --test-threads=1
           cargo check -p graphql-orm --no-default-features --features mssql --locked
-          cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --locked
+          cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --locked
           cargo clippy -p graphql-orm --all-targets --locked -- -D warnings
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps --locked
 

@@ -530,6 +530,19 @@ async fn runtime_string_predicates_execute_and_paginate() -> Result<(), Box<dyn 
         .collect();
     ids.sort();
     assert_eq!(ids, vec![1, 3, 10]);
+    let unchanged = fixture
+        .db
+        .schema()
+        .plan_migration_to_entities(
+            "read-replan",
+            "queries preserve physical schema",
+            &[StringSample::metadata()],
+        )
+        .await?;
+    assert!(
+        unchanged.steps.is_empty(),
+        "runtime reads must leave the physical target unchanged"
+    );
     #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
     postgres_binding_and_rls(&fixture).await?;
     fixture.finish().await
