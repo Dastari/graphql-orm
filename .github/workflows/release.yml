@@ -155,6 +155,11 @@ jobs:
           cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features --locked
           cargo check -p graphql-orm --no-default-features --features postgres --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --locked
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features mssql --test runtime_migrations_unsupported
+          for backend in sqlite postgres mssql; do
+            cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --locked --no-default-features --features "$backend"
+          done
           cargo test -p graphql-orm --no-default-features --features postgres --test projection_visibility --test cross_crate_relations_fixture --test repository_counts --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --locked -- --ignored --test-threads=1
           cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example policy_projections

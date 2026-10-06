@@ -236,3 +236,16 @@ this migration slice does not implement runtime record writes or dynamic GraphQL
 The current static transaction cancellation limitation is unchanged. B remains
 gated on a committed, reviewed A predecessor and supplies its stronger runtime
 operation/hook poisoning guarantee separately.
+
+Local owned backend lanes include the runtime migration, incoming-FK, baseline,
+DDL/history rollback and static compatibility suites. Run them sequentially with
+bounded Cargo jobs; they refuse ambient application database URLs:
+
+```sh
+CARGO_BUILD_JOBS=2 scripts/run-owned-database-lanes.sh sqlite
+CARGO_BUILD_JOBS=2 scripts/run-owned-database-lanes.sh postgres
+```
+
+The existing CI/release workflow definitions also select PostgreSQL migration
+execution, legacy external imports and MSSQL pre-I/O rejection for future owner
+runs. Their configuration does not authorize a workflow dispatch or release.
