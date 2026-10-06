@@ -232,9 +232,20 @@ impl RouterMetrics {
 }
 
 fn decrement(counter: &AtomicUsize, count: usize) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_sub(count))
-    });
+    // Keep the atomic saturating update compatible with the Rust 1.90 MSRV;
+    // current Rust deprecates fetch_update in favor of the newer try_update.
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        match counter.compare_exchange_weak(
+            current,
+            current.saturating_sub(count),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[cfg(test)]

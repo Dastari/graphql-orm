@@ -721,7 +721,7 @@ struct PrimaryKeyField {
 }
 
 fn create_input_visibility(meta: &FieldMetadata, rust_name: &str, auto_generated_pk: bool) -> bool {
-    let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
+    let is_timestamp = meta.timestamp_behavior(rust_name).exclude_input;
     let include_in_create =
         (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
     include_in_create && (!meta.skip_input || meta.input_only)
@@ -1139,7 +1139,7 @@ fn generated_resolver_schema_signature(
             graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
         let field_type = &field.ty;
         let rust_type = quote! { #field_type }.to_string();
-        let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
+        let is_timestamp = meta.timestamp_behavior(&rust_name).exclude_input;
         let create_visible = !meta.is_relation
             && !meta.skip_db
             && (!meta.is_primary_key || !auto_generated_pk)
@@ -1355,6 +1355,10 @@ pub(crate) fn generate_graphql_operations(
             ));
         }
     };
+    crate::entity::validate_host_timestamp_fields(
+        fields,
+        crate::entity::has_repository_entity_attribute(&input.attrs),
+    )?;
 
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
@@ -2173,7 +2177,7 @@ pub(crate) fn generate_graphql_operations(
 
         // Skip auto-generated primary key, timestamps, and skip_input fields (e.g. password_hash)
         // But #[input_only] overrides skip_input (allows write-only fields like encrypted credentials)
-        let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
+        let is_timestamp = meta.timestamp_behavior(&rust_name).exclude_input;
         let include_in_create =
             (!meta.is_primary_key || !auto_generated_pk) && !is_timestamp && meta.write;
         let include_generated_default_in_create = (!meta.is_primary_key || !auto_generated_pk)
@@ -2337,36 +2341,36 @@ pub(crate) fn generate_graphql_operations(
                     let repo_check = if upsert_update_candidate {
                         quote! {
                             if let Some(current_entity) = current_entity.as_ref() {
-                                db.ensure_writable_field(
+                                db.ensure_repository_writable_field(
                                     None,
                                     #entity_name_lit,
                                     #graphql_name,
                                     Some(#policy_key),
                                     Some(current_entity as &(dyn ::std::any::Any + Send + Sync)),
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
-                                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                             } else {
-                                db.ensure_writable_field(
+                                db.ensure_repository_writable_field(
                                     None,
                                     #entity_name_lit,
                                     #graphql_name,
                                     Some(#policy_key),
                                     None,
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
-                                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                             }
                         }
                     } else {
                         quote! {
                             if current_entity.is_none() {
-                                db.ensure_writable_field(
+                                db.ensure_repository_writable_field(
                                     None,
                                     #entity_name_lit,
                                     #graphql_name,
                                     Some(#policy_key),
                                     None,
                                     Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
-                                ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
+                                ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                             }
                         }
                     };
@@ -2637,7 +2641,7 @@ pub(crate) fn generate_graphql_operations(
 
         // For update: wrap in Option to make all fields optional (skip PK, timestamps, skip_input)
         // But #[input_only] overrides skip_input (allows write-only fields like encrypted credentials)
-        let is_timestamp = rust_name == "created_at" || rust_name == "updated_at";
+        let is_timestamp = meta.timestamp_behavior(&rust_name).exclude_input;
         if !meta.is_primary_key && !is_timestamp && meta.write {
             // All update fields are wrapped in Option (even if already optional)
             // This allows distinguishing between "not provided" and "set to null"
@@ -3110,16 +3114,13 @@ pub(crate) fn generate_graphql_operations(
         }
     }
 
-    let has_updated_at_column = fields.iter().any(|f| {
-        parse_field_metadata(f)
-            .ok()
-            .filter(|m| !m.is_relation && !m.skip_db)
-            .and_then(|m| {
-                f.ident
-                    .as_ref()
-                    .map(|ident| m.db_column.unwrap_or_else(|| ident.to_string()))
+    let has_updated_at_column = fields.iter().any(|field| {
+        field.ident.as_ref().is_some_and(|ident| {
+            parse_field_metadata(field).is_ok_and(|meta| {
+                meta.timestamp_behavior(&ident.to_string())
+                    .update_updated_at
             })
-            .is_some_and(|col| col == "updated_at")
+        })
     });
 
     if upsert_config.is_some() {

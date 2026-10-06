@@ -546,3 +546,30 @@ fn migration_file_renderer_includes_headers_and_semicolons() {
         "2026032501_create_users.sql"
     );
 }
+
+#[test]
+fn known_postgres_epoch_defaults_compare_without_widening_sql_equivalence() {
+    use graphql_orm::graphql::orm::canonicalize_column_default_expression;
+    let generated = "EXTRACT(EPOCH FROM NOW())::bigint";
+    for deparsed in [
+        "(EXTRACT(epoch FROM now()))::bigint",
+        "((EXTRACT(epoch FROM now()))::bigint)",
+        "extract(epoch from now())::BIGINT",
+    ] {
+        assert!(
+            canonicalize_column_default_expression(deparsed) == generated,
+            "known default representation mismatch"
+        );
+    }
+    for different in [
+        "(EXTRACT(epoch FROM now()))::bigint * 1000",
+        "EXTRACT(EPOCH FROM clock_timestamp())::bigint",
+        "EXTRACT(EPOCH FROM NOW())::integer",
+        "'EXTRACT(EPOCH FROM NOW())::bigint'",
+    ] {
+        assert!(
+            canonicalize_column_default_expression(different) != generated,
+            "different default collapsed"
+        );
+    }
+}

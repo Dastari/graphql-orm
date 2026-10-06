@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -61,6 +61,10 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - run: cargo check -p graphql-orm --no-default-features --features postgres
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
+      - name: Execute host timestamps on owned PostgreSQL
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
+      - name: Execute the private PostgreSQL host timestamp consumer
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm --no-default-features --features mssql
       - run: cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
@@ -71,24 +75,26 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Execute complete SQLite groups and unchanged aggregate behavior
-        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test complete_group_pages --test grouped_aggregates
+      - name: Execute complete SQLite groups and authorized aggregates
+        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test complete_group_pages --test portable_group_pages --test grouped_aggregates
       - name: Execute the dependency-minimal private repository example
         run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example complete_events
       - name: Verify unsupported profiles before pool I/O
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --lib --test complete_group_pages_unsupported
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --lib
           cargo test -p graphql-orm --locked --no-default-features --features mssql --lib --test complete_group_pages_unsupported
       - name: Execute existing aggregates on a test-owned PostgreSQL container
-        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test grouped_aggregates_postgres -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages -- --ignored --test-threads=1
+      - name: Execute the private PostgreSQL consumer without query SQL
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test portable_groups -- --ignored --test-threads=1
       - name: Check explicit backend Clippy and Rustdoc lanes
         run: |
           for backend in sqlite postgres mssql; do
-            cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --lib --test complete_group_pages --test complete_group_pages_unsupported -- -D warnings
+            cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --lib --test complete_group_pages --test portable_group_pages --test complete_group_pages_unsupported -- -D warnings
             RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --no-deps
           done
           cargo clippy --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --all-targets -- -D warnings
@@ -98,7 +104,7 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -116,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -131,7 +137,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -170,7 +176,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p graphql-orm-ai --no-default-features --features postgres
       - run: cargo check -p graphql-orm-ai --no-default-features --features mssql
@@ -184,7 +190,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
         run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1

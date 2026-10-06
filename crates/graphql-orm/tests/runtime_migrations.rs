@@ -1759,3 +1759,127 @@ async fn sqlite_successful_owned_rebuild_retains_memory_database_and_enforcement
     );
     Ok(())
 }
+
+// Released repository-only timestamp modes must retain their Integer/default DDL
+// when converted through A's canonical owned physical target.
+#[derive(graphql_orm::RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(
+    feature = "sqlite",
+    repository_entity(
+        backend = "sqlite",
+        table = "owned_clocks",
+        plural = "OwnedClocks",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    all(feature = "postgres", not(feature = "sqlite")),
+    repository_entity(
+        backend = "postgres",
+        table = "owned_clocks",
+        plural = "OwnedClocks",
+        default_sort = "id ASC"
+    )
+)]
+struct OwnedClock {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    #[graphql_orm(timestamp = "host")]
+    created_at: i64,
+    #[graphql_orm(timestamp = "host", db_column = "updated_at", default = "0")]
+    modified_ms: i64,
+}
+
+async fn owned_integer_timestamps_noop<B: RuntimeMigrationBackend + MigrationBackend>(
+    database: &Database<B>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let static_target = SchemaModel::from_entities(&[OwnedClock::metadata()]);
+    let schema = RuntimeSchema::from_static_entities(&[OwnedClock::metadata()])?.validate()?;
+    let target = schema.physical_schema::<B>(RuntimeMigrationLimits::default())?;
+    assert_eq!(target.stable_hash(), static_target.stable_hash());
+    for column in target.tables()[0]
+        .columns()
+        .iter()
+        .filter(|c| c.name != "id")
+    {
+        assert!(matches!(column.sql_type.as_str(), "INTEGER" | "BIGINT"));
+        let original = static_target.tables[0]
+            .columns
+            .iter()
+            .find(|c| c.name == column.name)
+            .unwrap();
+        assert_eq!(column.default, original.default);
+    }
+    assert!(
+        target.tables()[0]
+            .columns()
+            .iter()
+            .find(|c| c.name == "created_at")
+            .unwrap()
+            .default
+            .is_some()
+    );
+    assert_eq!(
+        target.tables()[0]
+            .columns()
+            .iter()
+            .find(|c| c.name == "updated_at")
+            .unwrap()
+            .default
+            .as_deref(),
+        Some("0")
+    );
+    let ownership = ManagedTableSet::new(["owned_clocks".to_owned()])?;
+    let manager = database.schema();
+    let plan = manager.plan_migration(
+        "owned-clocks-v1",
+        "static Integer defaults",
+        &SchemaModel::from_entities(&[]),
+        &static_target,
+    )?;
+    manager
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+    let owned = manager
+        .plan_owned_migration(
+            "owned-clocks-v2",
+            "same owned Integer defaults",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(owned.steps().is_empty());
+    assert!(owned.statements().is_empty());
+    let environment = manager
+        .runtime_mutation_environment(std::sync::Arc::new(schema), &target, &ownership)
+        .await?;
+    assert_eq!(
+        environment.schema().schema().collections[0].id.as_str(),
+        "owned_clocks"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_released_host_integer_timestamps_owned_noop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = sqlite().await;
+    owned_integer_timestamps_noop(&database).await?;
+    database.pool().close().await;
+    Ok(())
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_released_host_integer_timestamps_owned_noop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("owned-integer-timestamps")?;
+    let database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
+    owned_integer_timestamps_noop(&database).await?;
+    database.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}

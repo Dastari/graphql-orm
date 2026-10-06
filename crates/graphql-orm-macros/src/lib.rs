@@ -380,6 +380,13 @@ pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     )
 )]
 /// Derive managed-schema and typed repository APIs without any GraphQL type surface.
+///
+/// Persisted conventional Integer timestamp fields may opt into ordinary typed
+/// writes with `#[graphql_orm(timestamp = "host")]`. This accepts `i64` or
+/// `Option<i64>` where the Rust or physical column name is `created_at` or
+/// `updated_at`, disables automatic timestamp writes per field, and preserves
+/// column/default metadata. Normal field restrictions, policies and hooks apply.
+/// This mode is unavailable to GraphQL and schema-only derives.
 pub fn derive_repository_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let result = (|| {

@@ -99,6 +99,15 @@ let users = User::find_many(
 let total = User::count_all(&database).await?;
 ```
 
+Inside `Database::transaction`, `tx.query::<T>().count()` and `.exists()` retain
+repository entity authorization. An installed row policy must declare current
+`ReadVisibility::Unrestricted` or `Complete` SQL visibility; complete predicates
+are intersected with caller filters before the count on the same pinned
+transaction. Callback-only/prefilter policies and residual query filters under
+an installed row policy are rejected. The SQL count does not materialize entity
+rows or invoke per-row callbacks. With no row policy, existing residual-filter
+behavior remains available.
+
 Write-capable entities generate:
 
 - `insert(&database, input)` and `insert_many(&database, inputs)`
@@ -355,3 +364,11 @@ impl Job {
 ```
 
 If a computed field needs database access, use request-scoped `DataLoader` or another batching mechanism. Generated relation fields already use the relation batching runtime; custom computed fields should follow the same rule to avoid N+1 behavior.
+
+Transaction count regressions run on memory SQLite and individually owned
+PostgreSQL containers (never an ambient application database):
+
+```bash
+cargo test -p graphql-orm --locked --no-default-features --features sqlite --test repository_counts
+cargo test -p graphql-orm --locked --no-default-features --features postgres --test repository_counts -- --test-threads=1
+```

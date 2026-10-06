@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.36.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.40.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -187,6 +187,16 @@ compiles scalar and composite keys on SQLite/PostgreSQL/MSSQL; its
 [owned-backend tests](tests/fixtures/repository-aggregate-consumer/tests/owned_backend.rs)
 execute grouped aggregates and denial before SQL on disposable SQLite/PostgreSQL.
 Ordinary `GraphQLEntity` aggregate SDL remains unchanged.
+
+Complete bounded SQLite text-group pages reuse generated aggregate enums and the
+existing aggregate builder. See [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md)
+and the SQL-free private consumer example for native distinct identities, current
+SQL visibility and typed continuation. Existing aggregate SDL/cursors are unchanged.
+
+Repository-only Integer timestamps can use per-field `#[graphql_orm(timestamp = "host")]`.
+See [host timestamp inputs, migration compatibility and cancellation limits](../../docs/reference/graphql-orm/repository-only-entities.md#host-managed-integer-timestamps).
+
+Complete SQLite/PostgreSQL text-group pages and SQL-visible ordinary aggregates: see [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md).
 
 Owned runtime targets, explicit table ownership, read-only plans and guarded apply
 are documented in [runtime migrations](../../docs/reference/graphql-orm/runtime-migrations.md).

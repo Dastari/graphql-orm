@@ -3,7 +3,7 @@ title: "Repository-only entities"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-10-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -83,6 +83,107 @@ their entity payload when any field is sensitive, retaining action/key/source
 metadata without copying the protected value into the event bus. Hooks can
 still deliberately inspect and transform the typed create/update input in the
 normal before-write hook phase.
+
+## Host-managed Integer timestamps
+
+The legacy convention omits Rust fields named `created_at` and `updated_at`
+from typed create/update inputs. Updates also assign epoch seconds whenever a
+persisted physical column is named `updated_at`, including Rust aliases. Changing
+`default = "0"` or `default = false` alone does not disable that write behavior.
+
+Repository entities can opt each conventional timestamp field into ordinary
+host-supplied writes:
+
+```rust,ignore
+#[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+#[repository_entity(backend = "sqlite", table = "clocked_records", plural = "ClockedRecords")]
+struct ClockedRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: graphql_orm::uuid::Uuid,
+    label: String,
+    #[graphql_orm(timestamp = "host", default = "0")]
+    created_at: i64,
+    #[graphql_orm(timestamp = "host", db_column = "updated_at", default = "0")]
+    modified_ms: i64,
+}
+```
+
+`timestamp = "host"` supports persisted `i64` and `Option<i64>` fields where
+either the Rust name or physical column is `created_at` or `updated_at`.
+It disables both typed-input exclusion and automatic seconds assignment for
+that field. Supplied signed integers are bound unchanged: the ORM neither
+selects a clock nor interprets/rescales their units. Mixed host-managed and
+legacy fields retain their independent behavior.
+
+Non-null writable create fields are required even with a database default.
+Updates use `Option<i64>`: `None` preserves the existing value. Nullable fields
+use `Option<i64>` on create and `Option<Option<i64>>` on update, distinguishing
+omission (`None`), SQL NULL (`Some(None)`), and a value (`Some(Some(value))`).
+Normal restrictions, constraints, policies, input transforms, hooks, and
+redacted change metadata still apply. Host management grants no authority.
+
+Host-managed `created_at` is ordinarily writable, including during an upsert
+conflict update. It is **not immutable**; use existing restrictions and field
+policies for immutability. Upsert accepts the existing complete create input,
+while insert-if-absent leaves a conflicting existing row unchanged. No new
+upsert, CAS, conflict, or bulk-write semantics are introduced. Direct and
+transaction-bound insert, ID/key update, conditional/CAS update, bounded update,
+upsert, and insert-if-absent use the same field decision where those operations
+are supported by the declaration/backend.
+
+The annotation changes no column/default/schema metadata. Explicit defaults and
+legacy implicit epoch-second defaults remain intact, and adding the annotation
+alone replans to no-op on SQLite/PostgreSQL. Typed creates provide the host value
+explicitly; other writers that omit the column can still invoke its unchanged
+database default. Removing a default remains a separate schema change.
+`default = false` also works on an opted-in alias of a conventional physical
+column. Static-to-runtime conversion retains `Integer` and its default; this
+annotation is not a runtime write mode or a DateTime adapter. It neither implements
+nor changes the separate owned migration contract. That contract's approved
+rejection of legacy epoch-second DateTime storage, supported Integer epoch-second
+defaults, and canonical runtime DateTime semantics remain independent requirements.
+
+Whole-transaction cancellation and propagated hook/journal failures retain the
+existing rollback and commit-before-event guarantees. **Catching an inner
+mutation timeout/error and returning `Ok` does not guarantee rollback**: the
+static transaction context has no unfinished-operation poisoning invariant.
+Cancel the whole transaction or propagate the error. A lost commit response
+remains ambiguous; do not blindly retry. This capability does not implement the
+stronger runtime mutation contract.
+
+The annotation is rejected on GraphQL/schema-only derives, unrelated names,
+non-Integer representations (including `date_field`), relations, skipped database
+fields, primary keys, version fields, and explicitly generated fields. Ordinary
+`write = false` restrictions remain supported. Existing GraphQL SDL/automatic
+behavior and unannotated repository declarations remain unchanged. MSSQL keeps
+its existing external schema/write gates; the annotation does not authorize
+schema management or enable otherwise unavailable operations.
+
+The standalone [host timestamp example](../../../crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/host_timestamps.rs)
+uses no direct async-graphql dependency. SQLite runs it with:
+
+```bash
+CARGO_BUILD_JOBS=2 cargo run \
+  --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
+  --locked --no-default-features --features sqlite --example host_timestamps
+```
+
+PostgreSQL regression/example execution creates test-owned Docker containers,
+checks their ownership before cleanup, and never reads application connection
+settings. Run backend builds sequentially:
+
+```bash
+CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked \
+  --no-default-features --features sqlite --test host_timestamps
+CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked \
+  --no-default-features --features postgres --test host_timestamps \
+  -- --ignored --test-threads=1
+CARGO_BUILD_JOBS=2 cargo test \
+  --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
+  --locked --no-default-features --features postgres --test host_timestamps \
+  -- --ignored --test-threads=1
+```
 
 ## Reads, writes, and transactions
 

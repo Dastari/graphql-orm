@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.36.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.40.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.36.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.40.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -166,5 +166,20 @@ aggregate enums keep their GraphQL derive and naming attributes. See the
 [external runtime consumer](../graphql-orm/tests/fixtures/repository-aggregate-consumer/src/lib.rs)
 for compiled plain Rust aggregate calls without a direct async-graphql dependency.
 
-Version 0.36.0 aligns with the runtime migration API addition. Macro syntax and
-ordinary static GraphQL SDL remain unchanged.
+Version 0.33.3 gives the repository aggregate compatibility fix a distinct package
+identity after the independent 0.33.2 fixture maintenance. Generated behavior is
+unchanged from the reviewed aggregate fix.
+
+Version 0.35.1 generates projection identity for complete SQL row visibility and
+aligns with the core policy-aware projection fix. Existing generated
+aggregate enums/builders and ordinary GraphQL aggregate SDL remain unchanged;
+repository-only consumers still need no direct async-graphql dependency.
+
+Repository-only Integer timestamps can use per-field `#[graphql_orm(timestamp = "host")]`.
+See [host timestamp inputs, migration compatibility and cancellation limits](../../docs/reference/graphql-orm/repository-only-entities.md#host-managed-integer-timestamps).
+
+Complete SQLite/PostgreSQL text-group pages and SQL-visible ordinary aggregates: see [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md).
+
+Version 0.40.0 aligns with the owned runtime migration addition. Released host-managed
+timestamps, framework-neutral repository aggregate helpers and static GraphQL SDL
+remain unchanged.

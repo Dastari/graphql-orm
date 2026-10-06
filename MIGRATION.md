@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-02
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,10 +13,10 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
-## 0.35.1 to 0.36.0: owned runtime migration targets
+## 0.39.0 to 0.40.0: owned runtime migration targets
 
-Adopt runtime and macros 0.36.0 together. This unpublished identity follows the
-independent static 0.35.1 fixes without changing the approved migration contract. Existing static enums, variant imports,
+Adopt runtime and macros 0.40.0 together. This unpublished identity retains the released
+0.39.0 static capabilities without changing the approved migration contract. Existing static enums, variant imports,
 constructors, exhaustive matches, struct literals and function pointers remain
 source-compatible; no call-site or stored-data migration is required.
 
@@ -48,6 +48,75 @@ field with a scoped `UnsupportedDefault` diagnostic. Existing static defaults an
 storage remain unchanged; Integer epoch-second defaults remain supported. Canonical
 runtime datetime defaults retain RFC3339/native timestamp semantics. No implicit
 legacy datetime storage conversion or data migration is performed.
+
+## Repository host timestamps (0.39.0)
+
+Adopt aligned ORM/macros 0.39.0. Existing declarations require no edits and keep
+legacy seconds-based timestamp writes and GraphQL SDL. Add per-field
+`#[graphql_orm(timestamp = "host")]` only to `RepositoryEntity` Integer timestamp
+fields whose Rust/physical name is `created_at` or `updated_at`. Writable non-null
+create inputs now require that annotated field; update inputs use ordinary
+omission/null semantics. Explicit UUID keys and `auto_generated = false` remain
+unchanged. Host-managed creation timestamps are writable, including on upsert
+conflict: enforce immutability through existing restrictions/policies when needed.
+
+PostgreSQL's parentheses/capitalization when deparsing the known ORM epoch-second
+default now compare equivalent, avoiding false column alterations. The expression,
+storage units and runtime DateTime rules remain unchanged. Regenerate unapplied
+migration plans with this revision so their guarded hashes use the same default
+comparison.
+
+The annotation alone changes no physical metadata/default or stored value and
+replans to no-op. Database defaults remain available to other writers. Removing
+defaults is a separate migration. Runtime Integer/DateTime distinctions are not
+changed. Propagate transaction/hook/journal errors or cancel the whole transaction;
+catching an inner timeout then returning `Ok` does not guarantee rollback.
+
+See [repository timestamp behavior, examples and backend tests](docs/reference/graphql-orm/repository-only-entities.md#host-managed-integer-timestamps).
+This repository capability is independent of the runtime migration/mutation and
+dynamic GraphQL contracts; it does not implement those proposed APIs.
+
+## Portable group pages and SQL-visible aggregates (0.38.0)
+
+Adopt aligned ORM/macros 0.38.0. No physical schema, data, GraphQL SDL, existing
+SQLite cursor wire format or call-site change is required. `fetch_group_page`
+remains supported. PostgreSQL now supports single TEXT/VARCHAR group pages:
+`Binary` uses bytewise `C` comparison; the retained `SqliteNoCase` variant uses
+explicit ASCII A–Z folding then bytewise original-value tie-breaking. PostgreSQL
+page grouping uses exact original text equality, independently of source collation;
+ordinary aggregates and SQLite page native equality remain unchanged.
+
+An installed row policy no longer automatically blocks ordinary `fetch`: current
+`Unrestricted` or `Complete` visibility is required, with policy and caller filters
+intersected before aggregation. Residual/callback-only policies still fail closed.
+Generated aggregate-field enums supply an entity TypeId through a provided hook;
+handwritten enums remain compatible, but must implement `entity_type_id` correctly
+to use complete SQL visibility. Unrestricted visibility needs no token.
+
+Keep trusted authorization/public-revision context in page requests, protect
+host cursor envelopes as appropriate, and recheck current policy on every call.
+Page cursors do not pin a database snapshot. Concurrent insertion/deletion/renaming
+can change a multi-page enumeration; refresh from None when refreshing the dropdown.
+MSSQL pages and other scalar/multiple grouping keys reject before I/O. Existing
+MSSQL ordinary aggregate/provider/schema gates are unchanged.
+
+See [provider, authorization, wire and consistency contract](docs/reference/graphql-orm/typed-aggregates.md)
+and its executable standalone example and owned PostgreSQL test. This capability
+is independent of runtime contracts A–D and host-managed repository timestamps.
+
+## Policy-aware transaction counts (0.35.2)
+
+Adopt aligned runtime/macros 0.35.2. No schema, stored-data, public API or
+GraphQL SDL migration is required. Transaction-bound repository `count` and
+`exists` now accept current explicit `Unrestricted` visibility or a complete
+SQL predicate from the installed row policy. Complete predicates are combined
+with caller filters before counting on the existing pinned transaction.
+
+Entity authorization remains required. Callback-only/prefilter visibility and
+residual query filters under an installed policy remain rejected; no full-row
+scan replaces SQL authorization. Re-evaluate verified identity and ownership
+for every call and never declare a partial predicate complete. Existing
+no-policy behavior is retained. See [repository helpers](docs/reference/graphql-orm/runtime-and-writes.md#repository-helpers).
 
 ## Policy-aware typed projections (0.35.1)
 

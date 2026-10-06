@@ -220,3 +220,19 @@ read/write/schema-policy contracts remain unchanged. Unsupported runtime IR
 semantics continue to be rejected by its existing validator/conversion; do not
 substitute arbitrary SQL fragments. The dependency environment does not implement
 record writes, cascade mutations, catalog activation or durable event replay.
+
+## Released repository capability compatibility
+
+Owned migration targets retain the released repository host-managed timestamp
+annotation as an ordinary Integer field. Per-field host management changes no
+physical default, column name or unit. Static-to-runtime conversion retains
+explicit Integer defaults and supported epoch-second Integer defaults; it does
+not infer millisecond DateTime storage. No-op replanning on SQLite/PostgreSQL
+covers conversion of these released declarations. Legacy epoch-second DateTime
+default rejection remains unchanged.
+
+The independent runtime string predicate/binding fix is reviewed separately;
+this migration slice does not implement runtime record writes or dynamic GraphQL.
+The current static transaction cancellation limitation is unchanged. B remains
+gated on a committed, reviewed A predecessor and supplies its stronger runtime
+operation/hook poisoning guarantee separately.

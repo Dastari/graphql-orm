@@ -94,10 +94,10 @@ merged directly into a dynamic schema; hosts provide dynamic fields/types.
 | --- | --- | --- | --- |
 | Contract | Current main | This review checkpoint only | 0.33.1, unchanged |
 | Fix | Reviewed scope, independently of A–D | Plain repository aggregate enums | 0.33.3 (merged identity correction) |
-| A | Approved contract; implementation review #97 | Owned physical target conversion and scoped planning | 0.36.0 |
-| B | Approved contract and A's reviewed verified physical target | Transactional runtime mutation engine | 0.37.0 |
-| C | Approved contract; A for end-to-end fixtures | Read-only dynamic GraphQL | 0.38.0 |
-| D | Committed, reviewed B and C | Dynamic mutation registration | 0.39.0 |
+| A | Approved contract; implementation review #97 | Owned physical target conversion and scoped planning | 0.40.0 |
+| B | Approved contract and A's reviewed verified physical target | Transactional runtime mutation engine | next additive version after reviewed A |
+| C | Approved contract; A for end-to-end fixtures | Read-only dynamic GraphQL | next additive version after reviewed B |
+| D | Committed, reviewed B and C | Dynamic mutation registration | next additive version after reviewed C |
 
 These are proposed release increments, not reserved published versions.
 Rebase and choose the next appropriate version at each PR. ORM/macros remain
@@ -1120,8 +1120,9 @@ The revised A–D contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`
 is approved. The independent repository aggregate fix is merged and included
 in the owner-published 0.33.3 baseline. PR A implements owned targets and
 read-only planning, explicit ownership and separate guarded application in
-ORM/macros 0.36.0; its unpublished identity is reconciled after the independent
-static 0.35.1 release set without changing the approved interfaces. Its compiled host example and isolated SQLite/PostgreSQL
+ORM/macros 0.40.0; its unpublished identity is reconciled onto released
+0.39.0 main without changing the approved interfaces. Host-managed timestamps and
+portable static aggregate capabilities remain intact. Its compiled host example and isolated SQLite/PostgreSQL
 tests accompany the implementation. It remains subject to owner review.
 
 A's live FK capability checks reject unsupported actions/deferral with scoped
