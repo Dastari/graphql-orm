@@ -23,6 +23,7 @@ mod supported {
     )]
     struct PrivateHistory {
         #[primary_key]
+        #[graphql_orm(auto_generated = false)]
         id: String,
         event: Option<String>,
         tenant: String,
