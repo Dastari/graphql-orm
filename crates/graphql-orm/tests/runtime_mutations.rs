@@ -180,6 +180,8 @@ impl Fixture {
                     )
                     .unwrap(),
             ),
+            expected_policy_revision: 1,
+            pinned_policy_revision: 1,
             deny_intent: false,
             deny_preimage: false,
             deny_result: false,
@@ -249,6 +251,8 @@ impl Fixture {
 struct Authority {
     projection: RuntimeProjection,
     predicate: Option<RuntimePredicate>,
+    expected_policy_revision: u64,
+    pinned_policy_revision: u64,
     deny_intent: bool,
     deny_preimage: bool,
     deny_result: bool,
@@ -263,6 +267,11 @@ impl RuntimeWriteAuthority<Backend> for Authority {
         _tx: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<RuntimeWriteGrant, RuntimeMutationError>> {
         Box::pin(async move {
+            if self.expected_policy_revision != self.pinned_policy_revision {
+                return Err(RuntimeMutationError::new(
+                    RuntimeMutationErrorCode::SchemaMismatch,
+                ));
+            }
             if self.deny_intent {
                 return Err(RuntimeMutationError::new(
                     RuntimeMutationErrorCode::FieldDenied,
@@ -1188,5 +1197,27 @@ async fn combined_key_cas_and_authority_bind_budget_rejects_before_target_reads(
             .runtime_mutation_code(),
         Some("limit_exceeded")
     );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn host_policy_only_revision_changes_reject_unchanged_schema_requests() {
+    let f = Fixture::new().await;
+    let fingerprint = f.schema().fingerprint();
+    let request = f.create(1);
+    let mut authority = f.authority();
+    // Host obtains these values from its pinned policy generation, not the ORM schema.
+    authority.pinned_policy_revision = 2;
+    let error = f.run(request, authority).await.unwrap_err();
+    assert_eq!(
+        error.public_error().runtime_mutation_code(),
+        Some("schema_mismatch")
+    );
+    assert_eq!(f.schema().fingerprint(), fingerprint);
+    assert_eq!(f.count().await, 0);
+    let mut fresh = f.authority();
+    fresh.pinned_policy_revision = 2;
+    fresh.expected_policy_revision = 2;
+    f.run(f.create(1), fresh).await.unwrap();
     f.finish().await;
 }
