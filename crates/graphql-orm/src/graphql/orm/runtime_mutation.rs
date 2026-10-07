@@ -740,6 +740,25 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         if let Some(p) = &grant.predicate {
             p.check_mutation_limits(request.limits)?;
         }
+        let mut binds = request
+            .fields
+            .iter()
+            .filter(|(_, value)| !matches!(value, RuntimeValue::Null))
+            .count();
+        if request.action == RuntimeMutationAction::Create {
+            binds = binds.saturating_add(c.fields.iter().filter(|field| field.generated).count());
+        } else {
+            binds = binds.saturating_add(c.primary_key.len());
+            for predicate in [grant.predicate.as_ref(), request.expected.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                binds = binds.saturating_add(predicate.mutation_bind_count());
+            }
+        }
+        if binds > request.limits.query.max_bind_parameters {
+            return Err(err(E::LimitExceeded));
+        }
         let mut fields = grant.projection.fields().to_vec();
         let key_fields = c
             .primary_key

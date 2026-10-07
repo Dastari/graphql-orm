@@ -256,6 +256,11 @@ impl RuntimePredicate {
         fields
     }
     #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn mutation_bind_count(&self) -> usize {
+        self.binds
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
     pub(crate) fn check_mutation_limits(
         &self,
         limits: super::RuntimeMutationLimits,
