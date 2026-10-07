@@ -13,6 +13,49 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.39.0 to 0.40.0: owned runtime migration targets
+
+Adopt runtime and macros 0.40.0 together. This unpublished identity retains the released
+0.39.0 static capabilities without changing the approved migration contract. Existing static enums, variant imports,
+constructors, exhaustive matches, struct literals and function pointers remain
+source-compatible; no call-site or stored-data migration is required.
+
+Runtime hosts may opt into `ValidatedRuntimeSchema::physical_schema`, compose
+static metadata, explicitly declare owned physical tables, preview a plan, then
+apply its immutable artifact with ordinary `ApplyOptions`. Retain intentionally
+removed tables in the ownership set to review drops. Baseline validation is always
+required for owned plans; `require_clean_schema = false` does not disable their
+immutable baseline binding. Replan after drift and after successful application.
+Owned application does not reconcile PostgreSQL RLS. Unsupported backends fail
+before connection acquisition; unsupported live preservation cases return structured
+rejections. See [owned runtime migrations](docs/reference/graphql-orm/runtime-migrations.md).
+
+Owned runtime operations reject unsupported live FK semantics with a scoped
+`UnsupportedForeignKey` diagnostic. Use explicit delete `RESTRICT`, `CASCADE` or
+`SET NULL`, default update `NO ACTION` and non-deferrable constraints in the initial
+profile. Delete `SET DEFAULT`/`NO ACTION`, nondefault update actions and deferral
+cannot be faithfully represented by the legacy model. Relevant system/unowned
+incoming constraints are checked, including on the pinned apply transaction;
+unrelated tables are left intact. Static migration APIs/storage behavior are
+unchanged. See the reference for additional PostgreSQL scope/match limitations.
+
+PostgreSQL planning recognizes the unmodified built-in `TIMESTAMPTZ` /
+`timestamp with time zone` alias without rewriting metadata, defaults or hashes.
+This prevents false alterations and certification failures after applying runtime
+DateTime targets. It requires no data migration. Timestamp without time zone,
+precision modifiers, arrays and qualified/quoted type names remain distinct;
+this is not general SQL type-name normalization. SQLite comparison is unchanged.
+
+The physical dependency environment is not a record-write API or an authorization
+certificate. Hosts must fence external DDL and validate their complete public/policy
+revision before future mutations; ORM fingerprints exclude host policy revisions.
+
+Static-to-runtime conversion now rejects an epoch-second default on a DateTime
+field with a scoped `UnsupportedDefault` diagnostic. Existing static defaults and
+storage remain unchanged; Integer epoch-second defaults remain supported. Canonical
+runtime datetime defaults retain RFC3339/native timestamp semantics. No implicit
+legacy datetime storage conversion or data migration is performed.
+
 ## Repository host timestamps (0.39.0)
 
 Adopt aligned ORM/macros 0.39.0. Existing declarations require no edits and keep

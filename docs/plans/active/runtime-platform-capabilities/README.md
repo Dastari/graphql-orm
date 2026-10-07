@@ -3,7 +3,7 @@ title: Bounded runtime platform capability contract
 kind: plan
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-30
+last_reviewed: 2026-10-01
 review_by: 2026-12-31
 supersedes: []
 ---
@@ -14,9 +14,13 @@ supersedes: []
 
 Provide reusable runtime migration, transactional single-record mutation, and
 opt-in dynamic GraphQL mechanisms for applications with catalog-loaded schemas.
-This is a **proposed contract**, not an implemented API. All Rust signatures,
-examples, SDL, feature additions, and future versions below are proposals.
-Review this checkpoint before implementing unsettled public interfaces.
+The revised contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd` is approved for
+implementation and merged by PR #86 at `9ed46db5d1c5c6214f83ef9084352030e14905ad`.
+PR A implements the owned migration slice; its current public mechanics are in
+[owned runtime migrations](../../../reference/graphql-orm/runtime-migrations.md).
+B–D signatures, examples, SDL and feature additions below remain approved
+proposals until their separate implementation/test PRs. A proposal is not
+execution or downstream adoption evidence.
 
 The initiating [consumer contract](https://github.com/Dastari/digibase/blob/agent/vertical-slice-plan/docs/coordination/prompts/0013-graphql-orm-runnable-product-prerequisites.md)
 requires separate reviewable PRs. The host owns catalog persistence, activation,
@@ -89,11 +93,11 @@ merged directly into a dynamic schema; hosts provide dynamic fields/types.
 | PR | Depends on | Change | Suggested aligned ORM/macros version |
 | --- | --- | --- | --- |
 | Contract | Current main | This review checkpoint only | 0.33.1, unchanged |
-| Fix | Reviewed scope, independently of A–D | Plain repository aggregate enums | 0.33.2 |
-| A | Contract review | Owned physical target conversion and scoped planning | 0.34.0 |
-| B | Contract review and A's verified composed physical target | Transactional runtime mutation engine | 0.35.0 |
-| C | Contract review; A for end-to-end fixtures | Read-only dynamic GraphQL | 0.36.0 |
-| D | Committed, reviewed B and C | Dynamic mutation registration | 0.37.0 |
+| Fix | Reviewed scope, independently of A–D | Plain repository aggregate enums | 0.33.3 (merged identity correction) |
+| A | Approved contract; implementation review #97 | Owned physical target conversion and scoped planning | 0.40.0 |
+| B | Approved contract and A's reviewed verified physical target | Transactional runtime mutation engine | next additive version after reviewed A |
+| C | Approved contract; A for end-to-end fixtures | Read-only dynamic GraphQL | next additive version after reviewed B |
+| D | Committed, reviewed B and C | Dynamic mutation registration | next additive version after reviewed C |
 
 These are proposed release increments, not reserved published versions.
 Rebase and choose the next appropriate version at each PR. ORM/macros remain
@@ -292,7 +296,7 @@ let plan = database.schema().plan_owned_migration(
 ).await?;
 // Host reviews diagnostics/risks and retains the exact reviewed plan.
 let applied = database.schema().apply_owned_migration(&plan, ApplyOptions {
-    expected_current_schema_hash: plan.source_schema_hash().cloned(),
+    expected_current_schema_hash: Some(plan.source_schema_hash().to_owned()),
     ..ApplyOptions::default()
 }).await?;
 ```
@@ -1112,13 +1116,39 @@ is advertised until its contract is committed and reviewed.
 
 ## Current checkpoint
 
-Proposal prepared against the exact remote base; no functional APIs implemented.
-The independent repository aggregate fix is approved for implementation in
-its own PR. A–D remain pending review of this revised contract: preserved enum
-namespaces with shared internal storage adapters, ownership/RLS/dependency
-verification, guarded operation/hook cancellation, host-managed AEAD cursor
-protection, symmetric lossless JSON-text scalars, required create keys, and
-host policy-only revision validation. Other accepted boundaries, including
-initial unsupported_cascade with RESTRICT supported, are retained. No A–D
-interfaces are implemented by this proposal. Each approved functional PR must
-provide its own compiled examples, isolated evidence and exact handoff.
+The revised A–D contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`
+is approved. The independent repository aggregate fix is merged and included
+in the owner-published 0.33.3 baseline. PR A implements owned targets and
+read-only planning, explicit ownership and separate guarded application in
+ORM/macros 0.40.0; its unpublished identity is reconciled onto released
+0.39.0 main without changing the approved interfaces. Host-managed timestamps and
+portable static aggregate capabilities remain intact. Its compiled host example and isolated SQLite/PostgreSQL
+tests accompany the implementation. It remains subject to owner review.
+
+A's live FK capability checks reject unsupported actions/deferral with scoped
+`UnsupportedForeignKey` diagnostics, including relevant system/unowned incoming
+sources, and recheck them on the pinned apply transaction. The legacy physical
+model/static APIs are unchanged. Successful SQLite FK restoration retains its
+connection; cancellation or failed restoration discards an unsafe lease. ORM API
+reproductions at the reviewed head confirm constraint loss. Regressions cover
+structured FK rejection, successful in-memory rebuild/no-op replanning,
+cancellation, incoming constraints introduced after planning, and unchanged
+PostgreSQL system RLS. The approved legacy datetime rejection and
+representable static/runtime equivalence gates remain covered.
+
+Review correction R3 reproduces PostgreSQL DateTime no-op/certification failure
+through owned plan/apply APIs. The shared planner now compares the built-in
+`TIMESTAMPTZ` / `timestamp with time zone` alias without rewriting hashes or
+storage metadata. Required/nullable DateTime targets with no default and
+`CurrentTimestamp`, including static/system composition, have executable
+SQLite/PostgreSQL fixed-point gates. Timezone-free timestamps and precision
+changes remain distinct. This correction awaits exact-head re-review. Prefer
+owner merge/release of independent #112 first, then reconcile A with that exact
+merged source; Actions remain paused.
+
+B–D remain approved proposals with unimplemented interfaces and require reviewed
+committed predecessors. Keep the operation/hook cancellation, host-managed AEAD
+cursor protection, lossless JSON text, required create keys and host policy-only
+revision guarantees during implementation. Independent compiled static
+relationships/query/view work is coordinated separately and does not require
+B–D or dynamic GraphQL. No releases or consumer repository changes are included.

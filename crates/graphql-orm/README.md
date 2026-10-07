@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.39.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.40.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -197,3 +197,9 @@ Repository-only Integer timestamps can use per-field `#[graphql_orm(timestamp = 
 See [host timestamp inputs, migration compatibility and cancellation limits](../../docs/reference/graphql-orm/repository-only-entities.md#host-managed-integer-timestamps).
 
 Complete SQLite/PostgreSQL text-group pages and SQL-visible ordinary aggregates: see [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md).
+
+Owned runtime targets, explicit table ownership, read-only plans and guarded apply
+are documented in [runtime migrations](../../docs/reference/graphql-orm/runtime-migrations.md).
+Live capability checks reject FK actions/deferral the physical model cannot retain,
+including incoming system/unowned constraints, and recheck on the apply transaction.
+Static migration APIs remain unchanged.

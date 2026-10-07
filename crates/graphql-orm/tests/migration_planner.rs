@@ -573,3 +573,70 @@ fn known_postgres_epoch_defaults_compare_without_widening_sql_equivalence() {
         );
     }
 }
+
+#[test]
+fn postgres_timestamp_aliases_share_planning_without_rewriting_hashes_or_real_types() {
+    fn model(kind: &str) -> SchemaModel {
+        let mut table = users_v1();
+        table.columns[1].sql_type = kind.into();
+        SchemaModel {
+            extensions: vec![],
+            tables: vec![table],
+        }
+    }
+    let short = model("TIMESTAMPTZ");
+    let deparsed = model("timestamp with time zone");
+    // The public hash contract retains the caller's original physical spelling.
+    assert_ne!(short.stable_hash(), deparsed.stable_hash());
+    for (before, after) in [(&short, &deparsed), (&deparsed, &short)] {
+        let plan = build_migration_plan(DatabaseBackend::Postgres, before, after);
+        assert!(plan.steps.is_empty());
+        assert!(plan.statements.is_empty());
+        assert!(
+            !build_migration_plan(DatabaseBackend::Sqlite, before, after)
+                .steps
+                .is_empty()
+        );
+        assert!(
+            !build_migration_plan(DatabaseBackend::Mssql, before, after)
+                .steps
+                .is_empty()
+        );
+    }
+    for distinct in [
+        "timestamp without time zone",
+        "TIMESTAMP",
+        "DATE",
+        "TEXT",
+        "TIMESTAMPTZ(3)",
+        "timestamp(3) with time zone",
+        "TIMESTAMPTZ[]",
+        "public.timestamptz",
+        "\"TIMESTAMPTZ\"",
+    ] {
+        let plan = build_migration_plan(DatabaseBackend::Postgres, &short, &model(distinct));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| matches!(step, MigrationStep::AlterColumn { .. }))
+        );
+    }
+    assert!(
+        build_migration_plan(
+            DatabaseBackend::Postgres,
+            &model("timestamptz"),
+            &model("TIMESTAMP WITH TIME ZONE")
+        )
+        .steps
+        .is_empty()
+    );
+    assert!(
+        !build_migration_plan(
+            DatabaseBackend::Postgres,
+            &model("TIMESTAMPTZ(3)"),
+            &model("TIMESTAMPTZ(6)")
+        )
+        .steps
+        .is_empty()
+    );
+}
