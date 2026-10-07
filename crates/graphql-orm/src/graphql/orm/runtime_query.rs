@@ -230,6 +230,93 @@ impl fmt::Debug for RuntimePredicate {
 }
 
 impl RuntimePredicate {
+    /// Fields whose values affect this predicate, for independent host authorization.
+    pub fn referenced_fields(&self) -> Vec<&RuntimeFieldHandle> {
+        fn visit<'a>(expr: &'a PredicateExpr, fields: &mut Vec<&'a RuntimeFieldHandle>) {
+            match expr {
+                PredicateExpr::Constant(_) => {}
+                PredicateExpr::IsNull { field, .. }
+                | PredicateExpr::Compare { field, .. }
+                | PredicateExpr::List { field, .. }
+                | PredicateExpr::Between { field, .. } => {
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                PredicateExpr::And(nodes) | PredicateExpr::Or(nodes) => {
+                    for node in nodes {
+                        visit(node, fields);
+                    }
+                }
+                PredicateExpr::Not(node) => visit(node, fields),
+            }
+        }
+        let mut fields = Vec::new();
+        visit(&self.expr, &mut fields);
+        fields
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn check_mutation_limits(
+        &self,
+        limits: super::RuntimeMutationLimits,
+    ) -> Result<(), super::RuntimeMutationError> {
+        if self.nodes > limits.query.max_predicate_nodes
+            || self.depth > limits.query.max_predicate_depth
+            || self.binds > limits.query.max_bind_parameters
+        {
+            return Err(super::RuntimeMutationError::new(
+                super::RuntimeMutationErrorCode::LimitExceeded,
+            ));
+        }
+        fn visit(
+            expr: &PredicateExpr,
+            limits: super::RuntimeMutationLimits,
+            bytes: &mut usize,
+        ) -> Result<(), super::RuntimeMutationError> {
+            use super::{RuntimeMutationError, RuntimeMutationErrorCode};
+            let mut check = |field: &RuntimeFieldHandle, value: &RuntimeValue| {
+                super::runtime_mutation::check_value(field, value, limits)?;
+                let size = serde_json::to_vec(value)
+                    .map_err(|_| RuntimeMutationError::new(RuntimeMutationErrorCode::InvalidInput))?
+                    .len();
+                *bytes = bytes
+                    .checked_add(size)
+                    .filter(|n| *n <= limits.max_record_bytes)
+                    .ok_or_else(|| {
+                        RuntimeMutationError::new(RuntimeMutationErrorCode::LimitExceeded)
+                    })?;
+                Ok::<_, RuntimeMutationError>(())
+            };
+            match expr {
+                PredicateExpr::Constant(_) | PredicateExpr::IsNull { .. } => {}
+                PredicateExpr::Compare { field, value, .. } => check(field, value)?,
+                PredicateExpr::List { field, values, .. } => {
+                    if values.len() > limits.query.max_values_per_list {
+                        return Err(RuntimeMutationError::new(
+                            RuntimeMutationErrorCode::LimitExceeded,
+                        ));
+                    }
+                    for value in values {
+                        check(field, value)?;
+                    }
+                }
+                PredicateExpr::Between { field, low, high } => {
+                    check(field, low)?;
+                    check(field, high)?;
+                }
+                PredicateExpr::And(nodes) | PredicateExpr::Or(nodes) => {
+                    for node in nodes {
+                        visit(node, limits, bytes)?;
+                    }
+                }
+                PredicateExpr::Not(node) => visit(node, limits, bytes)?,
+            }
+            Ok(())
+        }
+        visit(&self.expr, limits, &mut 0)?;
+        Ok(())
+    }
+
     pub(crate) fn belongs_to(&self, schema: &SchemaFingerprint, collection: &CollectionId) -> bool {
         &self.schema == schema && &self.collection == collection
     }

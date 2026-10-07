@@ -14,6 +14,23 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.41.0 - unreleased
+
+Companion macros crate: `graphql-orm-macros` **0.41.0** (alignment only).
+
+- Add schema-bound single-record runtime create, patch and exact-key delete on
+  SQLite/PostgreSQL pinned state-machine transactions. Reuse existing values,
+  handles, typed predicates and row decoding; preserve static repository APIs.
+- Require explicit host intent/preimage/result authorization, structural CAS,
+  exact return projection grants and verified physical dependency environments.
+- Add cancellation guards for runtime mutations and before-commit host journal
+  hooks. Caught errors/timeouts cannot commit partial runtime work. Static-only
+  transaction behavior and ambiguous commit limitations remain unchanged.
+- Add conservative transaction commit-outcome inspection and safe runtime error
+  codes retained through the public transaction runner.
+- Document unsupported modifying cascades and backend capabilities; include a
+  disposable create/update/delete/journal example and framework-neutral consumer.
+
 ## 0.40.0 - unreleased
 
 Companion macros crate: `graphql-orm-macros` **0.40.0** (alignment only).

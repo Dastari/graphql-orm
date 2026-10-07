@@ -31,6 +31,7 @@ guidance for the core ORM package.
 ## Generated and repository operations
 
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
+- [Schema-bound transactional runtime mutations](runtime-mutations.md)
 - [Composite mutations](composite-mutations.md)
 - [Repository-only entities](repository-only-entities.md)
 - [Read projections](read-projections.md)
