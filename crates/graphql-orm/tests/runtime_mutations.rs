@@ -1101,7 +1101,7 @@ fn bounded_inputs_and_predicate_values_reject_without_database_access() {
         .runtime_key(&c, &[(id, RuntimeValue::Integer(1))])
         .unwrap();
     let limits = RuntimeMutationLimits {
-        max_value_bytes: 24,
+        max_value_bytes: 64,
         ..Default::default()
     };
     let value = RuntimeValue::String("fixture-private-value".repeat(10));

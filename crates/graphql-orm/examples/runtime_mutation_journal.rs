@@ -152,5 +152,18 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         example::run(graphql_orm::db::Database::connect_postgres(&owned.url).await?).await?;
         owned.cleanup()?;
     }
-    Ok(())
+    #[cfg(any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    ))]
+    {
+        Ok(())
+    }
+    #[cfg(not(any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    )))]
+    {
+        Err("runtime mutation example requires exactly SQLite or PostgreSQL".into())
+    }
 }
