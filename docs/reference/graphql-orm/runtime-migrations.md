@@ -10,7 +10,7 @@ supersedes: []
 
 # Owned runtime migration targets
 
-ORM/macros 0.36.0 adds migration targets from the existing validated runtime
+ORM/macros 0.40.0 (unreleased) adds migration targets from the existing validated runtime
 schema on SQLite and PostgreSQL. These APIs are separate from schema activation,
 catalog persistence, public revision selection, authorization policy and transport,
 which remain host responsibilities. Dynamic GraphQL and runtime record mutations
@@ -83,6 +83,14 @@ renames or record deletion. Equivalent representable static/owned targets use th
 semantics and replan to an empty step/statement list after application in either
 origin direction. SQLite introspection respects primary-key member ordinals,
 including a composite key whose order differs from column declaration order.
+
+PostgreSQL introspection reports `TIMESTAMPTZ` as `timestamp with time zone`.
+The shared static/owned planner treats these unmodified built-in spellings as
+equivalent, including required/nullable fields with no default or
+`CurrentTimestamp`. The stored metadata and hash algorithm retain their original
+spellings. Timezone-free timestamps and precision changes remain distinct.
+This comparison does not reinterpret storage or relax legacy DateTime default
+conversion checks.
 
 ## Ownership, composition and dependencies
 

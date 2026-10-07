@@ -1883,3 +1883,103 @@ async fn postgres_released_host_integer_timestamps_owned_noop()
     owned.cleanup()?;
     Ok(())
 }
+
+async fn datetime_fixed_point<B: RuntimeMigrationBackend>(
+    database: &Database<B>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (table, matrix, mixed) in [
+        ("minimal_dates", false, false),
+        ("matrix_dates", true, false),
+        ("composed_dates", true, true),
+    ] {
+        let mut definition = schema().schema().clone();
+        let collection = &mut definition.collections[0];
+        collection.physical_table = table.into();
+        collection.fields.truncate(1);
+        collection.indexes.clear();
+        for (name, nullable, default) in [
+            ("required_date", false, None),
+            ("nullable_date", true, None),
+            (
+                "required_now",
+                false,
+                Some(RuntimeDefault::CurrentTimestamp),
+            ),
+            ("nullable_now", true, Some(RuntimeDefault::CurrentTimestamp)),
+        ]
+        .into_iter()
+        .take(if matrix { 4 } else { 1 })
+        {
+            collection.fields.push(RuntimeField {
+                id: FieldId::new(name)?,
+                api_name: name.into(),
+                physical_column: name.into(),
+                value_kind: RuntimeValueKind::DateTime,
+                nullable,
+                unique: false,
+                filterable: false,
+                sortable: false,
+                generated: false,
+                default,
+            });
+        }
+        let schema = std::sync::Arc::new(definition.validate()?);
+        let mut target = schema.physical_schema::<B>(Default::default())?;
+        let mut tables = vec![table.to_owned()];
+        if mixed {
+            target = target.with_static_entities(&[OwnedClock::metadata()])?;
+            tables.push("owned_clocks".into());
+        }
+        let ownership = ManagedTableSet::new(tables)?;
+        let manager = database.schema();
+        let plan = manager
+            .plan_owned_migration(
+                table,
+                "datetime fixed point",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await?;
+        manager
+            .apply_owned_migration(&plan, ApplyOptions::default())
+            .await?;
+        let noop = manager
+            .plan_owned_migration(
+                table,
+                "unchanged datetime target",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await?;
+        assert!(noop.steps().is_empty(), "{noop:?}");
+        assert!(noop.statements().is_empty());
+        manager
+            .runtime_mutation_environment(schema, &target, &ownership)
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_datetime_required_nullable_defaults_and_composition_fixed_point()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    datetime_fixed_point(&db).await?;
+    db.pool().close().await;
+    Ok(())
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_datetime_required_nullable_defaults_and_composition_fixed_point()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("datetime-fixed-point")?;
+    let db = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
+    datetime_fixed_point(&db).await?;
+    db.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}

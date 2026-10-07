@@ -39,6 +39,13 @@ incoming constraints are checked, including on the pinned apply transaction;
 unrelated tables are left intact. Static migration APIs/storage behavior are
 unchanged. See the reference for additional PostgreSQL scope/match limitations.
 
+PostgreSQL planning recognizes the unmodified built-in `TIMESTAMPTZ` /
+`timestamp with time zone` alias without rewriting metadata, defaults or hashes.
+This prevents false alterations and certification failures after applying runtime
+DateTime targets. It requires no data migration. Timestamp without time zone,
+precision modifiers, arrays and qualified/quoted type names remain distinct;
+this is not general SQL type-name normalization. SQLite comparison is unchanged.
+
 The physical dependency environment is not a record-write API or an authorization
 certificate. Hosts must fence external DDL and validate their complete public/policy
 revision before future mutations; ORM fingerprints exclude host policy revisions.

@@ -36,6 +36,10 @@ Companion macros crate: `graphql-orm-macros` **0.40.0** (alignment only).
 - Preserve a single-connection SQLite in-memory database after a successful owned
   rebuild; discard suspended connections on cancellation or failed restoration.
 - Respect SQLite composite primary-key ordinal order during introspection.
+- Compare PostgreSQL `TIMESTAMPTZ` and its introspected `timestamp with time zone`
+  spelling as equivalent in the shared static/owned planner. DateTime targets now
+  replan to no-op and certify after application; timezone-free timestamps and
+  precision changes remain distinct. Physical metadata and hash formats are unchanged.
 - Reject legacy epoch-second DateTime default conversion with scoped structured
   diagnostics while preserving static storage and supported Integer defaults;
   preserve escaped quote semantics in converted literal defaults.

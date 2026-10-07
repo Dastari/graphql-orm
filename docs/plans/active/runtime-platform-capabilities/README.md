@@ -1136,6 +1136,16 @@ cancellation, incoming constraints introduced after planning, and unchanged
 PostgreSQL system RLS. The approved legacy datetime rejection and
 representable static/runtime equivalence gates remain covered.
 
+Review correction R3 reproduces PostgreSQL DateTime no-op/certification failure
+through owned plan/apply APIs. The shared planner now compares the built-in
+`TIMESTAMPTZ` / `timestamp with time zone` alias without rewriting hashes or
+storage metadata. Required/nullable DateTime targets with no default and
+`CurrentTimestamp`, including static/system composition, have executable
+SQLite/PostgreSQL fixed-point gates. Timezone-free timestamps and precision
+changes remain distinct. This correction awaits exact-head re-review. Prefer
+owner merge/release of independent #112 first, then reconcile A with that exact
+merged source; Actions remain paused.
+
 B–D remain approved proposals with unimplemented interfaces and require reviewed
 committed predecessors. Keep the operation/hook cancellation, host-managed AEAD
 cursor protection, lossless JSON text, required create keys and host policy-only

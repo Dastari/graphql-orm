@@ -583,6 +583,15 @@ fn render_constraint_comments(backend: DatabaseBackend, table: &TableRef<'_>) ->
         .collect()
 }
 
+// PostgreSQL format_type deparses the canonical runtime TIMESTAMPTZ spelling.
+// Compare that exact built-in alias without rewriting physical metadata or hashes.
+// Precision modifiers, arrays, domains and timestamp WITHOUT time zone remain
+// distinct; this is not a parser or general SQL type-name normalization rule.
+fn postgres_timestamptz_alias(sql_type: &str) -> bool {
+    sql_type.eq_ignore_ascii_case("TIMESTAMPTZ")
+        || sql_type.eq_ignore_ascii_case("timestamp with time zone")
+}
+
 pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
     before: &ColumnModel,
@@ -599,6 +608,9 @@ pub(super) fn column_changed_for_backend(
     let sql_type_changed = if matches!(backend, DatabaseBackend::Postgres | DatabaseBackend::Mssql)
     {
         !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+            && !(backend == DatabaseBackend::Postgres
+                && postgres_timestamptz_alias(&before.sql_type)
+                && postgres_timestamptz_alias(&after.sql_type))
     } else {
         before.sql_type != after.sql_type
     };
