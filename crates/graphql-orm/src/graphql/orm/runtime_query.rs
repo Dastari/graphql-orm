@@ -230,6 +230,103 @@ impl fmt::Debug for RuntimePredicate {
 }
 
 impl RuntimePredicate {
+    /// Fields whose values affect this predicate, for independent host authorization.
+    pub fn referenced_fields(&self) -> Vec<&RuntimeFieldHandle> {
+        fn visit<'a>(expr: &'a PredicateExpr, fields: &mut Vec<&'a RuntimeFieldHandle>) {
+            match expr {
+                PredicateExpr::Constant(_) => {}
+                PredicateExpr::IsNull { field, .. }
+                | PredicateExpr::Compare { field, .. }
+                | PredicateExpr::List { field, .. }
+                | PredicateExpr::Between { field, .. } => {
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                PredicateExpr::And(nodes) | PredicateExpr::Or(nodes) => {
+                    for node in nodes {
+                        visit(node, fields);
+                    }
+                }
+                PredicateExpr::Not(node) => visit(node, fields),
+            }
+        }
+        let mut fields = Vec::new();
+        visit(&self.expr, &mut fields);
+        fields
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn mutation_bind_count(&self, backend: DatabaseBackend) -> usize {
+        // Count emitted values, not logical operands or placeholder occurrences.
+        // Dialects may duplicate a value (SQLite suffixes) or reference one native
+        // slot repeatedly (PostgreSQL). Keep preflight coupled to execution rendering.
+        let mut values = Vec::new();
+        self.render(backend, &mut values);
+        values.len()
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn check_mutation_limits(
+        &self,
+        limits: super::RuntimeMutationLimits,
+    ) -> Result<(), super::RuntimeMutationError> {
+        if self.nodes > limits.query.max_predicate_nodes
+            || self.depth > limits.query.max_predicate_depth
+            || self.binds > limits.query.max_bind_parameters
+        {
+            return Err(super::RuntimeMutationError::new(
+                super::RuntimeMutationErrorCode::LimitExceeded,
+            ));
+        }
+        fn visit(
+            expr: &PredicateExpr,
+            limits: super::RuntimeMutationLimits,
+            bytes: &mut usize,
+        ) -> Result<(), super::RuntimeMutationError> {
+            use super::{RuntimeMutationError, RuntimeMutationErrorCode};
+            let mut check = |field: &RuntimeFieldHandle, value: &RuntimeValue| {
+                super::runtime_mutation::check_value(field, value, limits)?;
+                let size = serde_json::to_vec(value)
+                    .map_err(|_| RuntimeMutationError::new(RuntimeMutationErrorCode::InvalidInput))?
+                    .len();
+                *bytes = bytes
+                    .checked_add(size)
+                    .filter(|n| *n <= limits.max_record_bytes)
+                    .ok_or_else(|| {
+                        RuntimeMutationError::new(RuntimeMutationErrorCode::LimitExceeded)
+                    })?;
+                Ok::<_, RuntimeMutationError>(())
+            };
+            match expr {
+                PredicateExpr::Constant(_) | PredicateExpr::IsNull { .. } => {}
+                PredicateExpr::Compare { field, value, .. } => check(field, value)?,
+                PredicateExpr::List { field, values, .. } => {
+                    if values.len() > limits.query.max_values_per_list {
+                        return Err(RuntimeMutationError::new(
+                            RuntimeMutationErrorCode::LimitExceeded,
+                        ));
+                    }
+                    for value in values {
+                        check(field, value)?;
+                    }
+                }
+                PredicateExpr::Between { field, low, high } => {
+                    check(field, low)?;
+                    check(field, high)?;
+                }
+                PredicateExpr::And(nodes) | PredicateExpr::Or(nodes) => {
+                    for node in nodes {
+                        visit(node, limits, bytes)?;
+                    }
+                }
+                PredicateExpr::Not(node) => visit(node, limits, bytes)?,
+            }
+            Ok(())
+        }
+        visit(&self.expr, limits, &mut 0)?;
+        Ok(())
+    }
+
     pub(crate) fn belongs_to(&self, schema: &SchemaFingerprint, collection: &CollectionId) -> bool {
         &self.schema == schema && &self.collection == collection
     }
@@ -1593,6 +1690,76 @@ mod tests {
         }
         .validate()
         .unwrap()
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    #[test]
+    fn mutation_counts_emitted_backend_slots_including_nested_native_reuse() {
+        let schema = schema();
+        let collection = schema.resolve_collection(&collection_id("items")).unwrap();
+        let name = schema
+            .resolve_field(&collection, &field_id("name"))
+            .unwrap();
+        for literal in ["", "π%_\\"] {
+            let compare = |op| {
+                schema
+                    .runtime_compare(
+                        &collection,
+                        &name,
+                        op,
+                        RuntimeValue::String(literal.into()),
+                        RuntimeQueryLimits::default(),
+                    )
+                    .unwrap()
+            };
+            let suffix = compare(RuntimeScalarOperator::EndsWith);
+            let prefix = compare(RuntimeScalarOperator::StartsWith);
+            let nested = schema
+                .runtime_and(
+                    &collection,
+                    vec![
+                        suffix.clone(),
+                        schema
+                            .runtime_or(
+                                &collection,
+                                vec![
+                                    schema
+                                        .runtime_not(
+                                            &collection,
+                                            prefix.clone(),
+                                            Default::default(),
+                                        )
+                                        .unwrap(),
+                                    suffix.clone(),
+                                ],
+                                Default::default(),
+                            )
+                            .unwrap(),
+                    ],
+                    Default::default(),
+                )
+                .unwrap();
+            for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+                let suffix_slots = if backend == DatabaseBackend::Sqlite {
+                    2
+                } else {
+                    1
+                };
+                assert_eq!(suffix.mutation_bind_count(backend), suffix_slots);
+                assert_eq!(prefix.mutation_bind_count(backend), 1);
+                assert_eq!(nested.mutation_bind_count(backend), 2 * suffix_slots + 1);
+                // Existing surrounding query values change numbering, not slot cost.
+                let mut values = vec![SqlValue::Int(0)];
+                let sql = nested.render(backend, &mut values);
+                assert_eq!(nested.mutation_bind_count(backend), values.len() - 1);
+                if backend == DatabaseBackend::Postgres {
+                    for slot in ["$2", "$3", "$4"] {
+                        assert_eq!(sql.matches(slot).count(), 2);
+                    }
+                    assert_eq!(values.len(), 4);
+                }
+            }
+        }
     }
 
     #[test]

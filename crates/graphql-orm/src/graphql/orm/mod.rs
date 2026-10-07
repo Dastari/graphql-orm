@@ -18,10 +18,14 @@ mod owned_schema;
 mod query;
 mod rls;
 mod runtime_migration;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod runtime_mutation;
 mod runtime_query;
 mod runtime_record;
 mod runtime_relation;
 mod runtime_schema;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod runtime_transaction;
 mod schema_manager;
 mod schema_module;
 mod search;
@@ -45,6 +49,8 @@ pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedT
 pub use query::*;
 pub use rls::*;
 pub use runtime_migration::*;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub use runtime_mutation::*;
 pub use runtime_query::*;
 pub use runtime_record::*;
 pub use runtime_relation::*;

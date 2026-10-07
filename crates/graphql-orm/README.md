@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.40.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.41.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -203,3 +203,7 @@ are documented in [runtime migrations](../../docs/reference/graphql-orm/runtime-
 Live capability checks reject FK actions/deferral the physical model cannot retain,
 including incoming system/unowned constraints, and recheck on the apply transaction.
 Static migration APIs remain unchanged.
+
+Schema-bound runtime create/patch/delete with pinned authority, structural CAS,
+atomic host journals and cancellation poisoning are documented in
+[runtime mutations](../../docs/reference/graphql-orm/runtime-mutations.md).
