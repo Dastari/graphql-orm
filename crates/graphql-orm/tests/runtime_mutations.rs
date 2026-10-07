@@ -184,6 +184,7 @@ impl Fixture {
             pinned_policy_revision: 1,
             deny_intent: false,
             deny_preimage: false,
+            preimage_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             deny_result: false,
             pending_result: false,
             staged: Arc::new(AtomicBool::new(false)),
@@ -255,6 +256,7 @@ struct Authority {
     pinned_policy_revision: u64,
     deny_intent: bool,
     deny_preimage: bool,
+    preimage_calls: Arc<std::sync::atomic::AtomicUsize>,
     deny_result: bool,
     pending_result: bool,
     staged: Arc<AtomicBool>,
@@ -286,6 +288,7 @@ impl RuntimeWriteAuthority<Backend> for Authority {
         _tx: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
         Box::pin(async move {
+            self.preimage_calls.fetch_add(1, Ordering::SeqCst);
             if self.deny_preimage {
                 return Err(RuntimeMutationError::new(RuntimeMutationErrorCode::Denied));
             }
@@ -1219,5 +1222,148 @@ async fn host_policy_only_revision_changes_reject_unchanged_schema_requests() {
     fresh.pinned_policy_revision = 2;
     fresh.expected_policy_revision = 2;
     f.run(f.create(1), fresh).await.unwrap();
+    f.finish().await;
+}
+
+// PostgreSQL executes only rejection cases until the reviewed #112/A/B reconciliation.
+// The renderer's native-slot accounting is independently covered by unit tests.
+#[tokio::test]
+async fn emitted_suffix_bind_budgets_precede_target_reads_for_cas_and_authority() {
+    let f = Fixture::new().await;
+    let suffix = f
+        .schema()
+        .runtime_compare(
+            &f.collection(),
+            &f.field("label"),
+            RuntimeScalarOperator::EndsWith,
+            RuntimeValue::String("tial".into()),
+            Default::default(),
+        )
+        .unwrap();
+    let score = f
+        .schema()
+        .runtime_compare(
+            &f.collection(),
+            &f.field("score"),
+            RuntimeScalarOperator::Eq,
+            RuntimeValue::Integer(7),
+            Default::default(),
+        )
+        .unwrap();
+    let blocked = f
+        .schema()
+        .runtime_compare(
+            &f.collection(),
+            &f.field("label"),
+            RuntimeScalarOperator::Eq,
+            RuntimeValue::String("blocked".into()),
+            Default::default(),
+        )
+        .unwrap();
+    let not_blocked = f
+        .schema()
+        .runtime_not(&f.collection(), blocked, Default::default())
+        .unwrap();
+    let either = f
+        .schema()
+        .runtime_or(
+            &f.collection(),
+            vec![suffix.clone(), not_blocked],
+            Default::default(),
+        )
+        .unwrap();
+    let nested_cas = f
+        .schema()
+        .runtime_and(
+            &f.collection(),
+            vec![
+                suffix.clone(),
+                f.schema()
+                    .runtime_or(
+                        &f.collection(),
+                        vec![score.clone(), score.clone()],
+                        Default::default(),
+                    )
+                    .unwrap(),
+            ],
+            Default::default(),
+        )
+        .unwrap();
+    let tenant = f.authority().predicate.unwrap();
+    let nested_authority = f
+        .schema()
+        .runtime_and(
+            &f.collection(),
+            vec![tenant.clone(), either],
+            Default::default(),
+        )
+        .unwrap();
+    for (case, (expected, predicate, sqlite_slots, postgres_slots)) in [
+        (suffix, tenant.clone(), 5, 4),
+        (nested_cas.clone(), tenant, 7, 6),
+        (score, nested_authority.clone(), 7, 6),
+        (nested_cas, nested_authority, 10, 8),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let required = if Backend::DIALECT == DatabaseBackend::Sqlite {
+            sqlite_slots
+        } else {
+            postgres_slots
+        };
+        for budget in [required - 1, required, required + 1] {
+            if Backend::DIALECT == DatabaseBackend::Postgres && budget >= required {
+                continue;
+            }
+            let id = (case * 3 + budget + 2 - required) as i64;
+            f.run(f.create(id), f.authority()).await.unwrap();
+            let request = f
+                .schema()
+                .runtime_update_request(
+                    f.key(id),
+                    &[(f.field("score"), RuntimeValue::Integer(8))],
+                    Some(expected.clone()),
+                    None,
+                    RuntimeMutationLimits {
+                        query: RuntimeQueryLimits {
+                            max_bind_parameters: budget,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let mut authority = f.authority();
+            authority.predicate = Some(predicate.clone());
+            let calls = authority.preimage_calls.clone();
+            let result = f.run(request, authority).await;
+            if budget < required {
+                assert_eq!(
+                    result.unwrap_err().public_error().runtime_mutation_code(),
+                    Some("limit_exceeded")
+                );
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    0,
+                    "case {case}: preimage authorization ran before rejecting the bind budget"
+                );
+            } else {
+                result.unwrap();
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+            let sql = format!(
+                "SELECT score FROM runtime_records WHERE id = {}",
+                Backend::DIALECT.placeholder(1)
+            );
+            let rows = Backend::fetch_rows(f.db.pool(), &sql, &[SqlValue::Int(id)])
+                .await
+                .unwrap();
+            assert_eq!(
+                Backend::try_get_i64(&rows[0], "score").unwrap(),
+                if budget < required { 7 } else { 8 }
+            );
+        }
+    }
     f.finish().await;
 }

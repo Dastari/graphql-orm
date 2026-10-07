@@ -26,6 +26,8 @@ Companion macros crate: `graphql-orm-macros` **0.41.0** (alignment only).
 - Add cancellation guards for runtime mutations and before-commit host journal
   hooks. Caught errors/timeouts cannot commit partial runtime work. Static-only
   transaction behavior and ambiguous commit limitations remain unchanged.
+- Count backend-emitted predicate bindings before runtime target reads, including
+  duplicated SQLite suffix values and reused PostgreSQL native slots.
 - Add conservative transaction commit-outcome inspection and safe runtime error
   codes retained through the public transaction runner.
 - Document unsupported modifying cascades and backend capabilities; include a

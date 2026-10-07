@@ -753,7 +753,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                 .into_iter()
                 .flatten()
             {
-                binds = binds.saturating_add(predicate.mutation_bind_count());
+                binds = binds.saturating_add(predicate.mutation_bind_count(B::DIALECT));
             }
         }
         binds = binds.max(
@@ -761,7 +761,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                 grant
                     .predicate
                     .as_ref()
-                    .map_or(0, RuntimePredicate::mutation_bind_count),
+                    .map_or(0, |predicate| predicate.mutation_bind_count(B::DIALECT)),
             ),
         );
         if binds > request.limits.query.max_bind_parameters {

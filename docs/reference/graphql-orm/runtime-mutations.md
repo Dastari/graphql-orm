@@ -114,6 +114,9 @@ stored results before authorization, including defaults and trigger effects.
 
 `RuntimeMutationLimits` bounds input count, key arity, serialized value bytes,
 record bytes and JSON depth, plus existing predicate/bind/projection limits.
+Predicate bind budgets use the shared backend renderer's emitted value slots,
+including duplicated SQLite suffix operands and repeated PostgreSQL references to
+one native slot. Combined CAS/authority budgets reject before target reads.
 Defaults: 128 inputs, 16 key members, 1 MiB per value, 4 MiB per record and JSON
 depth 32. Bounds also apply to internal policy records; oversized decoding fails
 and poisons the transaction. Driver row decoding still allocates returned values;
