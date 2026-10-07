@@ -63,7 +63,7 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
       - name: Execute owned runtime migration preservation and compatibility
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql --test runtime_migrations_unsupported
           for backend in sqlite postgres mssql; do
             cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --locked --no-default-features --features "$backend"
