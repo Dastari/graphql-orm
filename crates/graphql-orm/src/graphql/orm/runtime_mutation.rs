@@ -756,6 +756,14 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                 binds = binds.saturating_add(predicate.mutation_bind_count());
             }
         }
+        binds = binds.max(
+            c.primary_key.len().saturating_add(
+                grant
+                    .predicate
+                    .as_ref()
+                    .map_or(0, RuntimePredicate::mutation_bind_count),
+            ),
+        );
         if binds > request.limits.query.max_bind_parameters {
             return Err(err(E::LimitExceeded));
         }

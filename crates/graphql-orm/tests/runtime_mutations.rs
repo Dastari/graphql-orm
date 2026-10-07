@@ -1146,3 +1146,47 @@ fn bounded_inputs_and_predicate_values_reject_without_database_access() {
         RuntimeMutationErrorCode::LimitExceeded
     );
 }
+
+#[tokio::test]
+async fn combined_key_cas_and_authority_bind_budget_rejects_before_target_reads() {
+    let f = Fixture::new().await;
+    let expected = f
+        .schema()
+        .runtime_compare(
+            &f.collection(),
+            &f.field("score"),
+            RuntimeScalarOperator::Eq,
+            RuntimeValue::Integer(7),
+            Default::default(),
+        )
+        .unwrap();
+    let limits = RuntimeMutationLimits {
+        query: RuntimeQueryLimits {
+            max_bind_parameters: 3,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let request = f
+        .schema()
+        .runtime_update_request(
+            f.key(1),
+            &[(f.field("label"), RuntimeValue::String("changed".into()))],
+            Some(expected),
+            None,
+            limits,
+        )
+        .unwrap();
+    <Backend as WriteBackend>::execute_with_binds(f.db.pool(), "DROP TABLE runtime_records", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        f.run(request, f.authority())
+            .await
+            .unwrap_err()
+            .public_error()
+            .runtime_mutation_code(),
+        Some("limit_exceeded")
+    );
+    f.finish().await;
+}
