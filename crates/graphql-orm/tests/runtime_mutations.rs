@@ -492,7 +492,14 @@ async fn denied_intent_preimage_result_and_output_are_fail_closed() {
         .unwrap();
     let mut authority = f.authority();
     authority.deny_preimage = true;
-    assert!(f.run(request, authority).await.is_err());
+    assert_eq!(
+        f.run(request, authority)
+            .await
+            .unwrap_err()
+            .public_error()
+            .runtime_mutation_code(),
+        Some("not_found")
+    );
     assert_eq!(f.count().await, 1);
     f.finish().await;
 }

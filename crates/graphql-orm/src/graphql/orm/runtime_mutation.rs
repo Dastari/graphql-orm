@@ -784,7 +784,14 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                     },
                     self,
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    if matches!(error.code(), E::Denied | E::FieldDenied) {
+                        err(E::NotFound).with_source(error)
+                    } else {
+                        error
+                    }
+                })?;
             if let Some(expected) = &request.expected {
                 if self
                     .runtime_select(
