@@ -16,6 +16,8 @@ for historical context.
 
 ## 0.42.0 (unreleased)
 
+- Runtime GraphQL composition explicitly rejects unsupported custom-directive factories before publication; built-in directives, bounded host extensions and checked subscription roots remain supported.
+
 - Add opt-in runtime GraphQL reads, checked dynamic composition, whole-operation
   host authority preflight and bounded runtime relation batches.
 - Add lossless JSON-text/full-i64 scalars and host-managed authenticated encrypted

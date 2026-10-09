@@ -20,7 +20,7 @@ PR A implements the owned migration slice; its current public mechanics are in
 [owned runtime migrations](../../../reference/graphql-orm/runtime-migrations.md).
 B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` as C's committed
 predecessor. C is being implemented separately behind `runtime-graphql`; its
-[current mechanics and outstanding custom-directive contract check](../../../reference/graphql-orm/runtime-graphql.md)
+[current mechanics and approved custom-directive limitation](../../../reference/graphql-orm/runtime-graphql.md)
 are documented independently. D remains a proposal gated on reviewed C/B.
 Final reconciliation and owner merge/release remain #112 → A → B → C. A proposal
 or unpublished implementation is not downstream adoption evidence.
@@ -601,13 +601,22 @@ including builtins, helper/filter/input/connection names, roots, and explicit
 reserved namespaces. Share ORM helper scalars only by an exact descriptor;
 arbitrary same-name host types are not treated as equivalent.
 
-Expose checked forwarding methods for host-owned data, extensions, custom
-directives, introspection policy, depth/complexity settings and optional
+Expose checked forwarding methods for host-owned data, extensions,
+introspection policy, depth/complexity settings and optional
 subscription roots; these do not add ORM subscriptions or transport. Keep host
 configuration choices while reserving the internal operation preflight and
 request budget enforcement. Do not require ORM to own the host's entire
 server configuration or add an opaque builder callback that bypasses collision
 checks. Generic register support covers host interfaces/unions/scalars too.
+
+Approved implementation adjustment: async-graphql 7.2.1 dynamic SchemaBuilder
+cannot register custom-directive factories. C exposes `directive(factory)` only
+to reject registration with structured `unsupported_capability` during
+composition, before schema publication; it must never silently ignore a factory.
+Custom directives are deferred without a fork, framework upgrade or emulation.
+Built-in directives and their limits, host extensions, checked subscription
+composition, collision checks and mandatory authorization/resource guards remain
+required and tested.
 
 Proposed SDL shape for a Customer collection (abbreviated):
 

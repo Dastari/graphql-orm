@@ -38,8 +38,14 @@ named `and`, `or` or `not` collide with recursive filter operators and are rejec
 Helper types are shared only within this composer; same-name host types collide.
 
 The locked async-graphql 7.2.1 dynamic builder has no custom-directive factory
-registration API. The contract adjustment for explicit unsupported-capability
-handling is pending review; custom-directive forwarding is not implemented.
+registration API. The approved C contract therefore explicitly defers custom
+directives: `composer.directive(factory)` returns structured
+`unsupported_capability` during composition, before schema publication. It never
+ignores registration or invokes the factory. No dependency fork or emulation is
+used. Built-in `@skip` and `@include` remain supported, including variable inputs;
+`limit_directives` bounds directives per field and cannot relax the installed
+selection budget. Host extensions and checked subscription roots remain supported,
+with collision checks and mandatory authorization/resource guards intact.
 
 ## Host integration
 

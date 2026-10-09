@@ -489,6 +489,23 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             .push(Box::new(move |builder| builder.extension(extension)));
         self
     }
+    /// Custom directive factories are unsupported by the locked dynamic framework.
+    /// Rejects during composition; the factory is never registered or invoked.
+    pub fn directive(
+        self,
+        _directive: impl async_graphql::CustomDirectiveFactory,
+    ) -> Result<Self, RuntimeGraphqlError> {
+        Err(RuntimeGraphqlError::new("unsupported_capability"))
+    }
+
+    /// Bounds built-in directives per field. This cannot relax the installed budget.
+    pub fn limit_directives(mut self, limit: usize) -> Self {
+        let limit = limit.min(self.limits.max_selections);
+        self.actions
+            .push(Box::new(move |builder| builder.limit_directives(limit)));
+        self
+    }
+
     pub fn disable_introspection(mut self) -> Self {
         self.actions
             .push(Box::new(SchemaBuilder::disable_introspection));
@@ -530,7 +547,8 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             .into_iter()
             .fold(
                 Schema::build(&self.query_name, None, self.subscription_name.as_deref())
-                    .extension(guard),
+                    .extension(guard)
+                    .limit_directives(self.limits.max_selections),
                 |builder, action| action(builder),
             )
             .register(self.query)

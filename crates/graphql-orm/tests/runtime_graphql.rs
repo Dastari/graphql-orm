@@ -30,6 +30,16 @@ type Backend = SqliteBackend;
 
 static QUERY_COUNTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+struct DeferredDirective;
+#[async_trait::async_trait]
+impl async_graphql::CustomDirective for DeferredDirective {}
+#[async_graphql::Directive(location = "Field")]
+fn deferred_directive() -> impl async_graphql::CustomDirective {
+    panic!("unsupported factory must never be invoked");
+    #[allow(unreachable_code)]
+    DeferredDirective
+}
+
 struct ReplaceSelection;
 impl async_graphql::extensions::ExtensionFactory for ReplaceSelection {
     fn create(&self) -> Arc<dyn async_graphql::extensions::Extension> {
@@ -726,6 +736,61 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
             .install(module())
             .is_err()
     );
+    assert!(matches!(
+        composer().directive(deferred_directive),
+        Err(error) if error.code() == "unsupported_capability"
+    ));
+    use async_graphql::dynamic::{Subscription, SubscriptionField, SubscriptionFieldFuture};
+    use futures::StreamExt;
+    let subscriptions = || {
+        Subscription::new("HostSubscription").field(SubscriptionField::new(
+            "pulse",
+            TypeRef::named_nn("Boolean"),
+            |_| {
+                SubscriptionFieldFuture::new(async {
+                    Ok(futures::stream::iter([Ok(FieldValue::value(true))]))
+                })
+            },
+        ))
+    };
+    assert!(
+        composer()
+            .subscription_root(Subscription::new("Query"))
+            .is_err()
+    );
+    assert!(
+        composer()
+            .subscription_root(subscriptions())
+            .unwrap()
+            .subscription_root(subscriptions())
+            .is_err()
+    );
+    let composed = composer()
+        .install(module())
+        .unwrap()
+        .subscription_root(subscriptions())
+        .unwrap()
+        .limit_directives(1)
+        .finish()
+        .unwrap();
+    let response = composed
+        .execute_stream("subscription { pulse }")
+        .next()
+        .await
+        .unwrap();
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(response.data, async_graphql::value!({"pulse":true}));
+    reset_query_count();
+    let skipped = composed
+        .execute("{ parents @skip(if:true) { edges { node { tenant } } } }")
+        .await;
+    assert!(skipped.errors.is_empty(), "{:?}", skipped.errors);
+    assert_eq!(query_count(), 0);
+    let limited = composed
+        .execute("{ parents @skip(if:true) @include(if:false) { edges { node { label } } } }")
+        .await;
+    assert!(!limited.errors.is_empty());
+    assert_eq!(query_count(), 0);
     let forged = composer()
         .query_field(RuntimeHostField::new(
             "forged",
