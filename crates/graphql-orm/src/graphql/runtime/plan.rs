@@ -25,6 +25,8 @@ pub(super) struct Plan {
     pub projection: RuntimeProjection,
     pub predicate: Option<RuntimePredicate>,
     pub order: RuntimeOrder,
+    pub requested_order: Vec<RuntimeOrderInput>,
+    pub order_was_supplied: bool,
     pub page: RuntimePageRequest,
     pub count: bool,
     pub relation: Option<RuntimeRelationHandle>,
@@ -157,16 +159,6 @@ impl Planner<'_> {
         if depth > self.limits.max_depth {
             return Err(RuntimeGraphqlError::new("cost_exceeded"));
         }
-        if relation.is_some() {
-            self.cost.relation_groups = self
-                .cost
-                .relation_groups
-                .checked_add(1)
-                .ok_or_else(invalid)?;
-            if self.cost.relation_groups > self.limits.relation.max_compatible_groups {
-                return Err(RuntimeGraphqlError::new("cost_exceeded"));
-            }
-        }
         let collection = module
             .schema
             .resolve_collection(&c.id)
@@ -221,6 +213,8 @@ impl Planner<'_> {
                 });
             }
         }
+        let requested_order = input.clone();
+        let order_was_supplied = args.get("orderBy").is_some_and(|v| v != &Value::Null);
         let order = module
             .schema
             .runtime_order(
@@ -297,27 +291,20 @@ impl Planner<'_> {
                 }
             }
         }
-        let nodes = parents
-            .checked_mul(usize::try_from(size).map_err(|_| invalid())?)
-            .ok_or_else(invalid)?;
-        self.cost.materialized_nodes = self
-            .cost
-            .materialized_nodes
-            .checked_add(nodes)
-            .ok_or_else(invalid)?;
-        self.cost.statements = self
-            .cost
-            .statements
-            .checked_add(1 + usize::from(count))
-            .ok_or_else(invalid)?;
-        self.cost.crypto_calls = self
-            .cost
-            .crypto_calls
-            .checked_add(nodes + parents)
-            .ok_or_else(invalid)?;
+        let protected = !to_one
+            && module.options.cursor_profile == RuntimeCursorProfile::AuthenticatedEncryption;
+        let size = usize::try_from(size).map_err(|_| invalid())?;
+        let cost = if relation.is_some() {
+            RuntimeGraphqlCost::for_relation_layer(parents, size, count, protected)?
+        } else {
+            RuntimeGraphqlCost::for_root_page(size, count, protected)?
+        };
+        let nodes = cost.materialized_nodes;
+        self.cost = self.cost.checked_add(cost)?;
         if self.cost.statements > self.limits.max_statements
             || self.cost.materialized_nodes > self.limits.max_materialized_nodes
             || self.cost.crypto_calls > self.limits.max_crypto_calls
+            || self.cost.relation_groups > self.limits.relation.max_compatible_groups
         {
             return Err(RuntimeGraphqlError::new("cost_exceeded"));
         }
@@ -393,6 +380,8 @@ impl Planner<'_> {
             projection,
             predicate,
             order,
+            requested_order,
+            order_was_supplied,
             page,
             count,
             relation,

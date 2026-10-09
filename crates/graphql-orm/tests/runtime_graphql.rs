@@ -28,6 +28,28 @@ type Backend = PostgresBackend;
 #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
 type Backend = SqliteBackend;
 
+static QUERY_COUNTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+struct ReplaceSelection;
+impl async_graphql::extensions::ExtensionFactory for ReplaceSelection {
+    fn create(&self) -> Arc<dyn async_graphql::extensions::Extension> {
+        Arc::new(Self)
+    }
+}
+#[async_trait::async_trait]
+impl async_graphql::extensions::Extension for ReplaceSelection {
+    async fn parse_query(
+        &self,
+        context: &async_graphql::extensions::ExtensionContext<'_>,
+        query: &str,
+        variables: &Variables,
+        next: async_graphql::extensions::NextParseQuery<'_>,
+    ) -> async_graphql::ServerResult<async_graphql::parser::types::ExecutableDocument> {
+        let _ = next.run(context, query, variables).await?;
+        Ok(async_graphql::parser::parse_query("{parents{edges{node{tenant}}}}").unwrap())
+    }
+}
+
 struct TestAead;
 impl RuntimeCursorProtector for TestAead {
     fn seal<'a>(
@@ -226,6 +248,11 @@ impl RuntimeReadAuthority for Authority {
             {
                 return Err(RuntimeGraphqlError::denied());
             }
+            if check.requested_order.iter().any(|term| {
+                term.field.id().as_str().ends_with(".id") && !check.projection.contains(&term.field)
+            }) {
+                return Err(RuntimeGraphqlError::denied());
+            }
             let tenant = check
                 .schema
                 .resolve_field(
@@ -267,6 +294,7 @@ fn request(
 }
 #[tokio::test]
 async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
+    let _query_counts = QUERY_COUNTS.lock().await;
     #[cfg(feature = "postgres")]
     let mut owned = owned_postgres::OwnedPostgres::start("runtime-graphql-c").unwrap();
     #[cfg(feature = "postgres")]
@@ -424,6 +452,7 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
     for query in [
         "{parents(where:{tenant:{eq:\"north\"}}){edges{node{label}}}}",
         "{parents(orderBy:{field:tenant}){edges{node{label}}}}",
+        "{parents(orderBy:{field:id}){edges{node{label}}}}",
         "{parents(where:{label:{contains:\"first\"}}){edges{node{label}}}}",
     ] {
         assert!(
@@ -632,6 +661,55 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
             .install(module())
             .is_err()
     );
+    let forged = composer()
+        .query_field(RuntimeHostField::new(
+            "forged",
+            TypeRef::named("Parent"),
+            |_| {
+                FieldFuture::new(async {
+                    Ok(Some(FieldValue::owned_any(
+                        async_graphql::value!({"label":"private-forged-value"}),
+                    )))
+                })
+            },
+        ))
+        .unwrap()
+        .install(module())
+        .unwrap()
+        .finish()
+        .unwrap();
+    reset_query_count();
+    let forged = forged.execute("{forged{label}}").await;
+    assert!(!forged.errors.is_empty());
+    assert!(!format!("{:?}", forged.errors).contains("private-forged-value"));
+    assert_eq!(query_count(), 0);
+    let guarded = composer()
+        .extension(ReplaceSelection)
+        .install(module())
+        .unwrap()
+        .finish()
+        .unwrap();
+    let guarded_authority = Arc::new(Authority {
+        deny_child: AtomicBool::new(false),
+        deny_count: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+        tenant: "north",
+    });
+    reset_query_count();
+    let changed_selection = guarded
+        .execute(request(
+            &runtime,
+            guarded_authority,
+            "{parents{edges{node{label}}}}",
+            serde_json::json!({}),
+        ))
+        .await;
+    assert!(!changed_selection.errors.is_empty());
+    assert_eq!(
+        query_count(),
+        0,
+        "host parse extensions cannot bypass final selection preflight"
+    );
     let unprotected = RuntimeGraphqlModule::compile(
         runtime.clone(),
         RuntimeGraphqlOptions {
@@ -675,6 +753,7 @@ use async_graphql::Value;
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_rls_context_is_propagated_to_read_count_and_relation_layers() {
+    let _query_counts = QUERY_COUNTS.lock().await;
     struct Public;
     impl RuntimeReadAuthority for Public {
         fn authorize<'a>(

@@ -90,6 +90,64 @@ pub struct RuntimeGraphqlCost {
     pub crypto_calls: usize,
     pub relation_groups: usize,
 }
+impl RuntimeGraphqlCost {
+    /// Conservative root-page admission estimate, including one possible resume.
+    pub fn for_root_page(
+        size: usize,
+        count: bool,
+        protected: bool,
+    ) -> Result<Self, RuntimeGraphqlError> {
+        let mut cost = Self::for_relation_layer(1, size, count, protected)?;
+        cost.relation_groups = 0;
+        Ok(cost)
+    }
+    /// One bounded batched layer; this does not estimate database scanned rows.
+    pub fn for_relation_layer(
+        parents: usize,
+        size: usize,
+        count: bool,
+        protected: bool,
+    ) -> Result<Self, RuntimeGraphqlError> {
+        let overflow = || RuntimeGraphqlError::new("cost_exceeded");
+        let nodes = parents.checked_mul(size).ok_or_else(overflow)?;
+        Ok(Self {
+            statements: if parents == 0 {
+                0
+            } else {
+                1 + usize::from(count)
+            },
+            materialized_nodes: nodes,
+            crypto_calls: if protected {
+                nodes.checked_add(parents).ok_or_else(overflow)?
+            } else {
+                0
+            },
+            relation_groups: usize::from(parents != 0),
+        })
+    }
+    /// Add independent roots/layers without wrapping admission counters.
+    pub fn checked_add(self, other: Self) -> Result<Self, RuntimeGraphqlError> {
+        let overflow = || RuntimeGraphqlError::new("cost_exceeded");
+        Ok(Self {
+            statements: self
+                .statements
+                .checked_add(other.statements)
+                .ok_or_else(overflow)?,
+            materialized_nodes: self
+                .materialized_nodes
+                .checked_add(other.materialized_nodes)
+                .ok_or_else(overflow)?,
+            crypto_calls: self
+                .crypto_calls
+                .checked_add(other.crypto_calls)
+                .ok_or_else(overflow)?,
+            relation_groups: self
+                .relation_groups
+                .checked_add(other.relation_groups)
+                .ok_or_else(overflow)?,
+        })
+    }
+}
 /// Immutable module metadata; contains no authority or catalog state.
 #[derive(Clone, Debug)]
 pub struct RuntimeGraphqlDescriptor {
@@ -145,17 +203,17 @@ impl RuntimeGraphqlModule {
         schema: Arc<ValidatedRuntimeSchema>,
         options: RuntimeGraphqlOptions,
     ) -> Result<Self, RuntimeGraphqlDiagnostics> {
+        let cost = RuntimeGraphqlCost::for_root_page(
+            50,
+            true,
+            options.cursor_profile == RuntimeCursorProfile::AuthenticatedEncryption,
+        )?;
         let mut module = Self {
             schema,
             options: Arc::new(options),
             descriptor: Arc::new(RuntimeGraphqlDescriptor {
                 names: BTreeSet::new(),
-                cost: RuntimeGraphqlCost {
-                    statements: 2,
-                    materialized_nodes: 50,
-                    crypto_calls: 51,
-                    relation_groups: 0,
-                },
+                cost,
             }),
         };
         if module.schema.schema().collections.len() > 512 {
@@ -463,14 +521,14 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         self.actions
             .into_iter()
             .fold(
-                Schema::build(&self.query_name, None, self.subscription_name.as_deref()),
+                Schema::build(&self.query_name, None, self.subscription_name.as_deref())
+                    .extension(guard),
                 |builder, action| action(builder),
             )
             .register(self.query)
             .limit_depth(self.limits.max_depth)
             .limit_complexity(self.limits.max_selections)
             .limit_recursive_depth(self.limits.max_depth)
-            .extension(guard)
             .finish()
             .map_err(|_| RuntimeGraphqlError::new("invalid_composition"))
     }
@@ -498,4 +556,38 @@ fn bounded_schema(
     }
     serde_json::to_writer(Counter { bytes: 0, maximum }, schema.schema())
         .map_err(|_| RuntimeGraphqlError::new("cost_exceeded"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn descriptors_are_shareable_and_cost_estimates_do_not_wrap() {
+        fn shared<T: Send + Sync>() {}
+        shared::<RuntimeGraphqlModule>();
+        shared::<RuntimeGraphqlDescriptor>();
+        shared::<RuntimeGraphqlOptions>();
+        shared::<RuntimeGraphqlLimits>();
+        let root = RuntimeGraphqlCost::for_root_page(20, true, true).unwrap();
+        let child = RuntimeGraphqlCost::for_relation_layer(20, 5, false, true).unwrap();
+        let combined = root.checked_add(child).unwrap();
+        assert_eq!(combined.statements, 3);
+        assert_eq!(combined.materialized_nodes, 120);
+        assert_eq!(combined.crypto_calls, 141);
+        assert_eq!(combined.relation_groups, 1);
+        assert_eq!(
+            RuntimeGraphqlCost::for_root_page(20, false, false)
+                .unwrap()
+                .crypto_calls,
+            0
+        );
+        assert!(RuntimeGraphqlCost::for_relation_layer(usize::MAX, 2, false, true).is_err());
+        assert!(
+            root.checked_add(RuntimeGraphqlCost {
+                statements: usize::MAX,
+                ..Default::default()
+            })
+            .is_err()
+        );
+    }
 }

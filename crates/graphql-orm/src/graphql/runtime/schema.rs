@@ -2,9 +2,13 @@ use super::*;
 use crate::graphql::orm::*;
 use async_graphql::{Value, dynamic::*};
 
+// Only the authorized execution path can construct a generated runtime object.
+// Host-owned dynamic types retain their own resolver payloads.
+struct AuthorizedOutput(Value);
+
 pub(super) fn field_value(value: Value) -> FieldValue<'static> {
     match value {
-        Value::Object(_) => FieldValue::owned_any(value),
+        Value::Object(_) => FieldValue::owned_any(AuthorizedOutput(value)),
         Value::List(values) => FieldValue::list(values.into_iter().map(field_value)),
         value => FieldValue::value(value),
     }
@@ -12,7 +16,11 @@ pub(super) fn field_value(value: Value) -> FieldValue<'static> {
 fn output(name: &str, ty: TypeRef) -> Field {
     Field::new(name, ty, |ctx| {
         FieldFuture::new(async move {
-            let value = ctx.parent_value.try_downcast_ref::<Value>()?;
+            let value = &ctx
+                .parent_value
+                .downcast_ref::<AuthorizedOutput>()
+                .ok_or_else(|| async_graphql::Error::new("projection_mismatch"))?
+                .0;
             let selection = ctx.field();
             let key = selection.alias().unwrap_or(selection.name());
             let Value::Object(map) = value else {

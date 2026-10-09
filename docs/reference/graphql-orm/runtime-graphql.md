@@ -24,7 +24,11 @@ fresh roots; it cannot safely inventory or extend an arbitrary existing dynamic
 SchemaBuilder. Static schemas can coexist in the host; this API does not merge
 opaque static Schema objects. Host data, extensions, introspection suppression,
 depth/complexity limits and host-owned subscription roots are supported. There
-are no ORM subscriptions or transport services.
+are no ORM subscriptions or transport services. Host-owned resolvers remain
+responsible for their own I/O and authorization. Generated runtime object payloads
+are private to the authorized executor: arbitrary host/preloaded Values cannot be
+used to bypass runtime authorization. Use separately registered host types for
+host-owned payloads.
 
 Names use ASCII camelCase fields/roots and PascalCase types, without underscores.
 The default list root lowercases only the first ASCII letter of the collection's
@@ -79,6 +83,10 @@ layer's grant before the first ORM statement. Row predicates are ANDed with clie
 filters before reads, pagination and counts. Hidden key acquisition is internal to
 the granted operation and does not expose those keys as loaded output fields.
 Filter/order authorization remains independent of projection authorization.
+The check distinguishes client-requested order terms (including explicit empty
+ordering) from the effective order's internal keys. It also exposes scalar/list
+and logical predicate operators; granting `eq` does not hide an enclosing `not`
+from the host's policy check.
 
 Filters are recursive `and`/`or`/`not` inputs with supported per-kind operators.
 SQL NULL uses `isNull`; omitted/null optional filter operands add no condition.
@@ -162,6 +170,11 @@ lower installed limits. Variable trees are walked iteratively; query nesting is
 bounded before parsing. Output admission conservatively accounts for JSON escaping
 and repeated aliased selections. Hosts still bound HTTP allocation before building
 an already-owned GraphQL Request.
+
+`descriptor().cost_metadata()` describes one default root page including count.
+Hosts can use `RuntimeGraphqlCost::for_root_page`, `for_relation_layer` and
+`checked_add` for overflow-checked admission estimates. Execution computes its own
+cost from the selected operation; caller estimates never bypass those checks.
 
 Run backend lanes sequentially with `CARGO_BUILD_JOBS=2`:
 

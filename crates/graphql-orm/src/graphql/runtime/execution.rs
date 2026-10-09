@@ -21,7 +21,12 @@ pub struct RuntimeReadCheck<'a> {
     /// Stable field handles and operator names from the existing typed predicate.
     /// Names are eq/ne/lt/lte/gt/gte/contains/startsWith/endsWith/in/notIn/isNull/isNotNull.
     pub filter_operations: Vec<(&'a RuntimeFieldHandle, &'static str)>,
+    /// Distinguish client ordering from trusted effective hidden-key ordering.
+    pub requested_order: &'a [RuntimeOrderInput],
+    pub order_was_supplied: bool,
     pub order: &'a RuntimeOrder,
+    /// Boolean operators present in the validated predicate: and/or/not.
+    pub logical_operators: Vec<&'static str>,
     pub relation: Option<&'a RuntimeRelationHandle>,
     pub include_count: bool,
 }
@@ -435,7 +440,13 @@ fn authorize<'a, B: RuntimeReadBackend>(
                     .predicate
                     .as_ref()
                     .map_or_else(Vec::new, RuntimePredicate::graphql_operations),
+                requested_order: &plan.requested_order,
+                order_was_supplied: plan.order_was_supplied,
                 order: &plan.order,
+                logical_operators: plan
+                    .predicate
+                    .as_ref()
+                    .map_or_else(Vec::new, RuntimePredicate::graphql_logical_operations),
                 relation: plan.relation.as_ref(),
                 include_count: plan.count,
             })

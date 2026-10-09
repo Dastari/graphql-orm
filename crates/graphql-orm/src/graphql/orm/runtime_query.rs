@@ -231,6 +231,26 @@ impl fmt::Debug for RuntimePredicate {
 
 impl RuntimePredicate {
     #[cfg(feature = "runtime-graphql")]
+    pub(crate) fn graphql_logical_operations(&self) -> Vec<&'static str> {
+        fn visit(expr: &PredicateExpr, out: &mut Vec<&'static str>) {
+            let (name, children): (&'static str, &[PredicateExpr]) = match expr {
+                PredicateExpr::And(children) => ("and", children),
+                PredicateExpr::Or(children) => ("or", children),
+                PredicateExpr::Not(child) => ("not", std::slice::from_ref(child.as_ref())),
+                _ => return,
+            };
+            if !out.contains(&name) {
+                out.push(name);
+            }
+            for child in children {
+                visit(child, out);
+            }
+        }
+        let mut out = Vec::new();
+        visit(&self.expr, &mut out);
+        out
+    }
+    #[cfg(feature = "runtime-graphql")]
     pub(crate) fn graphql_operations(&self) -> Vec<(&RuntimeFieldHandle, &'static str)> {
         fn visit<'a>(
             expr: &'a PredicateExpr,
