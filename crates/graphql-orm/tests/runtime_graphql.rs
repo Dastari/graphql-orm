@@ -529,6 +529,71 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
         .await;
     assert!(!invalid_alias.errors.is_empty());
     assert_eq!(query_count(), 0);
+    let wrong_order = api.execute(request(&runtime, authority.clone(),
+        "query($c:String!){parents(after:$c,orderBy:{field:id,direction:DESC}){edges{node{id}}}}",
+        serde_json::json!({"c":cursor}))).await;
+    assert!(!wrong_order.errors.is_empty());
+    assert_eq!(query_count(), 0);
+    let scope_request = Request::new("query($c:String!){parents(after:$c){edges{node{id}}}}")
+        .variables(Variables::from_json(serde_json::json!({"c":cursor})))
+        .data(
+            RuntimeGraphqlRequest::<Backend>::new(
+                runtime.fingerprint(),
+                authority.clone(),
+                None,
+                Default::default(),
+            )
+            .with_cursor_scope("revoked-partition"),
+        );
+    assert!(!api.execute(scope_request).await.errors.is_empty());
+    assert_eq!(query_count(), 0);
+    let mut newer = runtime.schema().clone();
+    newer.collections[0].append_only = true;
+    let newer = Arc::new(newer.validate().unwrap());
+    let newer_api = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+        .unwrap()
+        .cursor_protection(
+            Arc::new(TestAead),
+            RuntimeCursorAudience::new("synthetic-tests").unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+        .install(RuntimeGraphqlModule::compile(newer.clone(), Default::default()).unwrap())
+        .unwrap()
+        .finish()
+        .unwrap();
+    let stale_cursor = newer_api
+        .execute(request(
+            &newer,
+            authority.clone(),
+            "query($c:String!){parents(after:$c){edges{node{id}}}}",
+            serde_json::json!({"c":cursor}),
+        ))
+        .await;
+    assert!(!stale_cursor.errors.is_empty());
+    assert_eq!(query_count(), 0);
+    let other_audience = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+        .unwrap()
+        .cursor_protection(
+            Arc::new(TestAead),
+            RuntimeCursorAudience::new("different-audience").unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+        .install(RuntimeGraphqlModule::compile(runtime.clone(), Default::default()).unwrap())
+        .unwrap()
+        .finish()
+        .unwrap();
+    let wrong_audience = other_audience
+        .execute(request(
+            &runtime,
+            authority.clone(),
+            "query($c:String!){parents(after:$c){edges{node{id}}}}",
+            serde_json::json!({"c":cursor}),
+        ))
+        .await;
+    assert!(!wrong_audience.errors.is_empty());
+    assert_eq!(query_count(), 0);
     let south = Arc::new(Authority {
         deny_child: AtomicBool::new(false),
         deny_count: AtomicBool::new(false),
