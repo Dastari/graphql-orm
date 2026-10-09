@@ -65,7 +65,9 @@ let response = api.execute(request).await;
 ```
 
 Install protection before a protected module. The default profile requires it.
-`RuntimeCursorProfile::Unprotected` is an explicit alternative for hosts accepting
+Options are non-exhaustive so future D configuration can remain source-compatible;
+construct them with `Default` and explicit setters/field updates.
+`RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected)` is an explicit alternative for hosts accepting
 readable existing cursors; it must not be used for confidential hidden keys.
 
 ## Authorization, pagination and batching

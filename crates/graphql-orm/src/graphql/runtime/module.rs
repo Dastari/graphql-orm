@@ -12,10 +12,18 @@ impl<B: OrmBackend + RuntimeRowDecoder> RuntimeReadBackend for B {}
 
 /// Schema naming and cursor privacy options.
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct RuntimeGraphqlOptions {
     pub type_prefix: String,
     pub root_names: BTreeMap<CollectionId, String>,
     pub cursor_profile: RuntimeCursorProfile,
+}
+impl RuntimeGraphqlOptions {
+    /// Select cursor privacy explicitly. The default requires authenticated encryption.
+    pub fn with_cursor_profile(mut self, profile: RuntimeCursorProfile) -> Self {
+        self.cursor_profile = profile;
+        self
+    }
 }
 /// Hard schema and execution bounds. Hosts may lower these limits.
 #[derive(Clone, Copy, Debug)]

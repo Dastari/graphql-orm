@@ -777,10 +777,7 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
     );
     let unprotected = RuntimeGraphqlModule::compile(
         runtime.clone(),
-        RuntimeGraphqlOptions {
-            cursor_profile: RuntimeCursorProfile::Unprotected,
-            ..Default::default()
-        },
+        RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected),
     )
     .unwrap();
     let unprotected = RuntimeGraphqlComposer::new(database, "Query", Default::default())
