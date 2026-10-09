@@ -18,9 +18,12 @@ The revised contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd` is approved f
 implementation and merged by PR #86 at `9ed46db5d1c5c6214f83ef9084352030e14905ad`.
 PR A implements the owned migration slice; its current public mechanics are in
 [owned runtime migrations](../../../reference/graphql-orm/runtime-migrations.md).
-B–D signatures, examples, SDL and feature additions below remain approved
-proposals until their separate implementation/test PRs. A proposal is not
-execution or downstream adoption evidence.
+B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` as C's committed
+predecessor. C is being implemented separately behind `runtime-graphql`; its
+[current mechanics and outstanding custom-directive contract check](../../../reference/graphql-orm/runtime-graphql.md)
+are documented independently. D remains a proposal gated on reviewed C/B.
+Final reconciliation and owner merge/release remain #112 → A → B → C. A proposal
+or unpublished implementation is not downstream adoption evidence.
 
 The initiating [consumer contract](https://github.com/Dastari/digibase/blob/agent/vertical-slice-plan/docs/coordination/prompts/0013-graphql-orm-runnable-product-prerequisites.md)
 requires separate reviewable PRs. The host owns catalog persistence, activation,

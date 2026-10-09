@@ -13,6 +13,15 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.41.0 to 0.42.0: opt-in runtime GraphQL reads
+
+Enable `runtime-graphql` alongside an explicit SQLite or PostgreSQL feature. No
+stored-data migration or static SDL change is required. Hosts supply request
+read authority and AEAD cursor protection before installing a protected module.
+The dynamic scalar wire forms are new and do not replace static scalar mappings.
+See [runtime GraphQL](docs/reference/graphql-orm/runtime-graphql.md) for composition,
+limits, cursor rotation, SDK mappings and pending release/contract gates.
+
 ## 0.40.0 to 0.41.0: transactional runtime mutations
 
 Adopt aligned ORM/macros 0.41.0. This is an additive, unpublished successor to A;

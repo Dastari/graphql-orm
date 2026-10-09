@@ -230,6 +230,51 @@ impl fmt::Debug for RuntimePredicate {
 }
 
 impl RuntimePredicate {
+    #[cfg(feature = "runtime-graphql")]
+    pub(crate) fn graphql_operations(&self) -> Vec<(&RuntimeFieldHandle, &'static str)> {
+        fn visit<'a>(
+            expr: &'a PredicateExpr,
+            out: &mut Vec<(&'a RuntimeFieldHandle, &'static str)>,
+        ) {
+            match expr {
+                PredicateExpr::Constant(_) => {}
+                PredicateExpr::IsNull { field, is_null } => {
+                    out.push((field, if *is_null { "isNull" } else { "isNotNull" }))
+                }
+                PredicateExpr::Compare { field, op, .. } => out.push((
+                    field,
+                    match op {
+                        RuntimeScalarOperator::Eq => "eq",
+                        RuntimeScalarOperator::Ne => "ne",
+                        RuntimeScalarOperator::Lt => "lt",
+                        RuntimeScalarOperator::Lte => "lte",
+                        RuntimeScalarOperator::Gt => "gt",
+                        RuntimeScalarOperator::Gte => "gte",
+                        RuntimeScalarOperator::Contains => "contains",
+                        RuntimeScalarOperator::StartsWith => "startsWith",
+                        RuntimeScalarOperator::EndsWith => "endsWith",
+                    },
+                )),
+                PredicateExpr::List { field, op, .. } => out.push((
+                    field,
+                    match op {
+                        RuntimeListOperator::In => "in",
+                        RuntimeListOperator::NotIn => "notIn",
+                    },
+                )),
+                PredicateExpr::Between { field, .. } => out.push((field, "between")),
+                PredicateExpr::And(children) | PredicateExpr::Or(children) => {
+                    for child in children {
+                        visit(child, out);
+                    }
+                }
+                PredicateExpr::Not(child) => visit(child, out),
+            }
+        }
+        let mut out = Vec::new();
+        visit(&self.expr, &mut out);
+        out
+    }
     /// Fields whose values affect this predicate, for independent host authorization.
     pub fn referenced_fields(&self) -> Vec<&RuntimeFieldHandle> {
         fn visit<'a>(expr: &'a PredicateExpr, fields: &mut Vec<&'a RuntimeFieldHandle>) {
@@ -418,6 +463,16 @@ pub struct RuntimeReadRequest {
     page: RuntimePageRequest,
     include_total_count: bool,
     limits: RuntimeQueryLimits,
+}
+
+#[cfg(feature = "runtime-graphql")]
+impl RuntimeReadRequest {
+    pub(crate) fn validate_graphql_backend(
+        &self,
+        backend: DatabaseBackend,
+    ) -> Result<(), RuntimeQueryError> {
+        render_request(self, backend).map(|_| ())
+    }
 }
 
 impl fmt::Debug for RuntimeReadRequest {

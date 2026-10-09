@@ -1004,9 +1004,11 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "async-graphql",
+ "async-trait",
+ "base64 0.22.1",
  "chacha20poly1305",
  "chrono",
  "futures",
@@ -1030,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -2014,6 +2016,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "repository-aggregate-consumer"
 version = "0.0.0"
 dependencies = [
+ "chacha20poly1305",
  "graphql-orm",
  "serde",
  "tokio",

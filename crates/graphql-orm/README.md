@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.41.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.42.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -207,3 +207,5 @@ Static migration APIs remain unchanged.
 Schema-bound runtime create/patch/delete with pinned authority, structural CAS,
 atomic host journals and cancellation poisoning are documented in
 [runtime mutations](../../docs/reference/graphql-orm/runtime-mutations.md).
+
+The opt-in `runtime-graphql` feature provides [authorized dynamic reads and checked composition](../../docs/reference/graphql-orm/runtime-graphql.md), with host-owned authority and confidential cursors. It does not change static SDL or add mutations.
