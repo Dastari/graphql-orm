@@ -24,6 +24,49 @@ impl Default for RuntimeScalarLimits {
 fn invalid() -> RuntimeGraphqlError {
     RuntimeGraphqlError::new("invalid_graphql_input")
 }
+// serde_json otherwise falls back to f64 for integer tokens outside i64/u64.
+// Check number ranges without allocating; serde_json still owns JSON grammar.
+fn json_number_bounds(text: &str) -> Result<(), RuntimeGraphqlError> {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' => index = index.saturating_add(2),
+                    b'"' => {
+                        index += 1;
+                        break;
+                    }
+                    _ => index += 1,
+                }
+            }
+        } else if bytes[index] == b'-' || bytes[index].is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_digit()
+                    || matches!(bytes[index], b'.' | b'e' | b'E' | b'+' | b'-'))
+            {
+                index += 1;
+            }
+            let number = &text[start..index];
+            if number.contains(['.', 'e', 'E']) {
+                if !number.parse::<f64>().map_err(|_| invalid())?.is_finite() {
+                    return Err(invalid());
+                }
+            } else if number.starts_with('-') {
+                number.parse::<i64>().map_err(|_| invalid())?;
+            } else {
+                number.parse::<u64>().map_err(|_| invalid())?;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
+}
 fn json_bounds(
     value: &serde_json::Value,
     limits: RuntimeScalarLimits,
@@ -101,6 +144,7 @@ pub(super) fn decode(
             }
             RuntimeValueKind::Json => {
                 // serde_json's recursion guard also limits parsing before walking.
+                json_number_bounds(v)?;
                 let json = serde_json::from_str(v).map_err(|_| invalid())?;
                 json_bounds(&json, limits)?;
                 Ok(RuntimeValue::Json(json))
@@ -265,6 +309,31 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn json_integer_overflow_is_not_silently_reinterpreted_as_float() {
+        let limits = RuntimeScalarLimits::default();
+        for text in ["18446744073709551616", "-9223372036854775809", "1e999"] {
+            assert!(decode(RuntimeValueKind::Json, &Value::String(text.into()), limits).is_err());
+        }
+        for text in [
+            "18446744073709551615",
+            "-9223372036854775808",
+            "1e200",
+            r#""18446744073709551616""#,
+        ] {
+            let value =
+                decode(RuntimeValueKind::Json, &Value::String(text.into()), limits).unwrap();
+            assert_eq!(
+                decode(
+                    RuntimeValueKind::Json,
+                    &encode(&value, limits).unwrap(),
+                    limits
+                )
+                .unwrap(),
+                value
+            );
+        }
     }
     #[test]
     fn uuid_datetime_carry_and_json_text_are_canonical() {

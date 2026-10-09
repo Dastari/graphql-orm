@@ -154,7 +154,9 @@ old cursors; otherwise current row policies still apply to resumed pages.
 | Boolean/String | ordinary GraphQL Boolean/String, no string normalization |
 
 JSON whitespace/key spelling need not round-trip; the supported serde_json::Value
-must. JSON strings include their JSON quotes in the scalar text. Non-null JSON
+must. Integer JSON tokens must fit i64 (negative) or u64 (nonnegative), and
+fractional/exponent tokens must fit finite f64. Integer overflow is rejected,
+rather than silently falling back to a rounded floating-point value. JSON strings include their JSON quotes in the scalar text. Non-null JSON
 fields can contain JSON null. Unloaded fields are errors, never SQL NULL.
 
 TypeScript scalar mappings are strings for Int64/JSON/UUID/Bytes/DateTime. Use
