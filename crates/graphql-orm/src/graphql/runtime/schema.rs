@@ -13,6 +13,11 @@ pub(super) fn field_value(value: Value) -> FieldValue<'static> {
         value => FieldValue::value(value),
     }
 }
+// Colon cannot occur in a GraphQL name. Argument-dependent relation results
+// therefore cannot collide with schema-named scalar/helper values.
+pub(super) fn relation_output_key(name: &str, response_key: &str) -> String {
+    format!("{name}:{response_key}")
+}
 fn output(name: &str, ty: TypeRef) -> Field {
     Field::new(name, ty, |ctx| {
         FieldFuture::new(async move {
@@ -27,7 +32,7 @@ fn output(name: &str, ty: TypeRef) -> Field {
                 return Err(async_graphql::Error::new("invalid_composition"));
             };
             let value = map
-                .get(key)
+                .get(relation_output_key(selection.name(), key).as_str())
                 .or_else(|| map.get(selection.name()))
                 .ok_or_else(|| async_graphql::Error::new("projection_mismatch"))?;
             if value == &Value::Null {

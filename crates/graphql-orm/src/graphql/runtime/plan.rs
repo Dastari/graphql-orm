@@ -21,6 +21,8 @@ pub(super) struct Plan {
     pub module: RuntimeGraphqlModule,
     pub collection: RuntimeCollectionHandle,
     pub response_key: String,
+    pub field_name: String,
+    pub filter_intent: FilterIntent,
     pub fields: Vec<RuntimeFieldHandle>,
     pub projection: RuntimeProjection,
     pub predicate: Option<RuntimePredicate>,
@@ -164,6 +166,7 @@ impl Planner<'_> {
             .resolve_collection(&c.id)
             .map_err(record_error)?;
         let args = self.resolve(field)?;
+        let mut filter_intent = FilterIntent::default();
         let predicate = match args.get("where") {
             Some(value) if value != &Value::Null => Some(filter(
                 &module.schema,
@@ -172,6 +175,7 @@ impl Planner<'_> {
                 value,
                 self.limits,
                 0,
+                &mut filter_intent,
             )?),
             _ => None,
         };
@@ -376,6 +380,8 @@ impl Planner<'_> {
             module: module.clone(),
             collection,
             response_key: field.response_key().node.to_string(),
+            field_name: field.name.node.to_string(),
+            filter_intent,
             fields,
             projection,
             predicate,
@@ -390,6 +396,12 @@ impl Planner<'_> {
     }
 }
 
+#[derive(Clone, Default)]
+pub(super) struct FilterIntent {
+    pub operations: Vec<(RuntimeFieldHandle, &'static str)>,
+    pub logical: Vec<&'static str>,
+}
+
 fn filter(
     schema: &ValidatedRuntimeSchema,
     collection: &RuntimeCollectionHandle,
@@ -397,6 +409,7 @@ fn filter(
     value: &Value,
     limits: RuntimeGraphqlLimits,
     depth: usize,
+    intent: &mut FilterIntent,
 ) -> Result<RuntimePredicate, RuntimeGraphqlError> {
     if depth >= limits.query.max_predicate_depth {
         return Err(RuntimeGraphqlError::new("cost_exceeded"));
@@ -409,6 +422,16 @@ fn filter(
         if value == &Value::Null {
             continue;
         }
+        if let Some(logical) = match name.as_str() {
+            "and" => Some("and"),
+            "or" => Some("or"),
+            "not" => Some("not"),
+            _ => None,
+        } {
+            if !intent.logical.contains(&logical) {
+                intent.logical.push(logical);
+            }
+        }
         match name.as_str() {
             "and" | "or" => {
                 let values = list_values(value);
@@ -417,7 +440,7 @@ fn filter(
                 }
                 let parts = values
                     .into_iter()
-                    .map(|v| filter(schema, collection, c, v, limits, depth + 1))
+                    .map(|v| filter(schema, collection, c, v, limits, depth + 1, intent))
                     .collect::<Result<Vec<_>, _>>()?;
                 predicates.push(
                     if name == "and" {
@@ -432,7 +455,7 @@ fn filter(
                 schema
                     .runtime_not(
                         collection,
-                        filter(schema, collection, c, value, limits, depth + 1)?,
+                        filter(schema, collection, c, value, limits, depth + 1, intent)?,
                         limits.query,
                     )
                     .map_err(query_error)?,
@@ -453,6 +476,24 @@ fn filter(
                     if value == &Value::Null {
                         continue;
                     }
+                    // Capture requested capabilities before empty lists lower to constants.
+                    let operation = match op.as_str() {
+                        "eq" => "eq",
+                        "ne" => "ne",
+                        "lt" => "lt",
+                        "lte" => "lte",
+                        "gt" => "gt",
+                        "gte" => "gte",
+                        "contains" => "contains",
+                        "startsWith" => "startsWith",
+                        "endsWith" => "endsWith",
+                        "in" => "in",
+                        "notIn" => "notIn",
+                        "isNull" if value == &Value::Boolean(false) => "isNotNull",
+                        "isNull" => "isNull",
+                        _ => return Err(invalid()),
+                    };
+                    intent.operations.push((handle.clone(), operation));
                     let predicate = match op.as_str() {
                         "isNull" => {
                             let Value::Boolean(v) = value else {

@@ -16,6 +16,8 @@ for historical context.
 
 ## 0.42.0 (unreleased)
 
+- Fix runtime GraphQL alias swaps and scalar/relation output collisions; retain requested filter capabilities before empty-list constant lowering so authorization cannot be bypassed.
+
 - Runtime GraphQL composition explicitly rejects unsupported custom-directive factories before publication; built-in directives, bounded host extensions and checked subscription roots remain supported.
 
 - Add opt-in runtime GraphQL reads, checked dynamic composition, whole-operation

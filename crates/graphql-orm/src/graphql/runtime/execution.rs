@@ -18,14 +18,14 @@ pub struct RuntimeReadCheck<'a> {
     pub collection: &'a RuntimeCollectionHandle,
     pub projection: &'a [RuntimeFieldHandle],
     pub filter: Option<&'a RuntimePredicate>,
-    /// Stable field handles and operator names from the existing typed predicate.
+    /// Requested field handles and operators retained before predicate constant lowering.
     /// Names are eq/ne/lt/lte/gt/gte/contains/startsWith/endsWith/in/notIn/isNull/isNotNull.
     pub filter_operations: Vec<(&'a RuntimeFieldHandle, &'static str)>,
     /// Distinguish client ordering from trusted effective hidden-key ordering.
     pub requested_order: &'a [RuntimeOrderInput],
     pub order_was_supplied: bool,
     pub order: &'a RuntimeOrder,
-    /// Boolean operators present in the validated predicate: and/or/not.
+    /// Explicit Boolean operators in the validated client input: and/or/not.
     pub logical_operators: Vec<&'static str>,
     pub relation: Option<&'a RuntimeRelationHandle>,
     pub include_count: bool,
@@ -437,16 +437,15 @@ fn authorize<'a, B: RuntimeReadBackend>(
                 projection: &plan.fields,
                 filter: plan.predicate.as_ref(),
                 filter_operations: plan
-                    .predicate
-                    .as_ref()
-                    .map_or_else(Vec::new, RuntimePredicate::graphql_operations),
+                    .filter_intent
+                    .operations
+                    .iter()
+                    .map(|(field, op)| (field, *op))
+                    .collect(),
                 requested_order: &plan.requested_order,
                 order_was_supplied: plan.order_was_supplied,
                 order: &plan.order,
-                logical_operators: plan
-                    .predicate
-                    .as_ref()
-                    .map_or_else(Vec::new, RuntimePredicate::graphql_logical_operations),
+                logical_operators: plan.filter_intent.logical.clone(),
                 relation: plan.relation.as_ref(),
                 include_count: plan.count,
             })
@@ -723,7 +722,11 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 .relation_parents(relation)
                 .map_err(relation_error)?;
             let values = self.layer(child, parents).await?;
-            attach(&mut nodes, &child.response_key, values)?;
+            attach(
+                &mut nodes,
+                &super::schema::relation_output_key(&child.field_name, &child.response_key),
+                values,
+            )?;
         }
         let connection = RuntimeConnection {
             edges: connection
@@ -796,7 +799,11 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     .relation_parents(child.relation.as_ref().ok_or_else(invalid)?)
                     .map_err(relation_error)?;
                 let values = self.layer(child, parents).await?;
-                attach(&mut nodes, &child.response_key, values)?;
+                attach(
+                    &mut nodes,
+                    &super::schema::relation_output_key(&child.field_name, &child.response_key),
+                    values,
+                )?;
             }
             let mut nodes = nodes.into_iter();
             let mut output = Vec::new();
@@ -905,7 +912,7 @@ impl OutputShape {
                         continue;
                     }
                     let value = values
-                        .get(key.as_str())
+                        .get(super::schema::relation_output_key(name, key).as_str())
                         .or_else(|| values.get(name.as_str()))
                         .ok_or_else(invalid)?;
                     child.measure(value, bytes, maximum)?;
@@ -915,5 +922,40 @@ impl OutputShape {
             _ => add(bytes, 32)?,
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+    #[test]
+    fn response_budget_uses_schema_identity_and_separate_relation_slots() {
+        let scalar = || OutputShape { fields: vec![] };
+        let shape = OutputShape {
+            fields: vec![
+                ("caption".into(), "label".into(), scalar()),
+                ("label".into(), "caption".into(), scalar()),
+                ("link".into(), "children".into(), scalar()),
+            ],
+        };
+        let value = object([
+            ("label", Value::String("long scalar".repeat(10))),
+            ("caption", Value::String("c".into())),
+            ("children:link", Value::String("relation".into())),
+        ]);
+        let mut bytes = 0;
+        shape.measure(&value, &mut bytes, usize::MAX).unwrap();
+        let mut exact = 0;
+        shape.measure(&value, &mut exact, bytes).unwrap();
+        assert!(shape.measure(&value, &mut 0, bytes - 1).is_err());
+        // Repeating a long scalar under another schema field's alias still charges
+        // for the long scalar, never the shorter value stored under that name.
+        let repeated = OutputShape {
+            fields: vec![
+                ("caption".into(), "label".into(), scalar()),
+                ("other".into(), "label".into(), scalar()),
+            ],
+        };
+        assert!(repeated.measure(&value, &mut 0, bytes).is_err());
     }
 }

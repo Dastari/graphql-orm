@@ -148,6 +148,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
             field("parent.id", "id", RuntimeValueKind::Integer, false),
             field("parent.tenant", "tenant", RuntimeValueKind::String, false),
             field("parent.label", "label", RuntimeValueKind::String, false),
+            field("parent.caption", "caption", RuntimeValueKind::String, false),
             field("parent.required", "required", RuntimeValueKind::Json, false),
             field("parent.document", "document", RuntimeValueKind::Json, true),
         ],
@@ -284,9 +285,35 @@ impl RuntimeReadAuthority for Authority {
         })
     }
 }
+struct IntentAuthority {
+    delegate: Arc<Authority>,
+    deny: bool,
+}
+impl RuntimeReadAuthority for IntentAuthority {
+    fn authorize<'a>(
+        &'a self,
+        check: RuntimeReadCheck<'a>,
+    ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+        Box::pin(async move {
+            assert_eq!(
+                check
+                    .filter_operations
+                    .iter()
+                    .map(|(field, op)| (field.id().as_str(), *op))
+                    .collect::<Vec<_>>(),
+                vec![("parent.label", "in"), ("parent.caption", "notIn")]
+            );
+            assert_eq!(check.logical_operators, vec!["and", "not", "or"]);
+            if self.deny {
+                return Err(RuntimeGraphqlError::denied());
+            }
+            self.delegate.authorize(check).await
+        })
+    }
+}
 fn request(
     schema: &ValidatedRuntimeSchema,
-    authority: Arc<Authority>,
+    authority: Arc<dyn RuntimeReadAuthority>,
     query: &str,
     variables: serde_json::Value,
 ) -> Request {
@@ -315,7 +342,7 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
     let json_type = "JSONB";
     #[cfg(not(feature = "postgres"))]
     let json_type = "TEXT";
-    graphql_orm::sqlx::query(&format!("CREATE TABLE gql_parents (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, label TEXT NOT NULL, document {json_type}, required {json_type} NOT NULL DEFAULT 'null')")).execute(database.pool()).await.unwrap();
+    graphql_orm::sqlx::query(&format!("CREATE TABLE gql_parents (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, label TEXT NOT NULL, caption TEXT NOT NULL DEFAULT 'caption', document {json_type}, required {json_type} NOT NULL DEFAULT 'null')")).execute(database.pool()).await.unwrap();
     graphql_orm::sqlx::query("CREATE TABLE gql_children (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, owner BIGINT NOT NULL, label TEXT NOT NULL)").execute(database.pool()).await.unwrap();
     graphql_orm::sqlx::query("INSERT INTO gql_parents(id,tenant,label,document) VALUES (1,'north','first','null'),(2,'north','second',NULL),(3,'south','private',NULL)").execute(database.pool()).await.unwrap();
     graphql_orm::sqlx::query("INSERT INTO gql_children VALUES (11,'north',1,'a'),(12,'north',1,'b'),(21,'north',2,'c'),(22,'north',2,'d'),(31,'south',1,'private'),(41,'north',99,'orphan')").execute(database.pool()).await.unwrap();
@@ -345,6 +372,94 @@ async fn authorized_reads_counts_batched_relations_and_confidential_resume() {
         calls: AtomicUsize::new(0),
         tenant: "north",
     });
+    // Response aliases must never be mistaken for physical/schema field identities.
+    let aliases = api.execute(request(&runtime, authority.clone(),
+        "{ parents(first:1) { edges { node { ... Swapped labelChildren:children(first:1) { edges { node { label } } } children:label label:caption caption:label } } total:totalCount pageInfo { endCursor:startCursor startCursor:endCursor previous:hasNextPage next:hasPreviousPage } } } fragment Swapped on Parent { caption:label }",
+        serde_json::json!({}))).await;
+    assert!(aliases.errors.is_empty(), "{:?}", aliases.errors);
+    let aliases = aliases.data.into_json().unwrap();
+    let node = &aliases["parents"]["edges"][0]["node"];
+    assert_eq!(node["label"], "caption");
+    assert_eq!(node["caption"], "first");
+    assert_eq!(node["children"], "first");
+    assert_eq!(node["labelChildren"]["edges"][0]["node"]["label"], "a");
+    assert_eq!(aliases["parents"]["total"], "2");
+    assert_eq!(aliases["parents"]["pageInfo"]["previous"], true);
+    assert_eq!(aliases["parents"]["pageInfo"]["next"], false);
+    let overlap = api.execute(request(&runtime, authority.clone(),
+        "{ parents(first:1) { pageInfo:edges { cursor:node { label:children(first:1) { edges { node { parent:label label:parent { label } } } } children:label } node:cursor } edges:pageInfo { startCursor:hasNextPage endCursor:hasPreviousPage } } }",
+        serde_json::json!({}))).await;
+    assert!(overlap.errors.is_empty(), "{:?}", overlap.errors);
+    let overlap = overlap.data.into_json().unwrap();
+    let node = &overlap["parents"]["pageInfo"][0]["cursor"];
+    assert_eq!(node["children"], "first");
+    assert_eq!(node["label"]["edges"][0]["node"]["parent"], "a");
+    assert_eq!(node["label"]["edges"][0]["node"]["label"]["label"], "first");
+    assert_eq!(overlap["parents"]["edges"]["startCursor"], true);
+    assert_eq!(overlap["parents"]["edges"]["endCursor"], false);
+    // Requested fields/operators remain visible even when SQL lowering is constant.
+    for filter in [
+        "{tenant:{in:[]}}",
+        "{tenant:{notIn:[]}}",
+        "{not:{tenant:{in:[]}}}",
+        "{or:[{label:{notIn:[]}},{and:[{tenant:{notIn:[]}}]}]}",
+    ] {
+        reset_query_count();
+        let denied = api
+            .execute(request(
+                &runtime,
+                authority.clone(),
+                &format!("{{parents(where:{filter}){{totalCount edges{{node{{label}}}}}}}}"),
+                serde_json::json!({}),
+            ))
+            .await;
+        assert!(!denied.errors.is_empty(), "{filter}");
+        assert_eq!(
+            query_count(),
+            0,
+            "denied constant filters must precede ORM I/O"
+        );
+    }
+    for (filter, count) in [
+        ("{label:{in:[]}}", 0),
+        ("{label:{notIn:[]}}", 2),
+        ("{not:{label:{in:[]}}}", 2),
+        ("{not:{label:{notIn:[]}}}", 0),
+        (
+            "{and:[{label:{notIn:[]}},{or:[{label:{in:[]}},{caption:{notIn:[]}}]}]}",
+            2,
+        ),
+    ] {
+        let allowed = api
+            .execute(request(
+                &runtime,
+                authority.clone(),
+                &format!("{{parents(where:{filter}){{totalCount edges{{node{{label}}}}}}}}"),
+                serde_json::json!({}),
+            ))
+            .await;
+        assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
+        let allowed = allowed.data.into_json().unwrap();
+        assert_eq!(allowed["parents"]["totalCount"], count.to_string());
+        assert_eq!(allowed["parents"]["edges"].as_array().unwrap().len(), count);
+    }
+    for deny in [true, false] {
+        reset_query_count();
+        let audited = api.execute(request(&runtime, Arc::new(IntentAuthority {
+            delegate: authority.clone(), deny,
+        }), "{parents(where:{and:[{not:{label:{in:[]}}},{or:[{caption:{notIn:[]}}]}]}){totalCount edges{node{label}}}}",
+            serde_json::json!({}))).await;
+        if deny {
+            assert!(!audited.errors.is_empty());
+            assert_eq!(query_count(), 0);
+        } else {
+            assert!(audited.errors.is_empty(), "{:?}", audited.errors);
+            assert_eq!(
+                audited.data.into_json().unwrap()["parents"]["totalCount"],
+                "2"
+            );
+        }
+    }
     reset_query_count();
     let query = "{ health parents(first:2) { edges { cursor node { id label document required children(first:1) { edges { cursor node { label } } totalCount pageInfo { startCursor endCursor hasNextPage } } } } totalCount pageInfo { startCursor endCursor hasNextPage } } }";
     let response = api
@@ -893,7 +1008,7 @@ async fn postgres_rls_context_is_propagated_to_read_count_and_relation_layers() 
     let mut owned = owned_postgres::OwnedPostgres::start("runtime-gql-rls").unwrap();
     let owner = Database::connect_postgres(&owned.url).await.unwrap();
     for sql in [
-        "CREATE TABLE gql_parents(id BIGINT PRIMARY KEY,tenant TEXT NOT NULL,label TEXT NOT NULL,document JSONB,required JSONB NOT NULL DEFAULT 'null')",
+        "CREATE TABLE gql_parents(id BIGINT PRIMARY KEY,tenant TEXT NOT NULL,label TEXT NOT NULL,caption TEXT NOT NULL DEFAULT 'caption',document JSONB,required JSONB NOT NULL DEFAULT 'null')",
         "CREATE TABLE gql_children(id BIGINT PRIMARY KEY,tenant TEXT NOT NULL,owner BIGINT NOT NULL,label TEXT NOT NULL)",
         "INSERT INTO gql_parents(id,tenant,label,document) VALUES(1,'north','n',NULL),(2,'south','s',NULL)",
         "INSERT INTO gql_children VALUES(11,'north',1,'n-child'),(21,'south',2,'s-child')",

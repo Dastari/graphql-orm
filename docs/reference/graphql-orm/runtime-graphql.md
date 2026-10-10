@@ -119,6 +119,15 @@ writes can move records between pages or alter counts. Current authorization is
 reapplied on every resume. Hosts configure database statement timeouts; a bounded
 number of count statements is not a bound on scanned database rows.
 
+Response aliases are distinct from schema field identities, including scalar/relation
+alias overlaps and connection helpers. Response-size accounting follows the same
+identities as resolution. Field/operator authorization uses validated requested
+capabilities captured before constant lowering: empty `in: []` is false and empty
+`notIn: []` is true, but neither bypasses filter-field or operator authorization.
+Explicit nested `and`, `or` and `not` capabilities remain visible to the host.
+Use `RuntimeReadCheck::filter_operations` for requested filter authorization;
+the lowered predicate's referenced fields alone cannot represent constant inputs.
+
 ## Confidential cursors
 
 Protected output is `gormgqlc1.<public-key-id>.<base64url-ciphertext>`. The entire
