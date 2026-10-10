@@ -185,6 +185,16 @@ pub struct RuntimeAnchoredReadRequest {
     anchors: Vec<AnchorSpec>,
 }
 
+#[cfg(feature = "runtime-graphql")]
+impl RuntimeAnchoredReadRequest {
+    pub(crate) fn validate_graphql_backend(
+        &self,
+        backend: super::DatabaseBackend,
+    ) -> Result<(), super::RuntimeQueryError> {
+        self.inner.validate_graphql_backend(backend)
+    }
+}
+
 impl fmt::Debug for RuntimeAnchoredReadRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -211,6 +221,18 @@ pub struct RuntimeParentAnchor {
 }
 
 impl RuntimeParentAnchor {
+    #[cfg(feature = "runtime-graphql")]
+    pub(crate) fn graphql_cursor_scope(&self) -> Result<Vec<u8>, RuntimeRelationError> {
+        serde_json::to_vec(&(
+            &self.schema,
+            &self.relation,
+            &self.source,
+            &self.target,
+            &self.parent_identity,
+        ))
+        .map_err(|_| RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent))
+    }
+
     /// Position of the parent in the anchored read result.
     pub const fn parent_index(&self) -> usize {
         self.parent_index

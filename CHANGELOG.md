@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.42.0 (unreleased)
+
+- Fix runtime GraphQL alias swaps and scalar/relation output collisions; retain requested filter capabilities before empty-list constant lowering so authorization cannot be bypassed.
+
+- Runtime GraphQL composition explicitly rejects unsupported custom-directive factories before publication; built-in directives, bounded host extensions and checked subscription roots remain supported.
+
+- Add opt-in runtime GraphQL reads, checked dynamic composition, whole-operation
+  host authority preflight and bounded runtime relation batches.
+- Add lossless JSON-text/full-i64 scalars and host-managed authenticated encrypted
+  cursor framing with trusted schema/order/authorization/parent bindings.
+- Align macros at 0.42.0; static derives/SDL and default feature behavior are unchanged.
+- C remains an unpublished dependent review checkpoint; custom-directive forwarding
+  requires the documented contract decision. D is not included.
+
 ## 0.41.0 - unreleased
 
 Companion macros crate: `graphql-orm-macros` **0.41.0** (alignment only).
