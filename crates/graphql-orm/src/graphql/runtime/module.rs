@@ -17,8 +17,15 @@ pub struct RuntimeGraphqlOptions {
     pub type_prefix: String,
     pub root_names: BTreeMap<CollectionId, String>,
     pub cursor_profile: RuntimeCursorProfile,
+    pub(super) mutations: Option<RuntimeGraphqlMutationOptions>,
 }
 impl RuntimeGraphqlOptions {
+    /// Enable typed runtime mutations explicitly; reads remain the default.
+    pub fn with_mutations(mut self, options: RuntimeGraphqlMutationOptions) -> Self {
+        self.mutations = Some(options);
+        self
+    }
+
     /// Select cursor privacy explicitly. The default requires authenticated encryption.
     pub fn with_cursor_profile(mut self, profile: RuntimeCursorProfile) -> Self {
         self.cursor_profile = profile;
@@ -285,6 +292,17 @@ impl RuntimeGraphqlModule {
                 }
             }
         }
+        for c in &module.schema.schema().collections {
+            for name in super::mutation::type_names(&module, c) {
+                if !valid_name(&name, true)
+                    || !Arc::make_mut(&mut module.descriptor).names.insert(name)
+                {
+                    return Err(RuntimeGraphqlError::new("name_collision").into());
+                }
+            }
+        }
+        // Validate representable input objects before publication.
+        let _ = super::mutation::types(&module)?;
         if module.options.root_names.keys().any(|id| {
             !module
                 .schema
@@ -320,8 +338,8 @@ impl RuntimeGraphqlModule {
 
 /// Root field whose actual name is checked by the composer.
 pub struct RuntimeHostField {
-    name: String,
-    field: Field,
+    pub(super) name: String,
+    pub(super) field: Field,
     arguments: BTreeSet<String>,
 }
 impl RuntimeHostField {
@@ -357,12 +375,16 @@ impl RuntimeHostField {
 }
 /// Checked dynamic composition. It never accepts an opaque raw builder callback.
 pub struct RuntimeGraphqlComposer<B: RuntimeReadBackend> {
-    database: Database<B>,
+    pub(super) database: Database<B>,
+    pub(super) mutation: Option<Object>,
+    pub(super) mutation_name: Option<String>,
+    pub(super) mutation_roots: BTreeSet<String>,
+    pub(super) mutation_fields: Option<super::mutation::FieldFactory>,
     query: Object,
     query_name: String,
     subscription_name: Option<String>,
     actions: Vec<Box<dyn FnOnce(SchemaBuilder) -> SchemaBuilder + Send>>,
-    names: BTreeSet<String>,
+    pub(super) names: BTreeSet<String>,
     roots: BTreeSet<String>,
     modules: Vec<RuntimeGraphqlModule>,
     limits: RuntimeGraphqlLimits,
@@ -390,6 +412,10 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         }
         Ok(Self {
             database,
+            mutation: None,
+            mutation_name: None,
+            mutation_roots: BTreeSet::new(),
+            mutation_fields: None,
             query: Object::new(&query_name),
             query_name,
             subscription_name: None,
@@ -442,6 +468,27 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         bounded_schema(&module.schema, self.limits.max_schema_bytes)?;
         if self.modules.is_empty() {
             for ty in super::schema::helpers(self.limits.scalars) {
+                self = self.register(ty)?;
+            }
+        }
+        if module.options.mutations.is_some() {
+            let factory = self
+                .mutation_fields
+                .as_ref()
+                .ok_or_else(|| RuntimeGraphqlError::new("invalid_composition"))?;
+            let fields = factory(module.clone())?;
+            for (name, field) in fields {
+                if !self.mutation_roots.insert(name) {
+                    return Err(RuntimeGraphqlError::new("name_collision").into());
+                }
+                self.mutation = Some(
+                    self.mutation
+                        .take()
+                        .ok_or_else(|| RuntimeGraphqlError::new("invalid_composition"))?
+                        .field(field),
+                );
+            }
+            for ty in super::mutation::types(&module)? {
                 self = self.register(ty)?;
             }
         }
@@ -528,7 +575,11 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         self
     }
 
-    pub fn finish(self) -> Result<Schema, RuntimeGraphqlError> {
+    pub fn finish(mut self) -> Result<Schema, RuntimeGraphqlError> {
+        if let Some(root) = self.mutation.take() {
+            self.actions
+                .push(Box::new(move |builder| builder.register(root)));
+        }
         if self.protection.is_none()
             && self
                 .modules
@@ -546,9 +597,13 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         self.actions
             .into_iter()
             .fold(
-                Schema::build(&self.query_name, None, self.subscription_name.as_deref())
-                    .extension(guard)
-                    .limit_directives(self.limits.max_selections),
+                Schema::build(
+                    &self.query_name,
+                    self.mutation_name.as_deref(),
+                    self.subscription_name.as_deref(),
+                )
+                .extension(guard)
+                .limit_directives(self.limits.max_selections),
                 |builder, action| action(builder),
             )
             .register(self.query)

@@ -56,7 +56,7 @@ pub(super) struct Planner<'a> {
     pub cost: RuntimeGraphqlCost,
 }
 impl Planner<'_> {
-    fn resolve(
+    pub(super) fn resolve(
         &self,
         v: &async_graphql::parser::types::Field,
     ) -> Result<BTreeMap<String, Value>, RuntimeGraphqlError> {
@@ -402,7 +402,7 @@ pub(super) struct FilterIntent {
     pub logical: Vec<&'static str>,
 }
 
-fn filter(
+pub(super) fn filter(
     schema: &ValidatedRuntimeSchema,
     collection: &RuntimeCollectionHandle,
     c: &RuntimeCollection,

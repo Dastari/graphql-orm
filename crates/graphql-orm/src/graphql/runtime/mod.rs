@@ -44,3 +44,6 @@ pub use execution::{
     RuntimeGraphqlRequest, RuntimeReadAuthority, RuntimeReadCheck, RuntimeReadGrant,
 };
 pub use module::*;
+
+mod mutation;
+pub use mutation::RuntimeGraphqlMutationOptions;

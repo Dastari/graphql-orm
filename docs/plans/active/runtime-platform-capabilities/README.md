@@ -19,10 +19,13 @@ implementation and merged by PR #86 at `9ed46db5d1c5c6214f83ef9084352030e14905ad
 PR A implements the owned migration slice; its current public mechanics are in
 [owned runtime migrations](../../../reference/graphql-orm/runtime-migrations.md).
 B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` as C's committed
-predecessor. C is being implemented separately behind `runtime-graphql`; its
+predecessor. C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`; its
 [current mechanics and approved custom-directive limitation](../../../reference/graphql-orm/runtime-graphql.md)
-are documented independently. D remains a proposal gated on reviewed C/B.
-Final reconciliation and owner merge/release remain #112 → A → B → C. A proposal
+are documented independently. D has an isolated partial implementation based on
+that exact C revision. Typed no-record mutation roots delegate to B; returned
+record payloads currently reject before mutation pending the interface decision
+below. This checkpoint is not a completed D capability or adoption predecessor.
+Final reconciliation and owner merge/release remain #112 → A → B → C → D. A proposal
 or unpublished implementation is not downstream adoption evidence.
 
 The initiating [consumer contract](https://github.com/Dastari/digibase/blob/agent/vertical-slice-plan/docs/coordination/prompts/0013-graphql-orm-runnable-product-prerequisites.md)
@@ -931,6 +934,49 @@ Cancellation does not spawn hidden work. No driver rows/pools or GraphQL
 Context enter framework-neutral policy signatures.
 
 ## D: dynamic mutation registration
+
+### Implementation checkpoint: post-commit record authorization
+
+The approved D guarantee requires independent authorization after commit,
+including delete preimages. C's `RuntimeReadAuthority::authorize` returns an SQL
+predicate and projection grant but receives no record. B's `authorize_result`
+runs before commit and requires the pinned transaction. A deleted row cannot be
+re-read after commit to apply a newly granted SQL predicate. Neither callback
+alone establishes the required post-commit release decision.
+
+Proposed additive interface, awaiting review (not implemented):
+
+```rust,ignore
+pub struct RuntimeMutationOutputCheck<'a> {
+    pub schema: &'a ValidatedRuntimeSchema,
+    pub collection: &'a RuntimeCollectionHandle,
+    pub action: RuntimeMutationAction,
+    pub projection: &'a RuntimeProjection,
+    pub record: &'a RuntimeRecord,
+}
+// Additional default-deny method on RuntimeReadAuthority:
+fn authorize_mutation_result<'a>(
+    &'a self,
+    check: RuntimeMutationOutputCheck<'a>,
+) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>>;
+```
+
+The default implementation denies. C-only host authorities remain source
+compatible. Selected fields and CAS capabilities are authorized before writes;
+B independently authorizes the authoritative preimage/result and runs the
+journal hook. Only after the runner confirms commit may the adapter invoke this
+new callback and release the selected record (the deleted preimage for delete).
+The host must fail closed when its policy needs information absent from that
+projection. The callback is not a journal hook and has no mutation context.
+Post-commit denial, timeout or failure cannot imply rollback or trigger retry;
+clients must be told the mutation committed but the payload was withheld. No
+successful payload or protected record is released on that failure.
+
+The callback decision gates returned-record implementation, not the independent
+key/input/composition/transaction work. No interface deviation is treated as
+approved merely because this partial checkpoint compiles.
+
+### Approved registration contract
 
 Extend `RuntimeGraphqlOptions` through a builder method
 `with_mutations(RuntimeGraphqlMutationOptions)`; reads remain the default.
