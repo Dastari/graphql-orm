@@ -674,7 +674,24 @@ pub struct RetentionPurgeEvent {
     pub affected: u32,
 }
 
+/// Conservative commit outcome; unknown outcomes must not be blindly retried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionCommitOutcome {
+    /// The runner confirmed rollback or rejected before transaction entry.
+    RolledBack,
+    /// Commit or rollback completion is not established by this error variant.
+    Unknown,
+}
+
 impl TransactionError {
+    /// Whether rollback is established; preserves the existing error variants.
+    pub const fn commit_outcome(&self) -> TransactionCommitOutcome {
+        match self {
+            Self::Rejected(_) => TransactionCommitOutcome::RolledBack,
+            Self::Retryable(_) | Self::Failed(_) => TransactionCommitOutcome::Unknown,
+        }
+    }
+
     pub fn public_error(&self) -> &crate::graphql::errors::OrmPublicError {
         match self {
             Self::Rejected(error) | Self::Retryable(error) | Self::Failed(error) => error,
@@ -829,6 +846,7 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
     tx: B::Transaction<'tx>,
     mode: TransactionMode,
+    pub(crate) runtime_state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
 }
@@ -1255,6 +1273,7 @@ where
             db,
             tx,
             mode,
+            runtime_state: Default::default(),
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
         }
@@ -1404,11 +1423,25 @@ where
         }
     }
 
+    pub(crate) fn runtime_cannot_commit(&self) -> bool {
+        self.runtime_state.cannot_commit()
+    }
+
     pub async fn commit_and_emit(self) -> crate::Result<()> {
+        if self.runtime_cannot_commit() {
+            self.rollback().await?;
+            return Err(crate::graphql::errors::sqlx_error_from_public(
+                crate::graphql::errors::OrmPublicError::with_message(
+                    crate::graphql::errors::OrmErrorCode::Conflict,
+                    "unfinished or failed runtime work requires rollback",
+                ),
+            ));
+        }
         let Self {
             db,
             tx,
             mode: _,
+            runtime_state: _,
             deferred_events,
             deferred_actions,
         } = self;

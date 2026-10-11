@@ -1119,6 +1119,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             }
         }
         Ok(RuntimeMutationEnvironment {
+            backend: B::DIALECT,
             schema,
             physical_baseline_hash: current.stable_hash(),
             ownership: ownership.clone(),
@@ -1235,12 +1236,17 @@ pub struct VerifiedRuntimeDependency {
 /// Immutable schema-bound physical dependency certificate, not another schema IR.
 #[derive(Clone, Debug)]
 pub struct RuntimeMutationEnvironment {
+    backend: DatabaseBackend,
     schema: Arc<ValidatedRuntimeSchema>,
     physical_baseline_hash: String,
     ownership: ManagedTableSet,
     incoming: BTreeMap<String, Vec<VerifiedRuntimeDependency>>,
 }
 impl RuntimeMutationEnvironment {
+    /// Backend which verified this physical dependency certificate.
+    pub fn backend(&self) -> DatabaseBackend {
+        self.backend
+    }
     /// Validated schema pinned by the host generation.
     pub fn schema(&self) -> &Arc<ValidatedRuntimeSchema> {
         &self.schema
