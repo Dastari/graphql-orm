@@ -9,6 +9,7 @@ use super::execution::{
     applied_migration_records, applied_version_set, ensure_managed_policy, ensure_planning_policy,
 };
 use super::migrations::{build_migration_plan, classify_migration_steps};
+use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{build_rls_policy_plan, validate_rls_models};
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
 use crate::db::Database;
@@ -20,7 +21,7 @@ use crate::db::Database;
 /// the database; migration application requires a backend implementing
 /// [`MigrationBackend`].
 pub struct SchemaManager<'db, B: OrmBackend> {
-    database: &'db Database<B>,
+    pub(super) database: &'db Database<B>,
 }
 
 impl<'db, B: OrmBackend> SchemaManager<'db, B> {
@@ -479,6 +480,19 @@ pub fn validate_schema_models(
     current: &SchemaModel,
     target: &SchemaModel,
 ) -> SchemaValidationReport {
+    validate_schema_views(
+        backend,
+        policy,
+        &SchemaRef::from(current),
+        &SchemaRef::from(target),
+    )
+}
+pub(super) fn validate_schema_views(
+    backend: &'static str,
+    policy: SchemaPolicy,
+    current: &SchemaRef<'_>,
+    target: &SchemaRef<'_>,
+) -> SchemaValidationReport {
     let current_tables = current
         .tables
         .iter()
@@ -497,7 +511,7 @@ pub fn validate_schema_models(
             .iter()
             .map(|extension| extension.to_ascii_lowercase())
             .collect::<std::collections::BTreeSet<_>>();
-        for extension in &target.extensions {
+        for extension in target.extensions {
             if !current_extensions.contains(&extension.to_ascii_lowercase()) {
                 diagnostics.push(diagnostic(
                     SchemaDiagnosticSeverity::Error,
@@ -701,11 +715,11 @@ fn schema_current_for_plan(
 
 /// Summary of remaining work used for recorded-version apply decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct RemainingPlanWork {
-    migration_steps: usize,
-    migration_statements: usize,
-    rls_statements: usize,
-    combined_statements: usize,
+pub(super) struct RemainingPlanWork {
+    pub(super) migration_steps: usize,
+    pub(super) migration_statements: usize,
+    pub(super) rls_statements: usize,
+    pub(super) combined_statements: usize,
 }
 
 impl RemainingPlanWork {
@@ -746,7 +760,19 @@ async fn resolve_recorded_version_apply<B: MigrationBackend>(
     version: &str,
     work: RemainingPlanWork,
 ) -> crate::Result<Option<AppliedMigrationReport>> {
-    if !applied_version_set::<B>(pool).await?.contains(version) {
+    recorded_version_report(
+        version,
+        work,
+        applied_version_set::<B>(pool).await?.contains(version),
+    )
+}
+
+pub(super) fn recorded_version_report(
+    version: &str,
+    work: RemainingPlanWork,
+    recorded: bool,
+) -> crate::Result<Option<AppliedMigrationReport>> {
+    if !recorded {
         return Ok(None);
     }
 
@@ -797,29 +823,37 @@ fn plan_migration_for_backend<B: OrmBackend>(
 }
 
 fn reject_disallowed_risks(plan: &PlannedMigration, options: &ApplyOptions) -> crate::Result<()> {
-    if options.additive_only {
-        if let Some(step) = plan
-            .steps
+    reject_migration_risks(
+        &plan.version,
+        plan.steps
             .iter()
-            .find(|step| step.risk != MigrationRisk::Additive)
+            .map(|step| (step.risk, StepRef::from(&step.step))),
+        options,
+    )
+}
+pub(super) fn reject_migration_risks<'a>(
+    version: &str,
+    mut steps: impl Iterator<Item = (MigrationRisk, StepRef<'a>)> + Clone,
+    options: &ApplyOptions,
+) -> crate::Result<()> {
+    if options.additive_only {
+        if let Some(step) = steps
+            .clone()
+            .find(|(risk, _)| *risk != MigrationRisk::Additive)
         {
             return Err(sqlx::Error::Protocol(format!(
                 "Migration {} contains non-additive step {:?}; disable additive_only to apply it",
-                plan.version, step.step
+                version, step.1
             )));
         }
     }
     if options.allow_destructive {
         return Ok(());
     }
-    if let Some(step) = plan
-        .steps
-        .iter()
-        .find(|step| step.risk == MigrationRisk::Destructive)
-    {
+    if let Some(step) = steps.find(|(risk, _)| *risk == MigrationRisk::Destructive) {
         return Err(sqlx::Error::Protocol(format!(
             "Migration {} contains destructive step {:?}; set allow_destructive to apply it",
-            plan.version, step.step
+            version, step.1
         )));
     }
     Ok(())
@@ -830,13 +864,23 @@ fn stable_plan_hash(
     steps: &[PlannedMigrationStep],
     statements: &[String],
 ) -> String {
+    stable_plan_hash_views(
+        backend,
+        steps
+            .iter()
+            .map(|step| (step.risk, StepRef::from(&step.step), step.reason.as_str())),
+        statements,
+    )
+}
+pub(super) fn stable_plan_hash_views<'a>(
+    backend: &'static str,
+    steps: impl IntoIterator<Item = (MigrationRisk, StepRef<'a>, &'a str)>,
+    statements: &[String],
+) -> String {
     let mut canonical = backend.to_string();
     canonical.push('\n');
-    for step in steps {
-        canonical.push_str(&format!(
-            "{:?}|{:?}|{}\n",
-            step.risk, step.step, step.reason
-        ));
+    for (risk, step, reason) in steps {
+        canonical.push_str(&format!("{:?}|{:?}|{}\n", risk, step, reason));
     }
     for statement in statements {
         canonical.push_str(statement);

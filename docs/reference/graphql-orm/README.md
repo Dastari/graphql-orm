@@ -57,6 +57,7 @@ guidance for the core ORM package.
 ## Runtime schema APIs
 
 - [Runtime schema IR](runtime-schema-ir.md)
+- [Owned runtime migration targets](runtime-migrations.md)
 - [Runtime records](runtime-records.md)
 - [Runtime queries](runtime-queries.md)
 - [Runtime relations](runtime-relations.md)

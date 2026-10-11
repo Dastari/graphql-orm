@@ -1,3 +1,7 @@
+#[cfg(feature = "postgres")]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 #[cfg(feature = "sqlite")]
 use graphql_orm::graphql::orm::DeletePolicy;
 #[cfg(feature = "sqlite")]
@@ -278,10 +282,8 @@ async fn sqlite_migration_runner_rolls_back_failed_rewrite()
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let mut owned = owned_postgres::OwnedPostgres::start("legacy-migration-apply")?;
+    let pool = sqlx::PgPool::connect(&owned.url).await?;
     let suffix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -366,6 +368,9 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
         .execute(&pool)
         .await?;
 
+    pool.close().await;
+    owned.cleanup()?;
+
     Ok(())
 }
 
@@ -373,10 +378,8 @@ async fn postgres_migration_runner_applies_plan() -> Result<(), Box<dyn std::err
 #[tokio::test]
 async fn postgres_migration_runner_rolls_back_failed_migration()
 -> Result<(), Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let mut owned = owned_postgres::OwnedPostgres::start("legacy-migration-apply")?;
+    let pool = sqlx::PgPool::connect(&owned.url).await?;
     let table_name = format!(
         "rollback_users_{}",
         std::time::SystemTime::now()
@@ -405,6 +408,9 @@ async fn postgres_migration_runner_rolls_back_failed_migration()
     .await?;
     assert!(row.is_none());
     assert_eq!(postgres_history_count(&pool, &version_prefix).await?, 0);
+
+    pool.close().await;
+    owned.cleanup()?;
 
     Ok(())
 }
