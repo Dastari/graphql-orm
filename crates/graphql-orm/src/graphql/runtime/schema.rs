@@ -18,7 +18,7 @@ pub(super) fn field_value(value: Value) -> FieldValue<'static> {
 pub(super) fn relation_output_key(name: &str, response_key: &str) -> String {
     format!("{name}:{response_key}")
 }
-fn output(name: &str, ty: TypeRef) -> Field {
+pub(super) fn output(name: &str, ty: TypeRef) -> Field {
     Field::new(name, ty, |ctx| {
         FieldFuture::new(async move {
             let value = &ctx

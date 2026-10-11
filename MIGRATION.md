@@ -13,6 +13,23 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.42.0 to 0.43.0: opt-in runtime GraphQL mutations
+
+No data migration or static API/SDL change. Mutation registration requires an
+explicit options builder, checked mutation root, certified environment and host
+write authority. Existing read authorities remain source-compatible; releasing
+mutation records now requires an explicit post-commit callback override. Default
+denial leaves committed writes/journals intact and reports a committed outcome.
+Repeated mutation fields with the same validated response key now execute once
+with a merged projection, including fragment repeats. Distinct aliases retain
+separate transactions in document order. Repeated occurrences reuse terminal
+payloads/errors and never restart canceled work. A host extension continuing
+execution after resolver cancellation receives nonretryable committed or unknown
+outcome errors according to commit confirmation; whole-request cancellation can
+still prevent delivery.
+See [runtime GraphQL](docs/reference/graphql-orm/runtime-graphql.md) for callback,
+null/default/key behavior, cancellation uncertainty and compiled examples.
+
 ## 0.41.0 to 0.42.0: opt-in runtime GraphQL reads
 
 Enable `runtime-graphql` alongside an explicit SQLite or PostgreSQL feature. No
