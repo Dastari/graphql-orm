@@ -270,7 +270,7 @@ mod example {
                 "mutation($schema:String!){{{operation}{{record{{label exact}}}}}}"
             ))
             .variables(graphql_orm::async_graphql::Variables::from_json(
-                serde_json::json!({"schema":schema.fingerprint().to_string()}),
+                graphql_orm::serde_json::json!({"schema":schema.fingerprint().to_string()}),
             ))
             .data(
                 RuntimeGraphqlRequest::<Backend>::new(
