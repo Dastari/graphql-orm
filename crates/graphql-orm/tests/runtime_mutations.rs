@@ -1225,8 +1225,7 @@ async fn host_policy_only_revision_changes_reject_unchanged_schema_requests() {
     f.finish().await;
 }
 
-// PostgreSQL executes only rejection cases until the reviewed #112/A/B reconciliation.
-// The renderer's native-slot accounting is independently covered by unit tests.
+// Combined #112/A/B execution checks emitted slots at and below both backend budgets.
 #[tokio::test]
 async fn emitted_suffix_bind_budgets_precede_target_reads_for_cas_and_authority() {
     let f = Fixture::new().await;
@@ -1313,9 +1312,6 @@ async fn emitted_suffix_bind_budgets_precede_target_reads_for_cas_and_authority(
             postgres_slots
         };
         for budget in [required - 1, required, required + 1] {
-            if Backend::DIALECT == DatabaseBackend::Postgres && budget >= required {
-                continue;
-            }
             let id = (case * 3 + budget + 2 - required) as i64;
             f.run(f.create(id), f.authority()).await.unwrap();
             let request = f
@@ -1363,6 +1359,138 @@ async fn emitted_suffix_bind_budgets_precede_target_reads_for_cas_and_authority(
                 Backend::try_get_i64(&rows[0], "score").unwrap(),
                 if budget < required { 7 } else { 8 }
             );
+        }
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn reconciled_prefix_suffix_cas_preserves_unicode_empty_and_bound_values() {
+    let f = Fixture::new().await;
+    let samples = ["alpha", "ALPHA", "πfoo", "πfoo%", "suffix", "Ω", ""];
+    for (case, (operator, operand, matched)) in [
+        (RuntimeScalarOperator::StartsWith, "π", vec![2, 3]),
+        (RuntimeScalarOperator::EndsWith, "foo", vec![2]),
+        (RuntimeScalarOperator::EndsWith, "", (0..7).collect()),
+        (RuntimeScalarOperator::StartsWith, "", (0..7).collect()),
+        (RuntimeScalarOperator::StartsWith, "AL", vec![1]),
+        (RuntimeScalarOperator::EndsWith, "%", vec![3]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let expected = f
+            .schema()
+            .runtime_compare(
+                &f.collection(),
+                &f.field("label"),
+                operator,
+                RuntimeValue::String(operand.into()),
+                Default::default(),
+            )
+            .unwrap();
+        // SQL-renderable authority uses another repeated native value as well as
+        // the tenant restriction; no caller value is interpolated into SQL.
+        let tenant_suffix = f
+            .schema()
+            .runtime_compare(
+                &f.collection(),
+                &f.field("tenant"),
+                RuntimeScalarOperator::EndsWith,
+                RuntimeValue::String("orth".into()),
+                Default::default(),
+            )
+            .unwrap();
+        let visible = f
+            .schema()
+            .runtime_and(
+                &f.collection(),
+                vec![f.authority().predicate.unwrap(), tenant_suffix],
+                Default::default(),
+            )
+            .unwrap();
+        for (offset, label) in samples.iter().enumerate() {
+            let id = (case * samples.len() + offset) as i64;
+            let create = f
+                .schema()
+                .runtime_create_request(
+                    &f.collection(),
+                    &[
+                        (f.field("id"), RuntimeValue::Integer(id)),
+                        (f.field("tenant"), RuntimeValue::String("north".into())),
+                        (f.field("label"), RuntimeValue::String((*label).into())),
+                    ],
+                    None,
+                    Default::default(),
+                )
+                .unwrap();
+            f.run(create, f.authority()).await.unwrap();
+            let update = f
+                .schema()
+                .runtime_update_request(
+                    f.key(id),
+                    &[(f.field("score"), RuntimeValue::Integer(8))],
+                    Some(expected.clone()),
+                    Some(f.projection()),
+                    Default::default(),
+                )
+                .unwrap();
+            let mut authority = f.authority();
+            authority.predicate = Some(visible.clone());
+            let result = f.run(update.clone(), authority).await;
+            if matched.contains(&offset) {
+                let effect = result.unwrap();
+                assert!(matches!(
+                    effect.record().unwrap().state(&f.field("score")).unwrap(),
+                    RuntimeFieldState::Value(RuntimeValue::Integer(8))
+                ));
+                assert!(
+                    matches!(effect.record().unwrap().state(&f.field("label")).unwrap(), RuntimeFieldState::Value(RuntimeValue::String(actual)) if actual == label)
+                );
+                // A structural condition independent of a built-in version field
+                // catches the now-stale score even when the string still matches.
+                let score = f
+                    .schema()
+                    .runtime_compare(
+                        &f.collection(),
+                        &f.field("score"),
+                        RuntimeScalarOperator::Eq,
+                        RuntimeValue::Integer(7),
+                        Default::default(),
+                    )
+                    .unwrap();
+                let stale = f
+                    .schema()
+                    .runtime_and(
+                        &f.collection(),
+                        vec![expected.clone(), score],
+                        Default::default(),
+                    )
+                    .unwrap();
+                let retry = f
+                    .schema()
+                    .runtime_update_request(
+                        f.key(id),
+                        &[(f.field("score"), RuntimeValue::Integer(9))],
+                        Some(stale),
+                        None,
+                        Default::default(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    f.run(retry, f.authority())
+                        .await
+                        .unwrap_err()
+                        .public_error()
+                        .runtime_mutation_code(),
+                    Some("conflict")
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap_err().public_error().runtime_mutation_code(),
+                    Some("conflict")
+                );
+            }
         }
     }
     f.finish().await;

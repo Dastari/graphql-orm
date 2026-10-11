@@ -208,11 +208,12 @@ Docker containers and verify exact ownership before cleanup. MSSQL remains an
 unsupported runtime decoder and is rejected before ORM I/O; compilation is not
 live MSSQL execution. GitHub Actions remain paused.
 
-The unreconciled B predecessor does not yet contain #112. Successful PostgreSQL
-StartsWith/EndsWith execution and the SQLite empty-suffix correction remain gated
-on reviewed #112 → A → B → C reconciliation. This does not weaken those release
-acceptance requirements. No merge, publication or downstream pin is implied by an
-unpublished C branch. D requires separate reviewed C/B predecessors.
+The combined candidate contains reviewed #112 → A → B → C → D. Its owned
+backend runner executes PostgreSQL prefix/suffix CAS success and exact bind-budget
+boundaries, SQLite empty-suffix behavior, and repeated GraphQL string-CAS groups
+with atomic journals. Individual A–D heads remain unchanged. Final combined
+source review and owner-controlled merge/release are still adoption gates; local
+execution does not supply an immutable release identity or authorize a downstream pin.
 
 
 ## Typed mutations and committed output authorization

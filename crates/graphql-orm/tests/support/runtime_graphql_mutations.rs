@@ -1009,3 +1009,46 @@ async fn repeated_groups_keep_validation_directives_and_projection_denial_before
     assert_eq!(f.count().await, 1);
     f.finish().await;
 }
+
+#[tokio::test]
+async fn reconciled_string_cas_runs_once_through_graphql_and_atomic_journals() {
+    let f = Fixture::new().await;
+    f.run(f.create(1), f.authority()).await.unwrap();
+    let schema = api(&f);
+    let probe = Arc::new(GroupProbe::default());
+    let field = r#"updateRecord(key:{id:"1"},input:{label:"updated"},expected:{and:[{label:{startsWith:"ini"}},{label:{endsWith:"tial"}},{label:{endsWith:""}}]},expectedSchema:$schema)"#;
+    let response = schema
+        .execute(request(&f, &repeated(field)).data(group_context(
+            &f,
+            &probe,
+            0,
+            0,
+            Default::default(),
+        )))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["same"]["record"],
+        serde_json::json!({"label":"updated","score":"7","renamed":"updated"})
+    );
+    assert_eq!(probe.intents.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.hooks.lock().unwrap().len(), 1);
+    assert_eq!(probe.released.lock().unwrap().len(), 1);
+    assert_eq!(Journal::count_all(&f.db).await.unwrap(), 1);
+    let stale = schema
+        .execute(request(&f, &repeated(field)).data(group_context(
+            &f,
+            &probe,
+            0,
+            0,
+            Default::default(),
+        )))
+        .await;
+    assert_eq!(stale.errors.len(), 3);
+    assert!(stale.errors.iter().all(|error| error.message == "conflict"));
+    assert_eq!(probe.intents.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.hooks.lock().unwrap().len(), 1);
+    assert_eq!(probe.released.lock().unwrap().len(), 1);
+    assert_eq!(Journal::count_all(&f.db).await.unwrap(), 1);
+    f.finish().await;
+}

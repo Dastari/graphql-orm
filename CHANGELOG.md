@@ -16,6 +16,10 @@ for historical context.
 
 ## 0.43.0 (unreleased)
 
+- Reconcile accepted runtime strings/binding and A–D source at aligned 0.43.0.
+  Retain immutable reviewed predecessors and execute PostgreSQL prefix/suffix
+  CAS, SQLite empty suffixes and opt-in GraphQL conformance in owned backend lanes.
+
 - Add opt-in typed runtime GraphQL mutations delegating to guarded B transactions,
   with atomic host journals and independently authorized selected outputs.
 - Add an object-safe, default-deny post-commit record-release callback, explicit
