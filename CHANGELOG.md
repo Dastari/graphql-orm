@@ -20,6 +20,9 @@ for historical context.
   with atomic host journals and independently authorized selected outputs.
 - Add an object-safe, default-deny post-commit record-release callback, explicit
   deleted preimages and sanitized committed-outcome denial/failure/timeout errors.
+- Execute repeated runtime GraphQL mutation response-key groups once, merging
+  payload projections, preserving distinct-alias order and sharing terminal
+  outcomes after failure or cancellation. Budgets charge each group once.
 - Align ORM/macros at 0.43.0; static APIs/SDL and default features remain unchanged.
 
 ## 0.42.0 (unreleased)

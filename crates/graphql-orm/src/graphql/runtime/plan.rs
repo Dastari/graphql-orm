@@ -81,7 +81,9 @@ impl Planner<'_> {
         if depth > self.limits.max_depth {
             return Err(RuntimeGraphqlError::new("cost_exceeded"));
         }
-        let mut fields: BTreeMap<String, Field> = BTreeMap::new();
+        // A response-key group keeps its first occurrence in document order.
+        let mut fields: async_graphql::indexmap::IndexMap<String, Field> =
+            async_graphql::indexmap::IndexMap::new();
         for selection in &set.items {
             self.expanded = self.expanded.checked_add(1).ok_or_else(invalid)?;
             if self.expanded > self.limits.max_selections {

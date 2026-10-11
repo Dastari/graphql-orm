@@ -20,6 +20,13 @@ explicit options builder, checked mutation root, certified environment and host
 write authority. Existing read authorities remain source-compatible; releasing
 mutation records now requires an explicit post-commit callback override. Default
 denial leaves committed writes/journals intact and reports a committed outcome.
+Repeated mutation fields with the same validated response key now execute once
+with a merged projection, including fragment repeats. Distinct aliases retain
+separate transactions in document order. Repeated occurrences reuse terminal
+payloads/errors and never restart canceled work. A host extension continuing
+execution after resolver cancellation receives nonretryable committed or unknown
+outcome errors according to commit confirmation; whole-request cancellation can
+still prevent delivery.
 See [runtime GraphQL](docs/reference/graphql-orm/runtime-graphql.md) for callback,
 null/default/key behavior, cancellation uncertainty and compiled examples.
 

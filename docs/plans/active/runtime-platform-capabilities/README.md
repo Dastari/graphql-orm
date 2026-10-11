@@ -3,7 +3,7 @@ title: Bounded runtime platform capability contract
 kind: plan
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-11
 review_by: 2026-12-31
 supersedes: []
 ---
@@ -979,6 +979,18 @@ returns `mutation_payload_failed`. Each has `outcome: "committed"` and
 or transport loss after commit can prevent delivery of either success or this
 error: clients must reconcile the outcome, never infer rollback or blindly retry.
 
+Repeated runtime mutation occurrences with a validated common response key merge
+their payload projections and execute one transaction, guarded journal and
+post-commit authorization. Distinct aliases keep first-occurrence document order
+and separate transactions. Statement/node reservations and response measurement
+apply once per merged group; expansion limits still count every occurrence.
+The request-scoped group outcome is terminal on success, error or cancellation,
+so later occurrences cannot restart work. If an extension continues after
+resolver cancellation, repetitions receive a sanitized nonretryable committed
+payload-canceled error after confirmed commit, or an unknown-outcome error before
+commit confirmation. Whole-request cancellation can still suppress the response.
+This preserves B's before-commit rollback and commit-ambiguity guarantees.
+
 ### Approved registration contract
 
 Extend `RuntimeGraphqlOptions` through a builder method
@@ -1036,7 +1048,7 @@ policy-only revision before DML, without conflating revision with fingerprint.
 Resolve selected payload record fields into an independently authorized
 RuntimeProjection before mutation. If only `__typename` is selected, request
 no return record; never expose the internal key as a fallback. Execute one
-state-machine transaction per mutation root, call the host before-commit hook
+state-machine transaction per validated response-key group, call the host before-commit hook
 with the pending effect, then commit before resolving a successful payload.
 Denials, CAS conflicts, and commit failures are safe GraphQL errors, with no
 protected values in conflict payloads. No relation/nested mutation payload
@@ -1192,7 +1204,7 @@ cancellation. B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447`. Its r
 host example describe environment/policy revision pinning, backend gates and
 ambiguous commit limitations. The static-only inner-timeout limitation remains.
 
-C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`. D is implemented
+C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`. D is implemented with response-key grouping corrections
 for review, but remains unaccepted/unreleased and dependent on its
 respective reviewed predecessors. Preserve host-managed AEAD cursor protection,
 lossless JSON text, required create keys and independent post-commit payload

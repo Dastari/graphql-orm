@@ -127,7 +127,10 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
 }
 
 use crate::db::Database;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 pub(super) type FieldFactory = Box<
     dyn Fn(RuntimeGraphqlModule) -> Result<Vec<(String, Field)>, RuntimeGraphqlError> + Send + Sync,
 >;
@@ -246,6 +249,72 @@ pub(super) struct Prepared {
     limits: RuntimeGraphqlLimits,
     shape: super::execution::OutputShape,
     response_bytes: Arc<std::sync::atomic::AtomicUsize>,
+    // Shared by occurrences of this response key, fresh for every execution.
+    outcome: Arc<Mutex<GroupOutcome>>,
+}
+
+enum GroupOutcome {
+    Ready,
+    Running,
+    Finished(async_graphql::Result<Value>),
+}
+enum GroupStart {
+    Cached(async_graphql::Result<Value>),
+    Execute(GroupExecution),
+}
+/// Owns the only execution attempt. Dropping an unfinished future is terminal too.
+struct GroupExecution {
+    outcome: Arc<Mutex<GroupOutcome>>,
+    committed: bool,
+    finished: bool,
+}
+impl GroupExecution {
+    fn start(outcome: &Arc<Mutex<GroupOutcome>>) -> async_graphql::Result<GroupStart> {
+        let mut state = outcome.lock().map_err(|_| uncertain_error())?;
+        match &*state {
+            GroupOutcome::Finished(result) => Ok(GroupStart::Cached(result.clone())),
+            // The locked executor is serial at mutation roots. Fail closed if a host
+            // extension reenters an in-progress resolver; never start a second attempt.
+            GroupOutcome::Running => Ok(GroupStart::Cached(Err(uncertain_error()))),
+            GroupOutcome::Ready => {
+                *state = GroupOutcome::Running;
+                Ok(GroupStart::Execute(Self {
+                    outcome: outcome.clone(),
+                    committed: false,
+                    finished: false,
+                }))
+            }
+        }
+    }
+    fn finish(&mut self, result: &async_graphql::Result<Value>) {
+        if let Ok(mut state) = self.outcome.lock() {
+            *state = GroupOutcome::Finished(result.clone());
+        }
+        self.finished = true;
+    }
+}
+impl Drop for GroupExecution {
+    fn drop(&mut self) {
+        if !self.finished {
+            let error = if self.committed {
+                committed_error("mutation_payload_canceled")
+            } else {
+                // Cancellation may occur during COMMIT. Do not promise rollback or
+                // invite automatic retries when the outcome cannot be confirmed.
+                uncertain_error()
+            };
+            if let Ok(mut state) = self.outcome.lock() {
+                *state = GroupOutcome::Finished(Err(error));
+            }
+        }
+    }
+}
+fn uncertain_error() -> async_graphql::Error {
+    use async_graphql::ErrorExtensions;
+    wire_error("mutation_outcome_unknown").extend_with(|_, extensions| {
+        extensions.set("outcome", "unknown");
+        extensions.set("retryable", false);
+    })
 }
 fn mutation_error(error: RuntimeMutationError) -> RuntimeGraphqlError {
     RuntimeGraphqlError::new(error.code().as_str())
@@ -495,6 +564,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             limits: planner.limits,
                             shape,
                             response_bytes: response_bytes.clone(),
+                            outcome: Arc::new(Mutex::new(GroupOutcome::Ready)),
                         },
                     );
                 }
@@ -556,6 +626,21 @@ async fn execute<B: RuntimeMutationBackend>(
         .get(key)
         .ok_or_else(|| wire_error("authorization_missing"))?
         .clone();
+    let mut execution = match GroupExecution::start(&prepared.outcome)? {
+        GroupStart::Cached(result) => return result.map(super::schema::field_value),
+        GroupStart::Execute(execution) => execution,
+    };
+    let result = execute_once(database, context, &prepared, key, &mut execution).await;
+    execution.finish(&result);
+    result.map(super::schema::field_value)
+}
+async fn execute_once<B: RuntimeMutationBackend>(
+    database: Database<B>,
+    context: &RuntimeGraphqlRequest<B>,
+    prepared: &Prepared,
+    key: &str,
+    execution: &mut GroupExecution,
+) -> async_graphql::Result<Value> {
     let environment = context
         .mutation_environment
         .clone()
@@ -610,10 +695,11 @@ async fn execute<B: RuntimeMutationBackend>(
             };
             wire_error(code)
         })?;
+    execution.committed = true;
     let Some(projection) = prepared.returning.as_ref() else {
         let payload = async_graphql::value!({"record":null});
-        reserve_payload(&prepared, &payload, key)?;
-        return Ok(super::schema::field_value(payload));
+        reserve_payload(prepared, &payload, key)?;
+        return Ok(payload);
     };
     let record = effect
         .record()
@@ -687,8 +773,8 @@ async fn execute<B: RuntimeMutationBackend>(
             .into_iter()
             .collect(),
     );
-    reserve_payload(&prepared, &payload, key)?;
-    Ok(super::schema::field_value(payload))
+    reserve_payload(prepared, &payload, key)?;
+    Ok(payload)
 }
 
 /// The immutable transaction-captured image presented after confirmed commit.

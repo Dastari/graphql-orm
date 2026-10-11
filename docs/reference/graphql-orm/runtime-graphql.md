@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-09
+last_reviewed: 2026-10-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -230,9 +230,23 @@ nested/bulk writes are unsupported.
 
 Attach a certified environment, pinned write authority and optional journal hook
 using `with_mutation_environment`, `with_write_authority` and
-`with_mutation_hook`. Each root uses B's guarded state-machine transaction;
-multiple roots execute serially in separate transactions. Hook failures and
-cancellation before commit roll back. No automatic retries occur. The host
+`with_mutation_hook`. Each validated response-key group uses B's guarded
+state-machine transaction once. Repeated inline fields and fragment selections
+with the same response key merge their requested payload projections. They share
+one transaction, journal hook, post-commit authority decision and immutable
+payload/error, even when another alias occurs between the repeats. Distinct
+aliases execute serially in first-occurrence document order in separate
+transactions. They do not share outcomes, grants or caches across requests.
+
+Preflight conservatively reserves four ORM statements and one materialized node
+per distinct runtime mutation group; it measures the merged response shape once.
+Host journal/policy I/O needs separate host bounds. Every selection occurrence
+still contributes to document/fragment limits. The locked executor may invoke
+repeated resolver occurrences, but the request-scoped terminal outcome prevents
+another mutation attempt. Its response-object merger combines their selected
+fields; cached errors may be reported at each occurrence's location.
+
+Hook failures and cancellation before commit roll back. No automatic retries occur. The host
 retains complete policy-revision validation and schema/DDL fencing obligations.
 
 Selected projection and CAS field/operator capabilities are independently checked
@@ -257,3 +271,15 @@ cancellation or transport loss after commit may deliver no response at all;
 clients must reconcile state instead of assuming rollback or retrying blindly.
 An uncertain transaction commit remains distinct from a confirmed committed
 payload error. No durable replay or idempotency service is provided.
+
+If a host extension cancels an individual mutation resolver but continues the
+same execution, that response-key group remains terminal. Repeats do not restart
+its transaction, journal hook or output authorization. Cancellation after
+confirmed commit produces `mutation_payload_canceled` with `outcome: "committed"`
+and `retryable: false` on a subsequent occurrence. Cancellation before commit
+confirmation (including while COMMIT may be in flight) produces
+`mutation_outcome_unknown` with `outcome: "unknown"` and `retryable: false`.
+This conservative classification does not imply rollback; reconcile state.
+Whole-request cancellation may prevent any response. Before-commit guarded hook
+cancellation still rolls back under B's guarantees. Static transaction
+inner-timeout semantics are unchanged.
