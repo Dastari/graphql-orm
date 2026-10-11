@@ -13,8 +13,7 @@ supersedes: []
 The additive `runtime-graphql` feature registers read-only dynamic GraphQL over
 an `Arc<ValidatedRuntimeSchema>`. It is off by default. Static derives, SDL,
 framework-neutral cursors and repository consumers are unchanged. No data
-migration is required. This is C, based on the reviewed B revision; mutation
-registration D is not implemented here.
+migration is required. This is C, based on the reviewed B revision; typed mutation registration is explicitly opt-in.
 
 `RuntimeGraphqlModule::compile` checks public names and deterministic ordering.
 `RuntimeGraphqlComposer<B>` checks every root and type name before publication.
@@ -214,3 +213,47 @@ StartsWith/EndsWith execution and the SQLite empty-suffix correction remain gate
 on reviewed #112 → A → B → C reconciliation. This does not weaken those release
 acceptance requirements. No merge, publication or downstream pin is implied by an
 unpublished C branch. D requires separate reviewed C/B predecessors.
+
+
+## Typed mutations and committed output authorization
+
+Enable `RuntimeGraphqlOptions::with_mutations(RuntimeGraphqlMutationOptions::default())`
+and compose `mutation_root("Mutation")`. The existing executable host example now
+runs typed create, CAS update and exact-key delete with atomic typed journal
+inserts, and explicit post-commit public-record release. Enable only the required
+actions through mutation options. GraphQL cannot represent empty input objects;
+an enabled create/update action with no writable fields is rejected during
+compilation with `unsupported_capability`. Generated fields are excluded, keys
+are required on create and absent from update. Defaults stay omitted in GraphQL
+SDL so omission and explicit null remain distinct. Nested output relations and
+nested/bulk writes are unsupported.
+
+Attach a certified environment, pinned write authority and optional journal hook
+using `with_mutation_environment`, `with_write_authority` and
+`with_mutation_hook`. Each root uses B's guarded state-machine transaction;
+multiple roots execute serially in separate transactions. Hook failures and
+cancellation before commit roll back. No automatic retries occur. The host
+retains complete policy-revision validation and schema/DDL fencing obligations.
+
+Selected projection and CAS field/operator capabilities are independently checked
+before mutation; B's authoritative result check still runs in the transaction.
+After confirmed commit, `RuntimeReadAuthority::authorize_mutation_result` receives
+schema/collection identity, action, selected projection and the immutable captured
+record. `RuntimeMutationRecordKind::DeletedPreimage` explicitly identifies delete
+results; no post-commit reread is attempted. Internal keys and policy fields stay
+unloaded and are never serialized unless independently selected and authorized.
+The object-safe callback defaults to denial, preserving existing read-only host
+implementations. Hosts must deny when required policy information is absent.
+Only selecting `__typename` requests no record and does not call this callback.
+
+The callback timeout defaults to five seconds and is host configurable through
+`output_authorization_timeout`. Denial yields `mutation_payload_denied`, other
+errors yield `mutation_payload_failed`, and timeout yields
+`mutation_payload_timeout`. All have `extensions.outcome = "committed"` and
+`extensions.retryable = false`, without record values or host error details.
+These errors cannot undo the mutation or journal. Encoding/response-budget failures
+after commit use the same committed failure classification. Whole-request
+cancellation or transport loss after commit may deliver no response at all;
+clients must reconcile state instead of assuming rollback or retrying blindly.
+An uncertain transaction commit remains distinct from a confirmed committed
+payload error. No durable replay or idempotency service is provided.

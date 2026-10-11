@@ -21,10 +21,8 @@ PR A implements the owned migration slice; its current public mechanics are in
 B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` as C's committed
 predecessor. C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`; its
 [current mechanics and approved custom-directive limitation](../../../reference/graphql-orm/runtime-graphql.md)
-are documented independently. D has an isolated partial implementation based on
-that exact C revision. Typed no-record mutation roots delegate to B; returned
-record payloads currently reject before mutation pending the interface decision
-below. This checkpoint is not a completed D capability or adoption predecessor.
+are documented independently. D is implemented for review on that exact C revision, including the approved
+additive post-commit output callback. It remains unaccepted and unreleased.
 Final reconciliation and owner merge/release remain #112 → A → B → C → D. A proposal
 or unpublished implementation is not downstream adoption evidence.
 
@@ -935,7 +933,7 @@ Context enter framework-neutral policy signatures.
 
 ## D: dynamic mutation registration
 
-### Implementation checkpoint: post-commit record authorization
+### Approved additive post-commit record authorization
 
 The approved D guarantee requires independent authorization after commit,
 including delete preimages. C's `RuntimeReadAuthority::authorize` returns an SQL
@@ -944,13 +942,14 @@ runs before commit and requires the pinned transaction. A deleted row cannot be
 re-read after commit to apply a newly granted SQL predicate. Neither callback
 alone establishes the required post-commit release decision.
 
-Proposed additive interface, awaiting review (not implemented):
+Approved additive interface (implemented with a default-deny method):
 
 ```rust,ignore
 pub struct RuntimeMutationOutputCheck<'a> {
     pub schema: &'a ValidatedRuntimeSchema,
     pub collection: &'a RuntimeCollectionHandle,
     pub action: RuntimeMutationAction,
+    pub kind: RuntimeMutationRecordKind, // CommittedResult or DeletedPreimage
     pub projection: &'a RuntimeProjection,
     pub record: &'a RuntimeRecord,
 }
@@ -972,9 +971,13 @@ Post-commit denial, timeout or failure cannot imply rollback or trigger retry;
 clients must be told the mutation committed but the payload was withheld. No
 successful payload or protected record is released on that failure.
 
-The callback decision gates returned-record implementation, not the independent
-key/input/composition/transaction work. No interface deviation is treated as
-approved merely because this partial checkpoint compiles.
+The callback is object-safe and runs only when a record is requested. Its host-
+configured timeout returns `mutation_payload_timeout`; denial returns
+`mutation_payload_denied`, other failure or response encoding/budget failure
+returns `mutation_payload_failed`. Each has `outcome: "committed"` and
+`retryable: false` extensions, without record values. Whole-request cancellation
+or transport loss after commit can prevent delivery of either success or this
+error: clients must reconcile the outcome, never infer rollback or blindly retry.
 
 ### Approved registration contract
 
@@ -1185,11 +1188,12 @@ B's independent implementation is based on that exact committed A revision,
 with aligned unpublished ORM/macros 0.41.0. It adds schema-bound requests,
 explicit intent/preimage/result authority, pinned structural CAS, exact return
 projections, atomic repository journal writes and guarded operation/hook
-cancellation. It remains subject to exact-head review. Its reference and compiled
+cancellation. B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447`. Its reference and compiled
 host example describe environment/policy revision pinning, backend gates and
 ambiguous commit limitations. The static-only inner-timeout limitation remains.
 
-C/D remain approved proposals with unimplemented interfaces, dependent on their
+C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`. D is implemented
+for review, but remains unaccepted/unreleased and dependent on its
 respective reviewed predecessors. Preserve host-managed AEAD cursor protection,
 lossless JSON text, required create keys and independent post-commit payload
 read authorization. Reconcile B onto the final reviewed A after #112 integration

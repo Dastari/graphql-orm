@@ -26,6 +26,12 @@ impl RuntimeGraphqlError {
             code: "authorization_denied",
         }
     }
+    /// Safe host authorization-service failure, without underlying details.
+    pub const fn unavailable() -> Self {
+        Self {
+            code: "authorization_unavailable",
+        }
+    }
     pub(crate) const fn new(code: &'static str) -> Self {
         Self { code }
     }
@@ -46,4 +52,6 @@ pub use execution::{
 pub use module::*;
 
 mod mutation;
-pub use mutation::RuntimeGraphqlMutationOptions;
+pub use mutation::{
+    RuntimeGraphqlMutationOptions, RuntimeMutationOutputCheck, RuntimeMutationRecordKind,
+};

@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.43.0 (unreleased)
+
+- Add opt-in typed runtime GraphQL mutations delegating to guarded B transactions,
+  with atomic host journals and independently authorized selected outputs.
+- Add an object-safe, default-deny post-commit record-release callback, explicit
+  deleted preimages and sanitized committed-outcome denial/failure/timeout errors.
+- Align ORM/macros at 0.43.0; static APIs/SDL and default features remain unchanged.
+
 ## 0.42.0 (unreleased)
 
 - Fix runtime GraphQL alias swaps and scalar/relation output collisions; retain requested filter capabilities before empty-list constant lowering so authorization cannot be bypassed.

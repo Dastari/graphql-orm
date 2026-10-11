@@ -11,6 +11,8 @@ pub struct RuntimeGraphqlMutationOptions {
     pub update: bool,
     pub delete: bool,
     pub limits: RuntimeMutationLimits,
+    /// Bounds only post-commit record authorization, not the transaction itself.
+    pub output_authorization_timeout: std::time::Duration,
 }
 impl Default for RuntimeGraphqlMutationOptions {
     fn default() -> Self {
@@ -19,6 +21,7 @@ impl Default for RuntimeGraphqlMutationOptions {
             update: true,
             delete: true,
             limits: Default::default(),
+            output_authorization_timeout: std::time::Duration::from_secs(5),
         }
     }
 }
@@ -241,6 +244,8 @@ pub(super) struct Prepared {
     returning: Option<RuntimeProjection>,
     visibility: Option<RuntimePredicate>,
     limits: RuntimeGraphqlLimits,
+    shape: super::execution::OutputShape,
+    response_bytes: Arc<std::sync::atomic::AtomicUsize>,
 }
 fn mutation_error(error: RuntimeMutationError) -> RuntimeGraphqlError {
     RuntimeGraphqlError::new(error.code().as_str())
@@ -285,8 +290,10 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
     planner: &mut Planner<'_>,
     selections: &SelectionSet,
     root: &str,
+    registry: &async_graphql::registry::Registry,
 ) -> Result<super::execution::Results, RuntimeGraphqlError> {
     let mut prepared = BTreeMap::new();
+    let response_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for field in planner.selections(selections, root, 0)? {
         for module in modules {
             for c in &module.schema.schema().collections {
@@ -470,6 +477,13 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                     {
                         return Err(RuntimeGraphqlError::new("cost_exceeded"));
                     }
+                    let shape = super::execution::OutputShape::compile(
+                        planner,
+                        registry,
+                        &field.selection_set.node,
+                        &format!("{object}MutationPayload"),
+                        0,
+                    )?;
                     prepared.insert(
                         field.response_key().node.to_string(),
                         Prepared {
@@ -479,6 +493,8 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             returning,
                             visibility: grant.predicate,
                             limits: planner.limits,
+                            shape,
+                            response_bytes: response_bytes.clone(),
                         },
                     );
                 }
@@ -540,10 +556,6 @@ async fn execute<B: RuntimeMutationBackend>(
         .get(key)
         .ok_or_else(|| wire_error("authorization_missing"))?
         .clone();
-    // Pending the explicit post-commit output-authority contract decision.
-    if prepared.returning.is_some() {
-        return Err(wire_error("unsupported_capability"));
-    }
     let environment = context
         .mutation_environment
         .clone()
@@ -566,9 +578,9 @@ async fn execute<B: RuntimeMutationBackend>(
     let request = prepared.request.clone();
     let adapter = AuthorityAdapter {
         host: authority,
-        prepared,
+        prepared: prepared.clone(),
     };
-    database
+    let effect = database
         .transaction_with_auth(
             TransactionMode::StateMachine,
             context.auth.as_ref(),
@@ -598,7 +610,124 @@ async fn execute<B: RuntimeMutationBackend>(
             };
             wire_error(code)
         })?;
-    Ok(super::schema::field_value(
-        async_graphql::value!({"record":null}),
-    ))
+    let Some(projection) = prepared.returning.as_ref() else {
+        let payload = async_graphql::value!({"record":null});
+        reserve_payload(&prepared, &payload, key)?;
+        return Ok(super::schema::field_value(payload));
+    };
+    let record = effect
+        .record()
+        .ok_or_else(|| committed_error("mutation_payload_failed"))?;
+    let kind = if effect.action() == RuntimeMutationAction::Delete {
+        RuntimeMutationRecordKind::DeletedPreimage
+    } else {
+        RuntimeMutationRecordKind::CommittedResult
+    };
+    let timeout = prepared
+        .module
+        .options
+        .mutations
+        .as_ref()
+        .ok_or_else(|| committed_error("mutation_payload_failed"))?
+        .output_authorization_timeout;
+    let decision = tokio::time::timeout(
+        timeout,
+        context
+            .authority
+            .authorize_mutation_result(RuntimeMutationOutputCheck {
+                schema: &prepared.module.schema,
+                collection: &prepared.collection,
+                action: effect.action(),
+                kind,
+                projection,
+                record,
+            }),
+    )
+    .await;
+    match decision {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) if error == RuntimeGraphqlError::denied() => {
+            return Err(committed_error("mutation_payload_denied"));
+        }
+        Ok(Err(_)) => return Err(committed_error("mutation_payload_failed")),
+        Err(_) => return Err(committed_error("mutation_payload_timeout")),
+    }
+    // Serialize only the authorized selected projection, never internal policy/key fields.
+    let mut values = async_graphql::indexmap::IndexMap::new();
+    let metadata = prepared
+        .module
+        .schema
+        .schema()
+        .collections
+        .iter()
+        .find(|c| &c.id == prepared.collection.id())
+        .ok_or_else(|| committed_error("mutation_payload_failed"))?;
+    for field in projection.fields() {
+        let value = match record
+            .state(field)
+            .map_err(|_| committed_error("mutation_payload_failed"))?
+        {
+            RuntimeFieldState::Value(value) => {
+                super::scalar::encode(value, prepared.limits.scalars)
+                    .map_err(|_| committed_error("mutation_payload_failed"))?
+            }
+            RuntimeFieldState::Null => Value::Null,
+            RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
+        };
+        let name = &metadata
+            .fields
+            .iter()
+            .find(|f| &f.id == field.id())
+            .ok_or_else(|| committed_error("mutation_payload_failed"))?
+            .api_name;
+        values.insert(async_graphql::Name::new(name), value);
+    }
+    let payload = Value::Object(
+        [(async_graphql::Name::new("record"), Value::Object(values))]
+            .into_iter()
+            .collect(),
+    );
+    reserve_payload(&prepared, &payload, key)?;
+    Ok(super::schema::field_value(payload))
+}
+
+/// The immutable transaction-captured image presented after confirmed commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeMutationRecordKind {
+    CommittedResult,
+    /// The deleted row's authorized preimage; never a post-commit database reread.
+    DeletedPreimage,
+}
+/// Independent release check. Unselected/internal fields remain unloaded.
+pub struct RuntimeMutationOutputCheck<'a> {
+    pub schema: &'a ValidatedRuntimeSchema,
+    pub collection: &'a RuntimeCollectionHandle,
+    pub action: RuntimeMutationAction,
+    pub kind: RuntimeMutationRecordKind,
+    pub projection: &'a RuntimeProjection,
+    pub record: &'a RuntimeRecord,
+}
+fn committed_error(code: &'static str) -> async_graphql::Error {
+    use async_graphql::ErrorExtensions;
+    wire_error(code).extend_with(|_, extensions| {
+        extensions.set("outcome", "committed");
+        extensions.set("retryable", false);
+    })
+}
+
+fn reserve_payload(prepared: &Prepared, payload: &Value, key: &str) -> async_graphql::Result<()> {
+    use std::sync::atomic::Ordering;
+    let maximum = prepared.limits.max_response_bytes;
+    let mut bytes = key.len().saturating_mul(6).saturating_add(8);
+    prepared
+        .shape
+        .measure(payload, &mut bytes, maximum)
+        .map_err(|_| committed_error("mutation_payload_failed"))?;
+    prepared
+        .response_bytes
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            used.checked_add(bytes).filter(|total| *total <= maximum)
+        })
+        .map_err(|_| committed_error("mutation_payload_failed"))?;
+    Ok(())
 }

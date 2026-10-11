@@ -41,6 +41,15 @@ impl RuntimeReadGrant {
 }
 /// Hosts authorize every field, operator, traversal and count in the check.
 pub trait RuntimeReadAuthority: Send + Sync + 'static {
+    /// Independently release a transaction-captured record after confirmed commit.
+    /// Missing policy-required values must deny; this callback cannot roll back work.
+    fn authorize_mutation_result<'a>(
+        &'a self,
+        _check: RuntimeMutationOutputCheck<'a>,
+    ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+        Box::pin(async { Err(RuntimeGraphqlError::denied()) })
+    }
+
     fn authorize<'a>(
         &'a self,
         check: RuntimeReadCheck<'a>,
@@ -346,6 +355,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 &mut planner,
                 &operation.node.selection_set.node,
                 root,
+                &ctx.schema_env.registry,
             )
             .await;
         }
@@ -865,11 +875,12 @@ fn attach(nodes: &mut [Value], key: &str, values: Vec<Value>) -> Result<(), Runt
     Ok(())
 }
 
-struct OutputShape {
+#[derive(Clone)]
+pub(super) struct OutputShape {
     fields: Vec<(String, String, OutputShape)>,
 }
 impl OutputShape {
-    fn compile(
+    pub(super) fn compile(
         planner: &mut Planner<'_>,
         registry: &async_graphql::registry::Registry,
         set: &async_graphql::parser::types::SelectionSet,
@@ -903,7 +914,7 @@ impl OutputShape {
         }
         Ok(Self { fields })
     }
-    fn measure(
+    pub(super) fn measure(
         &self,
         value: &Value,
         bytes: &mut usize,
