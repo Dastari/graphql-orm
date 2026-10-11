@@ -420,6 +420,16 @@ pub struct RuntimeReadRequest {
     limits: RuntimeQueryLimits,
 }
 
+#[cfg(feature = "runtime-graphql")]
+impl RuntimeReadRequest {
+    pub(crate) fn validate_graphql_backend(
+        &self,
+        backend: DatabaseBackend,
+    ) -> Result<(), RuntimeQueryError> {
+        render_request(self, backend).map(|_| ())
+    }
+}
+
 impl fmt::Debug for RuntimeReadRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RuntimeReadRequest")
