@@ -775,10 +775,8 @@ impl graphql_orm::async_graphql::extensions::Extension for CancelRootExtension {
     }
 }
 fn group_api(f: &Fixture, cancel: bool, timeout: Duration) -> Schema {
-    let options = RuntimeGraphqlMutationOptions {
-        output_authorization_timeout: timeout,
-        ..Default::default()
-    };
+    let mut options = RuntimeGraphqlMutationOptions::default();
+    options.output_authorization_timeout = timeout;
     let module = RuntimeGraphqlModule::compile(
         Arc::new(f.schema().clone()),
         RuntimeGraphqlOptions::default()
