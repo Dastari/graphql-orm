@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-06
+last_reviewed: 2026-10-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,26 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.43.0 to 0.43.1: host-supplied integer primary-key binding
+
+No data migration, public signature, feature or GraphQL SDL change. Fields declared
+`#[primary_key] #[graphql_orm(auto_generated = false)]` continue to require the
+caller key in the generated create input. Integer keys now compile and bind as
+integers in generated insert/readback and related single-key write paths, using
+the existing typed key binder. No replacement key is generated, and event/display
+IDs retain their existing wire format. String, UUID and binary keys retain their
+native binds; composite writes continue to use the complete declared key.
+
+MSSQL `external_writable` still requires a physically writable connection and
+never synchronizes or migrates source schemas. SQLite/PostgreSQL managed schema
+behavior is unchanged. Supported Rust key types and integer storage domains are
+unchanged; the existing signed-i64 SQL-value domain is not widened by this fix.
+For narrow PostgreSQL keys use matching externally provisioned `SMALLINT`/`INT`
+columns for `i16`/`i32`. Existing static integer-to-`BIGINT` schema defaults and
+strict PostgreSQL row decoding are unchanged; this fix does not revise them.
+The external consumer `host_integer_key` example uses only a transaction-bound
+repository insert; hosts retain allocation, policies and source-schema ownership.
 
 ## 0.42.0 to 0.43.0: opt-in runtime GraphQL mutations
 

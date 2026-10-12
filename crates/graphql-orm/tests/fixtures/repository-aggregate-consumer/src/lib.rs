@@ -126,3 +126,6 @@ const _: fn() = || {
     let _ = <CompositeAggregateAggregateField as NotInput<_>>::probe;
     let _ = <CompositeAggregateAggregateField as NotOutput<_>>::probe;
 };
+
+#[path = "../../../support/host_primary_keys.rs"]
+pub mod host_primary_keys;
