@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -46,6 +46,20 @@ Companion macros crate: `graphql-orm-macros` **0.40.0** (alignment only).
 
 No automatic application, host catalog, transport, durable delivery or release
 publication is introduced. See the owned runtime migration reference and example.
+
+## 0.39.1 - unreleased
+
+Companion macros crate: `graphql-orm-macros` **0.39.1** (alignment only).
+
+- Correct runtime SQLite `ends_with("")` to match every non-null string;
+  preserve case-sensitive literal, Unicode and SQL NULL semantics.
+- Preserve repeated native PostgreSQL parameter identity at complete-statement
+  binding boundaries, including authenticated count/read pairs and transaction
+  reads/writes. Retain anonymous/mixed occurrence rebasing and static fragment
+  semantics; no public signature, cursor, schema or migration changes.
+- Add owned SQLite/PostgreSQL execution, evaluator/page/count/RLS parity,
+  normalization and dependency-minimal external-consumer regressions. MSSQL
+  runtime capability gates remain unchanged; no live MSSQL claim is made.
 
 ## 0.39.0 - 2026-10-03
 
