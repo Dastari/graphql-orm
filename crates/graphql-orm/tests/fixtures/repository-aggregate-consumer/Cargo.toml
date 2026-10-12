@@ -9,6 +9,7 @@ resolver = "3"
 
 [features]
 default = ["sqlite"]
+runtime-graphql = ["graphql-orm/runtime-graphql"]
 sqlite = ["graphql-orm/sqlite"]
 postgres = ["graphql-orm/postgres"]
 mssql = ["graphql-orm/mssql"]
@@ -18,4 +19,5 @@ graphql-orm = { path = "../../..", default-features = false }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+chacha20poly1305 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

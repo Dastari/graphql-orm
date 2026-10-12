@@ -64,3 +64,5 @@ guidance for the core ORM package.
 - [Runtime relations](runtime-relations.md)
 - [Cross-backend tenant module](cross-backend-tenant.md)
 - [Backup runtime boundary](backup-runtime.md)
+
+- [Runtime GraphQL reads and checked composition](runtime-graphql.md)
