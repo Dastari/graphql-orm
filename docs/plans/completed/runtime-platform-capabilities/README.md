@@ -1,9 +1,9 @@
 ---
 title: Bounded runtime platform capability contract
 kind: plan
-status: active
+status: accepted
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-11
+last_reviewed: 2026-10-12
 review_by: 2026-12-31
 supersedes: []
 ---
@@ -23,10 +23,13 @@ predecessor. C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`; its
 [current mechanics and approved custom-directive limitation](../../../reference/graphql-orm/runtime-graphql.md)
 are documented independently. D is accepted at
 `3a59d08be5b663ac952de418eb02dc6321ee08e7`, including the post-commit output
-callback and D1 response-key grouping. All slices remain unreleased; final
-combined review is pending.
-Final reconciliation and owner merge/release remain #112 → A → B → C → D. A proposal
-or unpublished implementation is not downstream adoption evidence.
+callback and D1 response-key grouping. The combined source is accepted at
+`78ad237b7d4d491da595c99eadd8c61e0f00f9db`. PRs #112, #97, #113, #114, #115 and
+#116 are merged in order; the combined merge at
+`24bfb3cca6c099b6d60dd6fb2913fd9ec2cab83a` preserves the exact reviewed tree
+`f79851ff958a16a64996452d9bc82368ec6af9f4`. Implementation is complete.
+All slices remain unreleased; an unpublished implementation is not downstream
+adoption evidence. Publication follows the [release runbook](../../../operations/release/process.md).
 
 The initiating [consumer contract](https://github.com/Dastari/digibase/blob/agent/vertical-slice-plan/docs/coordination/prompts/0013-graphql-orm-runnable-product-prerequisites.md)
 requires separate reviewable PRs. The host owns catalog persistence, activation,
@@ -1189,7 +1192,7 @@ is advertised until its contract is committed and reviewed.
 7. Run downstream SQLite/PostgreSQL adapter contracts. Upstream green checks
    establish mechanisms, not product readiness or durable event replay.
 
-## Current checkpoint
+## Completed implementation outcome
 
 All A–D implementations are accepted at exact committed revisions:
 
@@ -1207,15 +1210,18 @@ including #112's runtime predicates/native binding identity and all A–D
 corrections. The canonical owned backend runner now includes opt-in C/D tests.
 PostgreSQL success cases in B's emitted-bind budget test are enabled; new
 Unicode/empty prefix/suffix CAS and repeated GraphQL string-CAS/journal tests
-exercise the combined engine. Individual reviewed branches and sibling
-repositories remain unchanged.
+exercise the combined engine. All reviewed revisions remain ancestors of the
+combined merge; sibling repositories and unrelated worktrees remain unchanged.
 
-Final combined-source verification and review remain pending. Owner merge/release
-order stays #112 → A → B → C → D; Actions remain paused, local builds use two jobs
-and sequential backends. Retain migration/FK/DateTime/RLS preservation, pinned
+Final combined-source review is accepted; independent downstream verification
+passed 148 checks across SQLite/PostgreSQL. Upstream local verification passed
+173 SQLite and 154 PostgreSQL tests, plus 49 MSSQL unit/rendering/rejection checks
+without live MSSQL execution. Static compatibility passed 223 checks with 30 tool
+skips. Documentation, inventory, dependency and release metadata checks passed.
+Actions remain paused; local builds use two jobs and sequential backends. Retain migration/FK/DateTime/RLS preservation, pinned
 authority and CAS, atomic journals, cancellation poisoning, confidential AEAD
 cursors, lossless scalars, corrected aliases/filter intents and terminal repeated
 mutation groups. Custom-directive factories, modifying cascades and the static
-inner-timeout limitation remain documented boundaries. No merge/publication or
+inner-timeout limitation remain documented boundaries. No publication or
 downstream adoption is claimed. The owner release must bind an immutable workspace
 tag, full source SHA, package/lockfile hashes and external revision provenance.
