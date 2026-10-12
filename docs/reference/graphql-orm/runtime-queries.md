@@ -3,7 +3,7 @@ title: "Runtime select, filter, order, and keyset reads"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -105,7 +105,11 @@ String equality, range comparison, matching, and ordering are case-sensitive.
 Order and range comparisons use SQLite `BINARY` and PostgreSQL `C` collation.
 Pattern operators use backend functions and bind the whole literal, so `%`,
 `_`, quotes, comments, placeholder-shaped text, control characters, and
-Unicode remain data. Locale case folding and Unicode normalization are not
+Unicode remain data. Empty prefixes, suffixes and containment operands match
+all non-null strings, including the empty string. A longer operand cannot match
+a shorter value. SQL NULL remains unknown under NOT as well as direct comparison.
+Embedded U+0000 is outside the portable text contract: PostgreSQL TEXT rejects
+it and SQLite string-function length behavior differs. Locale case folding and Unicode normalization are not
 claimed.
 
 ## Ordering and cursors
@@ -155,3 +159,42 @@ Relation predicates on parent collections, dynamic-schema aggregates beyond
 exact count, dynamic GraphQL, runtime writes, and runtime migrations remain
 deferred. Static generated entities use the separate
 [typed grouped aggregate](typed-aggregates.md) API.
+
+## PostgreSQL parameter identity and verification
+
+At the complete-statement binding boundary, `PostgresBackend::normalize_sql`
+preserves native `$n` identity (including repeats and out-of-order references).
+Starting at 1 is idempotent; a positive start N shifts each native index by N−1.
+Native scanning skips ordinary/escaped strings, quoted identifiers, PostgreSQL
+dollar strings, line comments and nested block comments. Caller operands always
+remain bound data; neither normalization nor runtime rendering inserts them into
+SQL or safe diagnostics.
+
+Anonymous placeholders rebase by occurrence. Mixed anonymous/native/foreign
+forms retain their legacy occurrence rebasing and do not promise shared identity.
+`SqlDialect::normalize_sql` intentionally retains occurrence rebasing for static
+fragments, whose generated native labels can be arbitrary or restart inside
+nested filters. Those fragments are composed before driver binding. No public
+signature or static generated SDL/cursor format changes in 0.39.1.
+
+The standalone [runtime string consumer](../../../crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/runtime_strings.rs)
+uses schema-bound predicates, an independently bound visibility predicate,
+private projection and bounded pages with total counts. It has no direct
+async-graphql dependency or handwritten query SQL. Run it on owned SQLite:
+
+```sh
+CARGO_BUILD_JOBS=2 cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example runtime_strings
+CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test runtime_strings --test runtime_queries --test query_ir
+CARGO_BUILD_JOBS=2 cargo test -p graphql-orm --locked --no-default-features --features postgres --lib --test runtime_strings --test query_ir -- --include-ignored --test-threads=1
+CARGO_BUILD_JOBS=2 cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
+```
+
+PostgreSQL execution tests own a loopback Docker PostgreSQL 17 container and
+verify its immutable container identity/ownership label before cleanup. SQLite
+uses an exclusively owned in-memory pool and verifies it has no on-disk path
+before closing it. Ambient application database URLs are refused. PostgreSQL
+coverage includes a verified nonowner/NOBYPASSRLS role, current `DbAuthContext`,
+authenticated pages/counts and absence of transaction-local identity leakage.
+MSSQL evidence is compilation/rendering/capability rejection, not live execution.
+Separate page requests still do not pin a snapshot under concurrent writes;
+this correction changes no existing pagination or authorization guarantee.

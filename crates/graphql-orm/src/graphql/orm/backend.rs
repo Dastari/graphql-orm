@@ -53,8 +53,19 @@ pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
         Self::DIALECT.placeholder(index)
     }
 
+    /// Normalize a complete statement at the driver binding boundary.
+    ///
+    /// PostgreSQL statements using only native `$n` parameters preserve their
+    /// indices and repeated identity; rebasing adds `start_index - 1` to each
+    /// index. Anonymous or mixed placeholder forms retain legacy occurrence
+    /// rebasing. [`SqlDialect::normalize_sql`] separately rebases static query
+    /// fragments by occurrence, before their ordered values are composed.
     fn normalize_sql(sql: &str, start_index: usize) -> String {
-        Self::DIALECT.normalize_sql(sql, start_index)
+        if Self::DIALECT == DatabaseBackend::Postgres {
+            super::dialect::normalize_postgres_statement(sql, start_index)
+        } else {
+            Self::DIALECT.normalize_sql(sql, start_index)
+        }
     }
 }
 
