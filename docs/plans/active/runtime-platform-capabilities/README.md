@@ -1117,38 +1117,23 @@ is advertised until its contract is committed and reviewed.
 ## Current checkpoint
 
 The revised A–D contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`
-is approved. The independent repository aggregate fix is merged and included
-in the owner-published 0.33.3 baseline. PR A implements owned targets and
-read-only planning, explicit ownership and separate guarded application in
-ORM/macros 0.40.0; its unpublished identity is reconciled onto released
-0.39.0 main without changing the approved interfaces. Host-managed timestamps and
-portable static aggregate capabilities remain intact. Its compiled host example and isolated SQLite/PostgreSQL
-tests accompany the implementation. It remains subject to owner review.
+is approved. Digibase accepts A at `f2665ce68ed7fdbccb272cb8a783b6379ae5fd82`:
+FK corrections R1/R2 and PostgreSQL DateTime correction R3 are resolved. A's
+reviewed-predecessor gate for B is satisfied. A remains unmerged/unreleased,
+with ORM/macros 0.40.0. Owner merge/release of independent #112 precedes A's final
+reconciliation; Actions remain paused.
 
-A's live FK capability checks reject unsupported actions/deferral with scoped
-`UnsupportedForeignKey` diagnostics, including relevant system/unowned incoming
-sources, and recheck them on the pinned apply transaction. The legacy physical
-model/static APIs are unchanged. Successful SQLite FK restoration retains its
-connection; cancellation or failed restoration discards an unsafe lease. ORM API
-reproductions at the reviewed head confirm constraint loss. Regressions cover
-structured FK rejection, successful in-memory rebuild/no-op replanning,
-cancellation, incoming constraints introduced after planning, and unchanged
-PostgreSQL system RLS. The approved legacy datetime rejection and
-representable static/runtime equivalence gates remain covered.
+B's independent implementation is based on that exact committed A revision,
+with aligned unpublished ORM/macros 0.41.0. It adds schema-bound requests,
+explicit intent/preimage/result authority, pinned structural CAS, exact return
+projections, atomic repository journal writes and guarded operation/hook
+cancellation. It remains subject to exact-head review. Its reference and compiled
+host example describe environment/policy revision pinning, backend gates and
+ambiguous commit limitations. The static-only inner-timeout limitation remains.
 
-Review correction R3 reproduces PostgreSQL DateTime no-op/certification failure
-through owned plan/apply APIs. The shared planner now compares the built-in
-`TIMESTAMPTZ` / `timestamp with time zone` alias without rewriting hashes or
-storage metadata. Required/nullable DateTime targets with no default and
-`CurrentTimestamp`, including static/system composition, have executable
-SQLite/PostgreSQL fixed-point gates. Timezone-free timestamps and precision
-changes remain distinct. This correction awaits exact-head re-review. Prefer
-owner merge/release of independent #112 first, then reconcile A with that exact
-merged source; Actions remain paused.
-
-B–D remain approved proposals with unimplemented interfaces and require reviewed
-committed predecessors. Keep the operation/hook cancellation, host-managed AEAD
-cursor protection, lossless JSON text, required create keys and host policy-only
-revision guarantees during implementation. Independent compiled static
-relationships/query/view work is coordinated separately and does not require
-B–D or dynamic GraphQL. No releases or consumer repository changes are included.
+C/D remain approved proposals with unimplemented interfaces, dependent on their
+respective reviewed predecessors. Preserve host-managed AEAD cursor protection,
+lossless JSON text, required create keys and independent post-commit payload
+read authorization. Reconcile B onto the final reviewed A after #112 integration
+and rerun combined backend contracts before downstream adoption. No product or
+sibling repository changes, owner merge or release publication are included.

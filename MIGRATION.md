@@ -13,6 +13,18 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.40.0 to 0.41.0: transactional runtime mutations
+
+Adopt aligned ORM/macros 0.41.0. This is an additive, unpublished successor to A;
+no stored-data migration, macro syntax or static GraphQL SDL change is required.
+Use `TransactionMode::StateMachine`, a verified runtime mutation environment and
+explicit host authority. The host pins its complete policy revision and external
+DDL fence. Runtime mutation errors/cancellation now poison only transactions that
+perform runtime work; static-only timeout behavior is unchanged. Use the guarded
+before-commit hook for atomic host journal writes. Effects remain pending until
+the runner commits. See [runtime mutations](docs/reference/graphql-orm/runtime-mutations.md)
+for unsupported capabilities, exact omission/null semantics and ambiguous commits.
+
 ## 0.39.0 to 0.40.0: owned runtime migration targets
 
 Adopt runtime and macros 0.40.0 together. This unpublished identity retains the released

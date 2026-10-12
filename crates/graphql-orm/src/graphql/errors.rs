@@ -88,6 +88,7 @@ pub struct OrmPublicError {
     /// Internal diagnostic text never exposed by default GraphQL extensions.
     pub(crate) internal: Option<String>,
     pub(crate) retryable: bool,
+    pub(crate) runtime_mutation_code: Option<&'static str>,
 }
 
 impl fmt::Debug for OrmPublicError {
@@ -125,6 +126,7 @@ impl OrmPublicError {
             correlation_id: None,
             internal: None,
             retryable: false,
+            runtime_mutation_code: None,
         }
     }
 
@@ -136,6 +138,7 @@ impl OrmPublicError {
             correlation_id: None,
             internal: None,
             retryable: false,
+            runtime_mutation_code: None,
         }
     }
 
@@ -149,6 +152,11 @@ impl OrmPublicError {
     pub fn with_correlation_id(mut self, correlation_id: impl Into<String>) -> Self {
         self.correlation_id = Some(correlation_id.into());
         self
+    }
+
+    /// Safe runtime mutation code retained through the transaction runner, when applicable.
+    pub fn runtime_mutation_code(&self) -> Option<&'static str> {
+        self.runtime_mutation_code
     }
 
     /// Whether retrying the complete transaction is safe and recommended.

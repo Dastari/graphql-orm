@@ -1485,6 +1485,18 @@ where
                         return Err(classified);
                     }
                 };
+                if context.runtime_cannot_commit() {
+                    context
+                        .rollback()
+                        .await
+                        .map_err(classify_transaction_error::<B>)?;
+                    return Err(crate::graphql::orm::TransactionError::Rejected(
+                        OrmPublicError::with_message(
+                            OrmErrorCode::Conflict,
+                            "unfinished or failed runtime work requires rollback",
+                        ),
+                    ));
+                }
                 context
                     .commit_and_emit()
                     .await
