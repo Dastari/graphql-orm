@@ -1630,33 +1630,19 @@ pub(crate) fn generate_graphql_operations(
     });
     let pk_is_uuid = is_uuid_type(&pk_type_ty);
     let pk_is_bytes = is_byte_vec_type(&pk_type_ty);
-    let pk_bind_value = if pk_is_uuid {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(id) }
-    } else if pk_is_bytes {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(id.clone()) }
-    } else {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::String(id.to_string()) }
+    // Single-key write/readback paths use the same typed binder as key-based
+    // repository reads. Display/event IDs below remain strings; SQL keys do not.
+    let pk_bind_value = quote! {
+        #struct_name::__gom_key_values(&id).remove(0)
     };
-    let pk_bind_value_ref = if pk_is_uuid {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(*id) }
-    } else if pk_is_bytes {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(id.clone()) }
-    } else {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::String(id.to_string()) }
+    let pk_bind_value_ref = quote! {
+        #struct_name::__gom_key_values(id).remove(0)
     };
-    let pk_bind_value_for_entity = if pk_is_uuid {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(entity.#pk_field) }
-    } else if pk_is_bytes {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(entity.#pk_field.clone()) }
-    } else {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::String(entity.#pk_field.to_string()) }
+    let pk_bind_value_for_entity = quote! {
+        #struct_name::__gom_key_values(&entity.#pk_field).remove(0)
     };
-    let created_pk_value = if pk_is_uuid {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(created_pk) }
-    } else if pk_is_bytes {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::Bytes(created_pk.clone()) }
-    } else {
-        quote! { ::graphql_orm::graphql::orm::SqlValue::String(created_pk.clone()) }
+    let created_pk_value = quote! {
+        #struct_name::__gom_key_values(&created_pk).remove(0)
     };
     let created_pk_id_string = if pk_is_bytes {
         quote! { ::graphql_orm::graphql::orm::binary_key_id(&created_pk) }

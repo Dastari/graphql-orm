@@ -23,7 +23,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.26.0", default-features = false, features = ["mssql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.43.1", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -159,6 +159,37 @@ struct WorkItem {
 read-only. Changing only `SchemaPolicy` cannot turn those pools into writable connections. The
 explicit `connect_ado_external_writable`, `new_external_writable`, and
 `with_max_connections_external_writable` constructors are the only writable entry points.
+
+## Host-supplied integer primary keys
+
+For externally allocated keys, use `#[graphql_orm(auto_generated = false)]`:
+
+```rust
+#[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+#[repository_entity(backend = "mssql", table = "dbo.AllocatedRecords", schema_policy = "external_writable")]
+struct AllocatedRecord {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: i32,
+    label: String,
+}
+```
+
+Supply `id` through `CreateAllocatedRecordInput` and `tx.insert::<AllocatedRecord>`
+inside `Database::transaction`. The host allocates the key and provisions the
+external table. The ORM binds and returns the exact integer without generating
+or stringifying another key. Existing policies, hooks and transaction guarantees
+apply. Propagated errors roll back; catching an inner static mutation timeout and
+returning `Ok` does not guarantee rollback.
+
+Supported integer decode types remain `i8`, `i16`, `i32`, `i64`, `isize`, `u8`,
+`u16`, `u32`, `u64` and `usize`, subject to SQL Server column range and the
+existing signed-i64 bind domain. This fix does not add unsigned values above
+`i64::MAX`. String/UUID/binary and complete composite key bindings are preserved.
+See the dependency-minimal [compiled transaction example](../../../crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/examples/host_integer_key.rs)
+and owned `host_integer_key` consumer test. Its MSSQL/PostgreSQL standalone
+entry point is compile-only; the consumer test executes the function on owned
+infrastructure. The SQLite standalone entry point executes against in-memory SQL.
 
 ## Mapping Existing Tables
 

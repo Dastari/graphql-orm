@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-06
+last_reviewed: 2026-10-12
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,16 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.43.1 (unreleased)
+
+- Fix generated repository inserts for host-supplied integer primary keys. Reuse
+  typed key binding for bare-pool readback and related single-key lookups/updates,
+  preserving supplied keys and String/UUID/binary/composite key behavior.
+- Add framework-neutral external-consumer compilation and owned SQLite/PostgreSQL/
+  MSSQL execution for exact keys, transaction rollback and MSSQL read-only gates.
+- Align ORM/macros at 0.43.1. No new API, feature, physical schema or data migration;
+  externally writable SQL Server sources remain outside ORM schema management.
 
 ## 0.43.0 (unreleased)
 
