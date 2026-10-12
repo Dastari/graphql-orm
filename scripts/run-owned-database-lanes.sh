@@ -26,20 +26,21 @@ repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
 run_sqlite() {
-  cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
+    --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test runtime_strings --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
+    --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features sqlite --locked
 }
 
 run_postgres() {
-  cargo test -p graphql-orm --locked --no-default-features --features postgres \
-    --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
+    --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features postgres \

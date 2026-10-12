@@ -21,8 +21,10 @@ PR A implements the owned migration slice; its current public mechanics are in
 B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` as C's committed
 predecessor. C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`; its
 [current mechanics and approved custom-directive limitation](../../../reference/graphql-orm/runtime-graphql.md)
-are documented independently. D is implemented for review on that exact C revision, including the approved
-additive post-commit output callback. It remains unaccepted and unreleased.
+are documented independently. D is accepted at
+`3a59d08be5b663ac952de418eb02dc6321ee08e7`, including the post-commit output
+callback and D1 response-key grouping. All slices remain unreleased; final
+combined review is pending.
 Final reconciliation and owner merge/release remain #112 → A → B → C → D. A proposal
 or unpublished implementation is not downstream adoption evidence.
 
@@ -1189,25 +1191,31 @@ is advertised until its contract is committed and reviewed.
 
 ## Current checkpoint
 
-The revised A–D contract at `c53a5de966ca5089a5e4aa2d727e144bae83e6bd`
-is approved. Digibase accepts A at `f2665ce68ed7fdbccb272cb8a783b6379ae5fd82`:
-FK corrections R1/R2 and PostgreSQL DateTime correction R3 are resolved. A's
-reviewed-predecessor gate for B is satisfied. A remains unmerged/unreleased,
-with ORM/macros 0.40.0. Owner merge/release of independent #112 precedes A's final
-reconciliation; Actions remain paused.
+All A–D implementations are accepted at exact committed revisions:
 
-B's independent implementation is based on that exact committed A revision,
-with aligned unpublished ORM/macros 0.41.0. It adds schema-bound requests,
-explicit intent/preimage/result authority, pinned structural CAS, exact return
-projections, atomic repository journal writes and guarded operation/hook
-cancellation. B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447`. Its reference and compiled
-host example describe environment/policy revision pinning, backend gates and
-ambiguous commit limitations. The static-only inner-timeout limitation remains.
+| Slice | PR | Accepted revision |
+| --- | --- | --- |
+| Independent strings/binding | #112 | `01d4134da18028ec58e318e0ffd30ab244d0d8e1` |
+| A | #97 | `f2665ce68ed7fdbccb272cb8a783b6379ae5fd82` |
+| B | #113 | `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` |
+| C | #114 | `9d4cca34cb04ab0fd27c8313215001591f495c43` |
+| D | #115 | `3a59d08be5b663ac952de418eb02dc6321ee08e7` |
 
-C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`. D is implemented with response-key grouping corrections
-for review, but remains unaccepted/unreleased and dependent on its
-respective reviewed predecessors. Preserve host-managed AEAD cursor protection,
-lossless JSON text, required create keys and independent post-commit payload
-read authorization. Reconcile B onto the final reviewed A after #112 integration
-and rerun combined backend contracts before downstream adoption. No product or
-sibling repository changes, owner merge or release publication are included.
+The independent combined candidate merges these reviewed revisions in that order
+and keeps each as an ancestor. ORM/macros are aligned at unpublished 0.43.0,
+including #112's runtime predicates/native binding identity and all A–D
+corrections. The canonical owned backend runner now includes opt-in C/D tests.
+PostgreSQL success cases in B's emitted-bind budget test are enabled; new
+Unicode/empty prefix/suffix CAS and repeated GraphQL string-CAS/journal tests
+exercise the combined engine. Individual reviewed branches and sibling
+repositories remain unchanged.
+
+Final combined-source verification and review remain pending. Owner merge/release
+order stays #112 → A → B → C → D; Actions remain paused, local builds use two jobs
+and sequential backends. Retain migration/FK/DateTime/RLS preservation, pinned
+authority and CAS, atomic journals, cancellation poisoning, confidential AEAD
+cursors, lossless scalars, corrected aliases/filter intents and terminal repeated
+mutation groups. Custom-directive factories, modifying cascades and the static
+inner-timeout limitation remain documented boundaries. No merge/publication or
+downstream adoption is claimed. The owner release must bind an immutable workspace
+tag, full source SHA, package/lockfile hashes and external revision provenance.

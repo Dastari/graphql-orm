@@ -151,6 +151,9 @@ retain their existing limitation: catching an inner static mutation timeout and
 returning `Ok` does not guarantee rollback.
 
 Bulk/nested writes, new upsert semantics, dynamic GraphQL and durable delivery are
-outside B. C/D remain separate reviewed successors. Owner merge/release of #112
-and final reconciliation of A/B are required before combined downstream adoption;
-this branch does not claim to contain the independent string-binding fix.
+outside B. C/D remain separate reviewed successors. The combined candidate
+contains the independent #112 string-binding fix and exercises successful
+PostgreSQL prefix/suffix CAS and emitted-bind boundaries without test-side skips.
+SQLite empty suffixes match every non-null string. Final combined review and
+owner merge/release remain required before downstream adoption. Static APIs and
+their cancellation limitation are unchanged.

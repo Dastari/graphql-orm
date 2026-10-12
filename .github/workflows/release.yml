@@ -148,6 +148,13 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Execute opt-in runtime GraphQL reads and mutations on owned backends
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features mssql,runtime-graphql --test runtime_graphql_unsupported
       - name: Verify ORM backend lanes
         run: |
           cargo test -p graphql-orm --locked

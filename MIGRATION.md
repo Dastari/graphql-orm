@@ -15,6 +15,11 @@ neither the runtime nor macros crate is published to crates.io.
 
 ## 0.42.0 to 0.43.0: opt-in runtime GraphQL mutations
 
+The combined 0.43.0 candidate contains the reviewed independent string-binding
+fix and runtime slices A–D. Intermediate unreleased version entries below record
+reviewed branch contracts; they are not immutable published release identities.
+Owner review/merge and an exact-source workspace release remain adoption gates.
+
 No data migration or static API/SDL change. Mutation registration requires an
 explicit options builder, checked mutation root, certified environment and host
 write authority. Existing read authorities remain source-compatible; releasing
