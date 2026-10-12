@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.39.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.39.1", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -163,6 +163,7 @@ enforce row/field/database limits appropriate to the application.
 - [Entities and relations](../../docs/reference/graphql-orm/entities-and-relations.md)
 - [Typed grouped aggregates](../../docs/reference/graphql-orm/typed-aggregates.md)
 - [Federation entities, keys, and operation roots](../../docs/reference/graphql-orm/federation.md)
+- [Runtime predicates and keyset reads](../../docs/reference/graphql-orm/runtime-queries.md)
 - [Runtime writes and repository operations](../../docs/reference/graphql-orm/runtime-and-writes.md)
 - [Schema management](../../docs/reference/graphql-orm/schema-management.md)
 - [Strict authorization](../../docs/reference/graphql-orm/strict-authorization.md)

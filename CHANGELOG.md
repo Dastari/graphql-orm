@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,7 +14,21 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## 0.39.0 - unreleased
+## 0.39.1 - unreleased
+
+Companion macros crate: `graphql-orm-macros` **0.39.1** (alignment only).
+
+- Correct runtime SQLite `ends_with("")` to match every non-null string;
+  preserve case-sensitive literal, Unicode and SQL NULL semantics.
+- Preserve repeated native PostgreSQL parameter identity at complete-statement
+  binding boundaries, including authenticated count/read pairs and transaction
+  reads/writes. Retain anonymous/mixed occurrence rebasing and static fragment
+  semantics; no public signature, cursor, schema or migration changes.
+- Add owned SQLite/PostgreSQL execution, evaluator/page/count/RLS parity,
+  normalization and dependency-minimal external-consumer regressions. MSSQL
+  runtime capability gates remain unchanged; no live MSSQL claim is made.
+
+## 0.39.0 - 2026-10-03
 
 Companion macros crate: `graphql-orm-macros` **0.39.0**.
 

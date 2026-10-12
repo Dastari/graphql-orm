@@ -27,13 +27,19 @@ cd "${repository_root}"
 
 run_sqlite() {
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
+    --test runtime_strings --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features sqlite --locked
 }
 
 run_postgres() {
+  cargo test -p graphql-orm --no-default-features --features postgres \
+    --test runtime_strings --locked -- --include-ignored --test-threads=1
+  cargo test --manifest-path \
+    crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
+    --no-default-features --features postgres --locked --test runtime_strings \
+    -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features postgres \
     --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --locked -- --ignored --test-threads=1
   cargo test --manifest-path \
