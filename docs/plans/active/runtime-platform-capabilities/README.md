@@ -3,7 +3,7 @@ title: Bounded runtime platform capability contract
 kind: plan
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-11
 review_by: 2026-12-31
 supersedes: []
 ---
@@ -19,10 +19,11 @@ implementation and merged by PR #86 at `9ed46db5d1c5c6214f83ef9084352030e14905ad
 PR A implements the owned migration slice; its current public mechanics are in
 [owned runtime migrations](../../../reference/graphql-orm/runtime-migrations.md).
 B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447` as C's committed
-predecessor. C is being implemented separately behind `runtime-graphql`; its
+predecessor. C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`; its
 [current mechanics and approved custom-directive limitation](../../../reference/graphql-orm/runtime-graphql.md)
-are documented independently. D remains a proposal gated on reviewed C/B.
-Final reconciliation and owner merge/release remain #112 → A → B → C. A proposal
+are documented independently. D is implemented for review on that exact C revision, including the approved
+additive post-commit output callback. It remains unaccepted and unreleased.
+Final reconciliation and owner merge/release remain #112 → A → B → C → D. A proposal
 or unpublished implementation is not downstream adoption evidence.
 
 The initiating [consumer contract](https://github.com/Dastari/digibase/blob/agent/vertical-slice-plan/docs/coordination/prompts/0013-graphql-orm-runnable-product-prerequisites.md)
@@ -932,6 +933,66 @@ Context enter framework-neutral policy signatures.
 
 ## D: dynamic mutation registration
 
+### Approved additive post-commit record authorization
+
+The approved D guarantee requires independent authorization after commit,
+including delete preimages. C's `RuntimeReadAuthority::authorize` returns an SQL
+predicate and projection grant but receives no record. B's `authorize_result`
+runs before commit and requires the pinned transaction. A deleted row cannot be
+re-read after commit to apply a newly granted SQL predicate. Neither callback
+alone establishes the required post-commit release decision.
+
+Approved additive interface (implemented with a default-deny method):
+
+```rust,ignore
+pub struct RuntimeMutationOutputCheck<'a> {
+    pub schema: &'a ValidatedRuntimeSchema,
+    pub collection: &'a RuntimeCollectionHandle,
+    pub action: RuntimeMutationAction,
+    pub kind: RuntimeMutationRecordKind, // CommittedResult or DeletedPreimage
+    pub projection: &'a RuntimeProjection,
+    pub record: &'a RuntimeRecord,
+}
+// Additional default-deny method on RuntimeReadAuthority:
+fn authorize_mutation_result<'a>(
+    &'a self,
+    check: RuntimeMutationOutputCheck<'a>,
+) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>>;
+```
+
+The default implementation denies. C-only host authorities remain source
+compatible. Selected fields and CAS capabilities are authorized before writes;
+B independently authorizes the authoritative preimage/result and runs the
+journal hook. Only after the runner confirms commit may the adapter invoke this
+new callback and release the selected record (the deleted preimage for delete).
+The host must fail closed when its policy needs information absent from that
+projection. The callback is not a journal hook and has no mutation context.
+Post-commit denial, timeout or failure cannot imply rollback or trigger retry;
+clients must be told the mutation committed but the payload was withheld. No
+successful payload or protected record is released on that failure.
+
+The callback is object-safe and runs only when a record is requested. Its host-
+configured timeout returns `mutation_payload_timeout`; denial returns
+`mutation_payload_denied`, other failure or response encoding/budget failure
+returns `mutation_payload_failed`. Each has `outcome: "committed"` and
+`retryable: false` extensions, without record values. Whole-request cancellation
+or transport loss after commit can prevent delivery of either success or this
+error: clients must reconcile the outcome, never infer rollback or blindly retry.
+
+Repeated runtime mutation occurrences with a validated common response key merge
+their payload projections and execute one transaction, guarded journal and
+post-commit authorization. Distinct aliases keep first-occurrence document order
+and separate transactions. Statement/node reservations and response measurement
+apply once per merged group; expansion limits still count every occurrence.
+The request-scoped group outcome is terminal on success, error or cancellation,
+so later occurrences cannot restart work. If an extension continues after
+resolver cancellation, repetitions receive a sanitized nonretryable committed
+payload-canceled error after confirmed commit, or an unknown-outcome error before
+commit confirmation. Whole-request cancellation can still suppress the response.
+This preserves B's before-commit rollback and commit-ambiguity guarantees.
+
+### Approved registration contract
+
 Extend `RuntimeGraphqlOptions` through a builder method
 `with_mutations(RuntimeGraphqlMutationOptions)`; reads remain the default.
 Reuse C naming/coercion/composition and B input construction/engine. Add
@@ -987,7 +1048,7 @@ policy-only revision before DML, without conflating revision with fingerprint.
 Resolve selected payload record fields into an independently authorized
 RuntimeProjection before mutation. If only `__typename` is selected, request
 no return record; never expose the internal key as a fallback. Execute one
-state-machine transaction per mutation root, call the host before-commit hook
+state-machine transaction per validated response-key group, call the host before-commit hook
 with the pending effect, then commit before resolving a successful payload.
 Denials, CAS conflicts, and commit failures are safe GraphQL errors, with no
 protected values in conflict payloads. No relation/nested mutation payload
@@ -1139,11 +1200,12 @@ B's independent implementation is based on that exact committed A revision,
 with aligned unpublished ORM/macros 0.41.0. It adds schema-bound requests,
 explicit intent/preimage/result authority, pinned structural CAS, exact return
 projections, atomic repository journal writes and guarded operation/hook
-cancellation. It remains subject to exact-head review. Its reference and compiled
+cancellation. B is accepted at `04a1216aff86141ff6500b1dd0bf9adb4b0c6447`. Its reference and compiled
 host example describe environment/policy revision pinning, backend gates and
 ambiguous commit limitations. The static-only inner-timeout limitation remains.
 
-C/D remain approved proposals with unimplemented interfaces, dependent on their
+C is accepted at `9d4cca34cb04ab0fd27c8313215001591f495c43`. D is implemented with response-key grouping corrections
+for review, but remains unaccepted/unreleased and dependent on its
 respective reviewed predecessors. Preserve host-managed AEAD cursor protection,
 lossless JSON text, required create keys and independent post-commit payload
 read authorization. Reconcile B onto the final reviewed A after #112 integration

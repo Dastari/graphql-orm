@@ -240,6 +240,25 @@ pub struct RuntimeWriteGrant {
     predicate: Option<RuntimePredicate>,
 }
 impl RuntimeWriteGrant {
+    #[cfg(feature = "runtime-graphql")]
+    pub(crate) fn graphql_restrict(
+        self,
+        schema: &ValidatedRuntimeSchema,
+        collection: &RuntimeCollectionHandle,
+        visibility: Option<RuntimePredicate>,
+        limits: RuntimeQueryLimits,
+    ) -> Result<Self, RuntimeMutationError> {
+        let predicate = match (self.predicate, visibility) {
+            (Some(a), Some(b)) => Some(
+                schema
+                    .runtime_and(collection, vec![a, b], limits)
+                    .map_err(|e| err(RuntimeMutationErrorCode::InvalidInput).with_source(e))?,
+            ),
+            (a, b) => a.or(b),
+        };
+        Self::new(self.projection, predicate)
+    }
+
     /// Reject cross-schema/collection predicates; this does not narrow input approval.
     pub fn new(
         projection: RuntimeProjection,

@@ -32,7 +32,7 @@ pub struct RuntimeReadCheck<'a> {
 }
 /// Explicit host grant. No provider or error means denial.
 pub struct RuntimeReadGrant {
-    predicate: Option<RuntimePredicate>,
+    pub(super) predicate: Option<RuntimePredicate>,
 }
 impl RuntimeReadGrant {
     pub fn new(predicate: Option<RuntimePredicate>) -> Self {
@@ -41,6 +41,15 @@ impl RuntimeReadGrant {
 }
 /// Hosts authorize every field, operator, traversal and count in the check.
 pub trait RuntimeReadAuthority: Send + Sync + 'static {
+    /// Independently release a transaction-captured record after confirmed commit.
+    /// Missing policy-required values must deny; this callback cannot roll back work.
+    fn authorize_mutation_result<'a>(
+        &'a self,
+        _check: RuntimeMutationOutputCheck<'a>,
+    ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+        Box::pin(async { Err(RuntimeGraphqlError::denied()) })
+    }
+
     fn authorize<'a>(
         &'a self,
         check: RuntimeReadCheck<'a>,
@@ -48,11 +57,14 @@ pub trait RuntimeReadAuthority: Send + Sync + 'static {
 }
 /// Trusted request data. Reuse does not reuse execution caches or grants.
 pub struct RuntimeGraphqlRequest<B: RuntimeReadBackend> {
-    fingerprint: SchemaFingerprint,
-    authority: Arc<dyn RuntimeReadAuthority>,
-    auth: Option<DbAuthContext>,
-    budget: RuntimeGraphqlLimits,
+    pub(super) fingerprint: SchemaFingerprint,
+    pub(super) authority: Arc<dyn RuntimeReadAuthority>,
+    pub(super) auth: Option<DbAuthContext>,
+    pub(super) budget: RuntimeGraphqlLimits,
     scope: Option<String>,
+    pub(super) mutation_environment: Option<Arc<RuntimeMutationEnvironment>>,
+    pub(super) write_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub(super) mutation_hook: Option<Arc<dyn std::any::Any + Send + Sync>>,
     backend: PhantomData<B>,
 }
 impl<B: RuntimeReadBackend> RuntimeGraphqlRequest<B> {
@@ -68,6 +80,9 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlRequest<B> {
             auth,
             budget,
             scope: None,
+            mutation_environment: None,
+            write_authority: None,
+            mutation_hook: None,
             backend: PhantomData,
         }
     }
@@ -83,7 +98,10 @@ pub(super) struct Protection {
     pub audience: RuntimeCursorAudience,
     pub limits: RuntimeCursorProtectionLimits,
 }
-pub(super) struct Results(pub BTreeMap<String, Value>);
+pub(super) struct Results(
+    pub BTreeMap<String, Value>,
+    pub BTreeMap<String, super::mutation::Prepared>,
+);
 pub(super) struct GuardFactory<B: RuntimeReadBackend> {
     pub database: Database<B>,
     pub modules: Vec<RuntimeGraphqlModule>,
@@ -324,6 +342,23 @@ impl<B: RuntimeReadBackend> Guard<B> {
             expanded: 0,
             cost: Default::default(),
         };
+        if operation.node.ty == async_graphql::parser::types::OperationType::Mutation {
+            let root = ctx
+                .schema_env
+                .registry
+                .mutation_type
+                .as_deref()
+                .ok_or_else(invalid)?;
+            return super::mutation::prepare(
+                &self.modules,
+                request,
+                &mut planner,
+                &operation.node.selection_set.node,
+                root,
+                &ctx.schema_env.registry,
+            )
+            .await;
+        }
         let root_type = ctx.schema_env.registry.query_type.as_str();
         let selected = planner.selections(&operation.node.selection_set.node, root_type, 0)?;
         let mut plans = Vec::new();
@@ -350,7 +385,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
             }
         }
         if plans.is_empty() {
-            return Ok(Results(BTreeMap::new()));
+            return Ok(Results(BTreeMap::new(), BTreeMap::new()));
         }
         let request = request.ok_or_else(|| RuntimeGraphqlError::new("authorization_missing"))?;
         // Complete all layers' grants and cursor framing checks before any ORM I/O.
@@ -399,7 +434,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 limits.max_response_bytes,
             )?;
         }
-        Ok(Results(values))
+        Ok(Results(values, BTreeMap::new()))
     }
 }
 fn authorize<'a, B: RuntimeReadBackend>(
@@ -840,11 +875,12 @@ fn attach(nodes: &mut [Value], key: &str, values: Vec<Value>) -> Result<(), Runt
     Ok(())
 }
 
-struct OutputShape {
+#[derive(Clone)]
+pub(super) struct OutputShape {
     fields: Vec<(String, String, OutputShape)>,
 }
 impl OutputShape {
-    fn compile(
+    pub(super) fn compile(
         planner: &mut Planner<'_>,
         registry: &async_graphql::registry::Registry,
         set: &async_graphql::parser::types::SelectionSet,
@@ -878,7 +914,7 @@ impl OutputShape {
         }
         Ok(Self { fields })
     }
-    fn measure(
+    pub(super) fn measure(
         &self,
         value: &Value,
         bytes: &mut usize,

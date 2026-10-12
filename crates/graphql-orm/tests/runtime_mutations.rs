@@ -1367,3 +1367,7 @@ async fn emitted_suffix_bind_budgets_precede_target_reads_for_cas_and_authority(
     }
     f.finish().await;
 }
+
+#[cfg(feature = "runtime-graphql")]
+#[path = "support/runtime_graphql_mutations.rs"]
+mod graphql_mutations;
