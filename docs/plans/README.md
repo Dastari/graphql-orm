@@ -3,7 +3,7 @@ title: Plans index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-10-12
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -12,7 +12,6 @@ supersedes: []
 
 ## Active
 
-- [Bounded runtime platform capability contract](active/runtime-platform-capabilities/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [Documentation experience](active/documentation-experience/README.md)
 
@@ -23,6 +22,8 @@ supersedes: []
 - [Storage providers](backlog/storage-providers/README.md)
 
 ## Completed
+
+- [Bounded runtime platform capability contract](completed/runtime-platform-capabilities/README.md)
 
 - [AI provider sessions, hosted tools, and visible activity](completed/ai-provider-sessions-and-hosted-tools/README.md)
 - [GraphQL ORM Router](completed/graphql-orm-router/README.md)
