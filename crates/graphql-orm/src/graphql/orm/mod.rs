@@ -13,8 +13,11 @@ mod lease;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod migrations;
 mod operation_metadata;
+mod owned_foreign_keys;
+mod owned_schema;
 mod query;
 mod rls;
+mod runtime_migration;
 mod runtime_query;
 mod runtime_record;
 mod runtime_relation;
@@ -38,8 +41,10 @@ pub use lease::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use migrations::*;
 pub use operation_metadata::*;
+pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
 pub use query::*;
 pub use rls::*;
+pub use runtime_migration::*;
 pub use runtime_query::*;
 pub use runtime_record::*;
 pub use runtime_relation::*;

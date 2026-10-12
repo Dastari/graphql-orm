@@ -2,6 +2,10 @@
 
 use graphql_orm::prelude::*;
 
+#[cfg(feature = "postgres")]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 #[derive(GraphQLSchemaEntity, Clone, Debug)]
 #[graphql_entity(table = "legacy_history_items", plural = "LegacyHistoryItems")]
 #[allow(dead_code)]
@@ -212,10 +216,8 @@ async fn sqlite_legacy_adoption_preserves_recorded_version_drift_protection()
 #[tokio::test]
 async fn postgres_legacy_history_adopts_idempotently_and_malformed_identity_fails_closed()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        return Ok(());
-    };
-    let database = Database::<PostgresBackend>::connect_postgres(url).await?;
+    let mut owned = owned_postgres::OwnedPostgres::start("legacy-migration-history")?;
+    let database = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
     graphql_orm::sqlx::query("DROP TABLE IF EXISTS legacy_history_items CASCADE")
         .execute(database.pool())
         .await?;
@@ -297,5 +299,7 @@ async fn postgres_legacy_history_adopts_idempotently_and_malformed_identity_fail
     graphql_orm::sqlx::query("DROP TABLE __graphql_orm_migrations CASCADE")
         .execute(database.pool())
         .await?;
+    database.pool().close().await;
+    owned.cleanup()?;
     Ok(())
 }
