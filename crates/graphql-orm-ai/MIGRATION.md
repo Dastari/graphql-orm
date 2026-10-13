@@ -21,6 +21,26 @@ use [implementation status](docs/implementation-status.md) and the central
 
 ## 0.106.1 to 0.107.0
 
+This is a source-breaking pre-1.0 minor release under Cargo's compatibility
+rules. Recompile consumers and review these Rust API changes:
+
+- `ProviderRequestContext` no longer implements `UnwindSafe` or
+  `RefUnwindSafe`: it retains current delivery guards that can refer to mutable
+  host policy. Remove assumptions that the complete context can cross a panic
+  boundary. Any explicit `AssertUnwindSafe` is a caller-reviewed recovery
+  decision; it does not make the SDK guards panic-safe or authorize delivery.
+- Generated `CreateAiProviderSessionBindingRecordInput` and
+  `UpdateAiProviderSessionBindingRecordInput` literals gain the nullable
+  `installed_offering_fingerprint` field. Initialize it to `None` in old
+  literals or use the existing defaults where applicable. The owning lifecycle
+  service records installed definitions; caller-supplied values prove no
+  installation, cursor cleanup or permission.
+- `AiProviderSessionBindingRecordAggregateField` gains
+  `InstalledOfferingFingerprint`. Recompile exhaustive matches. Later implicit
+  discriminants change, so numeric casts from the old enum cannot identify
+  fields in the new release; use the typed variants and never persist their
+  integer values as field identities.
+
 Adopt tool profiles 0.16.0 from the same published workspace release. Existing
 non-media tool fingerprints remain unchanged. New media declarations require a
 trusted logical resolver, explicit exact provider destination policy and a current
@@ -45,8 +65,11 @@ the complete actual effect fence, without stripping it during capture/reopening.
 
 Apply owned AI schema module 0.72.0 before runtime admission. It adds nullable
 `protected_result_source` to tool calls and an internal source-address table;
-metadata and original output remain protected. Existing rows need no source
-backfill and gain no additional disclosure allowance. Include the new table in
+provider-session bindings additionally gain nullable
+`installed_offering_fingerprint`. Metadata and original output remain protected.
+Existing rows need no source backfill and gain no additional disclosure
+allowance. An unknown installed offering requires verified cursor cleanup
+before changed definitions can be admitted. Include the new table in
 owned backup/restore and retain the existing closed reconciliation gate. A small
 source index is correlation only; reopening always checks protected owner bytes.
 

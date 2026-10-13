@@ -12,6 +12,12 @@ supersedes: []
 
 ## 0.15.0 to 0.16.0
 
+This is a source-breaking pre-1.0 minor release: the public
+`AiToolDescriptor` gains the optional `result_media` field. Recompile consumers;
+old struct literals must initialize it to `None` or use the existing
+constructors. Serialized descriptors without media retain their previous
+representation and fingerprints.
+
 Profiles and descriptors gain an optional `AiToolResultMediaPolicy`. Construct
 it from validated field bindings, exact selected object paths and finite limits;
 use a logical owner resolver ID, never a URL or path. The declaration is included

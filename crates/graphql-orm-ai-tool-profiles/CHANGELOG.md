@@ -12,6 +12,12 @@ supersedes: []
 
 ## [0.16.0] - 2026-10-13
 
+### Changed
+
+- This pre-1.0 minor is source-breaking for public `AiToolDescriptor` literals:
+  initialize the new optional `result_media` field or use existing constructors.
+  Missing media preserves serialized descriptors and their fingerprints.
+
 ### Added
 
 - Immutable result-media policies bind selected image-reference fields, exact

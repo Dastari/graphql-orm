@@ -20,6 +20,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [0.107.0] - 2026-10-13
 
+### Changed
+
+- This pre-1.0 minor is source-breaking: `ProviderRequestContext` loses
+  `UnwindSafe`/`RefUnwindSafe`, generated provider-session input literals gain
+  `installed_offering_fingerprint`, and the generated aggregate-field enum
+  gains a variant while later implicit discriminants shift. Recompile consumers
+  and follow the explicit migration instructions; current delivery guards and
+  owned schema module 0.72.0 remain required.
+
 ### Added
 
 - Keep original static capability subsets in the same broker state, and require
