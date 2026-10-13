@@ -1407,7 +1407,26 @@ async fn approved_media_lifecycle(
     withdrawal: usize,
     reset_mode: Option<usize>,
 ) {
-    let (fixture, custody, application) = media_fixture_mode(true, true).await;
+    let (mut fixture, custody, application) = media_fixture_mode(true, true).await;
+    if reset_mode.is_some_and(|mode| mode < 8) {
+        fixture.budget_service = static_offering_tests::extended_task_budget_service(&fixture);
+        let policy = AiBudgetPolicyRecord::query(fixture.database.pool())
+            .limit(1)
+            .fetch_one()
+            .await
+            .unwrap()
+            .unwrap();
+        AiBudgetPolicyRecord::update_by_id(
+            &fixture.database,
+            &policy.id,
+            crate::persistence::UpdateAiBudgetPolicyRecordInput {
+                maximum_input_tokens: Some(Some(20_000)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    }
     let descriptor = fixture
         .runtime
         .tool_catalog()
@@ -2121,7 +2140,14 @@ async fn exercise_owned_static_reset(
     base.budget.attempt_id = lease.attempt_id();
     base.budget.lease_generation = lease.lease_generation();
     base.budget.idempotency_key = "owned-static-reset".into();
-    base.budget.estimate.input_tokens = 8000;
+    let mut complete_projection = base.request.clone();
+    continuation
+        .clone()
+        .apply_with_bound_task_context(&mut complete_projection)
+        .unwrap();
+    base.budget.estimate.input_tokens = complete_projection
+        .conservative_provider_egress_tokens(&base.provider_kind)
+        .unwrap();
     base.budget.estimate.image_units = 4;
     assert!(
         AiProviderCallPlan::new_continuation_with_classified_tools(

@@ -5,6 +5,28 @@ use crate::{
     AiSupervisedAgentTurnPlan, AiSupervisedAgentTurnPlanner, OrmAiProviderOutputService,
 };
 
+pub(super) fn extended_task_budget_service(fixture: &Fixture) -> Arc<OrmAiBudgetService> {
+    Arc::new(OrmAiBudgetService::new(
+        fixture.database.clone(),
+        Arc::new(SystemClock),
+        crate::AiBudgetServiceLimits::new(
+            AiBudgetAmounts {
+                input_tokens: 20_000,
+                output_tokens: 10_000,
+                tool_units: 100,
+                image_units: 100,
+                cost_microunits: 1_000_000,
+                runs: 1,
+            },
+            Duration::minutes(5),
+            Duration::seconds(30),
+            16,
+            8,
+        )
+        .unwrap(),
+    ))
+}
+
 struct QuotaRetryPlanner {
     fixture: Arc<Fixture>,
     application: Arc<OrmAiApplicationToolCallService>,
@@ -221,25 +243,7 @@ pub(super) async fn owning_coordinator_reset(
     // This extended original-task continuation is larger than the parent's 10,000
     // token test profile. Give only this fixture finite capacity for its complete
     // SDK-priced request; the separate zero image policy still forces the retry.
-    fixture.budget_service = Arc::new(OrmAiBudgetService::new(
-        fixture.database.clone(),
-        Arc::new(SystemClock),
-        crate::AiBudgetServiceLimits::new(
-            AiBudgetAmounts {
-                input_tokens: 20_000,
-                output_tokens: 10_000,
-                tool_units: 100,
-                image_units: 100,
-                cost_microunits: 1_000_000,
-                runs: 1,
-            },
-            Duration::minutes(5),
-            Duration::seconds(30),
-            16,
-            8,
-        )
-        .unwrap(),
-    ));
+    fixture.budget_service = extended_task_budget_service(&fixture);
     let fixture = Arc::new(fixture);
     let policy = AiBudgetPolicyRecord::query(fixture.database.pool())
         .limit(1)
