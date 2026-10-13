@@ -989,6 +989,16 @@ async fn bind_original_media_session(
 
 #[tokio::test]
 async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_executing_again() {
+    approved_media_lifecycle(false).await;
+}
+
+#[tokio::test]
+async fn native_history_normal_deny_after_preflight_withholds_saved_effect_and_releases_unstarted_budget()
+ {
+    approved_media_lifecycle(true).await;
+}
+
+async fn approved_media_lifecycle(deny_history: bool) {
     let (fixture, custody, application) = media_fixture_mode(true, true).await;
     let descriptor = fixture
         .runtime
@@ -1040,25 +1050,10 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
         Arc::new(AllowAccess),
         Arc::new(ProtectionPolicy),
         Arc::new(DatabaseManagedContentProtector),
-        Arc::new(TestRuleResolver::default()),
+        Arc::new(NativeTestRuleResolver),
         Arc::new(SystemClock),
         AiCoordinatorCheckpointLimits::new(256 * 1024, Duration::minutes(5)).unwrap(),
     ));
-    let (rules, usage) = test_rule_checkpoint(&fixture.scope, &[&provider], 0);
-    let protected = checkpoints
-        .persist_provider_turn(
-            &fixture.lease,
-            &provider,
-            &fixture.scope,
-            "approved-media-test",
-            &preview_route(),
-            &rules,
-            usage,
-            1,
-            1,
-        )
-        .await
-        .unwrap();
     let (_, approvals) = consequential_test_service(&fixture);
     let consequential = Arc::new(
         OrmAiConsequentialToolCallService::new(
@@ -1078,11 +1073,11 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
             )
             .unwrap(),
         )
-        .with_provider_session_service(sessions),
+        .with_provider_session_service(sessions.clone()),
     );
-    let requested = consequential
-        .request_approval(
-            &protected,
+    let prepared = consequential
+        .prepare_native_approval(
+            &fixture.lease,
             &provider,
             AiApplicationToolCallContext::new(
                 0,
@@ -1092,6 +1087,36 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
                 provider.budget_reservation_id().0.to_string(),
             )
             .unwrap(),
+        )
+        .await
+        .unwrap();
+    let receipt = consequential
+        .prepare_native_approval_receipt(prepared.lease(), &prepared, &preview_route())
+        .await
+        .unwrap();
+    let active = receipt.lease().clone();
+    provider.native_control_receipts = vec![receipt];
+    let (_, usage) = test_rule_checkpoint(&fixture.scope, &[&provider], 1);
+    let protected = checkpoints
+        .persist_native_approval_provider_turn(
+            &active,
+            &provider,
+            &prepared,
+            &fixture.scope,
+            "approved-media-test",
+            &preview_route(),
+            &native_test_rules(fixture.scope.clone()),
+            usage,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+    let requested = consequential
+        .finalize_prepared_approval(
+            &protected,
+            &provider,
+            &prepared,
             OffsetDateTime::now_utc() + Duration::minutes(5),
             false,
         )
@@ -1121,8 +1146,11 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
         .unwrap()
         .unwrap();
     assert!(claim.lease().lease_generation() > fixture.lease.lease_generation());
-    let resume =
-        OrmAiSupervisedResumeService::new(fixture.run_service.clone(), checkpoints, consequential);
+    let resume = OrmAiSupervisedResumeService::new(
+        fixture.run_service.clone(),
+        checkpoints.clone(),
+        consequential,
+    );
     let completed = resume.execute_claimed(&claim).await.unwrap();
     let current = completed.checkpointed().unwrap().lease();
     let source = application
@@ -1162,5 +1190,168 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
         .unwrap()
         .unwrap();
     assert_eq!(consumed.consumed_uses, 1);
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+    let adopted = checkpoints
+        .adopt_classified_mutation_batch(current)
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::AiAdoptedClassifiedMutationBatch::Supervised(adopted) = adopted else {
+        panic!("approved effect must retain its supervised checkpoint")
+    };
+    let current = checkpoints
+        .consume_supervised_before_provider(current, &adopted)
+        .await
+        .unwrap();
+    let mut next = plan(&fixture);
+    next.budget.attempt_id = current.attempt_id();
+    next.budget.lease_generation = current.lease_generation();
+    next.budget.idempotency_key = "approved-media-history".into();
+    next.budget.estimate.image_units = 4;
+    custody.requests.lock().await.clear();
+    if deny_history {
+        custody.deny_model_disclosure_at.store(2, Ordering::SeqCst);
+    }
+    let executor = AiProviderCallExecutor::new(
+        fixture.runtime.clone(),
+        fixture.budget_service.clone(),
+        fixture.audit.clone(),
+        Arc::new(ImageAccounting),
+        Arc::new(SystemClock),
+        AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+    )
+    .with_tool_result_source_service(application.clone())
+    .unwrap();
+    let selected = AiProviderSessionDescriptor::new(
+        ProviderKind::OpenAiCompatible,
+        "mock-profile",
+        "mock-model",
+        "a".repeat(64),
+        "mock/v1",
+        "b".repeat(64),
+    )
+    .unwrap();
+    let continued = executor
+        .execute_with_provider_session(
+            Arc::new(Mutex::new(current)),
+            next,
+            crate::AiProviderSessionTurnPlan::new(selected, "d".repeat(64)).unwrap(),
+            sessions,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+    let sent = custody.requests.lock().await;
+    assert_eq!(sent.len(), 1);
+    if deny_history {
+        assert_eq!(custody.model_disclosures.load(Ordering::SeqCst), 2);
+        assert_eq!(continued.usage().image_units, 0);
+        assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
+        assert!(sent[0].tools.is_empty());
+        assert!(sent[0].continuation.is_none());
+        assert!(matches!(&sent[0].input[0],ModelInputBlock::Text{text} if text=="hello"));
+        let serialized = serde_json::to_string(&sent[0].input).unwrap();
+        assert!(serialized.contains("historicalToolContentWithheld"));
+        assert!(!serialized.contains("Preview"));
+        let budgets = AiBudgetReservationRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(
+            budgets.iter().filter(|row| row.state == "released").count(),
+            1
+        );
+        assert_eq!(
+            budgets
+                .iter()
+                .filter(|row| row.state == "committed")
+                .count(),
+            2
+        );
+        assert!(budgets.iter().all(|row| row.state != "uncertain"));
+    } else {
+        assert_eq!(continued.usage().image_units, 1);
+        assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[tokio::test]
+async fn ordinary_text_with_zero_image_budget_does_not_offer_or_execute_media() {
+    let (fixture, custody, _) = media_fixture(false).await;
+    let executor = AiProviderCallExecutor::new(
+        fixture.runtime.clone(),
+        fixture.budget_service.clone(),
+        fixture.audit.clone(),
+        Arc::new(ImageAccounting),
+        Arc::new(SystemClock),
+        AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+    );
+    let result = executor
+        .execute(&fixture.lease, plan(&fixture))
+        .await
+        .unwrap();
+    assert_eq!(result.usage().image_units, 0);
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn owner_cancellation_closes_source_retained_call_and_preserves_effect_custody() {
+    let (fixture, custody, application) = media_fixture(true).await;
+    custody.fail_next_source_open.store(true, Ordering::SeqCst);
+    assert!(
+        preview_turn(&fixture, application.clone(), 4)
+            .await
+            .is_err()
+    );
+    let call = AiToolCallRecord::query(fixture.database.pool())
+        .limit(1)
+        .fetch_one()
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(call.state, "source_retained");
+    let cancellation = crate::OrmAiRunCancellationService::new(
+        fixture.database.clone(),
+        Arc::new(AllowAccess),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+        Arc::new(Resolver(fixture.principal.clone())),
+        Arc::new(SystemClock),
+        crate::AiRunCancellationLimits::default(),
+        Arc::new(crate::AiRunCancellationHub::default()),
+    );
+    cancellation
+        .request_cancellation(
+            &fixture.principal,
+            crate::CancelAiRunInput {
+                session_id: fixture.lease.session_id().0,
+                run_id: fixture.lease.run_id().0,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    let cancelled = AiToolCallRecord::find_by_id(&fixture.database, &call.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancelled.state, "cancelled");
+    assert_eq!(cancelled.protected_result, call.protected_result);
+    assert_eq!(
+        cancelled.protected_result_source,
+        call.protected_result_source
+    );
+    assert!(
+        application
+            .reopen_tool_result_source(
+                &fixture.lease,
+                AiToolCallId(call.id),
+                crate::AiToolResultDisclosurePurpose::Continuation
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
