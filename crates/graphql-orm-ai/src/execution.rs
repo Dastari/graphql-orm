@@ -430,6 +430,7 @@ impl AiToolExecutionProvenance {
     // Derived only from the completed trusted runtime result. Keep the exact current policy
     // fields that the owning bridge placed on its actual executor binding, including for
     // unapproved effects; current disclosure policy remains an independent recheck.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_completed_authorization(
         mut self,
         policy_version: &str,

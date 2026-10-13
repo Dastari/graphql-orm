@@ -704,7 +704,7 @@ async fn ordinary_attachments_and_reopened_pixels_share_complete_request_limits(
         .unwrap();
     let mut request = plan(&fixture).request;
     let attachment = ModelInputBlock::Attachment {
-        attachment_id: Uuid::new_v4(),
+        attachment_id: Uuid::new_v4().to_string(),
         mime: "image/png".into(),
         byte_count: images[0].byte_count(),
         sha256: images[0].reference().sha256().into(),
