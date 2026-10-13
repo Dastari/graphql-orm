@@ -28,7 +28,13 @@ source-aware egress hook. The compatibility defaults deny image delivery and
 Restricted-source overrides. Unsupported adapters refuse media-required effects.
 The new `AiProvider::supports_tool_result_source_delivery` compatibility default
 also denies declared Restricted effects and protected history until an adapter
-preserves and awaits the owning guard immediately before delivery.
+preserves and awaits the owning guard immediately before delivery. Codex additionally
+requires explicit owning-factory attestation and registration opt-in through
+`with_guarded_tool_result_source_delivery`, before deriving its immutable capability
+binding. Legacy disabled registration fingerprints remain unchanged; old launch
+support alone cannot admit protected effects. Completed protected output is saved
+under its exact live effect fence before fresh disclosure access is rechecked;
+withdrawal denies all source/image delivery without discarding actual completion.
 
 Original provider provenance getters keep their meaning. Optional effect attempt
 and generation getters are minted from the actual executing SDK lease, after

@@ -44,6 +44,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 - Read-only SDK-minted actual effect attempt/generation remain separate from
   original provider provenance and current disclosure fencing, including after
   approved resume. Missing or changed retained effect evidence is refused.
+- Codex protected delivery requires an explicit factory capability and immutable
+  guarded-delivery registration marker; legacy dynamic launch support cannot opt in.
+- Mid-effect scope/session withdrawal preserves the actual bounded protected output
+  under the live effect fence while refusing source admission and disclosure.
 - Unsupported adapters default-deny protected source delivery before Restricted
   or media effects. Native no-effect control receipts retain their owning
   admission while releasing unused image capacity.

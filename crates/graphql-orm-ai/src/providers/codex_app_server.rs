@@ -416,6 +416,7 @@ pub struct AiCodexAppServerRegistration {
     launch_profile: AiCodexAppServerLaunchProfile,
     bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
     reasoning_effort_profile: Option<ModelReasoningEffortProfile>,
+    guarded_tool_result_source_delivery: bool,
     capability_session_bindings: BTreeMap<String, AiProviderCapabilitySessionBinding>,
     identity: String,
 }
@@ -464,6 +465,7 @@ impl AiCodexAppServerRegistration {
             launch_profile,
             bootstrap_instructions,
             reasoning_effort_profile: None,
+            guarded_tool_result_source_delivery: false,
             capability_session_bindings: BTreeMap::new(),
             identity: String::new(),
         };
@@ -481,6 +483,19 @@ impl AiCodexAppServerRegistration {
     #[must_use]
     pub fn with_launch_profile(mut self, launch_profile: AiCodexAppServerLaunchProfile) -> Self {
         self.launch_profile = launch_profile;
+        self.refresh_identity();
+        self
+    }
+
+    /// Pins the reviewed final protected-source delivery contract into registration identity.
+    ///
+    /// Enable only when the actual factory preserves and awaits both the SDK input and
+    /// responder guards immediately before transport. The factory must independently
+    /// attest that contract. This grants no execution, resource, egress or budget authority.
+    /// Enabling invalidates existing capability-session bindings; derive them afterward.
+    #[must_use]
+    pub fn with_guarded_tool_result_source_delivery(mut self) -> Self {
+        self.guarded_tool_result_source_delivery = true;
         self.refresh_identity();
         self
     }
@@ -1376,6 +1391,8 @@ impl AiProvider for AiCodexAppServerProvider {
 
     fn supports_tool_result_images(&self) -> bool {
         self.registration.experimental_dynamic_tools()
+            && self.registration.guarded_tool_result_source_delivery
+            && self.pool.supports_tool_result_source_delivery()
             && self
                 .pool
                 .supports_launch_profile(self.registration.launch_profile())
@@ -1383,6 +1400,8 @@ impl AiProvider for AiCodexAppServerProvider {
 
     fn supports_tool_result_source_delivery(&self) -> bool {
         self.registration.experimental_dynamic_tools()
+            && self.registration.guarded_tool_result_source_delivery
+            && self.pool.supports_tool_result_source_delivery()
             && self
                 .pool
                 .supports_launch_profile(self.registration.launch_profile())
@@ -2021,6 +2040,13 @@ impl Drop for AiCodexAppServerLaunchedProcess {
 /// Trusted deployment seam that launches one reviewed app-server process.
 #[async_trait]
 pub trait AiCodexAppServerRunProcessFactory: Send + Sync {
+    /// Whether the actual launched process preserves the SDK's protected source guards
+    /// through every queue and awaits both input and responder delivery authorization
+    /// immediately before transport. Legacy dynamic-tool launch support proves neither.
+    /// The compatibility default refuses protected-source/typed-image effects.
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        false
+    }
     /// Whether this factory implements one exact closed launch profile.
     ///
     /// The default keeps existing text-only factories compatible and refuses
@@ -2267,6 +2293,12 @@ impl AiCodexAppServerRunPool {
     /// profile.
     pub fn supports_launch_profile(&self, profile: AiCodexAppServerLaunchProfile) -> bool {
         self.inner.factory.supports_launch_profile(profile)
+    }
+
+    /// Explicit immutable owning-factory attestation for final protected text/image delivery.
+    /// This alone grants no egress, budget, resource access or execution authority.
+    pub fn supports_tool_result_source_delivery(&self) -> bool {
+        self.inner.factory.supports_tool_result_source_delivery()
     }
 
     async fn create_empty_thread(
@@ -6845,6 +6877,11 @@ fn registration_identity(registration: &AiCodexAppServerRegistration) -> String 
     } else {
         hasher.update(b"no-profile\0");
     }
+    // Keep legacy false registration bytes unchanged. This marker is immutable transport
+    // policy, not a request/source claim, and changes every derived capability fingerprint.
+    if registration.guarded_tool_result_source_delivery {
+        hasher.update(b"guarded-tool-result-source-delivery-v1\0");
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -7907,6 +7944,64 @@ pub(crate) mod tests {
                 .with_reasoning_effort_profile(wrong_model),
             Err(ProviderError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn guarded_source_delivery_changes_identity_and_invalidates_old_capability_binding() {
+        let base = dynamic_registration("1.0.0");
+        let legacy_identity = base.identity().to_owned();
+        let legacy_binding = capability_session_binding(&base, ModelReasoningEffort::Unspecified);
+        let admitted = (*base)
+            .clone()
+            .with_capability_session_binding(legacy_binding.clone())
+            .unwrap();
+        assert_eq!(admitted.identity(), legacy_identity);
+        let guarded = admitted.with_guarded_tool_result_source_delivery();
+        assert_ne!(guarded.identity(), legacy_identity);
+        assert!(!guarded.admits_provider_session_fingerprint(legacy_binding.fingerprint()));
+        assert!(
+            guarded
+                .clone()
+                .with_capability_session_binding(legacy_binding)
+                .is_err()
+        );
+        let new_binding = capability_session_binding(&guarded, ModelReasoningEffort::Unspecified);
+        assert!(guarded.with_capability_session_binding(new_binding).is_ok());
+    }
+
+    #[test]
+    fn legacy_dynamic_factory_refuses_protected_effect_preflight() {
+        let counters = Arc::new(Counters::new());
+        let reviewed = (*dynamic_registration("1.0.0"))
+            .clone()
+            .with_guarded_tool_result_source_delivery();
+        let provider = Arc::new(AiCodexAppServerProvider::new(
+            Arc::new(reviewed),
+            pool(counters.clone(), 1, 2),
+        ));
+        assert!(provider.supports_custom_tools());
+        assert!(!provider.supports_tool_result_source_delivery());
+        assert!(!provider.supports_tool_result_images());
+        let runtime = crate::AiRuntime::builder()
+            .provider(provider)
+            .unwrap()
+            .build()
+            .unwrap();
+        let mut descriptor = crate::AiToolDescriptor::new("preview.read", "Read preview", crate::AiToolOperationKind::Query, "query Preview { Preview }", json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false})).unwrap();
+        descriptor.maximum_classification = crate::DataClassification::Restricted;
+        assert!(
+            runtime
+                .preflight_tool_result_media(&descriptor, &ProviderKind::LocalHarness)
+                .is_err()
+        );
+        descriptor.maximum_classification = crate::DataClassification::Public;
+        assert!(
+            runtime
+                .preflight_tool_result_media(&descriptor, &ProviderKind::LocalHarness)
+                .is_ok()
+        );
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
     }
 
     #[test]

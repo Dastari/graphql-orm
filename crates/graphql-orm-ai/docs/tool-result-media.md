@@ -77,7 +77,10 @@ static boundary on every disclosure.
 ## Durable results, provider delivery and budgets
 
 The application service protects and saves the actual bounded completed-effect
-result before parsing descriptive image metadata or opening resources. Invalid
+result before fresh scope/session disclosure authorization, parsing descriptive image
+metadata or opening resources. Losing disclosure access preserves the original
+completed output, while the exact live executing owner lease remains required
+for custody; cancelled or obsolete leases cannot revive a result. Invalid
 metadata preserves the saved output for owning recovery and denies disclosure; it does
 not replace the completed output or authorize effect replay. Source metadata is
 then admitted and protected before disclosure. Owner cancellation also closes
@@ -95,7 +98,12 @@ loader to the same runtime. Dynamic execution supplies the same owning service.
 Media-required tools fail adapter/policy/capacity preflight before effect
 admission. Adapters also default-deny source delivery for declared
 Restricted/media effects unless they implement the final current source guard;
-the reviewed Codex adapter preserves that guard through its process queue.
+Codex requires both an explicit factory `supports_tool_result_source_delivery`
+attestation and `AiCodexAppServerRegistration::with_guarded_tool_result_source_delivery`.
+The enabled-only registration marker invalidates old capability-session bindings;
+derive and admit the exact new binding afterward. Legacy text/dynamic-tool factories
+remain compatible but cannot admit protected effects. The factory must preserve
+both final input and responder guards through every queue.
 No-effect native approval/control receipts contain no images and release their
 unused media allocation while retaining ordinary protected receipt admission.
 The existing atomic provider-turn reservation allocates image units

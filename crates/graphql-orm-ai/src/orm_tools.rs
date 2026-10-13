@@ -3863,20 +3863,6 @@ impl OrmAiConsequentialToolCallService {
             }
         };
         let provider_response_id = call.provider_response_id.clone();
-        if self
-            .application_tools
-            .current_access(&running_lease, &scope)
-            .await
-            .is_err()
-        {
-            return self
-                .mark_consequential_recovery(
-                    &running_lease,
-                    tool_call_id,
-                    provider_response_id.clone(),
-                )
-                .await;
-        }
         let output_bytes = match serde_json::to_vec(&model_output) {
             Ok(output) => output,
             Err(_) => {
@@ -3930,6 +3916,20 @@ impl OrmAiConsequentialToolCallService {
         } else {
             None
         };
+        if self
+            .application_tools
+            .current_access(&running_lease, &scope)
+            .await
+            .is_err()
+        {
+            return self
+                .mark_consequential_recovery(
+                    &running_lease,
+                    tool_call_id,
+                    provider_response_id.clone(),
+                )
+                .await;
+        }
         let retained_context = if retained.is_some() {
             let reopened = self
                 .application_tools

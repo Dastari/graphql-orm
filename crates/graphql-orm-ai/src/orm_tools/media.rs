@@ -84,7 +84,8 @@ impl OrmAiApplicationToolCallService {
         classification: DataClassification,
         trust: AiSourceTrust,
     ) -> Result<RetainedDisclosure, AiError> {
-        self.current_access(lease, &call_context.scope).await?;
+        // Custody of the actual completed output is separate from fresh disclosure access.
+        // The owning write below still requires the exact live executing effect lease.
         let protected_result = self
             .protect(
                 policy,
@@ -100,6 +101,7 @@ impl OrmAiApplicationToolCallService {
         self.run_service
             .retain_tool_effect_output(lease, provenance, protected_result.clone())
             .await?;
+        self.current_access(lease, &call_context.scope).await?;
         let images = extract_references(
             descriptor,
             output,

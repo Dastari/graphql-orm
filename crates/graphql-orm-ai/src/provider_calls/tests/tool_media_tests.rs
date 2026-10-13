@@ -26,6 +26,39 @@ struct Custody {
     delivered_images: AtomicUsize,
     delay_open: AtomicBool,
     source_delivery_allowed: AtomicBool,
+    withdraw_access_after_effect: AtomicUsize,
+    access_withdrawn: AtomicBool,
+}
+#[async_trait]
+impl crate::AiAccessPolicy for Custody {
+    async fn can_access_scope(
+        &self,
+        _principal: &agql_auth::AuthPrincipal,
+        _scope: &AiScope,
+        _action: crate::AiSessionAction,
+    ) -> crate::AiAccessDecision {
+        if self.access_withdrawn.load(Ordering::SeqCst)
+            && self.withdraw_access_after_effect.load(Ordering::SeqCst) == 1
+        {
+            crate::AiAccessDecision::deny("scope_withdrawn", "preview-access-v1")
+        } else {
+            crate::AiAccessDecision::allow("current_scope", "preview-access-v1")
+        }
+    }
+    async fn can_access_session(
+        &self,
+        _principal: &agql_auth::AuthPrincipal,
+        _session: AiSessionId,
+        _action: crate::AiSessionAction,
+    ) -> crate::AiAccessDecision {
+        if self.access_withdrawn.load(Ordering::SeqCst)
+            && self.withdraw_access_after_effect.load(Ordering::SeqCst) == 2
+        {
+            crate::AiAccessDecision::deny("session_withdrawn", "preview-access-v1")
+        } else {
+            crate::AiAccessDecision::allow("current_session", "preview-access-v1")
+        }
+    }
 }
 struct SourceProtector(Arc<Custody>);
 #[async_trait]
@@ -95,6 +128,10 @@ impl AuthenticatedGraphqlExecutor for PreviewExecutor {
             },
         );
         self.0.effects.fetch_add(1, Ordering::SeqCst);
+        if self.0.withdraw_access_after_effect.load(Ordering::SeqCst) != 0 {
+            // The real resolver completes its effect while current disclosure access is lost.
+            self.0.access_withdrawn.store(true, Ordering::SeqCst);
+        }
         Ok(ToolGraphqlResponse {
             data: json!({"Preview":{
                 "Reference":reference.reference(),"Sha256":reference.sha256(),"Mime":reference.mime(),
@@ -540,7 +577,7 @@ async fn media_fixture_resolution(
             principal: fixture.principal.clone(),
             resolutions: fixture.principal_resolutions.clone(),
         }))
-        .access_policy(Arc::new(AllowAccess))
+        .access_policy(custody.clone())
         .tool_authorization_policy(Arc::new(AllowTools(fixture.tool_policy_version.clone())))
         .request_context_factory(Arc::new(ContextFactory))
         .graphql_executor(Arc::new(PreviewExecutor(custody.clone())))
@@ -1123,21 +1160,28 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
 
 #[tokio::test]
 async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_executing_again() {
-    approved_media_lifecycle(false, false).await;
+    approved_media_lifecycle(false, false, 0).await;
 }
 
 #[tokio::test]
 async fn native_history_normal_deny_after_preflight_withholds_saved_effect_and_releases_unstarted_budget()
  {
-    approved_media_lifecycle(true, false).await;
+    approved_media_lifecycle(true, false, 0).await;
 }
 
 #[tokio::test]
 async fn approved_effect_with_invalid_media_keeps_output_and_enters_recovery_without_replay() {
-    approved_media_lifecycle(false, true).await;
+    approved_media_lifecycle(false, true, 0).await;
 }
 
-async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool) {
+#[tokio::test]
+async fn approved_completed_effect_survives_mid_effect_scope_and_session_withdrawal() {
+    for withdrawal in [1, 2] {
+        approved_media_lifecycle(false, false, withdrawal).await;
+    }
+}
+
+async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool, withdrawal: usize) {
     let (fixture, custody, application) = media_fixture_mode(true, true).await;
     let descriptor = fixture
         .runtime
@@ -1303,8 +1347,11 @@ async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool) {
     custody
         .invalid_image_metadata
         .store(invalid_metadata, Ordering::SeqCst);
+    custody
+        .withdraw_access_after_effect
+        .store(withdrawal, Ordering::SeqCst);
     let completed = resume.execute_claimed(&claim).await.unwrap();
-    if invalid_metadata {
+    if invalid_metadata || withdrawal != 0 {
         assert!(matches!(
             completed,
             crate::AiSupervisedResumeOutcome::RecoveryRequired { .. }
@@ -1315,6 +1362,30 @@ async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool) {
             .unwrap();
         assert!(call.protected_result.is_some());
         assert!(call.protected_result_source.is_none());
+        if withdrawal != 0 {
+            let envelope: crate::ProtectedContentEnvelope =
+                serde_json::from_value(call.protected_result.clone().unwrap()).unwrap();
+            let crate::ProtectedContentEnvelope::DatabaseManaged { value } = envelope else {
+                unreachable!()
+            };
+            let captures = custody.captures.lock().await;
+            let capture = captures.values().next().unwrap();
+            assert_eq!(
+                value["Preview"]["Reference"],
+                json!(capture.reference.reference())
+            );
+            assert_eq!(value["Preview"]["Sha256"], capture.reference.sha256());
+            assert!(custody.access_withdrawn.load(Ordering::SeqCst));
+            assert_eq!(custody.opens.load(Ordering::SeqCst), 0);
+            assert_eq!(custody.model_disclosures.load(Ordering::SeqCst), 0);
+            assert!(
+                AiToolResultSourceRecord::query(fixture.database.pool())
+                    .fetch_all()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         let run = AiRunRecord::find_by_id(&fixture.database, &claim.lease().run_id().0)
             .await
             .unwrap()
