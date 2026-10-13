@@ -524,6 +524,7 @@ pub(crate) struct AiStaticOfferingResetReceipt {
     pub(crate) original_cursor_fingerprint: String,
     pub(crate) replacement_cursor_fingerprint: String,
     pub(crate) replacement_binding_id: Uuid,
+    pub(crate) task_context_only: bool,
     pub(crate) cleanup_generation: i64,
     pub(crate) offering_fingerprint: String,
     pub(crate) outcome_hash: String,

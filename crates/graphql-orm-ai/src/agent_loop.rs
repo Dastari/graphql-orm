@@ -569,6 +569,18 @@ impl AiAgentContinuation {
         self,
         request: &mut ModelRequest,
     ) -> Result<Vec<AiEgressManifest>, AiError> {
+        if self.task_context.is_some() {
+            return Err(AiError::Conflict);
+        }
+        self.apply_with_bound_task_context(request)
+    }
+
+    // Only the owning capability-bound plan builder retains task-context provenance and its
+    // final source guard. Other public continuation constructors cannot discard that evidence.
+    pub(crate) fn apply_with_bound_task_context(
+        self,
+        request: &mut ModelRequest,
+    ) -> Result<Vec<AiEgressManifest>, AiError> {
         if !request.input.is_empty() || request.continuation.is_some() {
             return Err(AiError::Conflict);
         }

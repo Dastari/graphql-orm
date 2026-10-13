@@ -665,7 +665,7 @@ impl MixedPlanner {
     }
 }
 
-fn mixed_broker_delivery(
+pub(super) fn mixed_broker_delivery(
     fixture: &Fixture,
     definitions: Vec<ModelToolDefinition>,
 ) -> AiCapabilityDeliveryTurn {

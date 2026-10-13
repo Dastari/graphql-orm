@@ -2243,10 +2243,6 @@ impl AiCapabilityDeliveryTurn {
         Ok(())
     }
 
-    pub(crate) fn same_shared_offering(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.tools, &other.tools) && self.session_binding == other.session_binding
-    }
-
     /// Selects the static bootstrap definitions offered on the next provider turn.
     ///
     /// Only fingerprints in the original immutable session binding may be selected. The

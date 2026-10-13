@@ -262,6 +262,7 @@ pub struct AiProviderCallPlan {
     native_reset_evidence: Option<Arc<crate::provider_session::AiVerifiedNativeContinuation>>,
     task_context: Option<Arc<crate::AiPreparedTaskContinuationContext>>,
     replan_continuation: Option<Arc<crate::AiAgentContinuation>>,
+    task_context_only: bool,
     static_offering_reset_receipt:
         Option<Arc<crate::provider_session::AiStaticOfferingResetReceipt>>,
 }
@@ -375,6 +376,7 @@ impl AiProviderCallPlan {
             native_reset_evidence: None,
             task_context: None,
             replan_continuation: None,
+            task_context_only: false,
             static_offering_reset_receipt: None,
         })
     }
@@ -826,7 +828,7 @@ impl AiProviderCallPlan {
         let native_reset_evidence = continuation.native_reset_evidence.clone();
         let task_context = continuation.task_context.clone();
         let replan_continuation = Arc::new(continuation.clone());
-        transfers.extend(continuation.apply_with_transfers(&mut request)?);
+        transfers.extend(continuation.apply_with_bound_task_context(&mut request)?);
         let mut plan = Self::new_with_bound_capability_surface(
             provider_kind,
             request,
@@ -1724,6 +1726,7 @@ impl AiProviderCallPlan {
             native_reset_evidence: None,
             task_context: None,
             replan_continuation: None,
+            task_context_only: false,
             static_offering_reset_receipt: None,
             tool_rule_bindings: vec![AiPlanToolRuleBinding {
                 fingerprint: "test-fingerprint".to_owned(),
@@ -2702,6 +2705,12 @@ impl DynamicToolResponder {
 }
 
 impl AiProviderCallResult {
+    pub(crate) fn is_withheld_native_task_context(&self) -> bool {
+        self.static_offering_reset_receipt
+            .as_ref()
+            .is_some_and(|receipt| receipt.task_context_only)
+    }
+
     pub(crate) fn proves_static_offering_reset_from(&self, expected: Option<&str>) -> bool {
         self.static_offering_reset_receipt
             .as_ref()
@@ -4009,6 +4018,17 @@ impl AiProviderCallExecutor {
                 | AiError::NotFound
                 | AiError::Conflict,
             ) => {
+                if plan.native_reset_evidence.is_some() && plan.task_context.is_some() {
+                    return self
+                        .execute_withheld_native_task_context(
+                            lease_state,
+                            plan,
+                            &session_plan,
+                            &session_service,
+                            &claim,
+                        )
+                        .await;
+                }
                 session_service
                     .require_cleanup(&claim, "retained_tool_source_withheld")
                     .await?;
@@ -4120,6 +4140,19 @@ impl AiProviderCallExecutor {
                 Ok(result)
             }
             Err(AiError::PreTransportToolSourceUnavailable) => {
+                if withheld_plan.native_reset_evidence.is_some()
+                    && withheld_plan.task_context.is_some()
+                {
+                    return self
+                        .execute_withheld_native_task_context(
+                            lease_state,
+                            withheld_plan,
+                            &session_plan,
+                            &session_service,
+                            &current_claim,
+                        )
+                        .await;
+                }
                 session_service
                     .require_cleanup(
                         &current_claim,

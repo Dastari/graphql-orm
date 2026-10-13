@@ -15171,6 +15171,86 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn changed_static_offering_has_real_fresh_thread_wire_and_no_retained_definition_override() {
+        let semantic = dynamic_model_request();
+        let original =
+            AiCodexAppServerTurnInput::try_from_dynamic_request(semantic.clone()).unwrap();
+        let mut with_image = semantic;
+        let mut image_tool = with_image.tools[0].clone();
+        image_tool.tool_id = "preview.image".into();
+        image_tool.provider_name = "preview_image".into();
+        image_tool.fingerprint = hex::encode(Sha256::digest(b"fixture-original-bound-image-tool"));
+        with_image.tools.push(image_tool);
+        let expanded = AiCodexAppServerTurnInput::try_from_dynamic_request(with_image).unwrap();
+        let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
+        let mut old = initialized_protocol_actor();
+        let initial: Value = serde_json::from_slice(
+            &old.start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &bootstrap,
+                original.tools(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(initial["method"], "thread/start");
+        assert_eq!(
+            initial["params"]["dynamicTools"].as_array().unwrap().len(),
+            1
+        );
+        assert!(initial["params"].get("input").is_none());
+        old.accept(br#"{"id":2,"result":{"thread":{"id":"offering-original"}}}"#)
+            .unwrap();
+        old.accept(&thread_started_notification("offering-original"))
+            .unwrap();
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "offering-original")
+                .unwrap();
+        assert!(
+            old.resume_thread(&cursor, &expanded).is_err(),
+            "retained definitions cannot be replaced in Rust alone"
+        );
+        let delete: Value = serde_json::from_slice(&old.delete_thread(&cursor).unwrap()).unwrap();
+        assert_eq!(delete["method"], "thread/delete");
+        assert_eq!(delete["params"]["threadId"], "offering-original");
+        assert!(
+            old.start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &bootstrap,
+                expanded.tools()
+            )
+            .is_err(),
+            "pending deletion does not admit another thread"
+        );
+        old.accept(br#"{"id":3,"result":{}}"#).unwrap();
+        let mut fresh = initialized_protocol_actor();
+        let replacement: Value = serde_json::from_slice(
+            &fresh
+                .start_persistent_empty_thread(
+                    "model-1",
+                    ModelReasoningEffort::Unspecified,
+                    &bootstrap,
+                    expanded.tools(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replacement["method"], "thread/start");
+        let names = replacement["params"]["dynamicTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["inventory_count", "preview_image"]);
+        assert!(replacement["params"].get("input").is_none());
+        assert!(replacement["params"].get("threadId").is_none());
+        assert_eq!(replacement["params"]["model"], initial["params"]["model"]);
+    }
+
+    #[test]
     fn detached_cleanup_deletes_exact_cursor_without_resuming_it_first() {
         let cursor = crate::AiProviderSessionCursor::new(
             "codex.app_server.thread.v2",

@@ -1716,12 +1716,18 @@ impl AiSupervisedAgentCoordinator {
                     }
                     return Err(error);
                 }
-                if let Some((service, claim, commit)) = provider_session_commit
-                    && service.commit_turn(&lease, &claim, commit).await.is_err()
-                {
-                    let _ = service
-                        .require_cleanup(&claim, "provider_session_commit_uncertain")
-                        .await;
+                if let Some((service, claim, commit)) = provider_session_commit {
+                    if result.is_withheld_native_task_context() {
+                        // This tool-free thread is a restricted completed-task projection.
+                        // Do not leave its empty offering as the next ordinary run's thread.
+                        let _ = service
+                            .require_cleanup(&claim, "native_withheld_task_context_completed")
+                            .await;
+                    } else if service.commit_turn(&lease, &claim, commit).await.is_err() {
+                        let _ = service
+                            .require_cleanup(&claim, "provider_session_commit_uncertain")
+                            .await;
+                    }
                 }
                 Ok(AiSupervisedAgentRunOutcome::Completed {
                     message_id,

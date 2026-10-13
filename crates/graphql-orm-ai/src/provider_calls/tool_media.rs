@@ -118,7 +118,12 @@ impl AiProviderCallExecutor {
         plan.request
             .input
             .retain(|input| matches!(input, ModelInputBlock::Attachment { .. }));
-        plan.request.input.insert(0, ModelInputBlock::Text { text });
+        if let Some(context) = &plan.task_context {
+            plan.request.input.insert(0, context.frame.clone());
+            plan.task_context_only = true;
+        } else {
+            plan.request.input.insert(0, ModelInputBlock::Text { text });
+        }
         let notice = serde_json::json!({"savedToolResultsRetained":true,"historicalToolContentWithheld":true,
             "executionRepeated":false,"providerContextReset":true});
         plan.request.input.push(ModelInputBlock::Text {

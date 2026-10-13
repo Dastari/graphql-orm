@@ -14,6 +14,7 @@ struct Capture {
 struct Custody {
     captures: Mutex<BTreeMap<Uuid, Capture>>,
     effects: AtomicUsize,
+    created_threads: AtomicUsize,
     opens: AtomicUsize,
     allowed: AtomicBool,
     ordinary_allowed: AtomicBool,
@@ -325,8 +326,14 @@ impl crate::AiProvider for MediaProvider {
         _: &AiProviderSessionDescriptor,
         _: &ModelRequest,
     ) -> Result<AiProviderSessionCursor, ProviderError> {
-        AiProviderSessionCursor::new("test.thread", "preview-thread")
-            .map_err(|_| ProviderError::InvalidRequest)
+        AiProviderSessionCursor::new(
+            "test.thread",
+            format!(
+                "preview-thread-{}",
+                self.custody.created_threads.fetch_add(1, Ordering::SeqCst)
+            ),
+        )
+        .map_err(|_| ProviderError::InvalidRequest)
     }
     async fn stream(
         &self,
@@ -1258,6 +1265,7 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
         AiSessionRecordWhereInput::default(),
         UpdateAiSessionRecordInput {
             message_head: Some(1),
+            event_head: Some(1),
             ..Default::default()
         },
     )
@@ -1282,6 +1290,31 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
             completion_state: "complete".into(),
             finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
             content_purged_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let message = AiMessageRecord::find_by_id(&fixture.database, &fixture.lease.input_message_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let event_id = Uuid::new_v4();
+    AiSessionEventRecord::insert(
+        &fixture.database,
+        crate::persistence::CreateAiSessionEventRecordInput {
+            id: event_id,
+            session_id: session.id,
+            sequence: 1,
+            event_type: "message_queued".into(),
+            run_id: Some(fixture.lease.run_id().0),
+            causation_id: Some(message.client_message_id.unwrap().to_string()),
+            correlation_id: message.client_message_id.unwrap().to_string(),
+            protected_payload: serde_json::to_value(
+                crate::ProtectedContentEnvelope::DatabaseManaged {
+                    value: json!({"messageId":message.id,"runId":fixture.lease.run_id().0}),
+                },
+            )
+            .unwrap(),
         },
     )
     .await
@@ -1335,28 +1368,33 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
 
 #[tokio::test]
 async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_executing_again() {
-    approved_media_lifecycle(false, false, 0).await;
+    approved_media_lifecycle(false, false, 0, None).await;
 }
 
 #[tokio::test]
 async fn native_history_normal_deny_after_preflight_withholds_saved_effect_and_releases_unstarted_budget()
  {
-    approved_media_lifecycle(true, false, 0).await;
+    approved_media_lifecycle(true, false, 0, None).await;
 }
 
 #[tokio::test]
 async fn approved_effect_with_invalid_media_keeps_output_and_enters_recovery_without_replay() {
-    approved_media_lifecycle(false, true, 0).await;
+    approved_media_lifecycle(false, true, 0, None).await;
 }
 
 #[tokio::test]
 async fn approved_completed_effect_survives_mid_effect_scope_and_session_withdrawal() {
     for withdrawal in [1, 2] {
-        approved_media_lifecycle(false, false, withdrawal).await;
+        approved_media_lifecycle(false, false, withdrawal, None).await;
     }
 }
 
-async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool, withdrawal: usize) {
+async fn approved_media_lifecycle(
+    deny_history: bool,
+    invalid_metadata: bool,
+    withdrawal: usize,
+    reset_mode: Option<usize>,
+) {
     let (fixture, custody, application) = media_fixture_mode(true, true).await;
     let descriptor = fixture
         .runtime
@@ -1633,6 +1671,19 @@ async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool, wi
         .consume_supervised_before_provider(current, &adopted)
         .await
         .unwrap();
+    if let Some(mode) = reset_mode {
+        exercise_owned_static_reset(
+            &fixture,
+            &custody,
+            application,
+            sessions,
+            &current,
+            &adopted,
+            mode,
+        )
+        .await;
+        return;
+    }
     let mut next = plan(&fixture);
     next.budget.attempt_id = current.attempt_id();
     next.budget.lease_generation = current.lease_generation();
@@ -1927,4 +1978,290 @@ async fn prepared_original_task_survives_a_later_queued_message_without_new_huma
             .is_err()
     );
     assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+}
+
+struct ConfirmPreviewDeletion {
+    custody: Arc<Custody>,
+    fail: bool,
+    requests: Mutex<Vec<String>>,
+    created_at_delete: Mutex<Vec<usize>>,
+}
+#[async_trait]
+impl crate::AiProviderSessionDeletionService for ConfirmPreviewDeletion {
+    async fn delete_or_confirm_absent(
+        &self,
+        request: &crate::AiProviderSessionDeletionRequest,
+    ) -> Result<crate::AiProviderSessionAbsenceProof, ProviderError> {
+        self.requests
+            .lock()
+            .await
+            .push(request.cursor().fingerprint());
+        assert_eq!(self.custody.effects.load(Ordering::SeqCst), 1);
+        self.created_at_delete
+            .lock()
+            .await
+            .push(self.custody.created_threads.load(Ordering::SeqCst));
+        if self.fail {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(crate::AiProviderSessionAbsenceProof::for_request(
+            request,
+            OffsetDateTime::now_utc(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn owning_approved_static_reset_requires_confirmed_cleanup_and_current_source_without_effect_replay()
+ {
+    for mode in [0, 1, 2, 4, 5] {
+        Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exercise_owned_static_reset(
+    fixture: &Fixture,
+    custody: &Arc<Custody>,
+    application: Arc<OrmAiApplicationToolCallService>,
+    sessions: Arc<OrmAiProviderSessionService>,
+    lease: &AiRunLease,
+    adopted: &crate::AiAdoptedSupervisedToolBatch,
+    mode: usize,
+) {
+    let descriptor = fixture
+        .runtime
+        .tool_catalog()
+        .descriptor(&AiToolId::parse("records.read").unwrap())
+        .unwrap();
+    let definition = ModelToolDefinition {
+        tool_id: descriptor.id.as_str().into(),
+        provider_name: "records_read".into(),
+        fingerprint: descriptor.fingerprint.clone(),
+        description: descriptor.description.clone(),
+        parameters: descriptor.argument_schema.clone(),
+        strict: true,
+        defer_loading: false,
+    };
+    let delivery =
+        super::native_coordinator_tests::mixed_broker_delivery(fixture, vec![definition]);
+    delivery
+        .set_static_bootstrap_offering(&BTreeSet::new())
+        .unwrap();
+    let mut policy = AiToolPolicySet::new(ToolMaturity::SupervisedWrite);
+    policy.bind(AiToolPolicyBinding {
+        tool_id: descriptor.id.clone(),
+        fingerprint: descriptor.fingerprint.clone(),
+        enabled: true,
+    });
+    let prepared = application
+        .prepare_task_continuation_context(lease, &fixture.scope)
+        .await
+        .unwrap();
+    let continuation = adopted
+        .continuation()
+        .clone()
+        .with_prepared_task_context(prepared)
+        .unwrap();
+    let original_reference = continuation.chain_reference().unwrap();
+    let mut base = plan(fixture);
+    base.request.input.clear();
+    base.request.tools = delivery.current_tools();
+    base.budget.attempt_id = lease.attempt_id();
+    base.budget.lease_generation = lease.lease_generation();
+    base.budget.idempotency_key = "owned-static-reset".into();
+    base.budget.estimate.input_tokens = 10000;
+    base.budget.estimate.image_units = 4;
+    assert!(
+        AiProviderCallPlan::new_continuation_with_classified_tools(
+            base.provider_kind.clone(),
+            base.request.clone(),
+            base.budget.clone(),
+            base.transfers.clone(),
+            "owned-static-reset",
+            continuation.clone(),
+            fixture.runtime.tool_catalog(),
+            &policy,
+            &fixture.generated_target_policy
+        )
+        .is_err(),
+        "another constructor cannot drop owning prepared-context evidence"
+    );
+    let mut next = AiProviderCallPlan::new_continuation_with_classified_capability_surface(
+        base.provider_kind,
+        base.request,
+        base.budget,
+        base.transfers,
+        "owned-static-reset",
+        continuation,
+        &delivery.current_surface(),
+        fixture.runtime.tool_catalog(),
+        &policy,
+        &fixture.generated_target_policy,
+    )
+    .unwrap();
+    let selected = AiProviderSessionDescriptor::new(
+        ProviderKind::OpenAiCompatible,
+        "mock-profile",
+        "mock-model",
+        "a".repeat(64),
+        "mock/v1",
+        "b".repeat(64),
+    )
+    .unwrap();
+    let session_plan = crate::AiProviderSessionTurnPlan::new(selected, "d".repeat(64)).unwrap();
+    let claim = sessions.reclaim_after_wait(lease).await.unwrap();
+    let old_cursor = sessions
+        .open_for_run(lease, &claim)
+        .await
+        .unwrap()
+        .cursor()
+        .fingerprint();
+    let deletion = Arc::new(ConfirmPreviewDeletion {
+        custody: custody.clone(),
+        fail: mode == 1,
+        requests: Mutex::new(Vec::new()),
+        created_at_delete: Mutex::new(Vec::new()),
+    });
+    let executor = AiProviderCallExecutor::new(
+        fixture.runtime.clone(),
+        fixture.budget_service.clone(),
+        fixture.audit.clone(),
+        Arc::new(ImageAccounting),
+        Arc::new(SystemClock),
+        AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+    )
+    .with_tool_result_source_service(application.clone())
+    .unwrap()
+    .with_static_offering_reset_deletion_service(deletion.clone());
+    if mode == 2 {
+        custody
+            .withdraw_access_after_effect
+            .store(1, Ordering::SeqCst);
+        custody.access_withdrawn.store(true, Ordering::SeqCst);
+    }
+    if mode == 4 || mode == 5 {
+        if mode == 4 {
+            custody.allowed.store(false, Ordering::SeqCst);
+        }
+        if mode == 5 {
+            next.budget.estimate.image_units = 0;
+        }
+        custody.requests.lock().await.clear();
+        // The admission preflight proves the old image is unavailable under current
+        // consent/quote. The SDK performs the same protected withholding path used by
+        // the executor, with confirmed deletion and real fresh retained cursor ownership.
+        assert!(
+            executor
+                .prepare_retained_tool_history(lease, &mut next, &claim)
+                .await
+                .is_err()
+        );
+        let result = executor
+            .execute_withheld_native_task_context(
+                Arc::new(Mutex::new(lease.clone())),
+                next,
+                &session_plan,
+                &(sessions.clone() as Arc<dyn crate::AiProviderSessionService>),
+                &claim,
+            )
+            .await
+            .unwrap();
+        assert!(result.proves_static_offering_reset_from(Some(&original_reference)));
+        assert!(result.is_withheld_native_task_context());
+        assert_eq!(result.usage().image_units, 0);
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(custody.created_threads.load(Ordering::SeqCst), 2);
+        assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
+        assert_eq!(*deletion.created_at_delete.lock().await, vec![1]);
+        let sent = custody.requests.lock().await;
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].tools.is_empty());
+        assert!(sent[0].continuation.is_none());
+        assert!(
+            sent[0]
+                .input
+                .iter()
+                .all(|input| matches!(input, ModelInputBlock::Text { .. }))
+        );
+        let contents = serde_json::to_string(&sent[0].input).unwrap();
+        assert!(contents.contains("FrameworkTaskContinuationContext"));
+        assert!(contents.contains("historicalToolContentWithheld"));
+        assert!(contents.contains("invocationAlreadyCompleted"));
+        assert!(!contents.contains("FrameworkApprovedToolOutcome"));
+        assert!(!contents.contains("Preview"));
+        assert!(!contents.contains("data:image"));
+        let budgets = AiBudgetReservationRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        let current = budgets
+            .iter()
+            .find(|budget| budget.id == result.budget_reservation_id().0)
+            .unwrap();
+        assert_eq!(current.state, "committed");
+        assert_eq!(current.reserved_image_units, 0);
+        return;
+    }
+    let result = executor
+        .reset_static_offering(
+            lease,
+            &mut next,
+            &session_plan,
+            &(sessions.clone() as Arc<dyn crate::AiProviderSessionService>),
+            Some(&claim),
+        )
+        .await;
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+    assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
+    if mode == 0 {
+        let (claim, cursor) = result.unwrap();
+        assert_ne!(cursor.fingerprint(), old_cursor);
+        assert_eq!(custody.created_threads.load(Ordering::SeqCst), 2);
+        assert_eq!(*deletion.requests.lock().await, vec![old_cursor]);
+        assert!(next.request.continuation.is_none());
+        let receipt = next.static_offering_reset_receipt.as_ref().unwrap();
+        assert_eq!(receipt.original_continuation_reference, original_reference);
+        assert_eq!(receipt.replacement_binding_id, claim.binding_id());
+        assert_eq!(receipt.replacement_cursor_fingerprint, cursor.fingerprint());
+        assert!(
+            matches!(&next.request.input[1],ModelInputBlock::Text{text} if text.contains("FrameworkTaskContinuationContext"))
+        );
+        let row = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+            &fixture.database,
+            &claim.binding_id(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.state, "claimed");
+        assert_eq!(
+            row.installed_offering_fingerprint.as_deref(),
+            Some(next.offering_fingerprint().as_str())
+        );
+    } else {
+        assert!(result.is_err());
+        assert_eq!(custody.created_threads.load(Ordering::SeqCst), 1);
+        let row = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+            &fixture.database,
+            &claim.binding_id(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        if mode == 1 {
+            assert_eq!(row.state, "cleanup_in_progress");
+            assert!(row.protected_cursor.is_some());
+        } else {
+            assert!(deletion.requests.lock().await.is_empty());
+            assert_eq!(row.state, "claimed");
+        }
+    }
+    let call = AiToolCallRecord::find_by_id(&fixture.database, &adopted.tool_call_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(call.protected_result.is_some());
+    assert_eq!(call.state, "completed");
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }

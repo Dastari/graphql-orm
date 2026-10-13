@@ -41,8 +41,20 @@ impl AiProviderCallExecutor {
         sources
             .validate_task_continuation_context(lease, &plan.budget.scope, context)
             .await?;
-        if plan.request.native_approved_outcome_hash().as_deref()
-            != Some(evidence.outcome_hash.as_str())
+        let original_outcome_hash = if plan.task_context_only {
+            plan.replan_continuation
+                .as_ref()
+                .and_then(|original| original.input().first())
+                .and_then(|block| match block {
+                    ModelInputBlock::Json { value } => {
+                        crate::provider::native_approved_outcome_hash(value)
+                    }
+                    _ => None,
+                })
+        } else {
+            plan.request.native_approved_outcome_hash()
+        };
+        if original_outcome_hash.as_deref() != Some(evidence.outcome_hash.as_str())
             || evidence.session_id != lease.session_id()
             || evidence.run_id != lease.run_id()
             || evidence.attempt_id != lease.attempt_id()
@@ -51,12 +63,18 @@ impl AiProviderCallExecutor {
         {
             return Err(AiError::Conflict);
         }
-        let original_continuation_reference = plan
-            .request
-            .continuation
-            .as_ref()
-            .and_then(|continuation| continuation.chain_reference(&plan.request.input))
-            .ok_or(AiError::Conflict)?;
+        let original_continuation_reference = if plan.task_context_only {
+            plan.replan_continuation
+                .as_ref()
+                .ok_or(AiError::Conflict)?
+                .chain_reference()?
+        } else {
+            plan.request
+                .continuation
+                .as_ref()
+                .and_then(|continuation| continuation.chain_reference(&plan.request.input))
+                .ok_or(AiError::Conflict)?
+        };
         // Price the exact fresh projection before cleanup or empty-thread creation. The
         // executor may refuse a host quote; it never increases a monetary reservation.
         let mut fresh_request = plan.request.clone();
@@ -202,12 +220,71 @@ impl AiProviderCallExecutor {
                 original_cursor_fingerprint,
                 replacement_cursor_fingerprint: cursor.fingerprint(),
                 replacement_binding_id: claim.binding_id(),
+                task_context_only: plan.task_context_only,
                 cleanup_generation,
                 offering_fingerprint: desired_offering_fingerprint,
                 outcome_hash: evidence.outcome_hash.clone(),
             },
         ));
         Ok((claim, cursor))
+    }
+
+    pub(super) async fn execute_withheld_native_task_context(
+        &self,
+        lease_state: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        planned: &crate::AiProviderSessionTurnPlan,
+        sessions: &Arc<dyn crate::AiProviderSessionService>,
+        claim: &crate::AiProviderSessionClaim,
+    ) -> Result<AiProviderCallResult, AiError> {
+        let current = lease_state.lock().await;
+        let mut safe = self.withheld_tool_history_plan(&current, plan).await?;
+        // A preceding proved empty-thread reset may already carry a bridge. This new
+        // definitely-unstarted source withholding deletes that actual cursor and mints a
+        // replacement bridge to the SAME original continuation, never a relabeled response.
+        safe.static_offering_reset_receipt = None;
+        if !safe.task_context_only
+            || !safe.request.tools.is_empty()
+            || safe.budget.estimate.image_units != 0
+        {
+            return Err(AiError::Conflict);
+        }
+        let (fresh_claim, cursor) = self
+            .reset_static_offering(&current, &mut safe, planned, sessions, Some(claim))
+            .await?;
+        let binding = crate::AiProviderRunBinding::from_lease(&current)?;
+        let opened = sessions
+            .open_for_run(&current, &fresh_claim)
+            .await?
+            .activate_newly_bound_empty(binding, &cursor)?;
+        drop(current);
+        let shared_claim = Arc::new(Mutex::new(fresh_claim.clone()));
+        let outcome = Box::pin(self.execute_inner(
+            lease_state,
+            safe,
+            None,
+            Some(opened),
+            Some(shared_claim),
+            0,
+        ))
+        .await;
+        match outcome {
+            Ok(mut result) => {
+                result.provider_session_claim = Some(fresh_claim);
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = sessions
+                    .require_cleanup(&fresh_claim, "native_withheld_task_context_failed")
+                    .await;
+                // This quote already has zero images; it cannot mint another image reduction.
+                Err(if matches!(error, AiError::PreTransportBudgetDenied) {
+                    AiError::PreTransportProviderFailed
+                } else {
+                    error
+                })
+            }
+        }
     }
 
     pub(super) async fn confirm_unstarted_static_offering_cleanup(
@@ -309,6 +386,13 @@ impl AiUnstartedStaticOfferingReplan {
         &self.delivery
     }
 
+    /// Original conservative typed quote. Retain every non-image field exactly; only image
+    /// capacity may decrease and the content-bound unstarted idempotency key must change.
+    /// This read-only request is pricing evidence, never a reservation or disclosure permit.
+    pub fn original_budget_request(&self) -> &AiBudgetReservationRequest {
+        &self.failed_plan.budget
+    }
+
     /// Failed finite image quote; the replacement quote must be strictly smaller.
     pub fn image_unit_quote(&self) -> u64 {
         self.failed_plan.budget.estimate.image_units
@@ -401,7 +485,7 @@ impl AiUnstartedStaticOfferingReplan {
             || old.correlation_id != next.correlation_id
             || !new_tools.is_subset(&old_tools)
             || new_tools == old_tools
-            || !self.delivery.same_shared_offering(delivery)
+            || !self.delivery.shares_run_state(delivery)
             || !delivery.matches_offered_tools(next.offered_tools())
             || session.descriptor() != self.session.descriptor()
             || session.transcript_fingerprint() != self.session.transcript_fingerprint()
