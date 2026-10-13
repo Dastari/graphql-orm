@@ -325,6 +325,13 @@ pub(super) async fn owning_coordinator_reset(
         .count()
         .await
         .unwrap();
+    let original_binding =
+        crate::orm_provider_session::AiProviderSessionBindingRecord::query(fixture.database.pool())
+            .limit(1)
+            .fetch_one()
+            .await
+            .unwrap()
+            .unwrap();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(35),
         Box::pin(coordinator.execute_approved_claim(&approved)),
@@ -371,14 +378,18 @@ pub(super) async fn owning_coordinator_reset(
     );
     let requests = custody.requests.lock().await;
     match mode {
-        8 => {
+        8 | 14 => {
             assert!(
                 matches!(result, Ok(AiSupervisedAgentRunOutcome::Completed { .. })),
                 "{result:?}"
             );
-            assert_eq!(planner.retries.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                planner.retries.load(Ordering::SeqCst),
+                usize::from(mode == 8)
+            );
             assert_eq!(requests.len(), 1);
             assert!(requests[0].tools.is_empty());
+            assert!(requests[0].builtin_tools.is_empty());
             assert!(requests[0].continuation.is_none());
             let serialized = serde_json::to_string(&requests[0].input).unwrap();
             assert!(serialized.contains("FrameworkTaskContinuationContext"));
@@ -386,12 +397,43 @@ pub(super) async fn owning_coordinator_reset(
             assert!(!serialized.contains("FrameworkApprovedToolOutcome"));
             assert!(!serialized.contains("Preview"));
             assert!(!serialized.contains("data:image"));
+            assert!(!serialized.contains("v2:"));
+            assert!(!serialized.contains(&"0".repeat(64)));
+            let ModelInputBlock::Text { text } = &requests[0].input[0] else {
+                panic!("same original task remains untrusted user context")
+            };
+            let task: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(
+                task["originalMessageId"],
+                approved.lease().input_message_id().to_string()
+            );
+            assert_eq!(task["goalContext"]["text"], "hello");
+            assert_eq!(task["priorProtectedContentIncluded"], false);
+            assert_eq!(task["newHumanEventCreated"], false);
+            assert_eq!(
+                task["savedInvocationStatuses"][0]["toolCallId"],
+                calls[0].id.to_string()
+            );
+            assert_eq!(task["savedInvocationStatuses"][0]["state"], "completed");
+            for capture in custody.captures.lock().await.values() {
+                assert!(!serialized.contains(&capture.reference.reference().to_string()));
+                assert!(!serialized.contains(capture.reference.sha256()));
+            }
             // Approval thread, denied empty thread, reduced empty thread, and the exact
             // tool-free withheld projection each have real retained custody.
-            assert!(custody.created_threads.load(Ordering::SeqCst) >= 3);
-            assert!(deletion.requests.lock().await.len() >= 2);
+            if mode == 8 {
+                assert!(custody.created_threads.load(Ordering::SeqCst) >= 3);
+                assert!(deletion.requests.lock().await.len() >= 2);
+            } else {
+                assert_eq!(custody.created_threads.load(Ordering::SeqCst), 2);
+                assert_eq!(*deletion.created_at_delete.lock().await, vec![1]);
+                assert_eq!(
+                    *deletion.requests.lock().await,
+                    vec![original_binding.cursor_fingerprint]
+                );
+            }
         }
-        9 | 14 => {
+        9 => {
             assert!(
                 matches!(
                     result,
@@ -400,9 +442,7 @@ pub(super) async fn owning_coordinator_reset(
                 "{result:?}"
             );
             assert_eq!(planner.retries.load(Ordering::SeqCst), 0);
-            if mode == 9 {
-                assert!(planner.held_plan.lock().await.is_some());
-            }
+            assert!(planner.held_plan.lock().await.is_some());
             assert!(requests.is_empty());
         }
         10 | 12 => {
