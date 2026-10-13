@@ -4960,6 +4960,7 @@ impl AiProviderCallExecutor {
         let mut image_bytes = 0_u64;
         let mut image_count = 0_u64;
         let mut image_sources = BTreeSet::new();
+        let mut retained_images = Vec::new();
         let mut authorized = Vec::with_capacity(plan.transfers.len());
         for manifest in &plan.transfers {
             let mut sources = Vec::new();
@@ -5041,6 +5042,7 @@ impl AiProviderCallExecutor {
                             {
                                 return Err(source_failure(AiError::EgressDenied));
                             }
+                            retained_images.extend(images);
                         }
                     }
                     if !sources
@@ -5108,7 +5110,10 @@ impl AiProviderCallExecutor {
             return Err(source_failure(AiError::ToolExecutionFailed));
         }
         Ok((
-            context.with_run_binding(crate::AiProviderRunBinding::from_lease(lease)?)?,
+            context
+                .with_run_binding(crate::AiProviderRunBinding::from_lease(lease)?)?
+                .with_retained_tool_result_images(retained_images)
+                .map_err(source_failure)?,
             image_bytes,
         ))
     }

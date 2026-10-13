@@ -1360,6 +1360,7 @@ pub struct ProviderRequestContext {
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
+    retained_tool_images: Vec<crate::AiResolvedToolImage>,
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
 }
@@ -1388,10 +1389,50 @@ impl ProviderRequestContext {
             budget,
             transfers: Vec::new(),
             resolved_attachments: Vec::new(),
+            retained_tool_images: Vec::new(),
             #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_source_delivery: None,
         }
         .with_authorized_transfer(manifest, proof)
+    }
+
+    /// Actual protected original image pixels reopened by the owning SDK source loader after
+    /// atomic budget admission. Adapters send these as genuine image input parts for continuation
+    /// or history, never base64 result text. The getter grants no resource/execution authority and
+    /// does not renew capture, action or retention deadlines. Current delivery revalidation remains
+    /// mandatory immediately before transport.
+    pub fn retained_tool_result_images(&self) -> &[crate::AiResolvedToolImage] {
+        &self.retained_tool_images
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_retained_tool_result_images(
+        mut self,
+        images: Vec<crate::AiResolvedToolImage>,
+    ) -> Result<Self, AiError> {
+        let bytes = images
+            .iter()
+            .try_fold(0_u64, |sum, image| sum.checked_add(image.byte_count()))
+            .ok_or(AiError::ResultBudgetExceeded)?;
+        let pixels = images
+            .iter()
+            .try_fold(0_u64, |sum, image| {
+                sum.checked_add(
+                    u64::from(image.reference().width())
+                        .checked_mul(u64::from(image.reference().height()))?,
+                )
+            })
+            .ok_or(AiError::ResultBudgetExceeded)?;
+        if images.len() > 4 || bytes > 16 * 1024 * 1024 || pixels > 16_000_000 {
+            return Err(AiError::ResultBudgetExceeded);
+        }
+        self.retained_tool_images = images;
+        Ok(self)
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn tool_source_delivery_check(
+        &self,
+    ) -> Option<Arc<crate::provider_calls::ToolSourceDelivery>> {
+        self.tool_source_delivery.clone()
     }
 
     /// Revalidates protected retained sources under the current owning principal/grant/resource

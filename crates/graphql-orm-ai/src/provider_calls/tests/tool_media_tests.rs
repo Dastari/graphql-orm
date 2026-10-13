@@ -16,6 +16,7 @@ struct Custody {
     effects: AtomicUsize,
     opens: AtomicUsize,
     allowed: AtomicBool,
+    ordinary_allowed: AtomicBool,
     revoke_before_delivery: AtomicBool,
 }
 struct PreviewExecutor(Arc<Custody>);
@@ -120,11 +121,20 @@ impl AiEgressPolicy for Custody {
         principal: &ResolvedPrincipal,
         manifest: &AiEgressManifest,
     ) -> AiEgressDecision {
-        AiEgressDecision::allow(
-            manifest,
-            "preview-policy-v1",
-            principal.principal().subject(),
-        )
+        if self.ordinary_allowed.load(Ordering::SeqCst) {
+            AiEgressDecision::allow(
+                manifest,
+                "preview-policy-v1",
+                principal.principal().subject(),
+            )
+        } else {
+            AiEgressDecision::deny(
+                manifest,
+                crate::AiEgressReason::PolicyDenied,
+                "preview-policy-v1",
+                principal.principal().subject(),
+            )
+        }
     }
     async fn authorize_tool_sources(
         &self,
@@ -164,7 +174,10 @@ impl crate::AiProvider for MediaProvider {
         ProviderKind::OpenAiCompatible
     }
     fn capabilities(&self) -> crate::ProviderCapabilities {
-        MockProvider::new(Vec::new()).capabilities()
+        crate::ProviderCapabilities {
+            image_input: self.supported,
+            ..MockProvider::new(Vec::new()).capabilities()
+        }
     }
     fn supports_tool_result_images(&self) -> bool {
         self.supported
@@ -303,6 +316,7 @@ async fn media_fixture(
     let mut fixture = fixture(Vec::new()).await;
     let custody = Arc::new(Custody::default());
     custody.allowed.store(true, Ordering::SeqCst);
+    custody.ordinary_allowed.store(true, Ordering::SeqCst);
     let rule = AiDisclosureRule::exportable(DataClassification::Restricted);
     let fields = [
         "Reference",
@@ -616,5 +630,34 @@ async fn retained_origin_body_and_mixed_source_boundary_cannot_be_forged() {
             .await
             .is_err()
     );
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn delivery_history_race_denies_protected_sources_but_preserves_general_denials() {
+    let (fixture, custody, service) = media_fixture(true).await;
+    let result = preview_turn(&fixture, service.clone(), 4).await.unwrap();
+    let call = &result.interactive_tool_results()[0];
+    let mut manifest = call.egress_manifest().unwrap().clone();
+    manifest.capability = AiEgressCapability::ModelInference;
+    let delivery = ToolSourceDelivery::new(
+        service,
+        Arc::new(Mutex::new(call.lease().clone())),
+        &[manifest],
+        4,
+    )
+    .unwrap()
+    .unwrap();
+    delivery.authorize().await.unwrap();
+    custody.allowed.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        delivery.authorize().await,
+        Err(ProviderError::ToolSourceUnavailable)
+    ));
+    custody.ordinary_allowed.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        delivery.authorize().await,
+        Err(ProviderError::EgressDenied)
+    ));
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }

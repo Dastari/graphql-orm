@@ -741,15 +741,18 @@ impl AiCodexAppServerWebSearchTurnConfig {
 
 /// Bounded text and optional native-search input for one fresh app-server turn.
 ///
-/// This type has no tool, URL, path, shell, environment, browser, image, MCP,
-/// app, credential, or generic JSON-RPC field. It intentionally cannot model
-/// coordinator-managed application tools.
+/// Static tools and SDK-derived retained images are admitted only through their owning
+/// coordinator paths. This type accepts no arbitrary image URL/path, shell, environment,
+/// browser, MCP, app, credential or generic JSON-RPC field.
 #[derive(Clone, PartialEq)]
 pub struct AiCodexAppServerTurnInput {
     model: String,
     instructions: Vec<String>,
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
+    tool_images: Vec<crate::AiResolvedToolImage>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
     tools: Vec<ModelToolDefinition>,
     web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     reasoning_effort: ModelReasoningEffort,
@@ -799,6 +802,9 @@ impl AiCodexAppServerTurnInput {
             instructions,
             retained_bootstrap_fingerprint: None,
             input,
+            tool_images: Vec::new(),
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            source_delivery: None,
             tools: Vec::new(),
             web_search: None,
             reasoning_effort,
@@ -807,6 +813,53 @@ impl AiCodexAppServerTurnInput {
         };
         turn.validate()?;
         Ok(turn)
+    }
+
+    fn with_tool_result_context(
+        mut self,
+        context: &ProviderRequestContext,
+    ) -> Result<Self, ProviderError> {
+        self.tool_images = context.retained_tool_result_images().to_vec();
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        {
+            self.source_delivery = context.tool_source_delivery_check();
+        }
+        self.protocol_input()?;
+        self.validate()?;
+        Ok(self)
+    }
+    /// Revalidates original protected tool/image sources after process-pool queueing and
+    /// immediately before actual `turn/start` transport. It never executes the original tool,
+    /// renews action evidence or relies on a retained positive grant decision.
+    ///
+    /// # Errors
+    /// Returns a safe error for unavailable/expired/revoked/cancelled historical sources.
+    pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        if let Some(delivery) = &self.source_delivery {
+            delivery.authorize().await?;
+        }
+        Ok(())
+    }
+    fn protocol_input(&self) -> Result<Vec<Value>, ProviderError> {
+        let mut input = self
+            .input
+            .iter()
+            .map(|text| json!({"type":"text","text":text}))
+            .collect::<Vec<_>>();
+        for image in &self.tool_images {
+            input.push(json!({"type":"text","text":serde_json::to_string(&json!({"capturedObservation":true,"capturedAtMs":image.reference().captured_at_ms(),"actionExpiresAtMs":image.reference().action_expires_at_ms(),"retainedUntilMs":image.reference().retained_until_ms(),"actionEvidenceRenewed":false,"currentFieldDescribesOriginalCaptureOnly":true})).map_err(|_|ProviderError::ToolSourceUnavailable)?}));
+            input.push(json!({"type":"image","url":format!("data:{};base64,{}",image.reference().mime(),base64::engine::general_purpose::STANDARD.encode(image.bytes()))}));
+        }
+        if self.tool_images.len() > 4
+            || serde_json::to_vec(&input)
+                .map_err(|_| ProviderError::ToolSourceUnavailable)?
+                .len()
+                > MAXIMUM_FRAME_BYTES.saturating_sub(4096)
+        {
+            return Err(ProviderError::ToolSourceUnavailable);
+        }
+        Ok(input)
     }
 
     /// Creates one retained dynamic-tool turn for a host-owned readiness
@@ -1368,6 +1421,7 @@ impl AiProvider for AiCodexAppServerProvider {
                     .pool
                     .supports_launch_profile(self.registration.launch_profile()),
             provider_retained_continuation: true,
+            image_input: dynamic_tools_available,
             local: true,
             reasoning_effort_profiles: self
                 .registration
@@ -1407,7 +1461,9 @@ impl AiProvider for AiCodexAppServerProvider {
             )?
         } else {
             AiCodexAppServerTurnInput::try_from_model_request(request)?
-        };
+        }
+        .with_tool_result_context(&context)?;
+        context.authorize_tool_source_delivery().await?;
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -1483,7 +1539,9 @@ impl AiProvider for AiCodexAppServerProvider {
             )?
         } else {
             AiCodexAppServerTurnInput::try_from_dynamic_request(request)?
-        };
+        }
+        .with_tool_result_context(&context)?;
+        context.authorize_tool_source_delivery().await?;
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -4372,10 +4430,10 @@ impl AiCodexAppServerProtocolActor {
             && !self.turn_started_observed
     }
 
-    /// Encodes text-only user input for one exact lifecycle-complete thread.
+    /// Encodes text and SDK-verified original image input for an exact lifecycle-complete thread.
     ///
     /// Trusted instructions are deliberately not copied into the user input
-    /// list. No tool, path, URL, image, skill, audio, environment, approval,
+    /// list. No arbitrary tool, path, source URL, skill, audio, environment, approval,
     /// sandbox, or generic JSON field can be supplied through this method.
     ///
     /// # Errors
@@ -4432,7 +4490,7 @@ impl AiCodexAppServerProtocolActor {
         }
         let mut params = json!({
             "threadId": thread_id,
-            "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
+            "input": input.protocol_input()?,
             "summary": "none",
         });
         if let Some(effort) = input.reasoning_effort().wire_value() {

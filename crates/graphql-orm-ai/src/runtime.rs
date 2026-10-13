@@ -338,11 +338,10 @@ impl AiRuntime {
     ) -> Result<(), AiError> {
         if let Some(policy) = &descriptor.result_media {
             self.tool_media_resolver(policy.resolver_id())?;
-            if !self
-                .providers
-                .get(kind)
-                .is_some_and(|provider| provider.supports_tool_result_image_policy(descriptor))
-            {
+            if !self.providers.get(kind).is_some_and(|provider| {
+                provider.capabilities().image_input
+                    && provider.supports_tool_result_image_policy(descriptor)
+            }) {
                 return Err(AiError::Forbidden);
             }
         }
@@ -1097,6 +1096,11 @@ impl AiRuntime {
                     "provider registry kind mismatch".to_owned(),
                 ));
             }
+            if !context.retained_tool_result_images().is_empty()
+                && (!provider.capabilities().image_input || !provider.supports_tool_result_images())
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
             provider
                 .capabilities()
                 .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
@@ -1164,6 +1168,11 @@ impl AiRuntime {
                 return Err(ProviderError::InvalidConfiguration(
                     "provider registry kind mismatch".to_owned(),
                 ));
+            }
+            if !context.retained_tool_result_images().is_empty()
+                && (!provider.capabilities().image_input || !provider.supports_tool_result_images())
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
             }
             provider
                 .capabilities()

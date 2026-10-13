@@ -190,7 +190,9 @@ pub(crate) fn validate_image_reference_batch(
     images: &[AiToolImageReference],
     limits: AiToolResultMediaLimits,
 ) -> Result<(), AiError> {
-    if images.len() > usize::from(limits.maximum_images()) {
+    if u64::try_from(images.len()).map_err(|_| AiError::ResultBudgetExceeded)?
+        > u64::from(limits.maximum_images())
+    {
         return Err(AiError::ResultBudgetExceeded);
     }
     let pixels = images

@@ -90,7 +90,12 @@ cannot erase SDK-derived image usage.
 Adapters await `ProviderRequestContext::authorize_tool_source_delivery` after
 preparation/queueing and immediately before model/history transport. Its owning
 callback is privately installed after actual source/body admission and reopens
-current grants, resource bytes and run fences. A general/ordinary denial remains
+current grants, resource bytes and run fences. The privately derived
+`retained_tool_result_images()` getter contains actual reopened original pixels
+for typed continuation input, rather than assuming the provider retained a
+previous successful image delivery. Codex turn input carries the same delivery
+check through the process queue; hosts await its `authorize_tool_source_delivery`
+immediately before `turn/start`. A general/ordinary denial remains
 closed rather than being reclassified as unavailable history.
 
 Adapters await `ProviderDynamicToolResponder::authorize_delivery` immediately

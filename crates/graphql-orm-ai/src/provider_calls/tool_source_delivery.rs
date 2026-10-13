@@ -83,10 +83,22 @@ impl ToolSourceDelivery {
                     if context.data_source() != *source {
                         return Err(ProviderError::ToolSourceUnavailable);
                     }
+                    contexts.push(context);
+                }
+                let ordinary = crate::tool_media::ordinary_source_component(manifest, &contexts)
+                    .map_err(|_| ProviderError::EgressDenied)?;
+                self.service
+                    .runtime()
+                    .authorize_egress(lease.principal_reference(), &ordinary)
+                    .await
+                    .map_err(|_| ProviderError::EgressDenied)?
+                    .authorize(&ordinary)
+                    .map_err(|_| ProviderError::EgressDenied)?;
+                for context in &contexts {
                     if seen.insert(context.source_reference()) && !context.images().is_empty() {
                         let images = self
                             .service
-                            .authorize_retained_image_analysis(&lease, &context, manifest)
+                            .authorize_retained_image_analysis(&lease, context, manifest)
                             .await
                             .map_err(|_| ProviderError::ToolSourceUnavailable)?;
                         count = count
@@ -101,7 +113,6 @@ impl ToolSourceDelivery {
                             return Err(ProviderError::BudgetDenied);
                         }
                     }
-                    contexts.push(context);
                 }
                 let decision = self
                     .service
@@ -139,5 +150,14 @@ impl ToolSourceDelivery {
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
             .await
             .map_err(|_| ProviderError::ToolSourceUnavailable)?
+    }
+}
+
+impl PartialEq for ToolSourceDelivery {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.service, &other.service)
+            && Arc::ptr_eq(&self.lease, &other.lease)
+            && self.manifests == other.manifests
+            && self.maximum_image_units == other.maximum_image_units
     }
 }
