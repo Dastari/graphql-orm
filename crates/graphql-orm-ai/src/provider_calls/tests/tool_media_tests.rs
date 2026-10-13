@@ -272,6 +272,11 @@ impl AiEgressPolicy for Custody {
         manifest: &AiEgressManifest,
         sources: &[crate::AiToolResultDisclosureContext],
     ) -> AiEgressDecision {
+        if sources.is_empty() {
+            // Withheld output has no media/source consent to admit; ordinary current
+            // egress policy still governs the exact saved-task/status projection.
+            return self.authorize(principal, manifest).await;
+        }
         let model_denied = manifest.capability == AiEgressCapability::ModelInference
             && self.deny_model_disclosure_at.load(Ordering::SeqCst) > 0
             && self.model_disclosures.fetch_add(1, Ordering::SeqCst) + 1
@@ -2435,6 +2440,22 @@ async fn exercise_owned_static_reset(
         assert!(!contents.contains("FrameworkApprovedToolOutcome"));
         assert!(!contents.contains("Preview"));
         assert!(!contents.contains("data:image"));
+        let inference = result.model_inference_manifest();
+        assert_eq!(inference.attachment_count, 0);
+        assert!(inference.sources.iter().all(|source| {
+            source.kind != "application_tool_result" && source.kind != "tool_result_image"
+        }));
+        custody.ordinary_allowed.store(false, Ordering::SeqCst);
+        let denied = fixture
+            .runtime
+            .authorize_tool_source_egress(lease.principal_reference(), inference, &[])
+            .await
+            .unwrap();
+        assert!(
+            denied.authorize(inference).is_err(),
+            "zero sources never waive ordinary policy"
+        );
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
         let budgets = AiBudgetReservationRecord::query(fixture.database.pool())
             .fetch_all()
             .await
