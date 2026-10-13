@@ -76,6 +76,15 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+### Fixed
+
+- Read-only `AiAgentContinuation::task_context_state` distinguishes ordinary
+  broker continuations from verified native checkpoints needing or retaining
+  their exact prepared task context. Hosts can preserve ordinary continuation
+  behavior without treating native attachment conflicts as a fallback. Invalid
+  private evidence or context bindings remain conflicts; classification grants
+  no current authorization, execution, reset or disclosure authority.
+
 ### Added
 
 - `AiToolAuthorizationDecision::require_authentication` distinguishes current

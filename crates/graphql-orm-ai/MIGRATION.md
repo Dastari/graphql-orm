@@ -19,6 +19,24 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.107.0 to 0.107.1
+
+This compatible patch adds `AiAgentContinuation::task_context_state` and the
+closed `AiAgentContinuationTaskContextState` enum. Match `Ordinary` to retain the
+continuation without preparing native task context. For
+`VerifiedNativeNeedsTaskContext`, prepare through the owning service, attach
+the same opaque context and propagate every error. For
+`VerifiedNativeHasTaskContext`, reuse and price the same opaque continuation;
+do not prepare or attach another context. Never use `AiError::Conflict` as an
+ordinary-continuation fallback.
+
+The read-only classification validates private retained evidence and binding
+consistency. It does not attest current lease, principal, grant or source
+authorization. Current preparation and provider delivery checks remain required.
+No data migration, GraphQL SDL, schema-module, serialized checkpoint, provider
+fingerprint, authorization, budget or protected source format change is required.
+AI schema module remains 0.72.0.
+
 ## 0.106.1 to 0.107.0
 
 This is a source-breaking pre-1.0 minor release under Cargo's compatibility

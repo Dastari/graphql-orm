@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.107.1` adds read-only continuation task-context classification.
+Hosts preserve ordinary broker continuations, attach context only to verified
+native checkpoints that need it, and reuse already prepared continuations.
+Invalid native evidence or attachment errors remain closed; classification
+grants no current permission. See [MIGRATION.md](MIGRATION.md).
+
 Version `0.107.0` adds protected JPEG/PNG tool-result content and fenced
 static-tool offering changes for retained native runs. Completed effects remain
 durable; current source authorization, atomic image budgets and final transport

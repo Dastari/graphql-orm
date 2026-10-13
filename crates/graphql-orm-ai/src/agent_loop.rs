@@ -71,6 +71,21 @@ pub struct AiAgentContinuation {
     pub(crate) task_context: Option<std::sync::Arc<AiPreparedTaskContinuationContext>>,
 }
 
+/// Read-only task-context state derived from an opaque SDK-owned continuation.
+///
+/// This classification grants no reset, execution, disclosure, or current-lease authority.
+/// Native states describe retained checkpoint evidence; normal current-access and fencing
+/// checks still apply when the owner prepares a context and before provider delivery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiAgentContinuationTaskContextState {
+    /// Ordinary broker or tool continuation with no native evidence or prepared context.
+    Ordinary,
+    /// Verified native checkpoint continuation awaiting one exact prepared task context.
+    VerifiedNativeNeedsTaskContext,
+    /// Verified native continuation already retaining its same bound prepared context.
+    VerifiedNativeHasTaskContext,
+}
+
 /// Read-only owning projection of an original task and actual saved invocation statuses.
 ///
 /// Fields, original message/event identities and source proof are opaque. It has no public
@@ -154,6 +169,70 @@ impl AiAgentContinuation {
     /// Returns the same bounded serialization errors as [`Self::conservative_input_bytes`].
     pub fn conservative_input_tokens(&self) -> Result<u64, AiError> {
         self.conservative_input_bytes()
+    }
+
+    /// Classifies the exact retained continuation without exposing checkpoint evidence.
+    ///
+    /// Leave ordinary continuations unchanged. Attach an owning prepared context only to
+    /// `VerifiedNativeNeedsTaskContext`, propagating every attachment error. For
+    /// `VerifiedNativeHasTaskContext`, price and reuse this same opaque continuation;
+    /// preparing or attaching another context is not a fallback.
+    ///
+    /// This checks internal outcome/evidence/context consistency, not current authorization
+    /// or lease freshness. Attachment and delivery retain their existing current fences.
+    ///
+    /// # Errors
+    /// Returns [`AiError::Conflict`] for unverified native material, ordinary material
+    /// carrying native evidence/context, or mismatched native outcome or context bindings.
+    pub fn task_context_state(&self) -> Result<AiAgentContinuationTaskContextState, AiError> {
+        use AiAgentContinuationTaskContextState as State;
+        if !self.native_outcome {
+            return if self.native_reset_evidence.is_none() && self.task_context.is_none() {
+                Ok(State::Ordinary)
+            } else {
+                Err(AiError::Conflict)
+            };
+        }
+        let evidence = self
+            .native_reset_evidence
+            .as_ref()
+            .ok_or(AiError::Conflict)?;
+        let [ModelInputBlock::Json { value }] = self.input.as_slice() else {
+            return Err(AiError::Conflict);
+        };
+        if !matches!(
+            self.continuation,
+            ModelContinuation::ProviderResponse { .. }
+        ) || crate::provider::native_approved_outcome_hash(value).is_none()
+            || crate::orm_native_approvals::native_receipt_hash(value)? != evidence.outcome_hash
+            || value
+                .get("toolCallId")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                != Some(evidence.tool_call_id)
+            || self.transfers.len() != 1
+            || !self.replay_transfers.is_empty()
+            || self.transfers[0].capability != crate::AiEgressCapability::ToolResult
+            || !self.transfers[0].sources.iter().any(|source| {
+                source.kind == "native_approved_outcome"
+                    && source.reference == evidence.outcome_hash
+                    && source.trust == crate::AiSourceTrust::TrustedRuntime
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        match &self.task_context {
+            None => Ok(State::VerifiedNativeNeedsTaskContext),
+            Some(context)
+                if context.session_id == evidence.session_id
+                    && context.run_id == evidence.run_id
+                    && context.attempt_id == evidence.attempt_id
+                    && context.lease_generation == evidence.lease_generation =>
+            {
+                Ok(State::VerifiedNativeHasTaskContext)
+            }
+            Some(_) => Err(AiError::Conflict),
+        }
     }
 
     /// Consumes the exact prepared owning context into one verified native continuation.
