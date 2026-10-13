@@ -4,6 +4,9 @@ use crate::{AiToolImageFieldBindings, AiToolResultMediaLimits, AiToolResultMedia
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+#[path = "static_offering_media_tests.rs"]
+mod static_offering_tests;
+
 #[derive(Clone)]
 struct Capture {
     reference: crate::AiToolImageReference,
@@ -15,6 +18,7 @@ struct Custody {
     captures: Mutex<BTreeMap<Uuid, Capture>>,
     effects: AtomicUsize,
     created_threads: AtomicUsize,
+    complete_after_capture: AtomicBool,
     opens: AtomicUsize,
     allowed: AtomicBool,
     ordinary_allowed: AtomicBool,
@@ -346,8 +350,11 @@ impl crate::AiProvider for MediaProvider {
             Ordering::SeqCst,
         );
         self.custody.requests.lock().await.push(request.clone());
-        if request.tools.is_empty() {
+        if request.tools.is_empty() || self.custody.complete_after_capture.load(Ordering::SeqCst) {
             return Ok(Box::pin(futures::stream::iter([
+                Ok(ProviderEvent::TextDelta {
+                    text: "The saved task is complete.".into(),
+                }),
                 Ok(ProviderEvent::Usage {
                     input_tokens: 1,
                     output_tokens: 1,
@@ -388,9 +395,13 @@ impl crate::AiProvider for MediaProvider {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<crate::ProviderEventStream, ProviderError> {
         context.authorize_tool_source_delivery().await?;
+        if self.custody.complete_after_capture.load(Ordering::SeqCst) {
+            return self.stream(request, context).await;
+        }
         let definition = request
             .tools
-            .first()
+            .iter()
+            .find(|definition| definition.tool_id == "records.read")
             .ok_or(ProviderError::Rejected)?
             .clone();
         let custody = self.custody.clone();
@@ -1419,16 +1430,36 @@ async fn approved_media_lifecycle(
         fingerprint: descriptor.fingerprint.clone(),
         enabled: true,
     });
-    let offered = AiProviderCallPlan::new_with_classified_tools(
-        base.provider_kind,
-        base.request,
-        base.budget,
-        base.transfers,
-        "approved-media-test",
-        fixture.runtime.tool_catalog(),
-        &policy,
-        &fixture.generated_target_policy,
-    )
+    let coordinator_delivery = reset_mode.filter(|mode| *mode >= 8).map(|_| {
+        super::native_coordinator_tests::mixed_broker_delivery(&fixture, base.request.tools.clone())
+    });
+    let offered = if let Some(delivery) = &coordinator_delivery {
+        base.request.tools = delivery.current_tools();
+        base.budget.estimate.input_tokens = 8000;
+        base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+        AiProviderCallPlan::new_with_classified_capability_surface(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            "approved-media-test",
+            &delivery.current_surface(),
+            fixture.runtime.tool_catalog(),
+            &policy,
+            &fixture.generated_target_policy,
+        )
+    } else {
+        AiProviderCallPlan::new_with_classified_tools(
+            base.provider_kind,
+            base.request,
+            base.budget,
+            base.transfers,
+            "approved-media-test",
+            fixture.runtime.tool_catalog(),
+            &policy,
+            &fixture.generated_target_policy,
+        )
+    }
     .unwrap();
     let executor = AiProviderCallExecutor::new(
         fixture.runtime.clone(),
@@ -1483,7 +1514,10 @@ async fn approved_media_lifecycle(
         ProviderKind::OpenAiCompatible,
         "mock-profile",
         "mock-model",
-        "a".repeat(64),
+        coordinator_delivery.as_ref().map_or_else(
+            || "a".repeat(64),
+            |delivery| delivery.session_binding().fingerprint().to_owned(),
+        ),
         "mock/v1",
         "b".repeat(64),
     )
@@ -1555,8 +1589,24 @@ async fn approved_media_lifecycle(
     let resume = OrmAiSupervisedResumeService::new(
         fixture.run_service.clone(),
         checkpoints.clone(),
-        consequential,
+        consequential.clone(),
     );
+    if let Some(delivery) = coordinator_delivery {
+        static_offering_tests::owning_coordinator_reset(
+            fixture,
+            custody,
+            application,
+            sessions,
+            checkpoints,
+            consequential,
+            Arc::new(resume),
+            delivery,
+            claim,
+            reset_mode.unwrap(),
+        )
+        .await;
+        return;
+    }
     custody
         .invalid_image_metadata
         .store(invalid_metadata, Ordering::SeqCst);
@@ -2070,7 +2120,7 @@ async fn exercise_owned_static_reset(
     base.budget.attempt_id = lease.attempt_id();
     base.budget.lease_generation = lease.lease_generation();
     base.budget.idempotency_key = "owned-static-reset".into();
-    base.budget.estimate.input_tokens = 10000;
+    base.budget.estimate.input_tokens = 8000;
     base.budget.estimate.image_units = 4;
     assert!(
         AiProviderCallPlan::new_continuation_with_classified_tools(
