@@ -289,6 +289,8 @@ pub trait AiSupervisedAgentTurnPlanner: Send + Sync {
     /// a strict subset of the original static offering and a strictly smaller image quote.
     /// It grants no renewal of an original effect, human consent or observation deadline.
     /// Only one retry is admitted; a second denial remains truthful and terminal.
+    /// The callback is cancelled on owner cancellation and bounded by the remaining
+    /// current lease, at most thirty seconds, without renewing that lease.
     ///
     /// # Errors
     /// Return a safe refusal when current host configuration cannot produce the exact
@@ -1382,15 +1384,19 @@ impl AiSupervisedAgentCoordinator {
                             )
                             .await;
                     }
-                    let replacement = match self
-                        .planner
-                        .replan_unstarted_static_offering(
-                            &lease,
-                            guard.provider_turns(),
-                            context.clone(),
-                        )
-                        .await
-                    {
+                    let replacement = Box::pin(self.replan_unstarted_static_offering_bounded(
+                        &lease,
+                        guard.provider_turns(),
+                        &context,
+                    ))
+                    .await;
+                    if self.run_control.cancellation(&lease).await?.is_some() {
+                        return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        });
+                    }
+                    let replacement = match replacement {
                         Ok(replacement) => replacement,
                         Err(_) => {
                             return self
@@ -2032,6 +2038,67 @@ impl AiSupervisedAgentCoordinator {
                 })
             }
         }
+    }
+
+    async fn replan_unstarted_static_offering_bounded(
+        &self,
+        lease: &AiRunLease,
+        provider_turns: u32,
+        context: &crate::AiUnstartedStaticOfferingReplan,
+    ) -> Result<Option<AiSupervisedAgentTurnPlan>, AiError> {
+        let remaining = lease.lease_expires_at() - self.clock.now();
+        if !remaining.is_positive() {
+            return Err(AiError::Conflict);
+        }
+        let deadline =
+            tokio::time::Instant::now() + remaining.min(Duration::seconds(30)).unsigned_abs();
+        let operation = async {
+            let callback = self.planner.replan_unstarted_static_offering(
+                lease,
+                provider_turns,
+                context.clone(),
+            );
+            tokio::pin!(callback);
+            let replacement = loop {
+                tokio::select! {
+                    result = &mut callback => break result?,
+                    cancellation = self.run_control.wait_for_cancellation(
+                        lease, std::time::Duration::from_millis(250),
+                    ) => {
+                        if cancellation?.is_some()
+                            || self.clock.now() >= lease.lease_expires_at()
+                        {
+                            return Err(AiError::Conflict);
+                        }
+                    }
+                }
+            };
+            // No renewal occurs while the host plans. A completed callback does not
+            // authorize a replacement after cancellation, expiry or changed custody.
+            if self.clock.now() >= lease.lease_expires_at()
+                || self.run_control.cancellation(lease).await?.is_some()
+            {
+                return Err(AiError::Conflict);
+            }
+            context
+                .validate_unstarted_cleanup(
+                    lease,
+                    self.provider_session_service
+                        .as_deref()
+                        .ok_or(AiError::Conflict)?,
+                    self.clock.now(),
+                )
+                .await?;
+            Ok(replacement)
+        };
+        let replacement = tokio::time::timeout_at(deadline, operation)
+            .await
+            .map_err(|_| AiError::ProviderFailed)??;
+        // A non-yielding host callback must also fail the same monotonic bound.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AiError::ProviderFailed);
+        }
+        Ok(replacement)
     }
 
     async fn execute_provider_with_heartbeats(

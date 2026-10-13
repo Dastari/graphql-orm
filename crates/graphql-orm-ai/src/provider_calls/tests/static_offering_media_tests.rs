@@ -119,7 +119,7 @@ impl AiSupervisedAgentTurnPlanner for QuotaRetryPlanner {
         context
             .capability_delivery()
             .set_static_bootstrap_offering(&BTreeSet::new())?;
-        if self.mode == 11 {
+        if matches!(self.mode, 11 | 13) {
             crate::OrmAiRunCancellationService::new(
                 self.fixture.database.clone(),
                 Arc::new(AllowAccess),
@@ -139,6 +139,11 @@ impl AiSupervisedAgentTurnPlanner for QuotaRetryPlanner {
                 },
             )
             .await?;
+        }
+        if matches!(self.mode, 12 | 13) {
+            // Actual durable cancellation must interrupt a host that never returns;
+            // without cancellation the same finite lease/reset deadline must end it.
+            return std::future::pending().await;
         }
         self.build(
             lease,
@@ -248,7 +253,12 @@ pub(super) async fn owning_coordinator_reset(
         .count()
         .await
         .unwrap();
-    let result = Box::pin(coordinator.execute_approved_claim(&approved)).await;
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(35),
+        Box::pin(coordinator.execute_approved_claim(&approved)),
+    )
+    .await
+    .expect("a pending host retry must end within its finite same-lease bound");
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1, "{result:?}");
     assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
     let calls = AiToolCallRecord::query(fixture.database.pool())
@@ -321,7 +331,7 @@ pub(super) async fn owning_coordinator_reset(
             assert!(planner.held_plan.lock().await.is_some());
             assert!(requests.is_empty());
         }
-        10 => {
+        10 | 12 => {
             assert!(
                 matches!(result, Ok(AiSupervisedAgentRunOutcome::Failed { .. })),
                 "{result:?}"
@@ -329,7 +339,7 @@ pub(super) async fn owning_coordinator_reset(
             assert_eq!(planner.retries.load(Ordering::SeqCst), 1);
             assert!(requests.is_empty());
         }
-        11 => {
+        11 | 13 => {
             assert!(
                 matches!(
                     result,
@@ -370,6 +380,13 @@ pub(super) async fn owning_coordinator_reset(
 #[tokio::test]
 async fn approved_native_quota_retry_is_once_and_preserves_effect_task_and_external_freeze() {
     for mode in [8, 9, 10, 11] {
+        Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
+    }
+}
+
+#[tokio::test]
+async fn approved_native_pending_quota_replan_is_bounded_and_owner_cancellable() {
+    for mode in [12, 13] {
         Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
     }
 }
