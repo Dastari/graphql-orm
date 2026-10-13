@@ -7979,7 +7979,7 @@ pub(crate) mod tests {
             Arc::new(reviewed),
             pool(counters.clone(), 1, 2),
         ));
-        assert!(provider.supports_custom_tools());
+        assert!(provider.capabilities().custom_tools);
         assert!(!provider.supports_tool_result_source_delivery());
         assert!(!provider.supports_tool_result_images());
         let runtime = crate::AiRuntime::builder()
