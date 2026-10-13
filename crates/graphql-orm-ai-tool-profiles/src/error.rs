@@ -125,6 +125,7 @@ impl AiError {
             Self::BudgetDenied => "AI_BUDGET_DENIED",
             Self::PreTransportBudgetDenied => "AI_BUDGET_DENIED",
             Self::PreTransportProviderFailed => "AI_PROVIDER_FAILED",
+            Self::PreTransportToolSourceUnavailable => "AI_TOOL_SOURCE_UNAVAILABLE",
             Self::InvalidInput(_) => "AI_INVALID_INPUT",
             Self::ResultBudgetExceeded => "AI_RESULT_BUDGET_EXCEEDED",
             Self::ReauthorizationFailed => "AI_REAUTHORIZATION_FAILED",

@@ -512,11 +512,13 @@ async fn typed_pixels_charge_atomic_budget_and_reopen_without_effect_replay() {
         .unwrap()
         .unwrap();
     assert!(saved.protected_result_source.is_some());
-    assert!(
-        !serde_json::to_string(&saved.protected_result)
-            .unwrap()
-            .contains("image/png")
-    );
+    // Database-managed protection deliberately retains structured metadata; actual pixels stay
+    // in the owning custody and are never inserted into the durable JSON result.
+    let json = serde_json::to_string(&saved.protected_result).unwrap();
+    assert!(!json.contains("data:image"));
+    let captures = custody.captures.lock().await;
+    let capture = captures.values().next().unwrap();
+    assert!(!json.contains(&hex::encode(&capture.bytes)));
 }
 #[tokio::test]
 async fn absent_image_capacity_and_unsupported_adapter_refuse_before_effect() {
