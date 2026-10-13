@@ -1357,6 +1357,25 @@ impl AiSupervisedAgentCoordinator {
                             total_tool_calls: guard.total_tool_calls(),
                         });
                     }
+                    let cleanup_is_current = if let Some(service) = &self.provider_session_service {
+                        context
+                            .validate_unstarted_cleanup(&lease, service.as_ref(), self.clock.now())
+                            .await
+                            .is_ok()
+                    } else {
+                        false
+                    };
+                    if !cleanup_is_current {
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderTurn,
+                                "unstarted_static_offering_cleanup_not_proved",
+                                None,
+                            )
+                            .await;
+                    }
                     let replacement = match self
                         .planner
                         .replan_unstarted_static_offering(

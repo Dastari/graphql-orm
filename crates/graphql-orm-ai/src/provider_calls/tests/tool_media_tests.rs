@@ -2064,7 +2064,7 @@ impl crate::AiProviderSessionDeletionService for ConfirmPreviewDeletion {
 #[tokio::test]
 async fn owning_approved_static_reset_requires_confirmed_cleanup_and_current_source_without_effect_replay()
  {
-    for mode in [0, 1, 2, 3, 4, 5, 6] {
+    for mode in [0, 1, 2, 3, 4, 5, 6, 7] {
         Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
     }
 }
@@ -2184,6 +2184,34 @@ async fn exercise_owned_static_reset(
     .with_tool_result_source_service(application.clone())
     .unwrap()
     .with_static_offering_reset_deletion_service(deletion.clone());
+    if mode == 7 {
+        let candidate =
+            crate::AiUnstartedStaticOfferingReplan::prepare(&next, &delivery, &session_plan)
+                .unwrap();
+        assert!(candidate.ready_for_callback().is_err());
+        drop(next);
+        candidate.ready_for_callback().unwrap();
+        assert!(
+            candidate
+                .validate_unstarted_cleanup(lease, sessions.as_ref(), OffsetDateTime::now_utc(),)
+                .await
+                .is_err(),
+            "an unstarted error category cannot manufacture deletion proof"
+        );
+        assert!(deletion.requests.lock().await.is_empty());
+        assert_eq!(custody.created_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+        let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+            &fixture.database,
+            &claim.binding_id(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(binding.state, "claimed");
+        assert!(binding.protected_cursor.is_some());
+        return;
+    }
     if mode == 3 {
         let owning_sessions = OrmAiSessionService::new(
             fixture.database.clone(),

@@ -428,6 +428,45 @@ impl AiUnstartedStaticOfferingReplan {
         self.delivery.require_unfrozen_static_offering()
     }
 
+    pub(crate) async fn validate_unstarted_cleanup(
+        &self,
+        lease: &AiRunLease,
+        sessions: &dyn crate::AiProviderSessionService,
+        now: time::OffsetDateTime,
+    ) -> Result<(), AiError> {
+        self.ready_for_callback()?;
+        let request = crate::AiProviderStaticOfferingResetRequest {
+            evidence: self
+                .failed_plan
+                .native_reset_evidence
+                .clone()
+                .ok_or(AiError::Conflict)?,
+            planned: self.session.clone(),
+            desired_offering_fingerprint: self.failed_plan.offering_fingerprint(),
+            definitely_unstarted_budget_denial: true,
+        };
+        // The error category alone proves neither a deletion nor its cause. Read the exact
+        // SDK-marked Deleted tombstone through the dedicated owning authorization path.
+        // This performs no rebind or cursor creation and grants the host no deletion proof.
+        let seconds = u64::try_from(
+            (lease.lease_expires_at() - now)
+                .whole_seconds()
+                .clamp(1, 30),
+        )
+        .map_err(|_| AiError::Conflict)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        tokio::time::timeout_at(
+            deadline,
+            sessions.authorize_static_offering_budget_rebind(lease, &request),
+        )
+        .await
+        .map_err(|_| AiError::ProviderFailed)??;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AiError::ProviderFailed);
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_replacement(
         &self,
         next: &AiProviderCallPlan,
