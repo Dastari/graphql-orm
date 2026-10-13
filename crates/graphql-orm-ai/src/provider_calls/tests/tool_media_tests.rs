@@ -1455,7 +1455,7 @@ async fn approved_media_lifecycle(
         fingerprint: descriptor.fingerprint.clone(),
         enabled: true,
     });
-    let coordinator_delivery = reset_mode.filter(|mode| *mode >= 8).map(|_| {
+    let coordinator_delivery = reset_mode.filter(|mode| (8..=14).contains(mode)).map(|_| {
         super::native_coordinator_tests::mixed_broker_delivery(&fixture, base.request.tools.clone())
     });
     let offered = if let Some(delivery) = &coordinator_delivery {
@@ -1746,6 +1746,17 @@ async fn approved_media_lifecycle(
         .consume_supervised_before_provider(current, &adopted)
         .await
         .unwrap();
+    if reset_mode == Some(15) {
+        continuation_context_state::assert_native_context_states(
+            &fixture,
+            &custody,
+            application.as_ref(),
+            &current,
+            adopted.continuation(),
+        )
+        .await;
+        return;
+    }
     if let Some(mode) = reset_mode {
         exercise_owned_static_reset(
             &fixture,
@@ -2530,3 +2541,5 @@ async fn exercise_owned_static_reset(
     assert_eq!(call.state, "completed");
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
+
+mod continuation_context_state;

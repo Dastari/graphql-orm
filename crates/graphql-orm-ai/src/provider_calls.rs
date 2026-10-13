@@ -12681,6 +12681,12 @@ mod tests {
             let continuation = guard
                 .continuation()
                 .expect("one durable broker result should permit continuation");
+            let original = continuation.checkpoint_value();
+            let continuation = match continuation.task_context_state().unwrap() {
+                crate::AiAgentContinuationTaskContextState::Ordinary => continuation,
+                _ => panic!("ordinary broker continuation must not prepare native task context"),
+            };
+            assert_eq!(continuation.checkpoint_value(), original);
             let total_tool_calls = usize::try_from(guard.total_tool_calls())
                 .expect("bounded tool-call count should fit usize");
             let (_, usage) =

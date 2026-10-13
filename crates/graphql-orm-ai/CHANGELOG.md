@@ -18,6 +18,17 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.107.1] - 2026-10-14
+
+### Fixed
+
+- Read-only `AiAgentContinuation::task_context_state` distinguishes ordinary
+  broker continuations from verified native checkpoints needing or retaining
+  their exact prepared task context. Hosts can preserve ordinary continuation
+  behavior without treating native attachment conflicts as a fallback. Invalid
+  private evidence or context bindings remain conflicts; classification grants
+  no current authorization, execution, reset or disclosure authority.
+
 ## [0.107.0] - 2026-10-13
 
 ### Changed
