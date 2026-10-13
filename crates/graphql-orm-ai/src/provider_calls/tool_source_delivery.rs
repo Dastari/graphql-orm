@@ -160,9 +160,12 @@ impl ToolSourceDelivery {
                 .map_err(|_| ProviderError::Cancelled)?;
             Ok(())
         };
-        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), operation)
-            .await
-            .map_err(|_| ProviderError::ToolSourceUnavailable)?
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Box::pin(operation),
+        )
+        .await
+        .map_err(|_| ProviderError::ToolSourceUnavailable)?
     }
 }
 

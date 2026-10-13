@@ -174,7 +174,12 @@ impl OrmAiApplicationToolCallService {
     ) -> Result<Vec<AiToolResultDisclosureContext>, AiError> {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.retained_session_sources_inner(lease, inference, binding_id, cursor_fingerprint),
+            Box::pin(self.retained_session_sources_inner(
+                lease,
+                inference,
+                binding_id,
+                cursor_fingerprint,
+            )),
         )
         .await
         .map_err(|_| AiError::ToolExecutionFailed)?
@@ -257,7 +262,7 @@ impl OrmAiApplicationToolCallService {
                 .await?;
             Ok(sources)
         };
-        tokio::time::timeout(std::time::Duration::from_secs(30), operation)
+        tokio::time::timeout(std::time::Duration::from_secs(30), Box::pin(operation))
             .await
             .map_err(|_| AiError::ToolExecutionFailed)?
     }
@@ -360,7 +365,7 @@ impl OrmAiApplicationToolCallService {
     ) -> Result<AiToolResultDisclosureContext, AiError> {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.reopen_tool_result_source_inner(lease, id, purpose),
+            Box::pin(self.reopen_tool_result_source_inner(lease, id, purpose)),
         )
         .await
         .map_err(|_| AiError::ToolExecutionFailed)?
@@ -653,7 +658,7 @@ impl OrmAiApplicationToolCallService {
         };
         tokio::time::timeout(
             std::time::Duration::from_millis(policy.limits().maximum_resolution_ms()),
-            operation,
+            Box::pin(operation),
         )
         .await
         .map_err(|_| AiError::ToolExecutionFailed)?

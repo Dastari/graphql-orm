@@ -2384,7 +2384,7 @@ impl OrmAiApplicationToolCallService {
                         || classification >= DataClassification::Restricted =>
                 {
                     Some(
-                        self.retain_disclosure_source(
+                        Box::pin(self.retain_disclosure_source(
                             lease,
                             &descriptor,
                             origin,
@@ -2394,7 +2394,7 @@ impl OrmAiApplicationToolCallService {
                             &disclosure_fingerprint,
                             classification,
                             source_trust,
-                        )
+                        ))
                         .await?,
                     )
                 }
@@ -3894,19 +3894,18 @@ impl OrmAiConsequentialToolCallService {
         {
             let origin = retained_origin.as_ref().ok_or(AiError::Forbidden)?;
             Some(
-                self.application_tools
-                    .retain_disclosure_source(
-                        &running_lease,
-                        &descriptor,
-                        origin,
-                        &context,
-                        &policy,
-                        &model_output,
-                        &disclosure_schema_fingerprint,
-                        classification,
-                        source_trust,
-                    )
-                    .await?,
+                Box::pin(self.application_tools.retain_disclosure_source(
+                    &running_lease,
+                    &descriptor,
+                    origin,
+                    &context,
+                    &policy,
+                    &model_output,
+                    &disclosure_schema_fingerprint,
+                    classification,
+                    source_trust,
+                ))
+                .await?,
             )
         } else {
             None

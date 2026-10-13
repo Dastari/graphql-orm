@@ -4930,7 +4930,12 @@ impl AiProviderCallExecutor {
     ) -> Result<(ProviderRequestContext, u64), AiError> {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.authorize_and_audit_transfers_inner(lease, plan, budget, native_session_claim),
+            Box::pin(self.authorize_and_audit_transfers_inner(
+                lease,
+                plan,
+                budget,
+                native_session_claim,
+            )),
         )
         .await
         .map_err(|_| {
@@ -13049,6 +13054,7 @@ mod tests {
         result.provider_kind = base.provider_kind.clone();
         result.provider_model = base.request.model.clone();
         result.request_snapshot = base.request.clone();
+        result.model_inference_manifest = base.transfers[0].clone();
         result.budget_reservation_id = budget.id();
         result.provider_session_claim = Some(claim);
         let context = |index| {
