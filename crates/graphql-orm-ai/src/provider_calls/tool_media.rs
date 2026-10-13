@@ -180,3 +180,57 @@ impl AiProviderCallExecutor {
         Ok(plan)
     }
 }
+
+// These values are denial-only bounds from already validated original input metadata; actual
+// ordinary payload admission still uses the existing exact owner attachment resolver.
+pub(super) fn ordinary_attachment_count(request: &ModelRequest) -> u64 {
+    request
+        .input
+        .iter()
+        .filter(|input| matches!(input, ModelInputBlock::Attachment { .. }))
+        .count() as u64
+}
+pub(super) fn ordinary_attachment_bytes(request: &ModelRequest) -> u64 {
+    request
+        .input
+        .iter()
+        .filter_map(|input| match input {
+            ModelInputBlock::Attachment { byte_count, .. } => Some(*byte_count),
+            _ => None,
+        })
+        .fold(0, u64::saturating_add)
+}
+pub(super) fn retained_image_egress_bytes(images: &[crate::AiResolvedToolImage]) -> Option<u64> {
+    images.iter().try_fold(0_u64, |sum, image| {
+        sum.checked_add(image.byte_count().div_ceil(3).checked_mul(4)?)?
+            .checked_add(image.reference().mime().len() as u64 + 1024)
+    })
+}
+pub(super) fn validate_combined_media_batch(
+    request: &ModelRequest,
+    images: &[crate::AiResolvedToolImage],
+    limits: AiProviderAttachmentResolutionLimits,
+    image_units: u64,
+) -> Result<(), AiError> {
+    let attachments = ordinary_attachment_count(request)
+        .checked_add(images.len() as u64)
+        .ok_or(AiError::ResultBudgetExceeded)?;
+    let image_count = request.input.iter().filter(|input| matches!(input, ModelInputBlock::Attachment { mime, .. } if mime.starts_with("image/"))).count() as u64;
+    let image_count = image_count
+        .checked_add(images.len() as u64)
+        .ok_or(AiError::ResultBudgetExceeded)?;
+    let bytes = images
+        .iter()
+        .try_fold(ordinary_attachment_bytes(request), |sum, image| {
+            sum.checked_add(image.byte_count())
+        })
+        .ok_or(AiError::ResultBudgetExceeded)?;
+    if attachments > limits.maximum_attachments() as u64
+        || image_count > 4
+        || image_count > image_units
+        || bytes > limits.maximum_total_bytes().min(16 * 1024 * 1024)
+    {
+        return Err(AiError::ResultBudgetExceeded);
+    }
+    Ok(())
+}

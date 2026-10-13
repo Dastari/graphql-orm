@@ -328,48 +328,36 @@ impl crate::AiProvider for MediaProvider {
     async fn stream_with_dynamic_tools(
         &self,
         request: ModelRequest,
-        _: ProviderRequestContext,
+        context: ProviderRequestContext,
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> Result<crate::ProviderEventStream, ProviderError> {
-        let definition = request.tools.first().ok_or(ProviderError::Rejected)?;
-        let call = ProviderDynamicToolCall::from_definition(
-            "preview-turn",
-            "preview-call",
-            definition,
-            json!({}),
-        )
-        .unwrap();
-        let result = responder.respond(call).await?;
-        if self.custody.revoke_before_delivery.load(Ordering::SeqCst) {
-            self.custody.allowed.store(false, Ordering::SeqCst);
-        }
-        responder.authorize_delivery(&result).await?;
-        if result.output()["status"] != "ApprovalPending"
-            && (result.images().len() != 1 || result.images()[0].bytes().is_empty())
-        {
-            return Err(ProviderError::Rejected);
-        }
-        Ok(Box::pin(futures::stream::iter([
-            Ok(ProviderEvent::ResponseStarted {
-                response_id: Some("preview-turn".into()),
-            }),
-            Ok(ProviderEvent::ToolCallStarted {
-                call_id: "preview-call".into(),
-                tool_id: definition.tool_id.clone(),
-            }),
-            Ok(ProviderEvent::ToolCallCompleted {
-                call_id: "preview-call".into(),
-                arguments: json!({}),
-            }),
-            Ok(ProviderEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-                cached_input_tokens: 0,
-            }),
-            Ok(ProviderEvent::ResponseCompleted {
-                response_id: Some("preview-turn".into()),
-            }),
-        ])))
+        context.authorize_tool_source_delivery().await?;
+        let definition = request
+            .tools
+            .first()
+            .ok_or(ProviderError::Rejected)?
+            .clone();
+        let custody = self.custody.clone();
+        // Real callbacks occur while polling the dispatched stream, after the SDK has
+        // durably marked its atomic reservation uncertain. Do not execute effects while
+        // merely preparing/returning the stream.
+        Ok(Box::pin(async_stream::try_stream! {
+            yield ProviderEvent::ResponseStarted { response_id: Some("preview-turn".into()) };
+            yield ProviderEvent::ToolCallStarted { call_id: "preview-call".into(), tool_id: definition.tool_id.clone() };
+            let call = ProviderDynamicToolCall::from_definition("preview-turn", "preview-call", &definition, json!({}))?;
+            let result = responder.respond(call).await?;
+            if custody.revoke_before_delivery.load(Ordering::SeqCst) {
+                custody.allowed.store(false, Ordering::SeqCst);
+            }
+            responder.authorize_delivery(&result).await?;
+            if result.output()["status"] != "ApprovalPending"
+                && (result.images().len() != 1 || result.images()[0].bytes().is_empty()) {
+                Err::<(), _>(ProviderError::Rejected)?;
+            }
+            yield ProviderEvent::ToolCallCompleted { call_id: "preview-call".into(), arguments: json!({}) };
+            yield ProviderEvent::Usage { input_tokens: 1, output_tokens: 1, cached_input_tokens: 0 };
+            yield ProviderEvent::ResponseCompleted { response_id: Some("preview-turn".into()) };
+        }))
     }
 }
 struct ImageAccounting;
@@ -705,6 +693,46 @@ async fn typed_pixels_charge_atomic_budget_and_reopen_without_effect_replay() {
     let capture = captures.values().next().unwrap();
     assert!(!json.contains(&hex::encode(&capture.bytes)));
 }
+#[tokio::test]
+async fn ordinary_attachments_and_reopened_pixels_share_complete_request_limits() {
+    let (fixture, custody, service) = media_fixture(true).await;
+    let result = preview_turn(&fixture, service.clone(), 4).await.unwrap();
+    let call = &result.interactive_tool_results()[0];
+    let images = service
+        .authorize_tool_images(call.lease(), call.id(), call.egress_manifest().unwrap())
+        .await
+        .unwrap();
+    let mut request = plan(&fixture).request;
+    let attachment = ModelInputBlock::Attachment {
+        attachment_id: Uuid::new_v4(),
+        mime: "image/png".into(),
+        byte_count: images[0].byte_count(),
+        sha256: images[0].reference().sha256().into(),
+    };
+    request.input.push(attachment.clone());
+    let raw = images[0].byte_count() * 2;
+    let exact = AiProviderAttachmentResolutionLimits::new(2, raw, raw).unwrap();
+    assert!(validate_combined_media_batch(&request, &images, exact, 2).is_ok());
+    let over_bytes = AiProviderAttachmentResolutionLimits::new(2, raw - 1, raw - 1).unwrap();
+    assert!(validate_combined_media_batch(&request, &images, over_bytes, 2).is_err());
+    assert!(validate_combined_media_batch(&request, &images, exact, 1).is_err());
+    let over_count = AiProviderAttachmentResolutionLimits::new(1, raw, raw).unwrap();
+    assert!(validate_combined_media_batch(&request, &images, over_count, 2).is_err());
+    request
+        .input
+        .extend([attachment.clone(), attachment.clone(), attachment]);
+    assert!(
+        validate_combined_media_batch(
+            &request,
+            &images,
+            AiProviderAttachmentResolutionLimits::default(),
+            5
+        )
+        .is_err()
+    );
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+}
+
 #[tokio::test]
 async fn absent_image_capacity_and_unsupported_adapter_refuse_before_effect() {
     for (supported, units) in [(true, 0), (false, 4)] {
@@ -1533,6 +1561,26 @@ async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool, wi
     } else {
         assert_eq!(continued.usage().image_units, 1);
         assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 1);
+        let inference = continued.model_inference_manifest();
+        assert_eq!(inference.attachment_count, 1);
+        assert_eq!(
+            inference
+                .sources
+                .iter()
+                .filter(|source| source.kind == "tool_result_image")
+                .count(),
+            1
+        );
+        let raw = custody
+            .captures
+            .lock()
+            .await
+            .values()
+            .next()
+            .unwrap()
+            .bytes
+            .len() as u64;
+        assert!(inference.estimated_bytes >= raw.div_ceil(3) * 4 + 1024);
     }
 }
 

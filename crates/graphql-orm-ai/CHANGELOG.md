@@ -44,6 +44,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 - Read-only SDK-minted actual effect attempt/generation remain separate from
   original provider provenance and current disclosure fencing, including after
   approved resume. Missing or changed retained effect evidence is refused.
+- Retained unapproved source provenance preserves the exact executor authorization
+  policy/digest alongside its effect fence; current source authorization stays separate.
+- Complete inference proofs count retained protected pixels together with ordinary
+  attachments and their encoded bytes; callback capacity shares the same finite turn.
 - Codex protected delivery requires an explicit factory capability and immutable
   guarded-delivery registration marker; legacy dynamic launch support cannot opt in.
 - Mid-effect scope/session withdrawal preserves the actual bounded protected output

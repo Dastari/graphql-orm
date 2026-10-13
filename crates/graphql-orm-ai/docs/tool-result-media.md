@@ -60,7 +60,9 @@ under current protection, access and uncancelled run fences; no effect is rerun.
 `AiToolExecutionProvenance::attempt_id` and `lease_generation` name the original
 provider admission. Optional `effect_attempt_id` and `effect_lease_generation`
 are minted only by the owning SDK from the actual executing lease immediately
-before invocation, after approval consumption where required. They remain fixed
+before invocation, after approval consumption where required. Retention also keeps
+exact authorization policy/digest returned by the completed trusted runtime, so
+its provenance matches the actual admitted executor binding. They remain fixed
 in the captured and protected result, and must match the separate retained effect
 fence when reopened. Missing or deserialized claims grant no effect authority.
 Old absent-field serialization remains unchanged.
@@ -107,7 +109,12 @@ both final input and responder guards through every queue.
 No-effect native approval/control receipts contain no images and release their
 unused media allocation while retaining ordinary protected receipt admission.
 The existing atomic provider-turn reservation allocates image units
-before callbacks. Callbacks share one count and 16 MiB raw-byte ceiling. Unused
+before callbacks. Callbacks share one count and 16 MiB raw-byte ceiling, including
+ordinary attachment capacity already consumed in that provider turn. Reopened
+history and ordinary attachments are checked as one complete request against
+existing attachment limits and the image quote. ModelInference admission includes
+the exact protected image sources, combined attachment count and conservative
+base64/frame byte overhead; no separate image proof can multiply those limits. Unused
 static capacity is released only after a definite completed result; ambiguous
 provider delivery keeps the reservation uncertain. Settlement must include
 `AiProviderUsageObservation::tool_result_image_units()`; provider-reported zero

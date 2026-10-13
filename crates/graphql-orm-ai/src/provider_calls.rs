@@ -27,6 +27,10 @@ use crate::{
 };
 
 mod tool_media;
+use tool_media::{
+    ordinary_attachment_bytes, ordinary_attachment_count, retained_image_egress_bytes,
+    validate_combined_media_batch,
+};
 mod tool_source_delivery;
 pub(crate) use tool_source_delivery::ToolSourceDelivery;
 
@@ -4082,7 +4086,7 @@ impl AiProviderCallExecutor {
             }
         };
 
-        let (mut context, historical_image_bytes) = match self
+        let (mut context, historical_image_bytes, effective_transfers) = match self
             .authorize_and_audit_transfers(
                 &lease,
                 &plan,
@@ -4100,6 +4104,8 @@ impl AiProviderCallExecutor {
                 });
             }
         };
+
+        plan.transfers = effective_transfers;
 
         let mut current = match self
             .runtime
@@ -4311,9 +4317,16 @@ impl AiProviderCallExecutor {
         let dynamic_responder = dynamic_execution.map(|execution| {
             Arc::new(DynamicToolResponder {
                 runtime: self.runtime.clone(),
-                maximum_image_units: reservation.reserved().image_units,
-                allocated_image_units: Mutex::new(historical_image_units),
-                allocated_image_bytes: Mutex::new(historical_image_bytes),
+                maximum_image_units: reservation.reserved().image_units.min(4),
+                // Ordinary attachment transport consumes the same finite complete-turn media
+                // capacity. Only SDK-derived tool images enter tool-result usage settlement.
+                allocated_image_units: Mutex::new(
+                    historical_image_units + ordinary_attachment_count(&request_snapshot),
+                ),
+                allocated_image_bytes: Mutex::new(
+                    historical_image_bytes
+                        .saturating_add(ordinary_attachment_bytes(&request_snapshot)),
+                ),
                 disclosed_image_units: Mutex::new(historical_image_units),
                 lease: lease_state.clone(),
                 execution,
@@ -4950,7 +4963,7 @@ impl AiProviderCallExecutor {
         plan: &AiProviderCallPlan,
         budget: crate::AuthorizedBudgetReservation,
         native_session_claim: Option<&Arc<Mutex<crate::AiProviderSessionClaim>>>,
-    ) -> Result<(ProviderRequestContext, u64), AiError> {
+    ) -> Result<(ProviderRequestContext, u64, Vec<AiEgressManifest>), AiError> {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
             Box::pin(self.authorize_and_audit_transfers_inner(
@@ -4976,7 +4989,7 @@ impl AiProviderCallExecutor {
         plan: &AiProviderCallPlan,
         budget: crate::AuthorizedBudgetReservation,
         native_session_claim: Option<&Arc<Mutex<crate::AiProviderSessionClaim>>>,
-    ) -> Result<(ProviderRequestContext, u64), AiError> {
+    ) -> Result<(ProviderRequestContext, u64, Vec<AiEgressManifest>), AiError> {
         let source_failure = |error| {
             if native_session_claim.is_some() {
                 AiError::PreTransportToolSourceUnavailable
@@ -5095,6 +5108,53 @@ impl AiProviderCallExecutor {
                     }
                 }
             }
+            // One effective inference proof covers the complete actual transport, including
+            // reopened protected pixels. Separate source policies cannot split count/byte limits.
+            let mut effective = manifest.clone();
+            if manifest.capability == AiEgressCapability::ModelInference
+                && !retained_images.is_empty()
+            {
+                validate_combined_media_batch(
+                    &plan.request,
+                    &retained_images,
+                    self.attachment_limits,
+                    plan.budget.estimate.image_units,
+                )
+                .map_err(source_failure)?;
+                for source in &sources {
+                    for image in &retained_images {
+                        if source.images().contains(image.reference()) {
+                            let reference =
+                                image.reference().egress_source(source, image.byte_count());
+                            if !effective.sources.contains(&reference) {
+                                effective.sources.push(reference);
+                            }
+                        }
+                    }
+                }
+                effective.attachment_count = u32::try_from(
+                    plan.request
+                        .input
+                        .iter()
+                        .filter(|input| matches!(input, ModelInputBlock::Attachment { .. }))
+                        .count(),
+                )
+                .map_err(|_| AiError::EgressDenied)?
+                .checked_add(
+                    u32::try_from(retained_images.len()).map_err(|_| AiError::EgressDenied)?,
+                )
+                .ok_or(AiError::EgressDenied)?;
+                effective.estimated_bytes = plan
+                    .request
+                    .conservative_provider_egress_bytes(&plan.provider_kind)
+                    .map_err(|_| AiError::EgressDenied)?
+                    .checked_add(
+                        retained_image_egress_bytes(&retained_images)
+                            .ok_or(AiError::EgressDenied)?,
+                    )
+                    .ok_or(AiError::EgressDenied)?;
+            }
+            let manifest = &effective;
             let decision = if sources.is_empty() {
                 self.runtime
                     .authorize_egress(lease.principal_reference(), manifest)
@@ -5132,6 +5192,10 @@ impl AiProviderCallExecutor {
             };
             authorized.push((manifest.clone(), proof));
         }
+        let effective_transfers = authorized
+            .iter()
+            .map(|(manifest, _)| manifest.clone())
+            .collect();
         let mut authorized = authorized.into_iter();
         let (inference_manifest, inference_proof) =
             authorized.next().ok_or(AiError::EgressDenied)?;
@@ -5155,6 +5219,7 @@ impl AiProviderCallExecutor {
                 .with_retained_tool_result_images(retained_images)
                 .map_err(source_failure)?,
             image_bytes,
+            effective_transfers,
         ))
     }
 

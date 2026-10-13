@@ -1641,14 +1641,31 @@ impl ProviderRequestContext {
             .iter()
             .filter(|block| matches!(block, ModelInputBlock::Attachment { .. }))
             .count() as u32;
+        let attachment_count = attachment_count
+            .checked_add(
+                u32::try_from(self.retained_tool_images.len())
+                    .map_err(|_| ProviderError::EgressDenied)?,
+            )
+            .ok_or(ProviderError::EgressDenied)?;
+        let image_bytes = self
+            .retained_tool_images
+            .iter()
+            .try_fold(0_u64, |sum, image| {
+                sum.checked_add(image.byte_count().div_ceil(3).checked_mul(4)?)?
+                    .checked_add(image.reference().mime().len() as u64 + 1024)
+            })
+            .ok_or(ProviderError::EgressDenied)?;
         let estimated_bytes = request.conservative_provider_egress_bytes(provider_kind)?;
+        let inference_bytes = estimated_bytes
+            .checked_add(image_bytes)
+            .ok_or(ProviderError::EgressDenied)?;
 
         self.require_capability(
             provider_kind,
             request,
             AiEgressCapability::ModelInference,
             attachment_count,
-            estimated_bytes,
+            inference_bytes,
         )?;
         if let Some(wrapper_hash) = request.native_approved_outcome_hash() {
             let transfers = self

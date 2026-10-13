@@ -427,6 +427,19 @@ impl AiToolExecutionProvenance {
         Ok(self)
     }
 
+    // Derived only from the completed trusted runtime result. Keep the exact current policy
+    // fields that the owning bridge placed on its actual executor binding, including for
+    // unapproved effects; current disclosure policy remains an independent recheck.
+    pub(crate) fn with_completed_authorization(
+        mut self,
+        policy_version: &str,
+        state_digest: &str,
+    ) -> Self {
+        self.policy_version = Some(policy_version.to_owned());
+        self.authorization_state_digest = Some(state_digest.to_owned());
+        self
+    }
+
     pub(crate) fn original_invocation(&self) -> Self {
         let mut original = self.clone();
         original.approval_id = None;

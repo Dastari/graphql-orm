@@ -944,15 +944,14 @@ impl OrmAiApplicationToolCallService {
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
         let fallback_context = context.clone();
         let fallback_route = route.clone();
-        match self
-            .execute_unapproved(
-                lease,
-                provider_result,
-                context,
-                route,
-                UnapprovedToolMode::ReadOnly,
-            )
-            .await
+        match Box::pin(self.execute_unapproved(
+            lease,
+            provider_result,
+            context,
+            route,
+            UnapprovedToolMode::ReadOnly,
+        ))
+        .await
         {
             Ok(AiConsequentialToolCallOutcome::Persisted(call)) => Ok(*call),
             Ok(AiConsequentialToolCallOutcome::RecoveryRequired { .. }) => Err(AiError::Conflict),
@@ -1928,13 +1927,13 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
-        self.execute_unapproved(
+        Box::pin(self.execute_unapproved(
             lease,
             provider_result,
             context,
             route,
             UnapprovedToolMode::AutomaticMutation,
-        )
+        ))
         .await
     }
 
@@ -2352,6 +2351,15 @@ impl OrmAiApplicationToolCallService {
                 )
             }
         };
+        let provenance = provenance.map(|origin| {
+            match (
+                policy_version.as_deref(),
+                authorization_state_digest.as_deref(),
+            ) {
+                (Some(policy), Some(digest)) => origin.with_completed_authorization(policy, digest),
+                _ => origin,
+            }
+        });
         #[cfg(test)]
         if let Err(error) =
             self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::AfterResolver)
@@ -2368,7 +2376,7 @@ impl OrmAiApplicationToolCallService {
                 Err(_) => Err(error),
             };
         }
-        let finalization: Result<AiConsequentialToolCallOutcome, AiError> = async {
+        let finalization: Result<AiConsequentialToolCallOutcome, AiError> = Box::pin(async {
             #[cfg(test)]
             self.inject_automatic_mutation_fault(
                 mode,
@@ -2604,7 +2612,7 @@ impl OrmAiApplicationToolCallService {
                     lease: renewed,
                 },
             )))
-        }
+        })
         .await;
         match finalization {
             Ok(outcome) => Ok(outcome),

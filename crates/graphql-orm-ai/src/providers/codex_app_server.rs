@@ -1447,7 +1447,7 @@ impl AiProvider for AiCodexAppServerProvider {
                     .pool
                     .supports_launch_profile(self.registration.launch_profile()),
             provider_retained_continuation: true,
-            image_input: dynamic_tools_available,
+            image_input: self.supports_tool_result_images(),
             local: true,
             reasoning_effort_profiles: self
                 .registration
