@@ -42,15 +42,17 @@ impl QuotaRetryPlanner {
         let input_contribution = continuation.conservative_input_tokens()?;
         let base_projection = base
             .request
-            .conservative_provider_egress_tokens(&base.provider_kind)?;
+            .conservative_provider_egress_tokens(&base.provider_kind)
+            .map_err(|_| AiError::Conflict)?;
         let mut complete_projection = base.request.clone();
         // Price the SDK's exact opaque input/context, including its actual reference
         // and framing. No guessed allowance substitutes for the complete request.
         continuation
             .clone()
             .apply_with_bound_task_context(&mut complete_projection)?;
-        let complete_quote =
-            complete_projection.conservative_provider_egress_tokens(&base.provider_kind)?;
+        let complete_quote = complete_projection
+            .conservative_provider_egress_tokens(&base.provider_kind)
+            .map_err(|_| AiError::Conflict)?;
         assert!(
             complete_quote
                 >= base_projection
@@ -80,7 +82,8 @@ impl QuotaRetryPlanner {
             provider.budget.estimate.input_tokens
                 >= provider
                     .request
-                    .conservative_provider_egress_tokens(&provider.provider_kind)?
+                    .conservative_provider_egress_tokens(&provider.provider_kind)
+                    .map_err(|_| AiError::Conflict)?
         );
         if self.mode == 9 {
             *self.held_plan.lock().await = Some(provider.clone());
