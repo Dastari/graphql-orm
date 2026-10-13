@@ -15,6 +15,9 @@ use graphql_orm::graphql::orm::{
 };
 use graphql_orm::prelude::*;
 
+mod tool_media;
+pub(crate) use tool_media::*;
+
 /// Per-scope runtime and maturity policy.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_scope_policies",
@@ -2575,6 +2578,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiRunStepRecord::metadata(),
                 AiRunCheckpointRecord::metadata(),
                 AiToolCallRecord::metadata(),
+                AiToolResultSourceRecord::metadata(),
                 AiNativeApprovalCandidateRecord::metadata(),
                 AiApprovalRecord::metadata(),
                 AiProposalRecord::metadata(),

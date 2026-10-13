@@ -5,6 +5,9 @@ use sha2::{Digest, Sha256};
 use std::{fmt, io::Cursor, sync::Arc};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod tests;
+
 /// Logical owning resolver and opaque resource identity. This contains no storage locator or
 /// credential and is descriptive correlation, never current resource authorization.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,6 +54,47 @@ pub struct AiResolvedToolImage {
     bytes: Arc<[u8]>,
 }
 impl AiResolvedToolImage {
+    /// Decodes exact bytes on a bounded two-worker blocking pool under the static policy's
+    /// whole resolution deadline. Busy pools refuse immediately; cancelled/timed-out results
+    /// are discarded and their permit stays held until that finite bounded decode ends.
+    /// This avoids unbounded blocking queues and never admits a late positive result.
+    ///
+    /// # Errors
+    /// Returns a safe error for a busy/cancelled decode, wrong metadata/content, or exceeded
+    /// static time/size/pixel bounds. Use this for bytes reopened from an owning remote boundary.
+    pub async fn decode_bounded(
+        reference: AiToolImageReference,
+        resource: AiToolMediaResourceId,
+        bytes: impl Into<Arc<[u8]>>,
+        limits: AiToolResultMediaLimits,
+    ) -> Result<Self, AiError> {
+        static POOL: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+        let permit = POOL
+            .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AiError::ToolExecutionFailed)?;
+        let bytes = bytes.into();
+        if resource.reference != reference.reference() {
+            return Err(AiError::Forbidden);
+        }
+        let work = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            decode_exact(&reference, &bytes, limits)?;
+            Ok(Self {
+                reference,
+                resource,
+                bytes,
+            })
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_millis(limits.maximum_resolution_ms()),
+            work,
+        )
+        .await
+        .map_err(|_| AiError::ToolExecutionFailed)?
+        .map_err(|_| AiError::ToolExecutionFailed)?
+    }
     /// Verifies exact JPEG/PNG bytes against descriptive metadata with hard dimension/allocation
     /// ceilings. Never construct from a model-selected URL/path or cache between disclosures.
     ///

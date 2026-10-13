@@ -48,6 +48,12 @@ pub enum AiError {
     /// [`Self::ProviderFailed`] and remain recovery-required.
     #[error("AI provider operation failed before dispatch")]
     PreTransportProviderFailed,
+    /// Retained protected tool content became unavailable before provider dispatch. The
+    /// unstarted reservation was durably released. A coordinator may reset the old cursor and
+    /// send only independently reopened current human input with a truthful withholding notice;
+    /// this never authorizes replay of the original effects or the unavailable history.
+    #[error("retained tool content is unavailable before dispatch")]
+    PreTransportToolSourceUnavailable,
     /// Input failed a public schema contract.
     #[error("invalid AI input: {0}")]
     InvalidInput(String),

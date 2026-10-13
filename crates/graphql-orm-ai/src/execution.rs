@@ -9,9 +9,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AiApprovalRule, AiRunId, AiScope, AiToolAuthorizationDecision, AiToolAuthorizationPolicy,
-    AiToolCallId, AiToolDescriptor, AiToolId, AiToolOperationKind, GraphqlExecutionTargetId,
-    GraphqlOperationContract, ToolExecutionError,
+    AiApprovalRule, AiError, AiRunId, AiScope, AiToolAuthorizationDecision,
+    AiToolAuthorizationPolicy, AiToolCallId, AiToolDescriptor, AiToolId, AiToolOperationKind,
+    GraphqlExecutionTargetId, GraphqlOperationContract, ToolExecutionError,
 };
 
 /// Deployment trust/routing class for authenticated GraphQL execution.
@@ -167,6 +167,10 @@ pub struct AiToolExecutionProvenance {
     budget_reservation_id: crate::AiBudgetReservationId,
     execution_selection: Option<crate::AiSessionExecutionSelection>,
     provider_registration_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_session_binding_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider_cursor_fingerprint: Option<String>,
     tool_fingerprint: String,
     argument_hash: String,
     approval_id: Option<crate::AiApprovalId>,
@@ -241,6 +245,34 @@ impl AiToolExecutionProvenance {
     /// Exact retained-provider registration fingerprint, when present.
     pub fn provider_registration_fingerprint(&self) -> Option<&str> {
         self.provider_registration_fingerprint.as_deref()
+    }
+
+    /// Original exact retained provider-session identity, when invocation came from an admitted
+    /// native thread. This is correlation only, never authority to resume/read a provider cursor.
+    pub const fn provider_session_binding_id(&self) -> Option<uuid::Uuid> {
+        self.provider_session_binding_id
+    }
+
+    /// Original admitted provider cursor digest, derived from the owning binding before effect
+    /// admission. It contains no cursor and permits no provider thread access.
+    pub fn provider_cursor_fingerprint(&self) -> Option<&str> {
+        self.provider_cursor_fingerprint.as_deref()
+    }
+
+    pub(crate) fn with_provider_cursor_fingerprint(
+        mut self,
+        fingerprint: String,
+    ) -> Result<Self, AiError> {
+        if self.provider_session_binding_id.is_none()
+            || fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(AiError::Conflict);
+        }
+        self.provider_cursor_fingerprint = Some(fingerprint);
+        Ok(self)
     }
 
     /// Exact compiled registered tool fingerprint.
@@ -326,6 +358,10 @@ impl AiToolExecutionProvenance {
             provider_registration_fingerprint: provider
                 .provider_session_claim()
                 .map(|claim| claim.descriptor().registration_fingerprint().to_owned()),
+            provider_session_binding_id: provider
+                .provider_session_claim()
+                .map(|claim| claim.binding_id()),
+            provider_cursor_fingerprint: None,
             tool_fingerprint: descriptor.fingerprint.clone(),
             argument_hash: crate::tools::canonical_json_digest(&request.variables),
             approval_id: None,
@@ -350,7 +386,18 @@ impl AiToolExecutionProvenance {
         }
         self.approval_id = Some(approval.approval_id());
         self.approval_binding_hash = Some(approval.binding_hash().to_owned());
+        self.policy_version = Some(binding.policy_version.clone());
+        self.authorization_state_digest = Some(binding.authorization_state_digest.clone());
         Ok(self)
+    }
+
+    pub(crate) fn original_invocation(&self) -> Self {
+        let mut original = self.clone();
+        original.approval_id = None;
+        original.approval_binding_hash = None;
+        original.policy_version = None;
+        original.authorization_state_digest = None;
+        original
     }
 
     fn matches_request(&self, fingerprint: &str, request: &ToolGraphqlRequest) -> bool {

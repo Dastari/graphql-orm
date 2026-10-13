@@ -2151,6 +2151,9 @@ impl OrmAiApplicationToolCallService {
         } else {
             None
         };
+        let provenance = self
+            .bind_original_provider_cursor(lease, provenance)
+            .await?;
         self.runtime
             .preflight_tool_result_media(&descriptor, provider_result.provider_kind())?;
         let protected_arguments = self
@@ -3225,6 +3228,13 @@ impl OrmAiConsequentialToolCallService {
         } else {
             None
         };
+        let provenance = self
+            .application_tools
+            .bind_original_provider_cursor(lease, provenance)
+            .await?;
+        self.application_tools
+            .runtime
+            .preflight_tool_result_media(&descriptor, provider_result.provider_kind())?;
         let call = PreparedToolCallStart {
             execution_provenance: provenance,
             native_preflight_refusal: None,
@@ -3750,11 +3760,27 @@ impl OrmAiConsequentialToolCallService {
         }) {
             return Err(AiError::Conflict);
         }
+        if let Some(origin) = &provenance {
+            self.application_tools
+                .runtime
+                .preflight_tool_result_media(&descriptor, origin.provider_kind())?;
+        }
+        if descriptor.result_media.is_some() && provenance.is_none() {
+            return Err(AiError::Forbidden);
+        }
         let consumed = self
             .approval_service
             .consume_approval(lease, approval_id, &binding, &preview)
             .await?;
         let (approval, running_lease) = consumed.into_parts();
+        let retained_origin = provenance
+            .clone()
+            .map(|origin| {
+                origin
+                    .with_consumed_approval(&approval, &binding)
+                    .map_err(AiError::from)
+            })
+            .transpose()?;
         let execution = if let Some(prepared) = prepared {
             tokio::time::timeout(
                 self.application_tools
@@ -3785,7 +3811,7 @@ impl OrmAiConsequentialToolCallService {
                         request,
                         &approval,
                         &binding,
-                        provenance,
+                        provenance.clone(),
                     ),
             )
             .await
@@ -3862,6 +3888,42 @@ impl OrmAiConsequentialToolCallService {
                 )
                 .await;
         }
+        let retained = if failure_code.is_none()
+            && (descriptor.result_media.is_some()
+                || classification >= DataClassification::Restricted)
+        {
+            let origin = retained_origin.as_ref().ok_or(AiError::Forbidden)?;
+            Some(
+                self.application_tools
+                    .retain_disclosure_source(
+                        &running_lease,
+                        &descriptor,
+                        origin,
+                        &context,
+                        &policy,
+                        &model_output,
+                        &disclosure_schema_fingerprint,
+                        classification,
+                        source_trust,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let retained_context = if retained.is_some() {
+            Some(
+                self.application_tools
+                    .reopen_tool_result_source(
+                        &running_lease,
+                        tool_call_id,
+                        crate::AiToolResultDisclosurePurpose::ToolResult,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
         let Some(outbound_bytes) = output_bytes
             .len()
             .checked_add(call.provider_call_id.len())
@@ -3889,12 +3951,17 @@ impl OrmAiConsequentialToolCallService {
             scope: scope.clone(),
             session_id: Some(running_lease.session_id()),
             run_id: Some(running_lease.run_id()),
-            sources: vec![AiDataSourceRef {
-                kind: "application_tool_result".to_owned(),
-                reference: tool_call_id.0.to_string(),
-                classification,
-                trust: source_trust,
-            }],
+            sources: vec![
+                retained_context
+                    .as_ref()
+                    .map(|source| source.data_source())
+                    .unwrap_or_else(|| AiDataSourceRef {
+                        kind: "application_tool_result".to_owned(),
+                        reference: tool_call_id.0.to_string(),
+                        classification,
+                        trust: source_trust,
+                    }),
+            ],
             estimated_bytes,
             estimated_tokens: 0,
             attachment_count: 0,
@@ -3904,12 +3971,22 @@ impl OrmAiConsequentialToolCallService {
             policy_version: route.policy_version,
             consent_reference: route.consent_reference,
         };
-        let decision = match self
-            .application_tools
-            .runtime
-            .authorize_egress(running_lease.principal_reference(), &manifest)
-            .await
-        {
+        let decision_result = if let Some(source) = &retained_context {
+            self.application_tools
+                .runtime
+                .authorize_tool_source_egress(
+                    running_lease.principal_reference(),
+                    &manifest,
+                    std::slice::from_ref(source),
+                )
+                .await
+        } else {
+            self.application_tools
+                .runtime
+                .authorize_egress(running_lease.principal_reference(), &manifest)
+                .await
+        };
+        let decision = match decision_result {
             Ok(decision) => decision,
             Err(_) => {
                 return self
@@ -3957,29 +4034,33 @@ impl OrmAiConsequentialToolCallService {
                 failure_code.map_or_else(|| "allowed".to_owned(), |code| code.as_str().to_owned()),
             )
         };
-        let protected_result = match self
-            .application_tools
-            .protect(
-                &policy,
-                protection_context(
-                    "graphql_orm_ai_tool_calls",
-                    tool_call_id.0,
-                    "protected_result",
-                    &scope,
-                ),
-                model_output,
-            )
-            .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                return self
-                    .mark_consequential_recovery(
-                        &running_lease,
-                        tool_call_id,
-                        provider_response_id.clone(),
-                    )
-                    .await;
+        let protected_result = if let Some(source) = &retained {
+            source.protected_result.clone()
+        } else {
+            match self
+                .application_tools
+                .protect(
+                    &policy,
+                    protection_context(
+                        "graphql_orm_ai_tool_calls",
+                        tool_call_id.0,
+                        "protected_result",
+                        &scope,
+                    ),
+                    model_output,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id.clone(),
+                        )
+                        .await;
+                }
             }
         };
         let event_id = Uuid::new_v4();
@@ -4049,7 +4130,7 @@ impl OrmAiConsequentialToolCallService {
         let renewed = match self
             .application_tools
             .run_service
-            .finish_tool_call(
+            .finish_tool_call_with_source(
                 &running_lease,
                 PreparedToolCallFinish {
                     id: tool_call_id.0,
@@ -4080,6 +4161,7 @@ impl OrmAiConsequentialToolCallService {
                     expected_scope_id: scope.id,
                     expected_tenant_id: scope.tenant_id,
                 },
+                retained.map(|source| source.protected_source),
             )
             .await
         {

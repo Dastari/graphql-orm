@@ -31,7 +31,7 @@ impl OrmAiCoordinatorCheckpointService {
             || source.execution.tool_call_id().0 != call.id
             || source.execution.run_id().0 != call.run_id
             || source.execution.session_id() != lease.session_id()
-            || source.execution.lease_generation() != call.lease_generation
+            || source.effect_lease_generation != call.lease_generation
             || source.execution.argument_hash() != call.argument_hash
             || source.execution.tool_fingerprint() != call.tool_fingerprint
             || source.execution.provider_call_id() != call.provider_call_id

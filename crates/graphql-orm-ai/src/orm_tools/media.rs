@@ -13,6 +13,56 @@ pub(super) struct RetainedDisclosure {
 }
 
 impl OrmAiApplicationToolCallService {
+    pub(crate) async fn validate_delivery_fence(&self, lease: &AiRunLease) -> Result<(), AiError> {
+        self.run_service.validate_tool_disclosure_fence(lease).await
+    }
+    pub(super) async fn bind_original_provider_cursor(
+        &self,
+        lease: &AiRunLease,
+        provenance: Option<AiToolExecutionProvenance>,
+    ) -> Result<Option<AiToolExecutionProvenance>, AiError> {
+        let Some(provenance) = provenance else {
+            return Ok(None);
+        };
+        self.run_service
+            .validate_tool_disclosure_fence(lease)
+            .await?;
+        let fingerprint = if let Some(binding_id) = provenance.provider_session_binding_id() {
+            let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+                self.run_service.database(),
+                &binding_id,
+            )
+            .await
+            .map_err(|_| AiError::PersistenceFailed)?
+            .ok_or(AiError::Conflict)?;
+            if binding.session_id != lease.session_id().0
+                || binding.state != "claimed"
+                || binding.claimed_run_id != Some(lease.run_id().0)
+                || binding.claimed_attempt_id != Some(lease.attempt_id())
+                || binding.claimed_run_lease_generation != Some(lease.lease_generation())
+                || binding
+                    .claim_expires_at
+                    .is_none_or(|expiry| expiry <= self.clock.now().unix_timestamp())
+                || binding.provider_profile_id != provenance.provider_profile_id()
+                || binding.registration_fingerprint
+                    != provenance
+                        .provider_registration_fingerprint()
+                        .ok_or(AiError::Conflict)?
+            {
+                return Err(AiError::Conflict);
+            }
+            Some(binding.cursor_fingerprint)
+        } else {
+            None
+        };
+        match fingerprint {
+            Some(fingerprint) => provenance
+                .with_provider_cursor_fingerprint(fingerprint)
+                .map(Some),
+            None => Ok(Some(provenance)),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn retain_disclosure_source(
         &self,
@@ -32,6 +82,13 @@ impl OrmAiApplicationToolCallService {
             output,
             self.clock.now().unix_timestamp_nanos() / 1_000_000,
         )?;
+        let provider_cursor_fingerprint =
+            provenance.provider_cursor_fingerprint().map(str::to_owned);
+        if provenance.provider_session_binding_id().is_some()
+            != provider_cursor_fingerprint.is_some()
+        {
+            return Err(AiError::Conflict);
+        }
         let source = RetainedToolResultSource {
             format_version: 1,
             execution: provenance.clone(),
@@ -43,7 +100,17 @@ impl OrmAiApplicationToolCallService {
             trust,
             delegation_reference: call_context.delegation_reference.clone(),
             images,
+            provider_cursor_fingerprint: provider_cursor_fingerprint.clone(),
+            effect_attempt_id: lease.attempt_id(),
+            effect_lease_generation: lease.lease_generation(),
         };
+        let source_context = AiToolResultDisclosureContext::from_retained(
+            source.clone(),
+            lease,
+            AiToolResultDisclosurePurpose::ToolResult,
+        )?;
+        let image_count =
+            i64::try_from(source_context.images().len()).map_err(|_| AiError::PersistenceFailed)?;
         let protected_result = self
             .protect(
                 policy,
@@ -75,12 +142,195 @@ impl OrmAiApplicationToolCallService {
                 protected_result.clone(),
                 protected_source.clone(),
                 provenance.clone(),
+                source_context.source_reference(),
+                classification_value(classification).to_owned(),
+                image_count,
+                provider_cursor_fingerprint,
             )
             .await?;
         Ok(RetainedDisclosure {
             protected_result,
             protected_source,
         })
+    }
+
+    pub(crate) async fn retained_session_sources(
+        &self,
+        lease: &AiRunLease,
+        inference: &AiEgressManifest,
+        binding_id: Uuid,
+        cursor_fingerprint: &str,
+    ) -> Result<Vec<AiToolResultDisclosureContext>, AiError> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.retained_session_sources_inner(lease, inference, binding_id, cursor_fingerprint),
+        )
+        .await
+        .map_err(|_| AiError::ToolExecutionFailed)?
+    }
+
+    async fn retained_session_sources_inner(
+        &self,
+        lease: &AiRunLease,
+        inference: &AiEgressManifest,
+        binding_id: Uuid,
+        cursor_fingerprint: &str,
+    ) -> Result<Vec<AiToolResultDisclosureContext>, AiError> {
+        use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
+        self.current_access(lease, &inference.scope).await?;
+        self.run_service
+            .validate_tool_disclosure_fence(lease)
+            .await?;
+        // Query only small source-address rows. Never scan entire protected result/argument bodies
+        // to discover history. An incomplete bounded source list cannot admit a retained cursor.
+        let rows = AiToolResultSourceRecord::query(self.run_service.database().pool())
+            .filter(AiToolResultSourceRecordWhereInput {
+                session_id: Some(UuidFilter {
+                    eq: Some(lease.session_id().0),
+                    ..Default::default()
+                }),
+                provider_kind: Some(StringFilter {
+                    eq: Some(inference.provider_kind.clone()),
+                    ..Default::default()
+                }),
+                provider_profile_id: Some(StringFilter {
+                    eq: Some(inference.provider_profile_id.clone()),
+                    ..Default::default()
+                }),
+                provider_model: Some(StringFilter {
+                    eq: Some(inference.model.clone()),
+                    ..Default::default()
+                }),
+                provider_session_binding_id: Some(UuidFilter {
+                    eq: Some(binding_id),
+                    ..Default::default()
+                }),
+                provider_cursor_fingerprint: Some(StringFilter {
+                    eq: Some(cursor_fingerprint.to_owned()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(65)
+            .fetch_all()
+            .await
+            .map_err(|_| AiError::PersistenceFailed)?;
+        if rows.len() > 64 {
+            return Err(AiError::ResultBudgetExceeded);
+        }
+        let operation = async {
+            let mut sources = Vec::with_capacity(rows.len());
+            for row in rows {
+                let source = self
+                    .reopen_tool_result_source(
+                        lease,
+                        AiToolCallId(row.id),
+                        AiToolResultDisclosurePurpose::History,
+                    )
+                    .await?;
+                if source.source_reference() != row.source_reference
+                    || source.execution_provenance().run_id().0 != row.run_id
+                    || source.execution_provenance().provider_kind().as_str() != row.provider_kind
+                    || source.execution_provenance().provider_profile_id()
+                        != row.provider_profile_id
+                    || source.execution_provenance().provider_model() != row.provider_model
+                    || classification_value(source.classification()) != row.classification
+                    || i64::try_from(source.images().len()).ok() != Some(row.image_count)
+                {
+                    return Err(AiError::Conflict);
+                }
+                sources.push(source);
+            }
+            self.run_service
+                .validate_tool_disclosure_fence(lease)
+                .await?;
+            Ok(sources)
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), operation)
+            .await
+            .map_err(|_| AiError::ToolExecutionFailed)?
+    }
+
+    pub(crate) async fn current_user_text(
+        &self,
+        lease: &AiRunLease,
+        scope: &AiScope,
+    ) -> Result<String, AiError> {
+        use graphql_orm::graphql::filters::UuidFilter;
+        self.run_service
+            .validate_tool_disclosure_fence(lease)
+            .await?;
+        let principal = self.current_access(lease, scope).await?;
+        let policy = self
+            .runtime
+            .content_protection_policy_resolver()
+            .resolve(principal.principal(), scope)
+            .await?;
+        let message =
+            AiMessageRecord::find_by_id(self.run_service.database(), &lease.input_message_id())
+                .await
+                .map_err(|_| AiError::PersistenceFailed)?
+                .ok_or(AiError::NotFound)?;
+        if message.session_id != lease.session_id().0
+            || message.run_id != Some(lease.run_id().0)
+            || message.message_role != "user"
+            || message.content_purged_at.is_some()
+            || message.completion_state != "complete"
+            || message.block_count != 1
+            || message.author_subject.as_deref()
+                != Some(lease.principal_reference().subject.as_str())
+            || !policy.ready
+            || policy.scope != *scope
+        {
+            return Err(AiError::Conflict);
+        }
+        let blocks = AiMessageBlockRecord::query(self.run_service.database().pool())
+            .filter(AiMessageBlockRecordWhereInput {
+                message_id: Some(UuidFilter {
+                    eq: Some(message.id),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .limit(2)
+            .fetch_all()
+            .await
+            .map_err(|_| AiError::PersistenceFailed)?;
+        if blocks.len() != 1 {
+            return Err(AiError::Conflict);
+        }
+        let block = &blocks[0];
+        if block.block_index != 0
+            || block.block_kind != "text"
+            || block.byte_count < 0
+            || usize::try_from(block.byte_count)
+                .map_or(true, |bytes| bytes > self.limits.maximum_model_output_bytes)
+        {
+            return Err(AiError::Conflict);
+        }
+        let value = self
+            .open(
+                &policy,
+                protection_context(
+                    "graphql_orm_ai_message_blocks",
+                    block.id,
+                    "protected_content",
+                    scope,
+                ),
+                &block.protected_content,
+            )
+            .await?;
+        let text = value
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(AiError::Conflict)?;
+        if i64::try_from(text.len()).ok() != Some(block.byte_count) {
+            return Err(AiError::Conflict);
+        }
+        self.run_service
+            .validate_tool_disclosure_fence(lease)
+            .await?;
+        Ok(text.to_owned())
     }
 
     /// Reopens one original protected tool-result source under the current disclosure lease.
@@ -92,6 +342,20 @@ impl OrmAiApplicationToolCallService {
     /// Returns a safe error for a cancelled/stale fence, inaccessible scope, missing/purged result,
     /// changed descriptor, mismatched origin/content/resource or invalid protection envelope.
     pub async fn reopen_tool_result_source(
+        &self,
+        lease: &AiRunLease,
+        id: AiToolCallId,
+        purpose: AiToolResultDisclosurePurpose,
+    ) -> Result<AiToolResultDisclosureContext, AiError> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.reopen_tool_result_source_inner(lease, id, purpose),
+        )
+        .await
+        .map_err(|_| AiError::ToolExecutionFailed)?
+    }
+
+    async fn reopen_tool_result_source_inner(
         &self,
         lease: &AiRunLease,
         id: AiToolCallId,
@@ -177,7 +441,14 @@ impl OrmAiApplicationToolCallService {
             || origin.run_id().0 != call.run_id
             || origin.session_id() != lease.session_id()
             || origin.tool_call_id() != id
-            || origin.lease_generation() != call.lease_generation
+            || source.effect_lease_generation != call.lease_generation
+            || source.provider_cursor_fingerprint.as_deref() != origin.provider_cursor_fingerprint()
+            || origin.approval_id().map(|id| id.0) != call.approval_id
+            || (call.state != "source_retained"
+                && (call.result_classification.as_deref()
+                    != Some(classification_value(source.classification))
+                    || call.disclosure_schema_fingerprint.as_deref()
+                        != Some(source.disclosure_fingerprint.as_str())))
             || origin.provider_call_id() != call.provider_call_id
             || origin.tool_fingerprint() != call.tool_fingerprint
             || descriptor.fingerprint != call.tool_fingerprint
@@ -266,21 +537,27 @@ impl OrmAiApplicationToolCallService {
             .record(tool_manifest, &text_decision)
             .await?;
         text_decision.authorize(tool_manifest)?;
-        let images = self.reopen_tool_images(lease, &context).await?;
+        self.authorize_retained_image_analysis(lease, &context, tool_manifest)
+            .await
+    }
+
+    pub(crate) async fn authorize_retained_image_analysis(
+        &self,
+        lease: &AiRunLease,
+        context: &AiToolResultDisclosureContext,
+        source_manifest: &AiEgressManifest,
+    ) -> Result<Vec<AiResolvedToolImage>, AiError> {
+        let images = self.reopen_tool_images(lease, context).await?;
         if images.is_empty() {
             return Ok(images);
         }
-        let mut manifest = tool_manifest.clone();
+        let mut manifest = source_manifest.clone();
         manifest.capability = AiEgressCapability::ImageAnalysis;
         manifest.attachment_count =
             u32::try_from(images.len()).map_err(|_| AiError::EgressDenied)?;
         manifest.sources = images
             .iter()
-            .map(|image| {
-                image
-                    .reference()
-                    .egress_source(&context, image.byte_count())
-            })
+            .map(|image| image.reference().egress_source(context, image.byte_count()))
             .collect();
         // Inline base64 expands exact bytes by 4/3; include MIME/data URI and typed frame overhead.
         manifest.estimated_bytes = images
@@ -295,7 +572,7 @@ impl OrmAiApplicationToolCallService {
             .authorize_tool_source_egress(
                 lease.principal_reference(),
                 &manifest,
-                std::slice::from_ref(&context),
+                std::slice::from_ref(context),
             )
             .await?;
         self.egress_audit.record(&manifest, &decision).await?;

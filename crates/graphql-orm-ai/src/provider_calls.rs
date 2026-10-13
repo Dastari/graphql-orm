@@ -26,6 +26,8 @@ use crate::{
     ProviderKind, ProviderRequestContext, ToolMaturity, classify_safe_application_tool_error,
 };
 
+mod tool_media;
+
 #[path = "provider_maintenance.rs"]
 pub(crate) mod maintenance;
 
@@ -2232,6 +2234,7 @@ struct DynamicToolResponder {
     runtime: Arc<AiRuntime>,
     maximum_image_units: u64,
     allocated_image_units: Mutex<u64>,
+    allocated_image_bytes: Mutex<u64>,
     disclosed_image_units: Mutex<u64>,
     lease: Arc<Mutex<AiRunLease>>,
     execution: Arc<dyn AiProviderDynamicToolExecution>,
@@ -2316,6 +2319,74 @@ impl ProviderDynamicToolResponder for DynamicToolResponder {
         .await
     }
 
+    async fn authorize_delivery(
+        &self,
+        result: &ProviderDynamicToolResult,
+    ) -> Result<(), ProviderError> {
+        let _callback = self.callbacks.lock().await;
+        let lease = self.lease.lock().await;
+        let results = self.results.lock().await;
+        let matches = results.iter().filter(|saved| matches!(saved.model_input(), Some(ModelInputBlock::ToolResult { call_id, tool_id, output }) if call_id == result.call_id() && tool_id == result.tool_id() && output == result.output())).collect::<Vec<_>>();
+        let [saved] = matches.as_slice() else {
+            return Err(ProviderError::Rejected);
+        };
+        let AiProviderDynamicToolOutcome::Application(application) = saved else {
+            if result.images().is_empty() {
+                return Ok(());
+            }
+            return Err(ProviderError::Rejected);
+        };
+        let manifest = application
+            .egress_manifest()
+            .ok_or(ProviderError::Rejected)?;
+        let service = self.execution.tool_result_source_service();
+        if let Some(service) = service {
+            if !std::ptr::eq(self.runtime.as_ref(), service.runtime()) {
+                return Err(ProviderError::Rejected);
+            }
+            service
+                .validate_delivery_fence(&lease)
+                .await
+                .map_err(|_| ProviderError::Rejected)?;
+            if manifest
+                .sources
+                .iter()
+                .any(|source| source.reference.starts_with("v2:"))
+            {
+                let images = service
+                    .authorize_tool_images(&lease, application.id(), manifest)
+                    .await
+                    .map_err(|_| ProviderError::Rejected)?;
+                if images.len() != result.images().len()
+                    || images.iter().zip(result.images()).any(|(fresh, prior)| {
+                        fresh.reference() != prior.reference()
+                            || fresh.resource() != prior.resource()
+                            || fresh.bytes() != prior.bytes()
+                    })
+                {
+                    return Err(ProviderError::Rejected);
+                }
+            } else if !result.images().is_empty() {
+                return Err(ProviderError::Rejected);
+            }
+        } else if !result.images().is_empty() {
+            return Err(ProviderError::Rejected);
+        }
+        if !manifest
+            .sources
+            .iter()
+            .any(|source| source.reference.starts_with("v2:"))
+        {
+            self.runtime
+                .authorize_egress(lease.principal_reference(), manifest)
+                .await
+                .map_err(|_| ProviderError::Rejected)?
+                .authorize(manifest)
+                .map_err(|_| ProviderError::Rejected)?;
+        }
+        Ok(())
+    }
+
     async fn reject_invalid_arguments(
         &self,
         call: crate::ProviderInvalidDynamicToolCall,
@@ -2356,14 +2427,15 @@ impl DynamicToolResponder {
                     && definition.fingerprint == call.tool_fingerprint()
             })
             .ok_or(ProviderError::Rejected)?;
-        let media_ceiling = self
+        let media_limits = self
             .runtime
             .tool_catalog()
             .descriptor(call.tool_id())
             .filter(|descriptor| descriptor.fingerprint == call.tool_fingerprint())
             .and_then(|descriptor| descriptor.result_media.as_ref())
-            .map(|policy| u64::from(policy.limits().maximum_images()))
-            .unwrap_or(0);
+            .map(|policy| policy.limits());
+        let media_ceiling = media_limits.map_or(0, |limits| u64::from(limits.maximum_images()));
+        let media_byte_ceiling = media_limits.map_or(0, |limits| limits.maximum_raw_bytes());
         // Reserve from the existing atomic uncertain turn reservation before any effect. Ordered
         // callbacks share one ceiling; duplicate call identities below never allocate twice.
         let (tool_call_index, tool_calls) = {
@@ -2418,7 +2490,11 @@ impl DynamicToolResponder {
             rejected_arguments.then_some(crate::AiApplicationToolFailureCode::InvalidArguments)
         };
         if failure.is_none() && media_ceiling > 0 {
-            if self.execution.tool_result_source_service().is_none() {
+            if !self
+                .execution
+                .tool_result_source_service()
+                .is_some_and(|service| std::ptr::eq(self.runtime.as_ref(), service.runtime()))
+            {
                 return Err(ProviderError::Rejected);
             }
             let mut allocated = self.allocated_image_units.lock().await;
@@ -2428,7 +2504,15 @@ impl DynamicToolResponder {
             if next > self.maximum_image_units {
                 return Err(ProviderError::BudgetDenied);
             }
+            let mut allocated_bytes = self.allocated_image_bytes.lock().await;
+            let next_bytes = allocated_bytes
+                .checked_add(media_byte_ceiling)
+                .ok_or(ProviderError::BudgetDenied)?;
+            if next_bytes > 16 * 1024 * 1024 {
+                return Err(ProviderError::BudgetDenied);
+            }
             *allocated = next;
+            *allocated_bytes = next_bytes;
         }
         let persisted = if let Some(code) = failure {
             let persisted = self
@@ -2505,6 +2589,13 @@ impl DynamicToolResponder {
         } else {
             Vec::new()
         };
+        let actual_bytes = images
+            .iter()
+            .try_fold(0_u64, |sum, image| sum.checked_add(image.byte_count()))
+            .ok_or(ProviderError::BudgetDenied)?;
+        if actual_bytes > media_byte_ceiling {
+            return Err(ProviderError::BudgetDenied);
+        }
         let actual_images = u64::try_from(images.len()).map_err(|_| ProviderError::Rejected)?;
         if actual_images > media_ceiling {
             return Err(ProviderError::BudgetDenied);
@@ -2515,6 +2606,10 @@ impl DynamicToolResponder {
             let mut allocated = self.allocated_image_units.lock().await;
             *allocated = allocated
                 .checked_sub(media_ceiling - actual_images)
+                .ok_or(ProviderError::BudgetDenied)?;
+            let mut allocated_bytes = self.allocated_image_bytes.lock().await;
+            *allocated_bytes = allocated_bytes
+                .checked_sub(media_byte_ceiling - actual_bytes)
                 .ok_or(ProviderError::BudgetDenied)?;
             let mut disclosed = self.disclosed_image_units.lock().await;
             *disclosed = disclosed
@@ -3337,7 +3432,7 @@ impl AiProviderCallExecutor {
         mut self,
         service: Arc<crate::OrmAiApplicationToolCallService>,
     ) -> Result<Self, AiError> {
-        if !Arc::ptr_eq(&self.runtime, service.runtime()) {
+        if !std::ptr::eq(self.runtime.as_ref(), service.runtime()) {
             return Err(AiError::InvalidConfiguration(
                 "tool-result source service belongs to another runtime".into(),
             ));
@@ -3492,8 +3587,15 @@ impl AiProviderCallExecutor {
         lease: &AiRunLease,
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError> {
-        self.execute_inner(Arc::new(Mutex::new(lease.clone())), plan, None, None, None)
-            .await
+        self.execute_inner(
+            Arc::new(Mutex::new(lease.clone())),
+            plan,
+            None,
+            None,
+            None,
+            0,
+        )
+        .await
     }
 
     /// Executes one provider turn whose application tools are answered by an
@@ -3522,7 +3624,7 @@ impl AiProviderCallExecutor {
         {
             return Err(AiError::Conflict);
         }
-        self.execute_inner(lease, plan, Some(execution), None, None)
+        self.execute_inner(lease, plan, Some(execution), None, None, 0)
             .await
     }
 
@@ -3531,7 +3633,7 @@ impl AiProviderCallExecutor {
     pub async fn execute_with_provider_session(
         &self,
         lease_state: Arc<Mutex<AiRunLease>>,
-        plan: AiProviderCallPlan,
+        mut plan: AiProviderCallPlan,
         session_plan: crate::AiProviderSessionTurnPlan,
         session_service: Arc<dyn crate::AiProviderSessionService>,
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
@@ -3704,6 +3806,34 @@ impl AiProviderCallExecutor {
                 return Err(AiError::ProviderSessionDeferred);
             }
         };
+        let history = self
+            .prepare_retained_tool_history(&lease, &mut plan, &claim)
+            .await;
+        let historical_image_units = match history {
+            Ok(units) => units,
+            Err(
+                AiError::EgressDenied
+                | AiError::ResultBudgetExceeded
+                | AiError::ToolExecutionFailed
+                | AiError::NotFound
+                | AiError::Conflict,
+            ) => {
+                session_service
+                    .require_cleanup(&claim, "retained_tool_source_withheld")
+                    .await?;
+                return self
+                    .execute_inner(
+                        lease_state,
+                        self.withheld_tool_history_plan(&lease, plan).await?,
+                        None,
+                        None,
+                        None,
+                        0,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error),
+        };
         let opened = match session_service.open_for_run(&lease, &claim).await {
             Ok(opened) => opened,
             Err(error) => {
@@ -3748,12 +3878,14 @@ impl AiProviderCallExecutor {
             opened
         };
         let shared_claim = Arc::new(Mutex::new(claim.clone()));
+        let withheld_plan = plan.clone();
         let turn = self.execute_inner(
             lease_state.clone(),
             plan,
             dynamic_execution,
             Some(opened),
             Some(shared_claim.clone()),
+            historical_image_units,
         );
         tokio::pin!(turn);
         let mut current_claim = claim;
@@ -3797,6 +3929,20 @@ impl AiProviderCallExecutor {
                 result.provider_session_claim = Some(current_claim);
                 Ok(result)
             }
+            Err(AiError::PreTransportToolSourceUnavailable) => {
+                session_service
+                    .require_cleanup(
+                        &current_claim,
+                        "retained_tool_source_withheld_before_dispatch",
+                    )
+                    .await?;
+                let current_lease = lease_state.lock().await.clone();
+                let safe_plan = self
+                    .withheld_tool_history_plan(&current_lease, withheld_plan)
+                    .await?;
+                self.execute_inner(lease_state, safe_plan, None, None, None, 0)
+                    .await
+            }
             Err(error @ AiError::PreTransportBudgetDenied) => Err(error),
             Err(AiError::PreTransportProviderFailed) => {
                 session_service
@@ -3820,6 +3966,7 @@ impl AiProviderCallExecutor {
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
         provider_session: Option<crate::AiOpenedProviderSession>,
         native_session_claim: Option<Arc<Mutex<crate::AiProviderSessionClaim>>>,
+        historical_image_units: u64,
     ) -> Result<AiProviderCallResult, AiError> {
         let lease = lease_state.lock().await.clone();
         if !self.runtime.start_gate().is_ready()
@@ -3892,8 +4039,13 @@ impl AiProviderCallExecutor {
             }
         };
 
-        let mut context = match self
-            .authorize_and_audit_transfers(&lease, &plan, authorized_budget)
+        let (mut context, historical_image_bytes) = match self
+            .authorize_and_audit_transfers(
+                &lease,
+                &plan,
+                authorized_budget,
+                native_session_claim.as_ref(),
+            )
             .await
         {
             Ok(context) => context,
@@ -4092,8 +4244,9 @@ impl AiProviderCallExecutor {
             Arc::new(DynamicToolResponder {
                 runtime: self.runtime.clone(),
                 maximum_image_units: reservation.reserved().image_units,
-                allocated_image_units: Mutex::new(0),
-                disclosed_image_units: Mutex::new(0),
+                allocated_image_units: Mutex::new(historical_image_units),
+                allocated_image_bytes: Mutex::new(historical_image_bytes),
+                disclosed_image_units: Mutex::new(historical_image_units),
                 lease: lease_state.clone(),
                 execution,
                 session_id: lease.session_id(),
@@ -4553,7 +4706,7 @@ impl AiProviderCallExecutor {
             builtin_usage,
             tool_result_image_units: match &dynamic_responder {
                 Some(responder) => *responder.disclosed_image_units.lock().await,
-                None => 0,
+                None => historical_image_units,
             },
         };
         let actual = self.usage_accounting.settle(&observation).await?;
@@ -4724,7 +4877,40 @@ impl AiProviderCallExecutor {
         lease: &AiRunLease,
         plan: &AiProviderCallPlan,
         budget: crate::AuthorizedBudgetReservation,
-    ) -> Result<ProviderRequestContext, AiError> {
+        native_session_claim: Option<&Arc<Mutex<crate::AiProviderSessionClaim>>>,
+    ) -> Result<(ProviderRequestContext, u64), AiError> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.authorize_and_audit_transfers_inner(lease, plan, budget, native_session_claim),
+        )
+        .await
+        .map_err(|_| {
+            if native_session_claim.is_some() {
+                AiError::PreTransportToolSourceUnavailable
+            } else {
+                AiError::ToolExecutionFailed
+            }
+        })?
+    }
+
+    async fn authorize_and_audit_transfers_inner(
+        &self,
+        lease: &AiRunLease,
+        plan: &AiProviderCallPlan,
+        budget: crate::AuthorizedBudgetReservation,
+        native_session_claim: Option<&Arc<Mutex<crate::AiProviderSessionClaim>>>,
+    ) -> Result<(ProviderRequestContext, u64), AiError> {
+        let source_failure = |error| {
+            if native_session_claim.is_some() {
+                AiError::PreTransportToolSourceUnavailable
+            } else {
+                error
+            }
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut image_bytes = 0_u64;
+        let mut image_count = 0_u64;
+        let mut image_sources = BTreeSet::new();
         let mut authorized = Vec::with_capacity(plan.transfers.len());
         for manifest in &plan.transfers {
             let mut sources = Vec::new();
@@ -4742,9 +4928,71 @@ impl AiProviderCallExecutor {
                             crate::AiToolCallId(id),
                             crate::AiToolResultDisclosurePurpose::History,
                         )
-                        .await?;
+                        .await
+                        .map_err(source_failure)?;
                     if context.data_source() != *source {
                         return Err(AiError::EgressDenied);
+                    }
+                    let origin = context.execution_provenance();
+                    let exact_output = plan.request.input.iter().any(|input| {
+                        matches!(input, ModelInputBlock::ToolResult {call_id,tool_id,output}
+                            if call_id == origin.provider_call_id()
+                                && service.runtime().tool_catalog().descriptors().any(|descriptor|
+                                    descriptor.id.as_str() == tool_id && descriptor.fingerprint == origin.tool_fingerprint())
+                                && crate::orm_tools::canonical_json_hash(output).ok().as_deref() == Some(context.result_sha256()))
+                    });
+                    let exact_retained_cursor = if let Some(claim) = native_session_claim {
+                        let claim = claim.lock().await;
+                        if origin.provider_session_binding_id() == Some(claim.binding_id()) {
+                            let binding = crate::orm_provider_session::AiProviderSessionBindingRecord::find_by_id(
+                                service.run_service().database(), &claim.binding_id()).await.map_err(|_| AiError::PersistenceFailed)?
+                                .ok_or(AiError::Conflict)?;
+                            context.original_provider_cursor_fingerprint()
+                                == Some(binding.cursor_fingerprint.as_str())
+                                && binding.claimed_run_id == Some(lease.run_id().0)
+                                && binding.claimed_attempt_id == Some(lease.attempt_id())
+                                && binding.claimed_run_lease_generation
+                                    == Some(lease.lease_generation())
+                                && binding.claim_generation == claim.binding_claim_generation()
+                                && binding.state == "claimed"
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if !exact_output && !exact_retained_cursor {
+                        return Err(AiError::EgressDenied);
+                    }
+                    if manifest.capability == AiEgressCapability::ModelInference
+                        && !context.images().is_empty()
+                    {
+                        if image_sources.insert(context.source_reference()) {
+                            let images = tokio::time::timeout_at(
+                                tokio::time::Instant::from_std(deadline),
+                                service
+                                    .authorize_retained_image_analysis(lease, &context, manifest),
+                            )
+                            .await
+                            .map_err(|_| source_failure(AiError::ToolExecutionFailed))?
+                            .map_err(source_failure)?;
+                            image_count = image_count
+                                .checked_add(images.len() as u64)
+                                .ok_or(AiError::EgressDenied)?;
+                            image_bytes = images
+                                .iter()
+                                .try_fold(image_bytes, |sum, image| {
+                                    sum.checked_add(image.byte_count())
+                                })
+                                .ok_or(AiError::EgressDenied)?;
+                            if image_count > 4
+                                || image_count > plan.budget.estimate.image_units
+                                || image_bytes > 16 * 1024 * 1024
+                                || std::time::Instant::now() >= deadline
+                            {
+                                return Err(source_failure(AiError::EgressDenied));
+                            }
+                        }
                     }
                     if !sources
                         .iter()
@@ -4763,7 +5011,8 @@ impl AiProviderCallExecutor {
             } else {
                 self.runtime
                     .authorize_tool_source_egress(lease.principal_reference(), manifest, &sources)
-                    .await?
+                    .await
+                    .map_err(source_failure)?
             };
             self.egress_audit.record(manifest, &decision).await?;
             let proof = decision.authorize(manifest)?;
@@ -4783,7 +5032,13 @@ impl AiProviderCallExecutor {
         for (manifest, proof) in authorized {
             context = context.with_authorized_transfer(manifest, proof)?;
         }
-        context.with_run_binding(crate::AiProviderRunBinding::from_lease(lease)?)
+        if std::time::Instant::now() >= deadline {
+            return Err(source_failure(AiError::ToolExecutionFailed));
+        }
+        Ok((
+            context.with_run_binding(crate::AiProviderRunBinding::from_lease(lease)?)?,
+            image_bytes,
+        ))
     }
 
     async fn release_unstarted(
@@ -4823,6 +5078,7 @@ fn valid_provider_call_id(value: &str) -> bool {
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
     mod native_coordinator_tests;
+    mod tool_media_tests;
 
     use std::sync::{
         RwLock,
@@ -13516,6 +13772,7 @@ mod tests {
             runtime: fixture.runtime.clone(),
             maximum_image_units: 0,
             allocated_image_units: Mutex::new(0),
+            allocated_image_bytes: Mutex::new(0),
             disclosed_image_units: Mutex::new(0),
             lease: lease.clone(),
             execution,
@@ -13660,6 +13917,7 @@ mod tests {
             runtime: fixture.runtime.clone(),
             maximum_image_units: 0,
             allocated_image_units: Mutex::new(0),
+            allocated_image_bytes: Mutex::new(0),
             disclosed_image_units: Mutex::new(0),
             lease: lease.clone(),
             execution: Arc::new(PersistingDynamicToolExecution {

@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.15.0 to 0.16.0
+
+Profiles and descriptors gain an optional `AiToolResultMediaPolicy`. Construct
+it from validated field bindings, exact selected object paths and finite limits;
+use a logical owner resolver ID, never a URL or path. The declaration is included
+in the immutable fingerprint and can only tighten result classification. Missing
+policy preserves previous serialization/fingerprints. Consumers using public
+struct literals must initialize `result_media` or use existing constructors.
+
+Media metadata is descriptive and grants neither execution nor disclosure.
+Adopt AI 0.107.0 from the same workspace release for the trusted byte resolver,
+current source hooks, atomic budgets and typed provider transport. This package
+requires no data migration; the owning AI package does require module 0.72.0.
+
 ## 0.14.0 to 0.15.0
 
 Adopt the AI and tool-profile packages from one reviewed workspace release.

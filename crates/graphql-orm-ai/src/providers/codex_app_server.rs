@@ -1328,6 +1328,23 @@ impl AiProvider for AiCodexAppServerProvider {
                 .supports_launch_profile(self.registration.launch_profile())
     }
 
+    fn supports_tool_result_image_policy(&self, descriptor: &crate::AiToolDescriptor) -> bool {
+        let Some(policy) = &descriptor.result_media else {
+            return true;
+        };
+        let wire = policy
+            .limits()
+            .maximum_raw_bytes()
+            .div_ceil(3)
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(descriptor.maximum_result_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(u64::from(policy.limits().maximum_images()) * 1024 + 1024)
+            });
+        self.supports_tool_result_images()
+            && wire.is_some_and(|bytes| bytes <= MAXIMUM_FRAME_BYTES as u64)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         let dynamic_tools_available = self.registration.experimental_dynamic_tools()
             && self
@@ -2072,6 +2089,16 @@ impl ProviderDynamicToolResponder for DynamicToolCallCounter {
                 .store(true, Ordering::SeqCst);
         }
         self.inner.respond(call).await
+    }
+
+    async fn authorize_delivery(
+        &self,
+        result: &crate::ProviderDynamicToolResult,
+    ) -> Result<(), ProviderError> {
+        if self.entry.interrupt_started.load(Ordering::SeqCst) {
+            return Err(ProviderError::Cancelled);
+        }
+        self.inner.authorize_delivery(result).await
     }
 
     async fn reject_invalid_arguments(
@@ -4259,6 +4286,11 @@ impl AiCodexAppServerProtocolActor {
         }
         let mut content = vec![json!({"type":"inputText","text":text})];
         for image in result.images() {
+            content.push(json!({"type":"inputText","text":serde_json::to_string(&json!({
+                "capturedObservation":true,"capturedAtMs":image.reference().captured_at_ms(),
+                "actionExpiresAtMs":image.reference().action_expires_at_ms(),"retainedUntilMs":image.reference().retained_until_ms(),
+                "actionEvidenceRenewed":false,"historicalCurrentFlagIsCaptureTimeOnly":true
+            })).map_err(|_| ProviderError::Rejected)?}));
             let encoded = base64::engine::general_purpose::STANDARD.encode(image.bytes());
             content.push(json!({"type":"inputImage","imageUrl":format!("data:{};base64,{encoded}", image.reference().mime())}));
         }

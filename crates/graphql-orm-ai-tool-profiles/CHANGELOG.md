@@ -14,6 +14,12 @@ supersedes: []
 
 ### Added
 
+- Immutable result-media policies bind selected image-reference fields, exact
+  object paths, logical resolver, confidentiality and finite limits to tool
+  fingerprints. Secret/NeverExport ancestors and URL/path resolver IDs fail.
+- `PreTransportToolSourceUnavailable` retains safe no-dispatch classification
+  for unavailable protected history after an unstarted reservation is released.
+
 - Trusted `ToolPreExecutionRejection` carries an exact invocation hash and one
   closed public reason without resolver text, credentials or request content.
   `RejectedBeforeExecution` and `ToolRejectedBeforeExecution` preserve this

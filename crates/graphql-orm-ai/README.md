@@ -561,3 +561,7 @@ disabled by default, and expires entries after at most seven days; see [MIGRATIO
 
 For concurrent chats with immutable provider/model/effort choices, use the
 [session execution selection contract](docs/session-execution-selection.md).
+
+Registered tools can declare protected retained image references with current
+source authorization and atomic image budgets. See the [tool-result media
+contract](docs/tool-result-media.md) for host resolver and provider integration.

@@ -33,6 +33,9 @@ pub(crate) struct RetainedToolResultSource {
     pub(crate) trust: AiSourceTrust,
     pub(crate) delegation_reference: Option<String>,
     pub(crate) images: Vec<AiToolImageReference>,
+    pub(crate) provider_cursor_fingerprint: Option<String>,
+    pub(crate) effect_attempt_id: Uuid,
+    pub(crate) effect_lease_generation: i64,
 }
 
 /// Parses only a redacted owning call hint from an ordinary legacy or versioned source address.
@@ -80,6 +83,10 @@ impl AiToolResultDisclosureContext {
                 .as_ref()
                 .is_some_and(|tenant| source.scope.tenant_id.as_ref() != Some(tenant))
             || source.classification == DataClassification::Secret
+            || source.effect_attempt_id.is_nil()
+            || source.effect_lease_generation <= 0
+            || source.execution.provider_session_binding_id().is_some()
+                != source.provider_cursor_fingerprint.is_some()
         {
             return Err(AiError::Conflict);
         }
@@ -131,6 +138,24 @@ impl AiToolResultDisclosureContext {
     /// Exact declared image references from retained output, not current caller arguments.
     pub fn images(&self) -> &[AiToolImageReference] {
         &self.source.images
+    }
+
+    /// Original opaque provider cursor digest from matched owning lifecycle metadata. It never
+    /// contains the cursor or grants remote thread reuse, and is unchanged by a later rebind.
+    pub fn original_provider_cursor_fingerprint(&self) -> Option<&str> {
+        self.source.provider_cursor_fingerprint.as_deref()
+    }
+
+    /// Actual original effect execution attempt, which may follow a human approval wait and
+    /// differ from the originating provider request. No continuation changes this value.
+    pub const fn effect_attempt_id(&self) -> Uuid {
+        self.source.effect_attempt_id
+    }
+
+    /// Actual original effect execution fence, separately retained from provider admission and
+    /// from the current disclosure fence. It grants no current execution authority.
+    pub const fn effect_lease_generation(&self) -> i64 {
+        self.source.effect_lease_generation
     }
     /// Current disclosure attempt, which may differ from the original completed effect.
     pub const fn current_attempt_id(&self) -> Uuid {

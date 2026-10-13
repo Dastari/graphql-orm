@@ -252,3 +252,8 @@ registered or remote binding helpers after independently verifying the owner's
 authenticated evidence. The binding hash correlates one request/attempt; it
 never proves remote authenticity or grants authority. Generic transport and
 resolver failures remain uncertain for consequential operations.
+
+`AiToolResultMediaPolicy` binds a logical owner resolver, exact selected opaque
+image metadata, classification and finite limits to the tool fingerprint. See
+the [AI media contract](../graphql-orm-ai/docs/tool-result-media.md); reference
+JSON never supplies image bytes or resource authorization.

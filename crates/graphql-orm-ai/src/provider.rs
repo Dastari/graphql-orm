@@ -2755,6 +2755,24 @@ pub trait ProviderDynamicToolResponder: Send + Sync {
         call: ProviderDynamicToolCall,
     ) -> Result<ProviderDynamicToolResult, ProviderError>;
 
+    /// Revalidates the exact retained result immediately before adapter transport. Adapters must
+    /// await this after callback completion and before encoding/sending protected image content.
+    /// The compatibility default admits ordinary text only; images require the owning coordinator.
+    /// This never executes a tool, renews retention or allocates another effect reservation.
+    ///
+    /// # Errors
+    /// Returns a safe error for revoked/cancelled/stale disclosure or unavailable source evidence.
+    async fn authorize_delivery(
+        &self,
+        result: &ProviderDynamicToolResult,
+    ) -> Result<(), ProviderError> {
+        if result.images().is_empty() {
+            Ok(())
+        } else {
+            Err(ProviderError::Rejected)
+        }
+    }
+
     /// Persists a schema-invalid request without executing its tool.
     ///
     /// The returned correction envelope must pass current authorization,
@@ -3295,6 +3313,12 @@ pub trait AiProvider: Send + Sync {
     /// default denies media-required effects before application execution; JSON references are
     /// never treated as image content.
     fn supports_tool_result_images(&self) -> bool {
+        false
+    }
+
+    /// Preflights the immutable media/text ceiling against this adapter's actual typed frame
+    /// contract before an effect is admitted. The compatibility default refuses the policy.
+    fn supports_tool_result_image_policy(&self, _descriptor: &crate::AiToolDescriptor) -> bool {
         false
     }
 

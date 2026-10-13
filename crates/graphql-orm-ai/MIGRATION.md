@@ -19,6 +19,33 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.106.1 to 0.107.0
+
+Adopt tool profiles 0.16.0 from the same published workspace release. Existing
+non-media tool fingerprints remain unchanged. New media declarations require a
+trusted logical resolver, explicit exact provider destination policy and a current
+source-aware egress hook. The compatibility defaults deny image delivery and
+Restricted-source overrides. Unsupported adapters refuse media-required effects.
+
+Apply owned AI schema module 0.72.0 before runtime admission. It adds nullable
+`protected_result_source` to tool calls and an internal source-address table;
+metadata and original output remain protected. Existing rows need no source
+backfill and gain no additional disclosure allowance. Include the new table in
+owned backup/restore and retain the existing closed reconciliation gate. A small
+source index is correlation only; reopening always checks protected owner bytes.
+
+Budget planners must reserve a finite image ceiling for actual offered media
+policies. Usage accounting must include the SDK-derived
+`tool_result_image_units()` count. A zero image policy remains a truthful denial;
+no pricing or user-grant authority is created by this API. Adapters call
+`authorize_delivery` immediately before typed image transport. Reopening must
+retain original action/capture deadlines and must never repeat effects.
+
+`PreTransportToolSourceUnavailable` proves an unstarted reservation was released;
+it permits a fresh sanitized conversation after cursor cleanup, never replay of
+inaccessible output. See the [canonical media contract](docs/tool-result-media.md)
+for original/current identity getters, bounds and history disclosure.
+
 ## 0.106.0 to 0.106.1
 
 Provider-session bindings now admit up to 128 static bootstrap fingerprints;

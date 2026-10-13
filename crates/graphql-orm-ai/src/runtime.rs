@@ -341,11 +341,9 @@ impl AiRuntime {
             if !self
                 .providers
                 .get(kind)
-                .is_some_and(|provider| provider.supports_tool_result_images())
+                .is_some_and(|provider| provider.supports_tool_result_image_policy(descriptor))
             {
-                return Err(AiError::ToolRejectedBeforeExecution(
-                    crate::ToolPreExecutionRejectionReason::CapabilityUnsupported,
-                ));
+                return Err(AiError::Forbidden);
             }
         }
         Ok(())

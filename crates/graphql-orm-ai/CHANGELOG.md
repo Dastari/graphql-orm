@@ -31,6 +31,19 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ### Added
 
+- Fingerprint-bound protected tool-result JPEG/PNG media, trusted owner resolvers,
+  derived original/current disclosure contexts and current source-aware policy.
+- Exact tool/profile/destination disclosure boundaries preserve the general
+  boundary for ordinary/unknown sources and deny Secret.
+- Durable protected source retention and bounded native-history admission;
+  unavailable history can be withheld in a fresh ordinary turn without effects.
+- SDK-derived image accounting uses the existing atomic turn reservation;
+  ambiguous delivery remains uncertain. Codex tool output uses genuine image
+  provider parts and source capture labels, with final delivery reauthorization.
+- Schema module 0.72.0 adds protected source metadata and a private source index.
+
+### Added
+
 - `AiToolAuthorizationDecision::require_authentication` distinguishes current
   authentication renewal from permission denial without granting execution.
   Native classification returns protected, audited non-retryable
