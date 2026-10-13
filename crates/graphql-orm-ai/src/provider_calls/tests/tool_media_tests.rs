@@ -18,6 +18,34 @@ struct Custody {
     allowed: AtomicBool,
     ordinary_allowed: AtomicBool,
     revoke_before_delivery: AtomicBool,
+    fail_next_source_open: AtomicBool,
+}
+struct SourceProtector(Arc<Custody>);
+#[async_trait]
+impl crate::AiContentProtector for SourceProtector {
+    async fn protect(
+        &self,
+        policy: &crate::AiContentProtectionPolicy,
+        context: &crate::ContentProtectionContext,
+        value: serde_json::Value,
+    ) -> Result<crate::ProtectedContentEnvelope, crate::ContentProtectionError> {
+        crate::AiContentProtector::protect(&DatabaseManagedContentProtector, policy, context, value)
+            .await
+    }
+    async fn open(
+        &self,
+        policy: &crate::AiContentProtectionPolicy,
+        context: &crate::ContentProtectionContext,
+        envelope: &crate::ProtectedContentEnvelope,
+    ) -> Result<serde_json::Value, crate::ContentProtectionError> {
+        if context.field == "protected_result_source"
+            && self.0.fail_next_source_open.swap(false, Ordering::SeqCst)
+        {
+            return Err(crate::ContentProtectionError::KeyUnavailable);
+        }
+        crate::AiContentProtector::open(&DatabaseManagedContentProtector, policy, context, envelope)
+            .await
+    }
 }
 struct PreviewExecutor(Arc<Custody>);
 #[async_trait]
@@ -425,7 +453,7 @@ async fn media_fixture(
         .tool_catalog(catalog)
         .secret_store(Arc::new(EnvironmentSecretStore::new()))
         .content_protection_policy_resolver(Arc::new(ProtectionPolicy))
-        .content_protector(Arc::new(DatabaseManagedContentProtector))
+        .content_protector(Arc::new(SourceProtector(custody.clone())))
         .provider(Arc::new(MediaProvider {
             custody: custody.clone(),
             supported,
@@ -659,5 +687,45 @@ async fn delivery_history_race_denies_protected_sources_but_preserves_general_de
         delivery.authorize().await,
         Err(ProviderError::EgressDenied)
     ));
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn post_effect_source_open_failure_retains_actual_output_for_later_read_without_reexecution()
+{
+    let (fixture, custody, service) = media_fixture(true).await;
+    custody.fail_next_source_open.store(true, Ordering::SeqCst);
+    assert!(preview_turn(&fixture, service.clone(), 4).await.is_err());
+    let sources = AiToolResultSourceRecord::query(fixture.database.pool())
+        .limit(2)
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(sources.len(), 1);
+    let call = AiToolCallRecord::find_by_id(&fixture.database, &sources[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(call.state, "source_retained");
+    assert!(call.protected_result.is_some());
+    assert!(call.protected_result_source.is_some());
+    let actual_run = AiRunRecord::find_by_id(&fixture.database, &fixture.lease.run_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    let current = crate::orm_runs::lease_from_record(&actual_run).unwrap();
+    let context = service
+        .reopen_tool_result_source(
+            &current,
+            AiToolCallId(call.id),
+            crate::AiToolResultDisclosurePurpose::Continuation,
+        )
+        .await
+        .unwrap();
+    let images = service
+        .reopen_tool_images(&current, &context)
+        .await
+        .unwrap();
+    assert_eq!(images.len(), 1);
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }

@@ -6842,6 +6842,10 @@ fn registration_identity(registration: &AiCodexAppServerRegistration) -> String 
 }
 
 #[cfg(test)]
+#[path = "codex_tool_media.rs"]
+mod tool_media_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
@@ -9896,7 +9900,7 @@ pub(crate) mod tests {
         assert!(!unverified_dynamic_provider.capabilities().custom_tools);
     }
 
-    fn turn() -> AiCodexAppServerTurnInput {
+    pub(super) fn turn() -> AiCodexAppServerTurnInput {
         AiCodexAppServerTurnInput::new(
             "model-1",
             vec!["trusted".to_owned()],
@@ -9913,7 +9917,7 @@ pub(crate) mod tests {
         input
     }
 
-    fn model_request() -> ModelRequest {
+    pub(super) fn model_request() -> ModelRequest {
         ModelRequest {
             model: "model-1".to_owned(),
             instructions: vec!["trusted".to_owned()],
