@@ -2481,6 +2481,14 @@ impl DynamicToolResponder {
                 None => None,
             },
         };
+        let requires_source = self
+            .runtime
+            .tool_catalog()
+            .descriptor(call.tool_id())
+            .is_some_and(|descriptor| {
+                descriptor.result_media.is_some()
+                    || descriptor.maximum_classification >= crate::DataClassification::Restricted
+            });
         // Reserve the final admitted callback for a durable no-execution
         // response. Do not reinterpret a failed persistence attempt as a
         // second failure result: its original outcome may be uncertain.
@@ -2489,6 +2497,15 @@ impl DynamicToolResponder {
         } else {
             rejected_arguments.then_some(crate::AiApplicationToolFailureCode::InvalidArguments)
         };
+        if failure.is_none()
+            && requires_source
+            && !self
+                .execution
+                .tool_result_source_service()
+                .is_some_and(|service| std::ptr::eq(self.runtime.as_ref(), service.runtime()))
+        {
+            return Err(ProviderError::Rejected);
+        }
         if failure.is_none() && media_ceiling > 0 {
             if !self
                 .execution
@@ -2630,6 +2647,7 @@ impl DynamicToolResponder {
             output,
         )?
         .with_images(images)
+        .map(|result| result.require_source_delivery(requires_source && failure.is_none()))
     }
 }
 

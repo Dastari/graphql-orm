@@ -2481,6 +2481,7 @@ pub struct ProviderDynamicToolResult {
     tool_id: String,
     output: serde_json::Value,
     images: Vec<crate::AiResolvedToolImage>,
+    requires_source_delivery: bool,
 }
 
 impl std::fmt::Debug for ProviderDynamicToolResult {
@@ -2502,6 +2503,7 @@ impl ProviderDynamicToolResult {
             tool_id,
             output: serde_json::json!({"ready": true}),
             images: Vec::new(),
+            requires_source_delivery: false,
         }
     }
 
@@ -2522,6 +2524,7 @@ impl ProviderDynamicToolResult {
             tool_id: call.tool_id.clone(),
             output,
             images: Vec::new(),
+            requires_source_delivery: false,
         })
     }
 
@@ -2541,6 +2544,7 @@ impl ProviderDynamicToolResult {
             tool_id,
             output,
             images: Vec::new(),
+            requires_source_delivery: false,
         })
     }
 
@@ -2564,6 +2568,12 @@ impl ProviderDynamicToolResult {
     /// into the result text or fetch a source URL/path.
     pub fn images(&self) -> &[crate::AiResolvedToolImage] {
         &self.images
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn require_source_delivery(mut self, required: bool) -> Self {
+        self.requires_source_delivery = required;
+        self
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -2766,7 +2776,7 @@ pub trait ProviderDynamicToolResponder: Send + Sync {
         &self,
         result: &ProviderDynamicToolResult,
     ) -> Result<(), ProviderError> {
-        if result.images().is_empty() {
+        if result.images().is_empty() && !result.requires_source_delivery {
             Ok(())
         } else {
             Err(ProviderError::Rejected)

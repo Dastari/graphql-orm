@@ -54,6 +54,7 @@ impl AiProviderCallExecutor {
             return Ok(0);
         }
         let mut images = 0_u64;
+        let mut labels = Vec::new();
         for source in &contexts {
             let descriptor = self
                 .runtime
@@ -74,6 +75,7 @@ impl AiProviderCallExecutor {
                     .validate_at(media.limits(), now_ms)
                     .map_err(|_| AiError::EgressDenied)?;
                 images = images.checked_add(1).ok_or(AiError::EgressDenied)?;
+                labels.push(serde_json::json!({"reference":reference.reference(),"capturedAtMs":reference.captured_at_ms(),"actionExpiresAtMs":reference.action_expires_at_ms(),"retainedUntilMs":reference.retained_until_ms(),"historicalObservation":true,"actionEvidenceRenewed":false,"currentFieldDescribesOriginalCaptureOnly":true}));
             }
             let data_source = source.data_source();
             if !inference.sources.contains(&data_source) {
@@ -82,6 +84,15 @@ impl AiProviderCallExecutor {
         }
         if images > plan.budget.estimate.image_units {
             return Err(AiError::EgressDenied);
+        }
+        if !labels.is_empty() {
+            plan.request.input.push(ModelInputBlock::Json {
+                value: serde_json::json!({"retainedToolImageCaptureLabels":labels}),
+            });
+            inference.estimated_bytes = plan
+                .request
+                .conservative_provider_egress_bytes(&plan.provider_kind)
+                .map_err(|_| AiError::EgressDenied)?;
         }
         // This is a preflight only. Actual post-reservation proof admission repeats owning
         // principal/resource/media checks immediately before provider dispatch.

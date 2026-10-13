@@ -161,6 +161,15 @@ pub(crate) fn evaluate(
     if media > manifest.attachment_count || media > scoped_media_ceiling.unwrap_or(0) {
         return Err(AiEgressReason::LimitExceeded);
     }
+    // A scoped allowance changes the ceiling for these exact sources, never adds another
+    // independent batch to the ordinary request count allowance.
+    if manifest.attachment_count
+        > general
+            .maximum_attachments
+            .max(scoped_media_ceiling.unwrap_or(0))
+    {
+        return Err(AiEgressReason::LimitExceeded);
+    }
     let ordinary_attachments = manifest.attachment_count - media;
     if ordinary_attachments > general.maximum_attachments {
         return Err(AiEgressReason::LimitExceeded);
