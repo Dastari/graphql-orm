@@ -519,14 +519,14 @@ async fn media_fixture_resolution(
     let disclosure = AiDisclosureSchema::new(
         "preview-disclosure-v1",
         AiDisclosureShape::object(
-            rule.clone(),
+            rule,
             [(
                 "Preview".into(),
                 AiDisclosureShape::object(
-                    rule.clone(),
+                    rule,
                     fields
                         .into_iter()
-                        .map(|name| (name.into(), AiDisclosureShape::scalar(rule.clone()))),
+                        .map(|name| (name.into(), AiDisclosureShape::scalar(rule))),
                 ),
             )],
         ),
@@ -796,15 +796,13 @@ async fn ordinary_attachments_and_reopened_pixels_share_complete_request_limits(
     request
         .input
         .extend([attachment.clone(), attachment.clone(), attachment]);
-    assert!(
-        validate_combined_media_batch(
-            &request,
-            &images,
-            AiProviderAttachmentResolutionLimits::default(),
-            5
-        )
-        .is_err()
-    );
+    assert!(validate_combined_media_batch(
+        &request,
+        &images,
+        AiProviderAttachmentResolutionLimits::default(),
+        5
+    )
+    .is_err());
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
 
@@ -940,16 +938,14 @@ async fn absent_or_changed_retained_effect_fence_is_refused_without_reexecution(
         )
         .await
         .unwrap();
-        assert!(
-            service
-                .reopen_tool_result_source(
-                    call.lease(),
-                    call.id(),
-                    crate::AiToolResultDisclosurePurpose::Continuation
-                )
-                .await
-                .is_err()
-        );
+        assert!(service
+            .reopen_tool_result_source(
+                call.lease(),
+                call.id(),
+                crate::AiToolResultDisclosurePurpose::Continuation
+            )
+            .await
+            .is_err());
         assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
     }
 }
@@ -1002,19 +998,17 @@ async fn retained_origin_body_and_mixed_source_boundary_cannot_be_forged() {
         classification: DataClassification::Restricted,
         trust: AiSourceTrust::ResolverResult,
     });
-    assert!(
-        fixture
-            .runtime
-            .authorize_tool_source_egress(
-                call.lease().principal_reference(),
-                &manifest,
-                std::slice::from_ref(&source)
-            )
-            .await
-            .unwrap()
-            .authorize(&manifest)
-            .is_err()
-    );
+    assert!(fixture
+        .runtime
+        .authorize_tool_source_egress(
+            call.lease().principal_reference(),
+            &manifest,
+            std::slice::from_ref(&source)
+        )
+        .await
+        .unwrap()
+        .authorize(&manifest)
+        .is_err());
     let saved = AiToolCallRecord::find_by_id(&fixture.database, &call.id().0)
         .await
         .unwrap()
@@ -1031,16 +1025,14 @@ async fn retained_origin_body_and_mixed_source_boundary_cannot_be_forged() {
     )
     .await
     .unwrap();
-    assert!(
-        service
-            .reopen_tool_result_source(
-                call.lease(),
-                call.id(),
-                crate::AiToolResultDisclosurePurpose::History
-            )
-            .await
-            .is_err()
-    );
+    assert!(service
+        .reopen_tool_result_source(
+            call.lease(),
+            call.id(),
+            crate::AiToolResultDisclosurePurpose::History
+        )
+        .await
+        .is_err());
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
 
@@ -1127,24 +1119,20 @@ async fn invalid_post_effect_media_is_saved_but_cannot_be_admitted_or_replayed()
     assert!(calls[0].protected_result.is_some());
     assert!(calls[0].protected_result_source.is_none());
     assert_eq!(calls[0].state, "executing");
-    assert!(
-        AiToolResultSourceRecord::query(fixture.database.pool())
-            .limit(1)
-            .fetch_all()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        service
-            .reopen_tool_result_source(
-                &fixture.lease,
-                AiToolCallId(calls[0].id),
-                crate::AiToolResultDisclosurePurpose::Continuation
-            )
-            .await
-            .is_err()
-    );
+    assert!(AiToolResultSourceRecord::query(fixture.database.pool())
+        .limit(1)
+        .fetch_all()
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(service
+        .reopen_tool_result_source(
+            &fixture.lease,
+            AiToolCallId(calls[0].id),
+            crate::AiToolResultDisclosurePurpose::Continuation
+        )
+        .await
+        .is_err());
     assert!(preview_turn(&fixture, service, 4).await.is_err());
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
     assert_eq!(custody.opens.load(Ordering::SeqCst), 0);
@@ -1318,7 +1306,7 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
     )
     .await
     .unwrap();
-    let sessions = Arc::new(
+    Arc::new(
         OrmAiProviderSessionService::new(
             fixture.database.clone(),
             Arc::new(AllowAccess),
@@ -1330,8 +1318,7 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
             Duration::minutes(5),
         )
         .unwrap(),
-    );
-    sessions
+    )
 }
 
 #[tokio::test]
@@ -1340,8 +1327,8 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
 }
 
 #[tokio::test]
-async fn native_history_normal_deny_after_preflight_withholds_saved_effect_and_releases_unstarted_budget()
- {
+async fn native_history_normal_deny_after_preflight_withholds_saved_effect_and_releases_unstarted_budget(
+) {
     approved_media_lifecycle(true, false, 0).await;
 }
 
@@ -1557,13 +1544,11 @@ async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool, wi
             assert!(custody.access_withdrawn.load(Ordering::SeqCst));
             assert_eq!(custody.opens.load(Ordering::SeqCst), 0);
             assert_eq!(custody.model_disclosures.load(Ordering::SeqCst), 0);
-            assert!(
-                AiToolResultSourceRecord::query(fixture.database.pool())
-                    .fetch_all()
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
+            assert!(AiToolResultSourceRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .is_empty());
         }
         let run = AiRunRecord::find_by_id(&fixture.database, &claim.lease().run_id().0)
             .await
@@ -1759,11 +1744,9 @@ async fn ordinary_text_with_zero_image_budget_does_not_offer_or_execute_media() 
 async fn owner_cancellation_closes_source_retained_call_and_preserves_effect_custody() {
     let (fixture, custody, application) = media_fixture(true).await;
     custody.fail_next_source_open.store(true, Ordering::SeqCst);
-    assert!(
-        preview_turn(&fixture, application.clone(), 4)
-            .await
-            .is_err()
-    );
+    assert!(preview_turn(&fixture, application.clone(), 4)
+        .await
+        .is_err());
     let call = AiToolCallRecord::query(fixture.database.pool())
         .limit(1)
         .fetch_one()
@@ -1802,15 +1785,13 @@ async fn owner_cancellation_closes_source_retained_call_and_preserves_effect_cus
         cancelled.protected_result_source,
         call.protected_result_source
     );
-    assert!(
-        application
-            .reopen_tool_result_source(
-                &fixture.lease,
-                AiToolCallId(call.id),
-                crate::AiToolResultDisclosurePurpose::Continuation
-            )
-            .await
-            .is_err()
-    );
+    assert!(application
+        .reopen_tool_result_source(
+            &fixture.lease,
+            AiToolCallId(call.id),
+            crate::AiToolResultDisclosurePurpose::Continuation
+        )
+        .await
+        .is_err());
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
