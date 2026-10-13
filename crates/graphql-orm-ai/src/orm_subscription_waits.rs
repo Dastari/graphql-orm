@@ -3080,6 +3080,7 @@ impl OrmAiSubscriptionWaitService {
                         protected_arguments: Some(registration.protected_arguments),
                         argument_hash: registration.argument_hash,
                         protected_result: None,
+                        protected_result_source: None,
                         payload_purged_at: None,
                         risk: "read_only".to_owned(),
                         authorization_code: Some("waiting_subscription".to_owned()),

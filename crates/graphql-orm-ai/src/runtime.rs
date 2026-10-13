@@ -95,6 +95,10 @@ pub struct AiRuntime {
     tool_bridge: AuthenticatedToolBridge,
     egress_policy: Arc<dyn AiEgressPolicy>,
     deployment_egress: AiDeploymentEgressBoundary,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    tool_result_egress_boundaries: Vec<crate::AiToolResultEgressBoundary>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: ToolMaturity,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
     tool_catalog: AiToolCatalog,
@@ -316,6 +320,43 @@ impl AiRuntime {
             .map_err(|_| AiError::ReauthorizationFailed)
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn tool_media_resolver(
+        &self,
+        id: &str,
+    ) -> Result<&Arc<dyn crate::AiToolResultMediaResolver>, AiError> {
+        self.tool_result_media_resolvers
+            .get(id)
+            .ok_or(AiError::Forbidden)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn preflight_tool_result_media(
+        &self,
+        descriptor: &AiToolDescriptor,
+        kind: &ProviderKind,
+    ) -> Result<(), AiError> {
+        if (descriptor.result_media.is_some()
+            || descriptor.maximum_classification >= crate::DataClassification::Restricted)
+            && !self
+                .providers
+                .get(kind)
+                .is_some_and(|provider| provider.supports_tool_result_source_delivery())
+        {
+            return Err(AiError::Forbidden);
+        }
+        if let Some(policy) = &descriptor.result_media {
+            self.tool_media_resolver(policy.resolver_id())?;
+            if !self.providers.get(kind).is_some_and(|provider| {
+                provider.capabilities().image_input
+                    && provider.supports_tool_result_image_policy(descriptor)
+            }) {
+                return Err(AiError::Forbidden);
+            }
+        }
+        Ok(())
+    }
+
     /// Applies deployment hard limits and scope policy to an exact egress
     /// manifest after current-principal rehydration.
     pub async fn authorize_egress(
@@ -337,6 +378,45 @@ impl AiRuntime {
             .await
             .map_err(|_| AiError::ReauthorizationFailed)?;
         Ok(self.egress_policy.authorize(&principal, manifest).await)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) async fn authorize_tool_source_egress(
+        &self,
+        principal_reference: &PrincipalReference,
+        manifest: &AiEgressManifest,
+        sources: &[crate::AiToolResultDisclosureContext],
+    ) -> Result<AiEgressDecision, AiError> {
+        if sources.iter().any(|source| {
+            source.current_principal_reference() != principal_reference
+                || !self.tool_catalog.descriptors().any(|descriptor| {
+                    descriptor.fingerprint == source.execution_provenance().tool_fingerprint()
+                })
+        }) {
+            return Err(AiError::EgressDenied);
+        }
+        if let Err(reason) = crate::tool_media::evaluate_tool_source_boundaries(
+            &self.deployment_egress,
+            &self.tool_result_egress_boundaries,
+            manifest,
+            sources,
+        ) {
+            return Ok(AiEgressDecision::deny(
+                manifest,
+                reason,
+                "deployment-tool-source-boundary",
+                &principal_reference.subject,
+            ));
+        }
+        let principal = self
+            .principal_resolver
+            .resolve(principal_reference)
+            .await
+            .map_err(|_| AiError::ReauthorizationFailed)?;
+        Ok(self
+            .egress_policy
+            .authorize_tool_sources(&principal, manifest, sources)
+            .await)
     }
 
     /// Executes an exact registered application tool through fresh host tool
@@ -669,9 +749,14 @@ impl AiRuntime {
         if response_bytes > descriptor.maximum_result_bytes {
             return Err(AiError::ResultBudgetExceeded);
         }
-        let disclosure = disclosure_schema
+        let mut disclosure = disclosure_schema
             .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
             .map_err(Self::map_disclosure_error)?;
+        if let Some(media) = &descriptor.result_media {
+            disclosure.maximum_classification = disclosure
+                .maximum_classification
+                .max(media.classification());
+        }
         Ok(AiToolExecutionResult {
             response,
             disclosure,
@@ -941,9 +1026,14 @@ impl AiRuntime {
         if response_bytes > descriptor.maximum_result_bytes {
             return Err(AiError::ResultBudgetExceeded);
         }
-        let disclosure = disclosure_schema
+        let mut disclosure = disclosure_schema
             .evaluate_graphql_with_record_limit(&response.data, descriptor.maximum_result_records)
             .map_err(Self::map_disclosure_error)?;
+        if let Some(media) = &descriptor.result_media {
+            disclosure.maximum_classification = disclosure
+                .maximum_classification
+                .max(media.classification());
+        }
         Ok(AiToolExecutionResult {
             response,
             disclosure,
@@ -1015,13 +1105,29 @@ impl AiRuntime {
                     "provider registry kind mismatch".to_owned(),
                 ));
             }
+            if !context.retained_tool_result_images().is_empty()
+                && (!provider.capabilities().image_input || !provider.supports_tool_result_images())
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            if context.tool_source_delivery_check().is_some()
+                && !provider.supports_tool_result_source_delivery()
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
             provider
                 .capabilities()
                 .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
             Ok(provider)
         };
         match local() {
-            Ok(provider) => provider.dispatch(request, context).await,
+            Ok(provider) => {
+                if let Err(error) = context.authorize_tool_source_delivery().await {
+                    return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+                }
+                provider.dispatch(request, context).await
+            }
             Err(error) => crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
         }
     }
@@ -1078,6 +1184,32 @@ impl AiRuntime {
                     "provider registry kind mismatch".to_owned(),
                 ));
             }
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            for definition in &request.tools {
+                let id = AiToolId::parse(definition.tool_id.clone())
+                    .map_err(|_| ProviderError::Rejected)?;
+                if let Some(descriptor) = self.tool_catalog.descriptor(&id) {
+                    if descriptor.fingerprint != definition.fingerprint {
+                        return Err(ProviderError::Rejected);
+                    }
+                    // Admission of a declared protected result requires the actual adapter's
+                    // final source guards before launch. The owning callback repeats this
+                    // check before any effect; ordinary definitions need no media capability.
+                    self.preflight_tool_result_media(descriptor, provider_kind)
+                        .map_err(|_| ProviderError::Unsupported)?;
+                }
+            }
+            if !context.retained_tool_result_images().is_empty()
+                && (!provider.capabilities().image_input || !provider.supports_tool_result_images())
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            if context.tool_source_delivery_check().is_some()
+                && !provider.supports_tool_result_source_delivery()
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
             provider
                 .capabilities()
                 .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
@@ -1085,6 +1217,9 @@ impl AiRuntime {
         };
         match local() {
             Ok(provider) => {
+                if let Err(error) = context.authorize_tool_source_delivery().await {
+                    return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+                }
                 provider
                     .dispatch_with_dynamic_tools(request, context, responder)
                     .await
@@ -1644,6 +1779,10 @@ pub struct AiRuntimeBuilder {
     graphql_targets: Option<GraphqlExecutionTargetRegistry>,
     egress_policy: Option<Arc<dyn AiEgressPolicy>>,
     deployment_egress: Option<AiDeploymentEgressBoundary>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    tool_result_egress_boundaries: Vec<crate::AiToolResultEgressBoundary>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    tool_result_media_resolvers: BTreeMap<String, Arc<dyn crate::AiToolResultMediaResolver>>,
     maximum_tool_maturity: Option<ToolMaturity>,
     generated_graphql_target_policy: AiGeneratedGraphqlTargetPolicySet,
     tool_catalog: AiToolCatalog,
@@ -1704,6 +1843,46 @@ impl AiRuntimeBuilder {
     pub fn deployment_egress(mut self, boundary: AiDeploymentEgressBoundary) -> Self {
         self.deployment_egress = Some(boundary);
         self
+    }
+
+    /// Admits one immutable registered-tool/provider-profile disclosure boundary. It grants no
+    /// current principal/resource/grant permission and leaves general/user egress unchanged.
+    /// Aggregate request byte/image budgets remain intersected; per-source policies cannot add
+    /// together their ceilings. Build rejects unknown fingerprints and duplicate bindings.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub fn tool_result_egress_boundary(
+        mut self,
+        boundary: crate::AiToolResultEgressBoundary,
+    ) -> Self {
+        self.tool_result_egress_boundaries.push(boundary);
+        self
+    }
+
+    /// Registers a trusted owning opener under one immutable logical resolver identity.
+    /// Output JSON cannot select a resolver; only the registered fingerprint-bound profile can.
+    ///
+    /// # Errors
+    /// Returns a safe configuration error for duplicate or unsafe logical identities.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub fn tool_result_media_resolver(
+        mut self,
+        id: impl Into<String>,
+        resolver: Arc<dyn crate::AiToolResultMediaResolver>,
+    ) -> Result<Self, AiError> {
+        let id = id.into();
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+            || self.tool_result_media_resolvers.contains_key(&id)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "invalid or duplicate tool-result media resolver".into(),
+            ));
+        }
+        self.tool_result_media_resolvers.insert(id, resolver);
+        Ok(self)
     }
 
     /// Sets immutable deployment tool-maturity cap.
@@ -1833,12 +2012,51 @@ impl AiRuntimeBuilder {
             graphql_targets,
         );
 
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        {
+            let mut bindings = std::collections::BTreeSet::new();
+            for boundary in &self.tool_result_egress_boundaries {
+                if !self
+                    .tool_catalog
+                    .descriptors()
+                    .any(|descriptor| descriptor.fingerprint == boundary.tool_fingerprint())
+                    || !bindings.insert((
+                        boundary.tool_fingerprint(),
+                        boundary.provider_profile_id(),
+                        boundary.destination(),
+                    ))
+                {
+                    return Err(AiError::InvalidConfiguration(
+                        "unknown or duplicate tool-result egress boundary".into(),
+                    ));
+                }
+            }
+            if self
+                .tool_catalog
+                .descriptors()
+                .filter_map(|descriptor| descriptor.result_media.as_ref())
+                .any(|policy| {
+                    !self
+                        .tool_result_media_resolvers
+                        .contains_key(policy.resolver_id())
+                })
+            {
+                return Err(AiError::InvalidConfiguration(
+                    "declared tool-result media resolver is unavailable".into(),
+                ));
+            }
+        }
+
         Ok(AiRuntime {
             principal_resolver,
             access_policy,
             tool_bridge,
             egress_policy,
             deployment_egress,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            tool_result_egress_boundaries: self.tool_result_egress_boundaries,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            tool_result_media_resolvers: self.tool_result_media_resolvers,
             maximum_tool_maturity,
             generated_graphql_target_policy: self.generated_graphql_target_policy,
             tool_catalog: self.tool_catalog,

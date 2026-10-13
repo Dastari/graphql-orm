@@ -10,6 +10,22 @@ supersedes: []
 
 # Changelog
 
+## [0.16.0] - 2026-10-13
+
+### Changed
+
+- This pre-1.0 minor is source-breaking for public `AiToolDescriptor` literals:
+  initialize the new optional `result_media` field or use existing constructors.
+  Missing media preserves serialized descriptors and their fingerprints.
+
+### Added
+
+- Immutable result-media policies bind selected image-reference fields, exact
+  object paths, logical resolver, confidentiality and finite limits to tool
+  fingerprints. Secret/NeverExport ancestors and URL/path resolver IDs fail.
+- `PreTransportToolSourceUnavailable` retains safe no-dispatch classification
+  for unavailable protected history after an unstarted reservation is released.
+
 ## [Unreleased]
 
 ### Added

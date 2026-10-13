@@ -24,7 +24,7 @@ are separate runtime decisions and must remain default-deny.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.15.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.0" }
 serde_json = "1"
 ```
 
@@ -252,3 +252,8 @@ registered or remote binding helpers after independently verifying the owner's
 authenticated evidence. The binding hash correlates one request/attempt; it
 never proves remote authenticity or grants authority. Generic transport and
 resolver failures remain uncertain for consequential operations.
+
+`AiToolResultMediaPolicy` binds a logical owner resolver, exact selected opaque
+image metadata, classification and finite limits to the tool fingerprint. See
+the [AI media contract](../graphql-orm-ai/docs/tool-result-media.md); reference
+JSON never supplies image bytes or resource authorization.

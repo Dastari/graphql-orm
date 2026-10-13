@@ -18,6 +18,53 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## [0.107.0] - 2026-10-13
+
+### Changed
+
+- This pre-1.0 minor is source-breaking: `ProviderRequestContext` loses
+  `UnwindSafe`/`RefUnwindSafe`, generated provider-session input literals gain
+  `installed_offering_fingerprint`, and the generated aggregate-field enum
+  gains a variant while later implicit discriminants shift. Recompile consumers
+  and follow the explicit migration instructions; current delivery guards and
+  owned schema module 0.72.0 remain required.
+
+### Added
+
+- Keep original static capability subsets in the same broker state, and require
+  confirmed exact old-thread deletion before a same-run native continuation
+  installs changed definitions on a fresh thread. The opaque original-task
+  context is priced and freshly checked; image quota replanning defaults off
+  and admits at most one proven unstarted reduction without effect replay.
+
+
+- Fingerprint-bound protected tool-result JPEG/PNG media, trusted owner resolvers,
+  derived original/current disclosure contexts and current source-aware policy.
+- Exact tool/profile/destination disclosure boundaries preserve the general
+  boundary for ordinary/unknown sources and deny Secret.
+- Durable protected source retention and bounded native-history admission;
+  unavailable history can be withheld in a fresh ordinary turn without effects.
+- SDK-derived image accounting uses the existing atomic turn reservation;
+  ambiguous delivery remains uncertain. Codex tool output uses genuine image
+  provider parts and source capture labels, with final delivery reauthorization.
+- Schema module 0.72.0 adds protected source metadata and a private source index.
+- Read-only SDK-minted actual effect attempt/generation remain separate from
+  original provider provenance and current disclosure fencing, including after
+  approved resume. Missing or changed retained effect evidence is refused.
+- Native approved-result wrappers reauthorize their exact protected original source
+  instead of falling back to the general boundary for Restricted output.
+- Retained unapproved source provenance preserves the exact executor authorization
+  policy/digest alongside its effect fence; current source authorization stays separate.
+- Complete inference proofs count retained protected pixels together with ordinary
+  attachments and their encoded bytes; callback capacity shares the same finite turn.
+- Codex protected delivery requires an explicit factory capability and immutable
+  guarded-delivery registration marker; legacy dynamic launch support cannot opt in.
+- Mid-effect scope/session withdrawal preserves the actual bounded protected output
+  under the live effect fence while refusing source admission and disclosure.
+- Unsupported adapters default-deny protected source delivery before Restricted
+  or media effects. Native no-effect control receipts retain their owning
+  admission while releasing unused image capacity.
+
 ## [0.106.1] - 2026-10-01
 
 ### Fixed

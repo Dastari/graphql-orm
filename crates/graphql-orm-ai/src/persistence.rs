@@ -15,6 +15,9 @@ use graphql_orm::graphql::orm::{
 };
 use graphql_orm::prelude::*;
 
+mod tool_media;
+pub(crate) use tool_media::*;
+
 /// Per-scope runtime and maturity policy.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_scope_policies",
@@ -751,10 +754,12 @@ pub(crate) struct AiSessionEventRecord {
     #[filterable(type = "string")]
     pub event_type: String,
     /// Optional run.
+    #[filterable(type = "uuid")]
     pub run_id: Option<graphql_orm::uuid::Uuid>,
     /// Causation reference.
     pub causation_id: Option<String>,
     /// Correlation reference.
+    #[filterable(type = "string")]
     pub correlation_id: String,
     /// Protected/ciphertext payload envelope.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
@@ -1730,6 +1735,10 @@ pub(crate) struct AiToolCallRecord {
     /// Protected result.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
     pub protected_result: Option<serde_json::Value>,
+    /// Protected immutable origin/result/media correlation, retained before any source disclosure.
+    /// Null legacy sources cannot supply current Restricted/media authority.
+    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    pub protected_result_source: Option<serde_json::Value>,
     /// Timestamp when retention removed protected content.
     pub payload_purged_at: Option<i64>,
     /// Risk class.
@@ -2496,7 +2505,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.71.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.72.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 
@@ -2571,6 +2580,7 @@ impl OrmSchemaModule for AiSchemaModule {
                 AiRunStepRecord::metadata(),
                 AiRunCheckpointRecord::metadata(),
                 AiToolCallRecord::metadata(),
+                AiToolResultSourceRecord::metadata(),
                 AiNativeApprovalCandidateRecord::metadata(),
                 AiApprovalRecord::metadata(),
                 AiProposalRecord::metadata(),

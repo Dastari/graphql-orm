@@ -1267,6 +1267,7 @@ impl OrmAiSessionRetentionService {
                                                 UpdateAiToolCallRecordInput {
                                                     protected_arguments: Some(None),
                                                     protected_result: Some(None),
+                                                    protected_result_source: Some(None),
                                                     payload_purged_at: Some(Some(now)),
                                                     ..Default::default()
                                                 },
@@ -5206,6 +5207,7 @@ mod tests {
                 protected_arguments: None,
                 argument_hash: "argument-hash".to_owned(),
                 protected_result: None,
+                protected_result_source: None,
                 payload_purged_at: Some(now().unix_timestamp() - 80),
                 risk: "read_only".to_owned(),
                 authorization_code: Some("allowed".to_owned()),
@@ -5539,6 +5541,7 @@ mod tests {
                 argument_hash: "argument-hash".to_owned(),
                 protected_result: tool_call_result_required(call_state)
                     .then(|| serde_json::json!({"protected": "result"})),
+                protected_result_source: None,
                 payload_purged_at: None,
                 risk: if approval_id.is_some() {
                     "high_impact".to_owned()
@@ -8339,6 +8342,7 @@ mod tests {
                                 })),
                                 protected_arguments: Some(None),
                                 protected_result: Some(None),
+                                protected_result_source: Some(None),
                                 payload_purged_at: Some(Some(now().unix_timestamp())),
                                 ..Default::default()
                             },
@@ -8714,6 +8718,7 @@ mod tests {
                     policy_fingerprint: "b".repeat(64),
                     cursor_kind: "test.thread".to_owned(),
                     cursor_fingerprint: "c".repeat(64),
+                    installed_offering_fingerprint: None,
                     protected_cursor: Some(serde_json::json!({"protected":true})),
                     through_message_sequence: 2,
                     transcript_fingerprint: "d".repeat(64),

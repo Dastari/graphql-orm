@@ -620,9 +620,15 @@ impl ModelRequest {
         ) {
             return None;
         }
-        let [ModelInputBlock::Json { value }] = self.input.as_slice() else {
+        let Some(ModelInputBlock::Json { value }) = self.input.first() else {
             return None;
         };
+        if self.input[1..]
+            .iter()
+            .any(|block| !matches!(block, ModelInputBlock::Text { .. }))
+        {
+            return None;
+        }
         native_approved_outcome_hash(value)
     }
 
@@ -1360,6 +1366,11 @@ pub struct ProviderRequestContext {
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
+    retained_tool_images: Vec<crate::AiResolvedToolImage>,
+    static_offering_reset_receipt:
+        Option<Arc<crate::provider_session::AiStaticOfferingResetReceipt>>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    tool_source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
 }
 
 impl ProviderRequestContext {
@@ -1386,8 +1397,75 @@ impl ProviderRequestContext {
             budget,
             transfers: Vec::new(),
             resolved_attachments: Vec::new(),
+            retained_tool_images: Vec::new(),
+            static_offering_reset_receipt: None,
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            tool_source_delivery: None,
         }
         .with_authorized_transfer(manifest, proof)
+    }
+
+    /// Actual protected original image pixels reopened by the owning SDK source loader after
+    /// atomic budget admission. Adapters send these as genuine image input parts for continuation
+    /// or history, never base64 result text. The getter grants no resource/execution authority and
+    /// does not renew capture, action or retention deadlines. Current delivery revalidation remains
+    /// mandatory immediately before transport.
+    pub fn retained_tool_result_images(&self) -> &[crate::AiResolvedToolImage] {
+        &self.retained_tool_images
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_retained_tool_result_images(
+        mut self,
+        images: Vec<crate::AiResolvedToolImage>,
+    ) -> Result<Self, AiError> {
+        let bytes = images
+            .iter()
+            .try_fold(0_u64, |sum, image| sum.checked_add(image.byte_count()))
+            .ok_or(AiError::ResultBudgetExceeded)?;
+        let pixels = images
+            .iter()
+            .try_fold(0_u64, |sum, image| {
+                sum.checked_add(
+                    u64::from(image.reference().width())
+                        .checked_mul(u64::from(image.reference().height()))?,
+                )
+            })
+            .ok_or(AiError::ResultBudgetExceeded)?;
+        if images.len() > 4 || bytes > 16 * 1024 * 1024 || pixels > 16_000_000 {
+            return Err(AiError::ResultBudgetExceeded);
+        }
+        self.retained_tool_images = images;
+        Ok(self)
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn tool_source_delivery_check(
+        &self,
+    ) -> Option<Arc<crate::provider_calls::ToolSourceDelivery>> {
+        self.tool_source_delivery.clone()
+    }
+
+    /// Revalidates protected retained sources under the current owning principal/grant/resource
+    /// and uncancelled fence after adapter preparation/queueing and immediately before transport.
+    /// Ordinary contexts have no additional source allowance or callback. Protected callbacks
+    /// are privately derived from actual admitted owner records; JSON/source markers cannot
+    /// install them. Adapters must await this along with `validate_request` before each disclosure.
+    ///
+    /// # Errors
+    /// Returns a safe provider error for unavailable/revoked/expired/cancelled source content.
+    pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        if let Some(delivery) = &self.tool_source_delivery {
+            delivery.authorize().await?;
+        }
+        Ok(())
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_tool_source_delivery(
+        mut self,
+        delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
+    ) -> Self {
+        self.tool_source_delivery = delivery;
+        self
     }
 
     /// Adds a separately authorized built-in or attachment transfer.
@@ -1450,6 +1528,26 @@ impl ProviderRequestContext {
             return Err(AiError::Conflict);
         }
         self.provider_session = Some(session);
+        Ok(self)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_static_offering_reset_receipt(
+        mut self,
+        receipt: Arc<crate::provider_session::AiStaticOfferingResetReceipt>,
+    ) -> Result<Self, AiError> {
+        let binding = self.run_binding.ok_or(AiError::Conflict)?;
+        if receipt.session_id != binding.session_id()
+            || receipt.run_id != binding.run_id()
+            || receipt.attempt_id != binding.attempt_id()
+            || receipt.lease_generation != binding.lease_generation()
+            || self.provider_session.as_ref().is_none_or(|session| {
+                session.cursor().fingerprint() != receipt.replacement_cursor_fingerprint
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        self.static_offering_reset_receipt = Some(receipt);
         Ok(self)
     }
 
@@ -1572,16 +1670,54 @@ impl ProviderRequestContext {
             .iter()
             .filter(|block| matches!(block, ModelInputBlock::Attachment { .. }))
             .count() as u32;
+        let attachment_count = attachment_count
+            .checked_add(
+                u32::try_from(self.retained_tool_images.len())
+                    .map_err(|_| ProviderError::EgressDenied)?,
+            )
+            .ok_or(ProviderError::EgressDenied)?;
+        let image_bytes = self
+            .retained_tool_images
+            .iter()
+            .try_fold(0_u64, |sum, image| {
+                sum.checked_add(image.byte_count().div_ceil(3).checked_mul(4)?)?
+                    .checked_add(image.reference().mime().len() as u64 + 1024)
+            })
+            .ok_or(ProviderError::EgressDenied)?;
         let estimated_bytes = request.conservative_provider_egress_bytes(provider_kind)?;
+        let inference_bytes = estimated_bytes
+            .checked_add(image_bytes)
+            .ok_or(ProviderError::EgressDenied)?;
 
         self.require_capability(
             provider_kind,
             request,
             AiEgressCapability::ModelInference,
             attachment_count,
-            estimated_bytes,
+            inference_bytes,
         )?;
-        if let Some(wrapper_hash) = request.native_approved_outcome_hash() {
+        let reset_wrapper_hash = self
+            .static_offering_reset_receipt
+            .as_ref()
+            .and_then(|receipt| {
+                if request.input.is_empty()
+                    || request.continuation.is_some()
+                    || request.continuation_mode != ModelContinuationMode::ProviderRetained
+                    || request.input[1..]
+                        .iter()
+                        .any(|input| !matches!(input, ModelInputBlock::Text { .. }))
+                {
+                    return None;
+                }
+                let Some(ModelInputBlock::Json { value }) = request.input.first() else {
+                    return None;
+                };
+                native_approved_outcome_hash(value).filter(|hash| *hash == receipt.outcome_hash)
+            });
+        if let Some(wrapper_hash) = request
+            .native_approved_outcome_hash()
+            .or(reset_wrapper_hash)
+        {
             let transfers = self
                 .transfers
                 .iter()
@@ -1955,6 +2091,11 @@ pub enum ProviderError {
     /// Provider rejected safe request metadata.
     #[error("provider rejected request")]
     Rejected,
+    /// Current protected tool source became unavailable at the delivery checkpoint. This proves
+    /// no dispatch only when carried by `RejectedBeforeDispatch`; after possible transport the
+    /// owning executor keeps the reservation uncertain and permits no automatic effect replay.
+    #[error("provider protected tool source is unavailable")]
+    ToolSourceUnavailable,
     /// A completed, metered stateless turn contained one provider-native item
     /// that the adapter's deployment contract proves was contained outside
     /// the admitted host tool surface.
@@ -1996,6 +2137,7 @@ impl ProviderError {
             | Self::BudgetDenied
             | Self::Unsupported
             | Self::Rejected
+            | Self::ToolSourceUnavailable
             | Self::StatelessNativeItemRejected
             | Self::NewlyBoundTurnRejected(_) => AiProviderFailureCategory::ProviderRejection,
             Self::RetainedTurnRejected(_) => AiProviderFailureCategory::RetainedResumeRejection,
@@ -2480,6 +2622,8 @@ pub struct ProviderDynamicToolResult {
     call_id: String,
     tool_id: String,
     output: serde_json::Value,
+    images: Vec<crate::AiResolvedToolImage>,
+    requires_source_delivery: bool,
 }
 
 impl std::fmt::Debug for ProviderDynamicToolResult {
@@ -2500,6 +2644,8 @@ impl ProviderDynamicToolResult {
             call_id,
             tool_id,
             output: serde_json::json!({"ready": true}),
+            images: Vec::new(),
+            requires_source_delivery: false,
         }
     }
 
@@ -2519,6 +2665,8 @@ impl ProviderDynamicToolResult {
             call_id: call.call_id.clone(),
             tool_id: call.tool_id.clone(),
             output,
+            images: Vec::new(),
+            requires_source_delivery: false,
         })
     }
 
@@ -2537,6 +2685,8 @@ impl ProviderDynamicToolResult {
             call_id,
             tool_id,
             output,
+            images: Vec::new(),
+            requires_source_delivery: false,
         })
     }
 
@@ -2553,6 +2703,37 @@ impl ProviderDynamicToolResult {
     /// Separately egress-authorized model-visible result.
     pub fn output(&self) -> &serde_json::Value {
         &self.output
+    }
+
+    /// Actual currently authorized typed image content for this exact call. Output reference JSON
+    /// alone supplies no image. Adapters must use real image parts, never serialize these bytes
+    /// into the result text or fetch a source URL/path.
+    pub fn images(&self) -> &[crate::AiResolvedToolImage] {
+        &self.images
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn require_source_delivery(mut self, required: bool) -> Self {
+        self.requires_source_delivery = required;
+        self
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_images(
+        mut self,
+        images: Vec<crate::AiResolvedToolImage>,
+    ) -> Result<Self, ProviderError> {
+        if images.len() > 4
+            || images
+                .iter()
+                .map(crate::AiResolvedToolImage::byte_count)
+                .sum::<u64>()
+                > 16 * 1024 * 1024
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.images = images;
+        Ok(self)
     }
 }
 
@@ -2725,6 +2906,24 @@ pub trait ProviderDynamicToolResponder: Send + Sync {
         &self,
         call: ProviderDynamicToolCall,
     ) -> Result<ProviderDynamicToolResult, ProviderError>;
+
+    /// Revalidates the exact retained result immediately before adapter transport. Adapters must
+    /// await this after callback completion and before encoding/sending protected image content.
+    /// The compatibility default admits ordinary text only; images require the owning coordinator.
+    /// This never executes a tool, renews retention or allocates another effect reservation.
+    ///
+    /// # Errors
+    /// Returns a safe error for revoked/cancelled/stale disclosure or unavailable source evidence.
+    async fn authorize_delivery(
+        &self,
+        result: &ProviderDynamicToolResult,
+    ) -> Result<(), ProviderError> {
+        if result.images().is_empty() && !result.requires_source_delivery {
+            Ok(())
+        } else {
+            Err(ProviderError::Rejected)
+        }
+    }
 
     /// Persists a schema-invalid request without executing its tool.
     ///
@@ -3262,6 +3461,28 @@ pub trait AiProvider: Send + Sync {
     /// Adapter/model capabilities used before routing.
     fn capabilities(&self) -> ProviderCapabilities;
 
+    /// Whether this adapter revalidates protected tool sources after queueing and immediately
+    /// before every actual text/image delivery. The default refuses declared Restricted/media
+    /// effects and protected retained history; ordinary text is unchanged. Returning true must
+    /// include both `ProviderDynamicToolResponder::authorize_delivery` and the owning request
+    /// context's current source guard, preserved across any host process queue.
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        false
+    }
+
+    /// Whether this adapter has a reviewed typed image tool-result transport. The compatibility
+    /// default denies media-required effects before application execution; JSON references are
+    /// never treated as image content.
+    fn supports_tool_result_images(&self) -> bool {
+        false
+    }
+
+    /// Preflights the immutable media/text ceiling against this adapter's actual typed frame
+    /// contract before an effect is admitted. The compatibility default refuses the policy.
+    fn supports_tool_result_image_policy(&self, _descriptor: &crate::AiToolDescriptor) -> bool {
+        false
+    }
+
     /// Starts a streaming request. The context can only be constructed from an
     /// allowed exact egress decision.
     async fn stream(
@@ -3294,6 +3515,9 @@ pub trait AiProvider: Send + Sync {
         context: ProviderRequestContext,
     ) -> AiProviderDispatchOutcome {
         if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        if let Err(error) = context.authorize_tool_source_delivery().await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         match self.stream(request, context).await {
@@ -3331,6 +3555,9 @@ pub trait AiProvider: Send + Sync {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> AiProviderDispatchOutcome {
         if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        if let Err(error) = context.authorize_tool_source_delivery().await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         match self

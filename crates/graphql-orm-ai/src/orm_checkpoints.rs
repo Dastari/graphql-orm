@@ -29,6 +29,7 @@ use crate::{
 };
 
 mod native;
+mod tool_media;
 
 #[derive(Clone, Copy)]
 enum CompletedToolCheckpointClass {
@@ -795,7 +796,8 @@ impl OrmAiCoordinatorCheckpointService {
                     &adopted.provider_result.provider_model,
                 ) && manifest.sources.len() == 1
                     && manifest.sources[0].kind == "application_tool_result"
-                    && manifest.sources[0].reference == completed.id().0.to_string()
+                    && crate::tool_media::source_call_hint(&manifest.sources[0].reference)
+                        == Some(completed.id().0)
             })
             .ok_or(AiError::EgressDenied)?;
         if completed.provider_call_id() != provider_tool.call_id {
@@ -1266,7 +1268,7 @@ impl OrmAiCoordinatorCheckpointService {
             )
             || transfer.sources.len() != 1
             || transfer.sources[0].kind != "application_tool_result"
-            || transfer.sources[0].reference != tool.id.to_string()
+            || crate::tool_media::source_call_hint(&transfer.sources[0].reference) != Some(tool.id)
         {
             return Err(AiError::EgressDenied);
         }
@@ -1274,6 +1276,13 @@ impl OrmAiCoordinatorCheckpointService {
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
             .ok_or(AiError::NotFound)?;
+        if transfer.sources[0].reference
+            != self
+                .expected_application_source(lease, &scope, &call, output)
+                .await?
+        {
+            return Err(AiError::EgressDenied);
+        }
         let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool.id)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -1604,7 +1613,8 @@ impl OrmAiCoordinatorCheckpointService {
                         result.provider_model(),
                     ) && manifest.sources.len() == 1
                         && manifest.sources[0].kind == "application_tool_result"
-                        && manifest.sources[0].reference == persisted.id().0.to_string()
+                        && crate::tool_media::source_call_hint(&manifest.sources[0].reference)
+                            == Some(persisted.id().0)
                 })
                 .ok_or(AiError::EgressDenied)?;
             if persisted.provider_call_id() != expected.call_id()
@@ -1658,7 +1668,7 @@ impl OrmAiCoordinatorCheckpointService {
                     result.provider_model(),
                 ) || transfer.sources.len() != 1
                     || transfer.sources[0].kind != "application_tool_result"
-                    || Uuid::parse_str(&transfer.sources[0].reference).is_err()
+                    || crate::tool_media::source_call_hint(&transfer.sources[0].reference).is_none()
                     || !unique_manifest_hashes.insert(transfer.stable_hash())
                 {
                     return Err(AiError::EgressDenied);
@@ -2043,7 +2053,8 @@ impl OrmAiCoordinatorCheckpointService {
                 )
                 || transfer.sources.len() != 1
                 || transfer.sources[0].kind != "application_tool_result"
-                || transfer.sources[0].reference != tool.id.to_string()
+                || crate::tool_media::source_call_hint(&transfer.sources[0].reference)
+                    != Some(tool.id)
             {
                 return Err(AiError::EgressDenied);
             }
@@ -2051,6 +2062,13 @@ impl OrmAiCoordinatorCheckpointService {
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
                 .ok_or(AiError::NotFound)?;
+            if transfer.sources[0].reference
+                != self
+                    .expected_application_source(lease, &scope, &call, output)
+                    .await?
+            {
+                return Err(AiError::EgressDenied);
+            }
             let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool.id)
                 .await
                 .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -2158,8 +2176,8 @@ impl OrmAiCoordinatorCheckpointService {
                 {
                     return Err(AiError::EgressDenied);
                 }
-                let tool_id = Uuid::parse_str(&transfer.sources[0].reference)
-                    .map_err(|_| AiError::Conflict)?;
+                let tool_id = crate::tool_media::source_call_hint(&transfer.sources[0].reference)
+                    .ok_or(AiError::Conflict)?;
                 if !durable_ids.insert(tool_id) || !provider_call_ids.insert(item.call_id.as_str())
                 {
                     return Err(AiError::Conflict);
@@ -2168,6 +2186,13 @@ impl OrmAiCoordinatorCheckpointService {
                     .await
                     .map_err(|error| map_orm(OrmPublicError::from(error)))?
                     .ok_or(AiError::NotFound)?;
+                if transfer.sources[0].reference
+                    != self
+                        .expected_application_source(lease, &scope, &call, &item.output)
+                        .await?
+                {
+                    return Err(AiError::EgressDenied);
+                }
                 let step = AiRunStepRecord::find_by_id(self.run_service.database(), &tool_id)
                     .await
                     .map_err(|error| map_orm(OrmPublicError::from(error)))?

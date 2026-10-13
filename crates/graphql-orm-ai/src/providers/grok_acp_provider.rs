@@ -38,6 +38,12 @@ fn argument_digest(arguments: &serde_json::Value) -> Result<[u8; 32], ProviderEr
 
 #[async_trait]
 impl ProviderDynamicToolResponder for RejectionTrackingResponder {
+    async fn authorize_delivery(
+        &self,
+        result: &crate::ProviderDynamicToolResult,
+    ) -> Result<(), ProviderError> {
+        self.inner.authorize_delivery(result).await
+    }
     async fn respond(
         &self,
         call: crate::ProviderDynamicToolCall,

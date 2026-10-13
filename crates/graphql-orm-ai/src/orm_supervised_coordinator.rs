@@ -280,6 +280,29 @@ pub trait AiSupervisedAgentTurnPlanner: Send + Sync {
         provider_turns: u32,
         continuation: crate::AiAgentContinuation,
     ) -> Result<AiSupervisedAgentTurnPlan, AiError>;
+
+    /// Optionally reduces one SDK-proven unstarted image continuation after atomic quota denial.
+    ///
+    /// Default is no retry. The SDK releases its failed plan clones and refuses this callback
+    /// if any other frozen plan survives. A replacement must use the same opaque continuation,
+    /// prepared task context, shared delivery, provider/model/registration, scope and rules,
+    /// a strict subset of the original static offering and a strictly smaller image quote.
+    /// It grants no renewal of an original effect, human consent or observation deadline.
+    /// Only one retry is admitted; a second denial remains truthful and terminal.
+    /// The callback is cancelled on owner cancellation and bounded by the remaining
+    /// current lease, at most thirty seconds, without renewing that lease.
+    ///
+    /// # Errors
+    /// Return a safe refusal when current host configuration cannot produce the exact
+    /// smaller offering. The SDK separately validates cleanup, source, fencing and quote.
+    async fn replan_unstarted_static_offering(
+        &self,
+        _lease: &AiRunLease,
+        _provider_turns: u32,
+        _context: crate::AiUnstartedStaticOfferingReplan,
+    ) -> Result<Option<AiSupervisedAgentTurnPlan>, AiError> {
+        Ok(None)
+    }
 }
 
 /// Durable wait created for one provider-requested supervised mutation.
@@ -986,6 +1009,32 @@ impl AiSupervisedAgentCoordinator {
     #[allow(clippy::too_many_arguments)]
     async fn execute_turn(
         &self,
+        lease: AiRunLease,
+        guard: AiAgentLoopGuard,
+        plan: AiSupervisedAgentTurnPlan,
+        rule_usage: AiRuleRunUsage,
+        adopted: Option<&AiAdoptedSupervisedToolBatch>,
+        adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
+        adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        // The private retry state retains several exact plans and proofs. Keep that
+        // future off every native continuation caller's inline polling frame.
+        Box::pin(self.execute_turn_with_retry(
+            lease,
+            guard,
+            plan,
+            rule_usage,
+            adopted,
+            adopted_automatic,
+            adopted_subscription,
+            true,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn_with_retry(
+        &self,
         mut lease: AiRunLease,
         mut guard: AiAgentLoopGuard,
         plan: AiSupervisedAgentTurnPlan,
@@ -993,6 +1042,7 @@ impl AiSupervisedAgentCoordinator {
         adopted: Option<&AiAdoptedSupervisedToolBatch>,
         adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
         adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
+        allow_unstarted_retry: bool,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         if !guard.can_begin_provider_turn() {
             return self
@@ -1166,6 +1216,20 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         }
+        let unstarted_replan = if native_mode && allow_unstarted_retry {
+            capability_delivery
+                .as_ref()
+                .zip(provider_session.as_ref())
+                .and_then(|(delivery, session)| {
+                    crate::AiUnstartedStaticOfferingReplan::prepare(
+                        &provider_plan,
+                        delivery,
+                        session,
+                    )
+                })
+        } else {
+            None
+        };
         let classified_bindings = provider_plan.clone();
         let resumed_checkpoint =
             adopted.is_some() || adopted_automatic.is_some() || adopted_subscription.is_some();
@@ -1279,6 +1343,106 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
             Err(SupervisedProviderTurnFailure::BudgetDenied) => {
+                if let Some(context) = unstarted_replan {
+                    // The completed execution future owns no transport/effect. Release every
+                    // SDK clone before offering mutable static configuration to the host.
+                    drop(classified_bindings);
+                    drop(native_execution);
+                    if context.ready_for_callback().is_err() {
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderTurn,
+                                "unstarted_static_offering_plan_still_frozen",
+                                None,
+                            )
+                            .await;
+                    }
+                    if self.run_control.cancellation(&lease).await?.is_some() {
+                        return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        });
+                    }
+                    let cleanup_is_current = if let Some(service) = &self.provider_session_service {
+                        context
+                            .validate_unstarted_cleanup(&lease, service.as_ref(), self.clock.now())
+                            .await
+                            .is_ok()
+                    } else {
+                        false
+                    };
+                    if !cleanup_is_current {
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderTurn,
+                                "unstarted_static_offering_cleanup_not_proved",
+                                None,
+                            )
+                            .await;
+                    }
+                    let replacement = Box::pin(self.replan_unstarted_static_offering_bounded(
+                        &lease,
+                        guard.provider_turns(),
+                        &context,
+                    ))
+                    .await;
+                    if self.run_control.cancellation(&lease).await?.is_some() {
+                        return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        });
+                    }
+                    let replacement = match replacement {
+                        Ok(replacement) => replacement,
+                        Err(_) => {
+                            return self
+                                .finish_failed(
+                                    &lease,
+                                    &guard,
+                                    "unstarted_static_offering_replan_refused",
+                                )
+                                .await;
+                        }
+                    };
+                    if let Some(next) = replacement {
+                        if !next.native
+                            || next.uses_byok != uses_byok
+                            || next.result_egress_route != route
+                            || next.rules.fingerprint() != planned_rules.fingerprint()
+                            || next
+                                .capability_delivery
+                                .as_ref()
+                                .zip(next.provider_session.as_ref())
+                                .is_none_or(|(delivery, session)| {
+                                    context
+                                        .validate_replacement(
+                                            &next.provider_call,
+                                            delivery,
+                                            session,
+                                        )
+                                        .is_err()
+                                })
+                        {
+                            return self
+                                .finish_failed(
+                                    &lease,
+                                    &guard,
+                                    "unstarted_static_offering_replan_invalid",
+                                )
+                                .await;
+                        }
+                        // The original checkpoint was already consumed; recursive entry only
+                        // prices/discloses the same continuation and never consumes or invokes it again.
+                        return Box::pin(self.execute_turn_with_retry(
+                            lease, guard, next, rule_usage, None, None, None, false,
+                        ))
+                        .await;
+                    }
+                }
                 if let Some((service, claim)) = &reclaimed {
                     let _ = service
                         .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
@@ -1583,12 +1747,18 @@ impl AiSupervisedAgentCoordinator {
                     }
                     return Err(error);
                 }
-                if let Some((service, claim, commit)) = provider_session_commit
-                    && service.commit_turn(&lease, &claim, commit).await.is_err()
-                {
-                    let _ = service
-                        .require_cleanup(&claim, "provider_session_commit_uncertain")
-                        .await;
+                if let Some((service, claim, commit)) = provider_session_commit {
+                    if result.is_withheld_native_task_context() {
+                        // This tool-free thread is a restricted completed-task projection.
+                        // Do not leave its empty offering as the next ordinary run's thread.
+                        let _ = service
+                            .require_cleanup(&claim, "native_withheld_task_context_completed")
+                            .await;
+                    } else if service.commit_turn(&lease, &claim, commit).await.is_err() {
+                        let _ = service
+                            .require_cleanup(&claim, "provider_session_commit_uncertain")
+                            .await;
+                    }
                 }
                 Ok(AiSupervisedAgentRunOutcome::Completed {
                     message_id,
@@ -1868,6 +2038,67 @@ impl AiSupervisedAgentCoordinator {
                 })
             }
         }
+    }
+
+    async fn replan_unstarted_static_offering_bounded(
+        &self,
+        lease: &AiRunLease,
+        provider_turns: u32,
+        context: &crate::AiUnstartedStaticOfferingReplan,
+    ) -> Result<Option<AiSupervisedAgentTurnPlan>, AiError> {
+        let remaining = lease.lease_expires_at() - self.clock.now();
+        if !remaining.is_positive() {
+            return Err(AiError::Conflict);
+        }
+        let deadline =
+            tokio::time::Instant::now() + remaining.min(Duration::seconds(30)).unsigned_abs();
+        let operation = async {
+            let callback = self.planner.replan_unstarted_static_offering(
+                lease,
+                provider_turns,
+                context.clone(),
+            );
+            tokio::pin!(callback);
+            let replacement = loop {
+                tokio::select! {
+                    result = &mut callback => break result?,
+                    cancellation = self.run_control.wait_for_cancellation(
+                        lease, std::time::Duration::from_millis(250),
+                    ) => {
+                        if cancellation?.is_some()
+                            || self.clock.now() >= lease.lease_expires_at()
+                        {
+                            return Err(AiError::Conflict);
+                        }
+                    }
+                }
+            };
+            // No renewal occurs while the host plans. A completed callback does not
+            // authorize a replacement after cancellation, expiry or changed custody.
+            if self.clock.now() >= lease.lease_expires_at()
+                || self.run_control.cancellation(lease).await?.is_some()
+            {
+                return Err(AiError::Conflict);
+            }
+            context
+                .validate_current_unstarted_cleanup(
+                    lease,
+                    self.provider_session_service
+                        .as_deref()
+                        .ok_or(AiError::Conflict)?,
+                    self.clock.now(),
+                )
+                .await?;
+            Ok(replacement)
+        };
+        let replacement = tokio::time::timeout_at(deadline, operation)
+            .await
+            .map_err(|_| AiError::ProviderFailed)??;
+        // A non-yielding host callback must also fail the same monotonic bound.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AiError::ProviderFailed);
+        }
+        Ok(replacement)
     }
 
     async fn execute_provider_with_heartbeats(
@@ -2264,6 +2495,7 @@ mod tests {
                 idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
                 absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
                 row_version: 2,
+                installed_offering_fingerprint: None,
             })
         }
 

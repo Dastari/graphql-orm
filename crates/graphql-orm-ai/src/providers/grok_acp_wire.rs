@@ -680,6 +680,7 @@ impl AiGrokAcpRunProcess for AiGrokAcpWireProcess {
                             let arguments=call.arguments().clone();
                             yield ProviderEvent::ToolCallStarted{call_id:call_id.clone(),tool_id:call.tool_id().to_owned()};
                             let result=responder.respond(call).await?;
+                            responder.authorize_delivery(&result).await?;
                             let response=state.broker.tool_response(&result).map_err(|e| classify_protocol(e, Failure::ProtocolSdk))?;
                             yield ProviderEvent::ToolCallCompleted{call_id,arguments};
                             response

@@ -57,6 +57,9 @@ pub(crate) struct AiProviderSessionBindingRecord {
     pub registration_fingerprint: String,
     pub protocol_version: String,
     pub policy_fingerprint: String,
+    /// SDK-owned fingerprint of the exact definitions installed at thread creation. Historical
+    /// unknown values require verified cleanup before a changed static offering is admitted.
+    pub installed_offering_fingerprint: Option<String>,
     pub cursor_kind: String,
     pub cursor_fingerprint: String,
     /// The cursor is never exposed through generated reads and is redacted
@@ -171,6 +174,8 @@ mod service {
 
     const CURSOR_FORMAT_VERSION: u16 = 1;
     const MAXIMUM_SAFE_REASON_CODE_BYTES: usize = 200;
+
+    include!("orm_provider_session/static_offering.rs");
 
     #[derive(Serialize, Deserialize)]
     #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -422,6 +427,39 @@ mod service {
 
     #[async_trait]
     impl AiProviderSessionService for OrmAiProviderSessionService {
+        async fn prepare_static_offering_reset(
+            &self,
+            lease: &AiRunLease,
+            claim: &AiProviderSessionClaim,
+            request: &crate::AiProviderStaticOfferingResetRequest,
+        ) -> Result<
+            (
+                AiProviderSessionCleanupClaim,
+                AiProviderSessionDeletionRequest,
+            ),
+            AiError,
+        > {
+            self.prepare_static_offering_reset_inner(lease, claim, request)
+                .await
+        }
+
+        async fn authorize_static_offering_rebind(
+            &self,
+            lease: &AiRunLease,
+            cleanup: &AiProviderSessionCleanupClaim,
+            request: &crate::AiProviderStaticOfferingResetRequest,
+        ) -> Result<AiProviderSessionRebindAuthorization, AiError> {
+            self.authorize_static_offering_rebind_inner(lease, cleanup, request)
+                .await
+        }
+        async fn authorize_static_offering_budget_rebind(
+            &self,
+            lease: &AiRunLease,
+            request: &crate::AiProviderStaticOfferingResetRequest,
+        ) -> Result<(AiProviderSessionRebindAuthorization, String), AiError> {
+            self.authorize_static_offering_budget_rebind_inner(lease, request)
+                .await
+        }
         async fn inspect_for_run(
             &self,
             lease: &AiRunLease,
@@ -496,6 +534,20 @@ mod service {
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
+                        if let Some((evidence, offering)) = &planned.native_context {
+                            validate_static_reset_graph(
+                                tx,
+                                &lease,
+                                &crate::AiProviderStaticOfferingResetRequest {
+                                    evidence: evidence.clone(),
+                                    planned: planned.clone(),
+                                    desired_offering_fingerprint: offering.clone(),
+                                    definitely_unstarted_budget_denial: false,
+                                },
+                                now,
+                            )
+                            .await?;
+                        }
                         let input = tx
                             .find_by_id::<AiMessageRecord>(&lease.input_message_id())
                             .await
@@ -504,7 +556,13 @@ mod service {
                         if input.session_id != session.id
                             || input.message_role != "user"
                             || input.completion_state != "complete"
-                            || input.sequence != session.message_head
+                            || if planned.native_context.is_some() {
+                                input.run_id != Some(lease.run_id().0)
+                                    || input.content_purged_at.is_some()
+                                    || input.sequence > session.message_head
+                            } else {
+                                input.sequence != session.message_head
+                            }
                             || input.sequence <= 0
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -670,6 +728,7 @@ mod service {
                                     transcript_fingerprint: planned
                                         .transcript_fingerprint()
                                         .to_owned(),
+                                    static_offering_reset: None,
                                 },
                             )));
                         }
@@ -689,8 +748,13 @@ mod service {
             let policy = self.protection_policy(current.principal(), &scope).await?;
             let now = canonical_second(self.clock.now());
             let binding_id = Uuid::new_v4();
-            let (descriptor, cursor, transcript_fingerprint, provider_expires_at) =
-                request.into_parts();
+            let (
+                descriptor,
+                cursor,
+                transcript_fingerprint,
+                provider_expires_at,
+                installed_offering_fingerprint,
+            ) = request.into_parts();
             let absolute_expires_at = now
                 .checked_add(self.limits.absolute_lifetime())
                 .ok_or(AiError::PersistenceFailed)?;
@@ -812,6 +876,7 @@ mod service {
                                         .to_owned(),
                                     cursor_kind,
                                     cursor_fingerprint,
+                                    installed_offering_fingerprint,
                                     protected_cursor: Some(protected_cursor),
                                     through_message_sequence: input.sequence - 1,
                                     transcript_fingerprint,
@@ -876,8 +941,13 @@ mod service {
             let (current, observed_session, scope) = self.load_owned_active_context(lease).await?;
             let policy = self.protection_policy(current.principal(), &scope).await?;
             let now = canonical_second(self.clock.now());
-            let (descriptor, cursor, transcript_fingerprint, provider_expires_at) =
-                request.into_parts();
+            let (
+                descriptor,
+                cursor,
+                transcript_fingerprint,
+                provider_expires_at,
+                installed_offering_fingerprint,
+            ) = request.into_parts();
             if authorization.session_id != lease.session_id()
                 || authorization.run_id != lease.run_id()
                 || authorization.attempt_id != lease.attempt_id()
@@ -889,6 +959,11 @@ mod service {
                 || authorization.expires_at <= now
                 || authorization.provider_absence_observed_at > now
                 || provider_expires_at.is_some_and(|expiry| expiry <= now)
+            {
+                return Err(AiError::Conflict);
+            }
+            if let Some(reset) = &authorization.static_offering_reset
+                && installed_offering_fingerprint.as_deref() != Some(reset.offering_fingerprint())
             {
                 return Err(AiError::Conflict);
             }
@@ -931,6 +1006,9 @@ mod service {
                         if current_run.state != AiRunState::Running.as_str() {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
+                        if let Some(reset) = &authorization.static_offering_reset {
+                            validate_static_reset_graph(tx, &lease, reset, now).await?;
+                        }
                         let session = tx
                             .find_by_id::<AiSessionRecord>(&lease.session_id().0)
                             .await
@@ -953,7 +1031,13 @@ mod service {
                         if input.session_id != session.id
                             || input.message_role != "user"
                             || input.completion_state != "complete"
-                            || input.sequence != session.message_head
+                            || if authorization.static_offering_reset.is_some() {
+                                input.run_id != Some(lease.run_id().0)
+                                    || input.content_purged_at.is_some()
+                                    || input.sequence > session.message_head
+                            } else {
+                                input.sequence != session.message_head
+                            }
                             || input.sequence <= 0
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -1025,6 +1109,9 @@ mod service {
                                     ),
                                     cursor_kind: Some(cursor_kind),
                                     cursor_fingerprint: Some(cursor_fingerprint),
+                                    installed_offering_fingerprint: Some(
+                                        installed_offering_fingerprint,
+                                    ),
                                     protected_cursor: Some(Some(protected_cursor)),
                                     through_message_sequence: Some(input.sequence - 1),
                                     transcript_fingerprint: Some(transcript_fingerprint),
@@ -3476,6 +3563,7 @@ mod service {
             idle_expires_at: parse_required_time(record.idle_expires_at)?,
             absolute_expires_at: parse_required_time(record.absolute_expires_at)?,
             row_version: record.row_version,
+            installed_offering_fingerprint: record.installed_offering_fingerprint.clone(),
         })
     }
 
@@ -3518,6 +3606,10 @@ mod service {
             && !principal_reference.subject.is_empty()
             && crate::valid_sha256(&record.cursor_fingerprint)
             && crate::valid_sha256(&record.transcript_fingerprint)
+            && record
+                .installed_offering_fingerprint
+                .as_deref()
+                .is_none_or(crate::valid_sha256)
             && record.through_message_sequence >= 0
             && record.claim_generation >= 0
             && record.park_generation >= 0
@@ -4443,6 +4535,7 @@ mod service {
                     policy_fingerprint: "b".repeat(64),
                     cursor_kind,
                     cursor_fingerprint,
+                    installed_offering_fingerprint: None,
                     protected_cursor: Some(protected_cursor),
                     through_message_sequence: 0,
                     transcript_fingerprint: "c".repeat(64),
@@ -4539,6 +4632,7 @@ mod service {
                     protected_arguments: Some(serde_json::json!({"protected": true})),
                     argument_hash: "f".repeat(64),
                     protected_result: None,
+                    protected_result_source: None,
                     payload_purged_at: None,
                     risk: "high_impact".to_owned(),
                     authorization_code: None,

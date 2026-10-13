@@ -31,6 +31,7 @@ use crate::{
 };
 
 pub(crate) mod native_checkpoints;
+mod tool_media;
 
 const MAXIMUM_WORKER_ID_BYTES: usize = 256;
 const MAXIMUM_SAFE_CODE_BYTES: usize = 200;
@@ -3159,6 +3160,7 @@ impl OrmAiRunService {
                         protected_result: blocked
                             .as_ref()
                             .map(|blocked| blocked.receipt.protected_receipt.clone()),
+                        protected_result_source: None,
                         payload_purged_at: None,
                         risk: call.risk,
                         authorization_code: blocked
@@ -4122,6 +4124,25 @@ impl OrmAiRunService {
         lease: &AiRunLease,
         finish: PreparedToolCallFinish,
     ) -> Result<AiRunLease, AiError> {
+        self.finish_tool_call_inner(lease, finish, None).await
+    }
+
+    pub(crate) async fn finish_tool_call_with_source(
+        &self,
+        lease: &AiRunLease,
+        finish: PreparedToolCallFinish,
+        protected_source: Option<serde_json::Value>,
+    ) -> Result<AiRunLease, AiError> {
+        self.finish_tool_call_inner(lease, finish, protected_source)
+            .await
+    }
+
+    async fn finish_tool_call_inner(
+        &self,
+        lease: &AiRunLease,
+        finish: PreparedToolCallFinish,
+        retained_source: Option<serde_json::Value>,
+    ) -> Result<AiRunLease, AiError> {
         let now = canonical_second(self.clock.now());
         let lease_ttl = self.limits.lease_ttl;
         let lease = lease.clone();
@@ -4149,8 +4170,19 @@ impl OrmAiRunService {
                         || call.lease_generation != lease.lease_generation
                         || call.provider_call_key != finish.expected_provider_call_key
                         || call.tool_fingerprint != finish.expected_tool_fingerprint
-                        || call.state != "executing"
-                        || call.protected_result.is_some()
+                        || match &retained_source {
+                            Some(source) => {
+                                call.state != "source_retained"
+                                    || call.protected_result.as_ref()
+                                        != Some(&finish.protected_result)
+                                    || call.protected_result_source.as_ref() != Some(source)
+                            }
+                            None => {
+                                call.state != "executing"
+                                    || call.protected_result.is_some()
+                                    || call.protected_result_source.is_some()
+                            }
+                        }
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
@@ -6738,6 +6770,7 @@ mod tests {
                 protected_arguments: Some(serde_json::json!({"protected": true})),
                 argument_hash: "argument-hash".to_owned(),
                 protected_result: Some(serde_json::json!({"protected": true})),
+                protected_result_source: None,
                 payload_purged_at: None,
                 risk: "read_only".to_owned(),
                 authorization_code: Some("allowed".to_owned()),

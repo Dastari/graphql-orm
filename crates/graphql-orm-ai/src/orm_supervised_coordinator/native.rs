@@ -34,6 +34,9 @@ pub(super) struct NativeExecution {
 
 #[async_trait]
 impl AiProviderDynamicToolExecution for NativeExecution {
+    fn tool_result_source_service(&self) -> Option<&OrmAiApplicationToolCallService> {
+        Some(self.services.applications.as_ref())
+    }
     async fn execute_dynamic_tool(
         &self,
         _lease: &AiRunLease,
@@ -127,10 +130,13 @@ impl AiProviderDynamicToolExecution for NativeExecution {
             match (disposition, pending) {
                 (AiApplicationToolDisposition::ReadOnly, _) => {
                     AiProviderDynamicToolOutcome::Application(Box::new(
-                        self.services
-                            .applications
-                            .execute_read_only(lease, result, context, self.route.clone())
-                            .await?,
+                        Box::pin(self.services.applications.execute_read_only(
+                            lease,
+                            result,
+                            context,
+                            self.route.clone(),
+                        ))
+                        .await?,
                     ))
                 }
                 (_, Some(pending)) => AiProviderDynamicToolOutcome::NativeControl(Box::new(
@@ -145,19 +151,23 @@ impl AiProviderDynamicToolExecution for NativeExecution {
                         )
                         .await?,
                 )),
-                (AiApplicationToolDisposition::AutomaticMutation, None) => match self
-                    .services
-                    .applications
-                    .execute_automatic_mutation(lease, result, context, self.route.clone())
+                (AiApplicationToolDisposition::AutomaticMutation, None) => {
+                    match Box::pin(self.services.applications.execute_automatic_mutation(
+                        lease,
+                        result,
+                        context,
+                        self.route.clone(),
+                    ))
                     .await?
-                {
-                    crate::AiConsequentialToolCallOutcome::Persisted(result) => {
-                        AiProviderDynamicToolOutcome::Application(result)
+                    {
+                        crate::AiConsequentialToolCallOutcome::Persisted(result) => {
+                            AiProviderDynamicToolOutcome::Application(result)
+                        }
+                        crate::AiConsequentialToolCallOutcome::RecoveryRequired { .. } => {
+                            return Err(AiError::Conflict);
+                        }
                     }
-                    crate::AiConsequentialToolCallOutcome::RecoveryRequired { .. } => {
-                        return Err(AiError::Conflict);
-                    }
-                },
+                }
                 (AiApplicationToolDisposition::ApprovalRequired, None) => {
                     let prepared = self
                         .services

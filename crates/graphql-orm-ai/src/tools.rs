@@ -557,6 +557,13 @@ impl AiToolCatalog {
         descriptor: AiToolDescriptor,
         disclosure_schema: Option<AiDisclosureSchema>,
     ) -> Result<(), AiError> {
+        if let Some(media) = &descriptor.result_media {
+            let disclosure = disclosure_schema.as_ref().ok_or(AiError::Forbidden)?;
+            media.validate_disclosure(&disclosure.root)?;
+            if media.classification() > descriptor.maximum_classification {
+                return Err(AiError::Forbidden);
+            }
+        }
         if !descriptor.has_valid_fingerprint()
             || descriptor
                 .argument_schema

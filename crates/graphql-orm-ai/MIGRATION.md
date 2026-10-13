@@ -19,6 +19,72 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.106.1 to 0.107.0
+
+This is a source-breaking pre-1.0 minor release under Cargo's compatibility
+rules. Recompile consumers and review these Rust API changes:
+
+- `ProviderRequestContext` no longer implements `UnwindSafe` or
+  `RefUnwindSafe`: it retains current delivery guards that can refer to mutable
+  host policy. Remove assumptions that the complete context can cross a panic
+  boundary. Any explicit `AssertUnwindSafe` is a caller-reviewed recovery
+  decision; it does not make the SDK guards panic-safe or authorize delivery.
+- Generated `CreateAiProviderSessionBindingRecordInput` and
+  `UpdateAiProviderSessionBindingRecordInput` literals gain the nullable
+  `installed_offering_fingerprint` field. Initialize it to `None` in old
+  literals or use the existing defaults where applicable. The owning lifecycle
+  service records installed definitions; caller-supplied values prove no
+  installation, cursor cleanup or permission.
+- `AiProviderSessionBindingRecordAggregateField` gains
+  `InstalledOfferingFingerprint`. Recompile exhaustive matches. Later implicit
+  discriminants change, so numeric casts from the old enum cannot identify
+  fields in the new release; use the typed variants and never persist their
+  integer values as field identities.
+
+Adopt tool profiles 0.16.0 from the same published workspace release. Existing
+non-media tool fingerprints remain unchanged. New media declarations require a
+trusted logical resolver, explicit exact provider destination policy and a current
+source-aware egress hook. The compatibility defaults deny image delivery and
+Restricted-source overrides. Unsupported adapters refuse media-required effects.
+The new `AiProvider::supports_tool_result_source_delivery` compatibility default
+also denies declared Restricted effects and protected history until an adapter
+preserves and awaits the owning guard immediately before delivery. Codex additionally
+requires explicit owning-factory attestation and registration opt-in through
+`with_guarded_tool_result_source_delivery`, before deriving its immutable capability
+binding. Legacy disabled registration fingerprints remain unchanged; old launch
+support alone cannot admit protected effects. Completed protected output is saved
+under its exact live effect fence before fresh disclosure access is rechecked;
+withdrawal denies all source/image delivery without discarding actual completion.
+
+Original provider provenance getters keep their meaning. Optional effect attempt
+and generation getters are minted from the actual executing SDK lease, after
+human approval consumption when required. They remain separate from the current
+disclosure lease. Absent fields preserve old serialization and fingerprints;
+deserialized fields never prove authority. Protected result admission compares
+the complete actual effect fence, without stripping it during capture/reopening.
+
+Apply owned AI schema module 0.72.0 before runtime admission. It adds nullable
+`protected_result_source` to tool calls and an internal source-address table;
+provider-session bindings additionally gain nullable
+`installed_offering_fingerprint`. Metadata and original output remain protected.
+Existing rows need no source backfill and gain no additional disclosure
+allowance. An unknown installed offering requires verified cursor cleanup
+before changed definitions can be admitted. Include the new table in
+owned backup/restore and retain the existing closed reconciliation gate. A small
+source index is correlation only; reopening always checks protected owner bytes.
+
+Budget planners must reserve a finite image ceiling for actual offered media
+policies. Usage accounting must include the SDK-derived
+`tool_result_image_units()` count. A zero image policy remains a truthful denial;
+no pricing or user-grant authority is created by this API. Adapters call
+`authorize_delivery` immediately before typed image transport. Reopening must
+retain original action/capture deadlines and must never repeat effects.
+
+`PreTransportToolSourceUnavailable` proves an unstarted reservation was released;
+it permits a fresh sanitized conversation after cursor cleanup, never replay of
+inaccessible output. See the [canonical media contract](docs/tool-result-media.md)
+for original/current identity getters, bounds and history disclosure.
+
 ## 0.106.0 to 0.106.1
 
 Provider-session bindings now admit up to 128 static bootstrap fingerprints;
@@ -5738,3 +5804,21 @@ content protection and immutable deployment boundaries, and keep the runtime
 start gate closed until readiness succeeds. PostgreSQL/MSSQL rehearsal must use
 a disposable Docker-owned database; never point migration commands at a live
 machine database.
+
+
+### Retained native static offering changes
+
+Hosts that change an originally bound static subset between native turns must
+use the same `AiCapabilityDeliveryTurn`, prepare and price the owning original
+task context, and register the exact provider-session deletion adapter with
+`with_static_offering_reset_deletion_service`. Installed Codex 0.159.1 requires
+confirmed cleanup and a fresh thread to advertise the changed definitions.
+Existing fixed offerings retain their prior path. The optional
+`replan_unstarted_static_offering` callback defaults to no retry and cannot
+change the original provider/model/selection, scope, rules or source proof.
+Retain every non-image field from `original_budget_request()` when building its
+strictly smaller image quote, and reuse `continuation()` with its already
+attached prepared context. The SDK verifies the exact confirmed unstarted
+cleanup again before this callback; an error category alone is insufficient.
+A host may offer ordinary semantic tools at zero image quota; no retained
+screenshot or completed native effect is replayed to manufacture capacity.

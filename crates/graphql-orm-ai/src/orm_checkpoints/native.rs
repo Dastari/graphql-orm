@@ -144,6 +144,9 @@ impl OrmAiCoordinatorCheckpointService {
                 }
             }
             let manifest = persisted.egress_manifest().ok_or(AiError::EgressDenied)?;
+            let expected_source = self
+                .expected_application_source(lease, scope, &call, output)
+                .await?;
             if !route.matches_manifest(
                 manifest,
                 lease,
@@ -152,7 +155,7 @@ impl OrmAiCoordinatorCheckpointService {
                 result.provider_model(),
             ) || manifest.sources.len() != 1
                 || manifest.sources[0].kind != "application_tool_result"
-                || manifest.sources[0].reference != call.id.to_string()
+                || manifest.sources[0].reference != expected_source
                 || manifest.capability != crate::AiEgressCapability::ToolResult
                 || call.result_egress_manifest_hash.as_deref()
                     != Some(manifest.stable_hash().as_str())
@@ -639,7 +642,10 @@ impl OrmAiCoordinatorCheckpointService {
                         )
                         || (index > source.pending_call_index && call.risk != "read_only")
                         || manifest.sources[0].kind != "application_tool_result"
-                        || manifest.sources[0].reference != call.id.to_string()
+                        || manifest.sources[0].reference
+                            != self
+                                .expected_application_source(lease, &source.scope, &call, output)
+                                .await?
                         || call.result_egress_manifest_hash.as_deref()
                             != Some(manifest.stable_hash().as_str())
                     {
@@ -1341,7 +1347,10 @@ impl OrmAiCoordinatorCheckpointService {
             &proof.provider.provider_model,
         ) || original.sources.len() != 1
             || original.sources[0].kind != "application_tool_result"
-            || original.sources[0].reference != call.id.to_string()
+            || original.sources[0].reference
+                != self
+                    .expected_application_source(lease, &payload.source.scope, &call, output)
+                    .await?
         {
             return Err(AiError::EgressDenied);
         }
@@ -1448,7 +1457,7 @@ impl OrmAiCoordinatorCheckpointService {
         {
             return Err(AiError::Conflict);
         }
-        let (tool, continuation) = self
+        let (tool, mut continuation) = self
             .validate_native_outcome(lease, &payload, &policy)
             .await?;
         let call = AiToolCallRecord::find_by_id(self.run_service.database(), &tool.id)
@@ -1464,6 +1473,23 @@ impl OrmAiCoordinatorCheckpointService {
         }
         self.reauthorize_native_rules(lease, &payload.source)
             .await?;
+        let [ModelInputBlock::Json { value }] = continuation.input() else {
+            return Err(AiError::Conflict);
+        };
+        continuation.native_reset_evidence = Some(std::sync::Arc::new(
+            crate::provider_session::AiVerifiedNativeContinuation {
+                session_id: lease.session_id(),
+                run_id: lease.run_id(),
+                attempt_id: lease.attempt_id(),
+                lease_generation: lease.lease_generation(),
+                checkpoint_id: row.id,
+                checkpoint_hash: row.checkpoint_hash,
+                tool_call_id: call.id,
+                tool_row_version: call.row_version,
+                approval_id: payload.approval_id,
+                outcome_hash: native_receipt_hash(value)?,
+            },
+        ));
         Ok(AiAdoptedSupervisedToolBatch {
             checkpoint_id: id,
             approval_id: crate::AiApprovalId(payload.approval_id),

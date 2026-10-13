@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    AiError, DataClassification, GraphqlOperationContract, canonical_json::canonical_json_bytes,
+    AiError, AiToolResultMediaPolicy, DataClassification, GraphqlOperationContract,
+    canonical_json::canonical_json_bytes,
 };
 
 /// Stable validated tool identifier.
@@ -223,6 +224,10 @@ pub struct AiToolDescriptor {
     /// stored result to an application frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_result_preview: Option<AiBrowserResultPreviewPolicy>,
+    /// Immutable output-image references and trusted host resolver contract. Missing means text
+    /// only. This is discovery metadata and never current resource or egress authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_media: Option<AiToolResultMediaPolicy>,
     /// Stable fingerprint over the complete contract.
     pub fingerprint: String,
 }
@@ -276,6 +281,7 @@ impl AiToolDescriptor {
             maximum_classification: DataClassification::Internal,
             idempotent: true,
             browser_result_preview: None,
+            result_media: None,
             fingerprint: String::new(),
         };
         descriptor.refresh_fingerprint();
@@ -348,6 +354,19 @@ impl AiToolDescriptor {
         self.browser_result_preview = Some(policy);
         self.refresh_fingerprint();
         self
+    }
+
+    /// Declares bounded output images and binds their policy into the complete tool fingerprint.
+    /// Registration must additionally validate paths against the exact disclosure projection.
+    ///
+    /// # Errors
+    /// Returns a configuration error for invalid static media policy.
+    pub fn with_result_media(mut self, policy: AiToolResultMediaPolicy) -> Result<Self, AiError> {
+        policy.validate()?;
+        self.maximum_classification = self.maximum_classification.max(policy.classification());
+        self.result_media = Some(policy);
+        self.refresh_fingerprint();
+        Ok(self)
     }
 
     fn refresh_fingerprint(&mut self) {

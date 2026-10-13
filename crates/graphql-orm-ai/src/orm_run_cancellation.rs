@@ -547,6 +547,7 @@ async fn cancel_active_tool_calls(
             state: Some(StringFilter {
                 in_list: Some(vec![
                     "executing".to_owned(),
+                    "source_retained".to_owned(),
                     "waiting_approval".to_owned(),
                     "waiting_subscription".to_owned(),
                 ]),

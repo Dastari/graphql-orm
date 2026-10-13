@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use agql_auth::Clock;
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -415,6 +416,7 @@ pub struct AiCodexAppServerRegistration {
     launch_profile: AiCodexAppServerLaunchProfile,
     bootstrap_instructions: AiCodexAppServerBootstrapInstructions,
     reasoning_effort_profile: Option<ModelReasoningEffortProfile>,
+    guarded_tool_result_source_delivery: bool,
     capability_session_bindings: BTreeMap<String, AiProviderCapabilitySessionBinding>,
     identity: String,
 }
@@ -463,6 +465,7 @@ impl AiCodexAppServerRegistration {
             launch_profile,
             bootstrap_instructions,
             reasoning_effort_profile: None,
+            guarded_tool_result_source_delivery: false,
             capability_session_bindings: BTreeMap::new(),
             identity: String::new(),
         };
@@ -480,6 +483,19 @@ impl AiCodexAppServerRegistration {
     #[must_use]
     pub fn with_launch_profile(mut self, launch_profile: AiCodexAppServerLaunchProfile) -> Self {
         self.launch_profile = launch_profile;
+        self.refresh_identity();
+        self
+    }
+
+    /// Pins the reviewed final protected-source delivery contract into registration identity.
+    ///
+    /// Enable only when the actual factory preserves and awaits both the SDK input and
+    /// responder guards immediately before transport. The factory must independently
+    /// attest that contract. This grants no execution, resource, egress or budget authority.
+    /// Enabling invalidates existing capability-session bindings; derive them afterward.
+    #[must_use]
+    pub fn with_guarded_tool_result_source_delivery(mut self) -> Self {
+        self.guarded_tool_result_source_delivery = true;
         self.refresh_identity();
         self
     }
@@ -740,15 +756,18 @@ impl AiCodexAppServerWebSearchTurnConfig {
 
 /// Bounded text and optional native-search input for one fresh app-server turn.
 ///
-/// This type has no tool, URL, path, shell, environment, browser, image, MCP,
-/// app, credential, or generic JSON-RPC field. It intentionally cannot model
-/// coordinator-managed application tools.
+/// Static tools and SDK-derived retained images are admitted only through their owning
+/// coordinator paths. This type accepts no arbitrary image URL/path, shell, environment,
+/// browser, MCP, app, credential or generic JSON-RPC field.
 #[derive(Clone, PartialEq)]
 pub struct AiCodexAppServerTurnInput {
     model: String,
     instructions: Vec<String>,
     retained_bootstrap_fingerprint: Option<String>,
     input: Vec<String>,
+    tool_images: Vec<crate::AiResolvedToolImage>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
     tools: Vec<ModelToolDefinition>,
     web_search: Option<AiCodexAppServerWebSearchTurnConfig>,
     reasoning_effort: ModelReasoningEffort,
@@ -798,6 +817,9 @@ impl AiCodexAppServerTurnInput {
             instructions,
             retained_bootstrap_fingerprint: None,
             input,
+            tool_images: Vec::new(),
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            source_delivery: None,
             tools: Vec::new(),
             web_search: None,
             reasoning_effort,
@@ -806,6 +828,53 @@ impl AiCodexAppServerTurnInput {
         };
         turn.validate()?;
         Ok(turn)
+    }
+
+    fn with_tool_result_context(
+        mut self,
+        context: &ProviderRequestContext,
+    ) -> Result<Self, ProviderError> {
+        self.tool_images = context.retained_tool_result_images().to_vec();
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        {
+            self.source_delivery = context.tool_source_delivery_check();
+        }
+        self.protocol_input()?;
+        self.validate()?;
+        Ok(self)
+    }
+    /// Revalidates original protected tool/image sources after process-pool queueing and
+    /// immediately before actual `turn/start` transport. It never executes the original tool,
+    /// renews action evidence or relies on a retained positive grant decision.
+    ///
+    /// # Errors
+    /// Returns a safe error for unavailable/expired/revoked/cancelled historical sources.
+    pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        if let Some(delivery) = &self.source_delivery {
+            delivery.authorize().await?;
+        }
+        Ok(())
+    }
+    fn protocol_input(&self) -> Result<Vec<Value>, ProviderError> {
+        let mut input = self
+            .input
+            .iter()
+            .map(|text| json!({"type":"text","text":text}))
+            .collect::<Vec<_>>();
+        for image in &self.tool_images {
+            input.push(json!({"type":"text","text":serde_json::to_string(&json!({"capturedObservation":true,"capturedAtMs":image.reference().captured_at_ms(),"actionExpiresAtMs":image.reference().action_expires_at_ms(),"retainedUntilMs":image.reference().retained_until_ms(),"actionEvidenceRenewed":false,"currentFieldDescribesOriginalCaptureOnly":true})).map_err(|_|ProviderError::ToolSourceUnavailable)?}));
+            input.push(json!({"type":"image","url":format!("data:{};base64,{}",image.reference().mime(),base64::engine::general_purpose::STANDARD.encode(image.bytes()))}));
+        }
+        if self.tool_images.len() > 4
+            || serde_json::to_vec(&input)
+                .map_err(|_| ProviderError::ToolSourceUnavailable)?
+                .len()
+                > MAXIMUM_FRAME_BYTES.saturating_sub(4096)
+        {
+            return Err(ProviderError::ToolSourceUnavailable);
+        }
+        Ok(input)
     }
 
     /// Creates one retained dynamic-tool turn for a host-owned readiness
@@ -1320,6 +1389,41 @@ impl AiProvider for AiCodexAppServerProvider {
         ProviderKind::LocalHarness
     }
 
+    fn supports_tool_result_images(&self) -> bool {
+        self.registration.experimental_dynamic_tools()
+            && self.registration.guarded_tool_result_source_delivery
+            && self.pool.supports_tool_result_source_delivery()
+            && self
+                .pool
+                .supports_launch_profile(self.registration.launch_profile())
+    }
+
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        self.registration.experimental_dynamic_tools()
+            && self.registration.guarded_tool_result_source_delivery
+            && self.pool.supports_tool_result_source_delivery()
+            && self
+                .pool
+                .supports_launch_profile(self.registration.launch_profile())
+    }
+
+    fn supports_tool_result_image_policy(&self, descriptor: &crate::AiToolDescriptor) -> bool {
+        let Some(policy) = &descriptor.result_media else {
+            return true;
+        };
+        let wire = policy
+            .limits()
+            .maximum_raw_bytes()
+            .div_ceil(3)
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(descriptor.maximum_result_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(u64::from(policy.limits().maximum_images()) * 1024 + 1024)
+            });
+        self.supports_tool_result_images()
+            && wire.is_some_and(|bytes| bytes <= MAXIMUM_FRAME_BYTES as u64)
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         let dynamic_tools_available = self.registration.experimental_dynamic_tools()
             && self
@@ -1343,6 +1447,7 @@ impl AiProvider for AiCodexAppServerProvider {
                     .pool
                     .supports_launch_profile(self.registration.launch_profile()),
             provider_retained_continuation: true,
+            image_input: self.supports_tool_result_images(),
             local: true,
             reasoning_effort_profiles: self
                 .registration
@@ -1382,7 +1487,9 @@ impl AiProvider for AiCodexAppServerProvider {
             )?
         } else {
             AiCodexAppServerTurnInput::try_from_model_request(request)?
-        };
+        }
+        .with_tool_result_context(&context)?;
+        context.authorize_tool_source_delivery().await?;
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -1458,7 +1565,9 @@ impl AiProvider for AiCodexAppServerProvider {
             )?
         } else {
             AiCodexAppServerTurnInput::try_from_dynamic_request(request)?
-        };
+        }
+        .with_tool_result_context(&context)?;
+        context.authorize_tool_source_delivery().await?;
         if let Some(session) = retained {
             match session.activation() {
                 crate::AiProviderSessionActivation::NewlyBoundEmpty => {
@@ -1931,6 +2040,13 @@ impl Drop for AiCodexAppServerLaunchedProcess {
 /// Trusted deployment seam that launches one reviewed app-server process.
 #[async_trait]
 pub trait AiCodexAppServerRunProcessFactory: Send + Sync {
+    /// Whether the actual launched process preserves the SDK's protected source guards
+    /// through every queue and awaits both input and responder delivery authorization
+    /// immediately before transport. Legacy dynamic-tool launch support proves neither.
+    /// The compatibility default refuses protected-source/typed-image effects.
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        false
+    }
     /// Whether this factory implements one exact closed launch profile.
     ///
     /// The default keeps existing text-only factories compatible and refuses
@@ -2066,6 +2182,16 @@ impl ProviderDynamicToolResponder for DynamicToolCallCounter {
         self.inner.respond(call).await
     }
 
+    async fn authorize_delivery(
+        &self,
+        result: &crate::ProviderDynamicToolResult,
+    ) -> Result<(), ProviderError> {
+        if self.entry.interrupt_started.load(Ordering::SeqCst) {
+            return Err(ProviderError::Cancelled);
+        }
+        self.inner.authorize_delivery(result).await
+    }
+
     async fn reject_invalid_arguments(
         &self,
         call: crate::ProviderInvalidDynamicToolCall,
@@ -2167,6 +2293,12 @@ impl AiCodexAppServerRunPool {
     /// profile.
     pub fn supports_launch_profile(&self, profile: AiCodexAppServerLaunchProfile) -> bool {
         self.inner.factory.supports_launch_profile(profile)
+    }
+
+    /// Explicit immutable owning-factory attestation for final protected text/image delivery.
+    /// This alone grants no egress, budget, resource access or execution authority.
+    pub fn supports_tool_result_source_delivery(&self) -> bool {
+        self.inner.factory.supports_tool_result_source_delivery()
     }
 
     async fn create_empty_thread(
@@ -4227,8 +4359,8 @@ impl AiCodexAppServerProtocolActor {
     /// Encodes the only allowed successful response to an admitted dynamic
     /// tool request.
     ///
-    /// The result is serialized as one text content item because arbitrary
-    /// image/audio URLs are outside this integration.
+    /// Sends the exact authorized JSON text and any SDK-verified images as separate typed content
+    /// items. Images use inline verified bytes; this path accepts no source URL/path or audio.
     ///
     /// # Errors
     ///
@@ -4249,10 +4381,20 @@ impl AiCodexAppServerProtocolActor {
         if text.len() > MAXIMUM_TEXT_BYTES {
             return Err(ProviderError::Rejected);
         }
+        let mut content = vec![json!({"type":"inputText","text":text})];
+        for image in result.images() {
+            content.push(json!({"type":"inputText","text":serde_json::to_string(&json!({
+                "capturedObservation":true,"capturedAtMs":image.reference().captured_at_ms(),
+                "actionExpiresAtMs":image.reference().action_expires_at_ms(),"retainedUntilMs":image.reference().retained_until_ms(),
+                "actionEvidenceRenewed":false,"historicalCurrentFlagIsCaptureTimeOnly":true
+            })).map_err(|_| ProviderError::Rejected)?}));
+            let encoded = base64::engine::general_purpose::STANDARD.encode(image.bytes());
+            content.push(json!({"type":"inputImage","imageUrl":format!("data:{};base64,{encoded}", image.reference().mime())}));
+        }
         let frame = self.encode(json!({
             "id": request_id,
             "result": {
-                "contentItems": [{"type": "inputText", "text": text}],
+                "contentItems": content,
                 "success": true,
             }
         }))?;
@@ -4327,10 +4469,10 @@ impl AiCodexAppServerProtocolActor {
             && !self.turn_started_observed
     }
 
-    /// Encodes text-only user input for one exact lifecycle-complete thread.
+    /// Encodes text and SDK-verified original image input for an exact lifecycle-complete thread.
     ///
     /// Trusted instructions are deliberately not copied into the user input
-    /// list. No tool, path, URL, image, skill, audio, environment, approval,
+    /// list. No arbitrary tool, path, source URL, skill, audio, environment, approval,
     /// sandbox, or generic JSON field can be supplied through this method.
     ///
     /// # Errors
@@ -4387,7 +4529,7 @@ impl AiCodexAppServerProtocolActor {
         }
         let mut params = json!({
             "threadId": thread_id,
-            "input": input.input().iter().map(|text| json!({"type": "text", "text": text})).collect::<Vec<_>>(),
+            "input": input.protocol_input()?,
             "summary": "none",
         });
         if let Some(effort) = input.reasoning_effort().wire_value() {
@@ -6735,8 +6877,17 @@ fn registration_identity(registration: &AiCodexAppServerRegistration) -> String 
     } else {
         hasher.update(b"no-profile\0");
     }
+    // Keep legacy false registration bytes unchanged. This marker is immutable transport
+    // policy, not a request/source claim, and changes every derived capability fingerprint.
+    if registration.guarded_tool_result_source_delivery {
+        hasher.update(b"guarded-tool-result-source-delivery-v1\0");
+    }
     hex::encode(hasher.finalize())
 }
+
+#[cfg(test)]
+#[path = "codex_tool_media.rs"]
+mod tool_media_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -7793,6 +7944,46 @@ pub(crate) mod tests {
                 .with_reasoning_effort_profile(wrong_model),
             Err(ProviderError::InvalidConfiguration(_))
         ));
+    }
+
+    #[test]
+    fn guarded_source_delivery_changes_identity_and_invalidates_old_capability_binding() {
+        let base = dynamic_registration("1.0.0");
+        let legacy_identity = base.identity().to_owned();
+        let legacy_binding = capability_session_binding(&base, ModelReasoningEffort::Unspecified);
+        let admitted = (*base)
+            .clone()
+            .with_capability_session_binding(legacy_binding.clone())
+            .unwrap();
+        assert_eq!(admitted.identity(), legacy_identity);
+        let guarded = admitted.with_guarded_tool_result_source_delivery();
+        assert_ne!(guarded.identity(), legacy_identity);
+        assert!(!guarded.admits_provider_session_fingerprint(legacy_binding.fingerprint()));
+        assert!(
+            guarded
+                .clone()
+                .with_capability_session_binding(legacy_binding)
+                .is_err()
+        );
+        let new_binding = capability_session_binding(&guarded, ModelReasoningEffort::Unspecified);
+        assert!(guarded.with_capability_session_binding(new_binding).is_ok());
+    }
+
+    #[test]
+    fn legacy_dynamic_factory_refuses_protected_source_capability() {
+        let counters = Arc::new(Counters::new());
+        let reviewed = (*dynamic_registration("1.0.0"))
+            .clone()
+            .with_guarded_tool_result_source_delivery();
+        let provider = Arc::new(AiCodexAppServerProvider::new(
+            Arc::new(reviewed),
+            pool(counters.clone(), 1, 2),
+        ));
+        assert!(provider.capabilities().custom_tools);
+        assert!(!provider.supports_tool_result_source_delivery());
+        assert!(!provider.supports_tool_result_images());
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -9793,7 +9984,7 @@ pub(crate) mod tests {
         assert!(!unverified_dynamic_provider.capabilities().custom_tools);
     }
 
-    fn turn() -> AiCodexAppServerTurnInput {
+    pub(super) fn turn() -> AiCodexAppServerTurnInput {
         AiCodexAppServerTurnInput::new(
             "model-1",
             vec!["trusted".to_owned()],
@@ -9810,7 +10001,7 @@ pub(crate) mod tests {
         input
     }
 
-    fn model_request() -> ModelRequest {
+    pub(super) fn model_request() -> ModelRequest {
         ModelRequest {
             model: "model-1".to_owned(),
             instructions: vec!["trusted".to_owned()],
@@ -14977,6 +15168,86 @@ pub(crate) mod tests {
             guard.delete_thread(&swapped),
             Err(ProviderError::Rejected)
         ));
+    }
+
+    #[test]
+    fn changed_static_offering_has_real_fresh_thread_wire_and_no_retained_definition_override() {
+        let semantic = dynamic_model_request();
+        let original =
+            AiCodexAppServerTurnInput::try_from_dynamic_request(semantic.clone()).unwrap();
+        let mut with_image = semantic;
+        let mut image_tool = with_image.tools[0].clone();
+        image_tool.tool_id = "preview.image".into();
+        image_tool.provider_name = "preview_image".into();
+        image_tool.fingerprint = hex::encode(Sha256::digest(b"fixture-original-bound-image-tool"));
+        with_image.tools.push(image_tool);
+        let expanded = AiCodexAppServerTurnInput::try_from_dynamic_request(with_image).unwrap();
+        let bootstrap = AiCodexAppServerBootstrapInstructions::disabled();
+        let mut old = initialized_protocol_actor();
+        let initial: Value = serde_json::from_slice(
+            &old.start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &bootstrap,
+                original.tools(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(initial["method"], "thread/start");
+        assert_eq!(
+            initial["params"]["dynamicTools"].as_array().unwrap().len(),
+            1
+        );
+        assert!(initial["params"].get("input").is_none());
+        old.accept(br#"{"id":2,"result":{"thread":{"id":"offering-original"}}}"#)
+            .unwrap();
+        old.accept(&thread_started_notification("offering-original"))
+            .unwrap();
+        let cursor =
+            crate::AiProviderSessionCursor::new("codex.app_server.thread.v2", "offering-original")
+                .unwrap();
+        assert!(
+            old.resume_thread(&cursor, &expanded).is_err(),
+            "retained definitions cannot be replaced in Rust alone"
+        );
+        let delete: Value = serde_json::from_slice(&old.delete_thread(&cursor).unwrap()).unwrap();
+        assert_eq!(delete["method"], "thread/delete");
+        assert_eq!(delete["params"]["threadId"], "offering-original");
+        assert!(
+            old.start_persistent_empty_thread(
+                "model-1",
+                ModelReasoningEffort::Unspecified,
+                &bootstrap,
+                expanded.tools()
+            )
+            .is_err(),
+            "pending deletion does not admit another thread"
+        );
+        old.accept(br#"{"id":3,"result":{}}"#).unwrap();
+        let mut fresh = initialized_protocol_actor();
+        let replacement: Value = serde_json::from_slice(
+            &fresh
+                .start_persistent_empty_thread(
+                    "model-1",
+                    ModelReasoningEffort::Unspecified,
+                    &bootstrap,
+                    expanded.tools(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replacement["method"], "thread/start");
+        let names = replacement["params"]["dynamicTools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["inventory_count", "preview_image"]);
+        assert!(replacement["params"].get("input").is_none());
+        assert!(replacement["params"].get("threadId").is_none());
+        assert_eq!(replacement["params"]["model"], initial["params"]["model"]);
     }
 
     #[test]

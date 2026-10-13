@@ -407,6 +407,7 @@ impl AiContentProtector for CheckpointRaceProtector {
                         protected_arguments: extra.protected_arguments,
                         argument_hash: extra.argument_hash,
                         protected_result: extra.protected_result,
+                        protected_result_source: None,
                         payload_purged_at: extra.payload_purged_at,
                         risk: extra.risk,
                         authorization_code: extra.authorization_code,
@@ -664,7 +665,7 @@ impl MixedPlanner {
     }
 }
 
-fn mixed_broker_delivery(
+pub(super) fn mixed_broker_delivery(
     fixture: &Fixture,
     definitions: Vec<ModelToolDefinition>,
 ) -> AiCapabilityDeliveryTurn {

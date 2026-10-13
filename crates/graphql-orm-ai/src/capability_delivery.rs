@@ -130,10 +130,58 @@ impl AiCapabilityDeliveryDecision {
 }
 
 /// Exact initial tool surface produced for one coordinator-selected mode.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AiCapabilityDeliverySurface {
     mode: AiCapabilityDeliveryMode,
     tools: Vec<ModelToolDefinition>,
+    offering: Option<AiCapabilityOfferingSnapshot>,
+}
+
+#[derive(Debug)]
+struct AiCapabilityOfferingState {
+    tools: Vec<ModelToolDefinition>,
+    static_fingerprints: BTreeSet<String>,
+    generation: u64,
+    frozen_plans: usize,
+}
+
+#[derive(Clone, Debug)]
+struct AiCapabilityOfferingSnapshot {
+    state: Arc<Mutex<AiCapabilityOfferingState>>,
+    generation: u64,
+}
+
+impl PartialEq for AiCapabilityDeliverySurface {
+    fn eq(&self, other: &Self) -> bool {
+        self.mode == other.mode && self.tools == other.tools
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AiCapabilityOfferingPlanGuard(Arc<AiCapabilityOfferingPlanFreeze>);
+
+#[derive(Debug)]
+struct AiCapabilityOfferingPlanFreeze {
+    state: Arc<Mutex<AiCapabilityOfferingState>>,
+    generation: u64,
+}
+
+impl Drop for AiCapabilityOfferingPlanFreeze {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.frozen_plans = state.frozen_plans.saturating_sub(1);
+    }
+}
+
+impl AiCapabilityOfferingPlanGuard {
+    #[cfg_attr(feature = "mssql", allow(dead_code))]
+    pub(crate) fn validate(&self) -> Result<(), AiError> {
+        let state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.generation != self.0.generation {
+            return Err(AiError::Conflict);
+        }
+        Ok(())
+    }
 }
 
 impl AiCapabilityDeliverySurface {
@@ -149,6 +197,26 @@ impl AiCapabilityDeliverySurface {
     /// static bootstrap definitions fingerprinted into its session binding.
     pub fn tools(&self) -> &[ModelToolDefinition] {
         &self.tools
+    }
+
+    pub(crate) fn freeze_offering(&self) -> Result<Option<AiCapabilityOfferingPlanGuard>, AiError> {
+        let Some(snapshot) = &self.offering else {
+            return Ok(None);
+        };
+        let mut state = snapshot
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.generation != snapshot.generation || state.tools != self.tools {
+            return Err(AiError::Conflict);
+        }
+        state.frozen_plans = state.frozen_plans.checked_add(1).ok_or(AiError::Conflict)?;
+        Ok(Some(AiCapabilityOfferingPlanGuard(Arc::new(
+            AiCapabilityOfferingPlanFreeze {
+                state: snapshot.state.clone(),
+                generation: snapshot.generation,
+            },
+        ))))
     }
 }
 
@@ -218,6 +286,7 @@ pub fn prepare_capability_delivery_surface(
     Ok(AiCapabilityDeliverySurface {
         mode: decision.mode,
         tools,
+        offering: None,
     })
 }
 
@@ -2019,7 +2088,7 @@ pub struct AiCapabilityDeliveryTurn {
     session: AiCapabilityBrokerSession,
     #[cfg_attr(feature = "mssql", allow(dead_code))]
     static_bootstrap_tools: Arc<Vec<ModelToolDefinition>>,
-    tools: Arc<Mutex<Vec<ModelToolDefinition>>>,
+    tools: Arc<Mutex<AiCapabilityOfferingState>>,
 }
 
 impl std::fmt::Debug for AiCapabilityDeliveryTurn {
@@ -2088,6 +2157,10 @@ impl AiCapabilityDeliveryTurn {
             tools.extend(static_bootstrap_tools.iter().cloned());
             tools.sort_by(|left, right| left.tool_id.cmp(&right.tool_id));
         }
+        let static_fingerprints = static_bootstrap_tools
+            .iter()
+            .map(|definition| definition.fingerprint.clone())
+            .collect();
         Ok(Self {
             mode: surface.mode(),
             index_fingerprint: index_fingerprint.to_owned(),
@@ -2095,7 +2168,12 @@ impl AiCapabilityDeliveryTurn {
             broker,
             session,
             static_bootstrap_tools: Arc::new(static_bootstrap_tools),
-            tools: Arc::new(Mutex::new(tools)),
+            tools: Arc::new(Mutex::new(AiCapabilityOfferingState {
+                tools,
+                static_fingerprints,
+                generation: 0,
+                frozen_plans: 0,
+            })),
         })
     }
 
@@ -2134,6 +2212,7 @@ impl AiCapabilityDeliveryTurn {
         self.tools
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            .tools
             .clone()
     }
 
@@ -2145,10 +2224,73 @@ impl AiCapabilityDeliveryTurn {
     /// turn passed by the coordinator rather than retaining an earlier surface
     /// or reconstructing one from public fields.
     pub fn current_surface(&self) -> AiCapabilityDeliverySurface {
+        let state = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
         AiCapabilityDeliverySurface {
             mode: self.mode,
-            tools: self.current_tools(),
+            tools: state.tools.clone(),
+            offering: Some(AiCapabilityOfferingSnapshot {
+                state: self.tools.clone(),
+                generation: state.generation,
+            }),
         }
+    }
+
+    pub(crate) fn require_unfrozen_static_offering(&self) -> Result<(), AiError> {
+        let state = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.frozen_plans != 0 {
+            return Err(AiError::Conflict);
+        }
+        Ok(())
+    }
+
+    /// Selects the static bootstrap definitions offered on the next provider turn.
+    ///
+    /// Only fingerprints in the original immutable session binding may be selected. The
+    /// same broker, loaded definitions and shared run state survive reduction or reoffering.
+    /// This is disclosure configuration, not execution authority. Call before constructing
+    /// the next plan; existing plans freeze their offered set until all plan clones are dropped.
+    /// Retained providers require the SDK's confirmed cleanup and fresh-thread transition
+    /// before a changed set can be installed remotely.
+    ///
+    /// # Errors
+    /// Returns [`AiError::Forbidden`] for unsupported modes or unknown fingerprints and
+    /// [`AiError::Conflict`] when a changed set would alter a frozen plan.
+    pub fn set_static_bootstrap_offering(
+        &self,
+        selected_fingerprints: &BTreeSet<String>,
+    ) -> Result<(), AiError> {
+        if !matches!(
+            self.mode,
+            AiCapabilityDeliveryMode::FixedBroker | AiCapabilityDeliveryMode::ClientDeferred
+        ) || !selected_fingerprints
+            .is_subset(self.session_binding.static_bootstrap_tool_fingerprints())
+        {
+            return Err(AiError::Forbidden);
+        }
+        let mut state = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.static_fingerprints == *selected_fingerprints {
+            return Ok(());
+        }
+        if state.frozen_plans != 0 {
+            return Err(AiError::Conflict);
+        }
+        let generation = state.generation.checked_add(1).ok_or(AiError::Conflict)?;
+        let all_static = self.session_binding.static_bootstrap_tool_fingerprints();
+        state
+            .tools
+            .retain(|definition| !all_static.contains(&definition.fingerprint));
+        state.tools.extend(
+            self.static_bootstrap_tools
+                .iter()
+                .filter(|definition| selected_fingerprints.contains(&definition.fingerprint))
+                .cloned(),
+        );
+        state
+            .tools
+            .sort_by(|left, right| left.tool_id.cmp(&right.tool_id));
+        state.static_fingerprints = selected_fingerprints.clone();
+        state.generation = generation;
+        Ok(())
     }
 
     /// Whether an offered definition set is exactly the crate-owned surface.
@@ -2210,12 +2352,26 @@ impl AiCapabilityDeliveryTurn {
             exact_definitions,
             self.session.limits(),
         )?;
+        let mut current = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
+        if current.frozen_plans != 0 {
+            return Err(AiError::Conflict);
+        }
+        let generation = current.generation.checked_add(1).ok_or(AiError::Conflict)?;
         let mut tools = vec![discovery_definition(&self.index_fingerprint)];
-        tools.extend(self.static_bootstrap_tools.iter().cloned());
+        tools.extend(
+            self.static_bootstrap_tools
+                .iter()
+                .filter(|definition| {
+                    current
+                        .static_fingerprints
+                        .contains(&definition.fingerprint)
+                })
+                .cloned(),
+        );
         tools.extend(installed);
         tools.sort_by(|left, right| left.tool_id.cmp(&right.tool_id));
-        let mut current = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
-        current.clone_from(&tools);
+        current.tools.clone_from(&tools);
+        current.generation = generation;
         self.session.complete_deferred_installation();
         Ok(tools)
     }
@@ -2771,6 +2927,38 @@ mod tests {
                 .iter()
                 .any(|definition| { definition.tool_id == AI_CAPABILITY_DISCOVER_TOOL_ID })
         );
+        let clone = delivery.clone();
+        assert!(delivery.shares_run_state(&clone));
+        assert!(matches!(
+            clone.set_static_bootstrap_offering(&BTreeSet::from(["0".repeat(64)])),
+            Err(AiError::Forbidden)
+        ));
+        assert!(delivery.matches_offered_tools(surface.tools()));
+        let frozen = surface.freeze_offering().unwrap().unwrap();
+        let frozen_clone = frozen.clone();
+        assert!(matches!(
+            clone.set_static_bootstrap_offering(&BTreeSet::new()),
+            Err(AiError::Conflict)
+        ));
+        drop(frozen);
+        assert!(
+            clone
+                .set_static_bootstrap_offering(&BTreeSet::new())
+                .is_err()
+        );
+        drop(frozen_clone);
+        clone
+            .set_static_bootstrap_offering(&BTreeSet::new())
+            .unwrap();
+        assert_eq!(delivery.current_tools().len(), 3);
+        assert!(delivery.shares_run_state(&clone));
+        assert!(matches!(surface.freeze_offering(), Err(AiError::Conflict)));
+        delivery
+            .set_static_bootstrap_offering(&BTreeSet::from([static_tool.fingerprint.clone()]))
+            .unwrap();
+        assert_eq!(delivery.current_tools(), surface.tools());
+        // Restoring the same definitions does not revive a stale snapshot generation.
+        assert!(matches!(surface.freeze_offering(), Err(AiError::Conflict)));
     }
 
     #[test]
@@ -3168,10 +3356,11 @@ mod tests {
                 .expect("index set")
                 .fingerprint()
                 .to_owned();
+        let static_tool = definition("preview.semantic");
         let binding = AiProviderCapabilitySessionBinding::new(
             AiCapabilityDeliveryMode::ClientDeferred,
             &index_fingerprint,
-            BTreeSet::new(),
+            BTreeSet::from([static_tool.fingerprint.clone()]),
             "provider-projection-v1",
             "gpt-test",
             ModelReasoningEffort::Unspecified,
@@ -3187,13 +3376,16 @@ mod tests {
                 ..ProviderCapabilities::default()
             },
             &index_fingerprint,
-            Vec::new(),
+            vec![static_tool.clone()],
             false,
             binding,
             broker.clone(),
             session.clone(),
         )
         .expect("client-deferred delivery");
+        delivery
+            .set_static_bootstrap_offering(&BTreeSet::new())
+            .unwrap();
         let value = broker
             .dispatch_client_deferred_discover(
                 &principal_reference,
@@ -3226,6 +3418,20 @@ mod tests {
             .expect("exact loaded definition should install");
         assert_eq!(delivery.current_tools().len(), 2);
         assert!(!delivery.requires_deferred_installation());
+        let loaded_tools = delivery.current_tools();
+        delivery
+            .set_static_bootstrap_offering(&BTreeSet::from([static_tool.fingerprint.clone()]))
+            .unwrap();
+        assert_eq!(delivery.current_tools().len(), 3);
+        assert!(
+            loaded_tools
+                .iter()
+                .all(|tool| delivery.current_tools().contains(tool))
+        );
+        delivery
+            .set_static_bootstrap_offering(&BTreeSet::new())
+            .unwrap();
+        assert_eq!(delivery.current_tools(), loaded_tools);
 
         authority.allowed.store(false, Ordering::SeqCst);
         let empty = broker
