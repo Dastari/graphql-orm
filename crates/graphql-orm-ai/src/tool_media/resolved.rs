@@ -68,6 +68,8 @@ impl AiResolvedToolImage {
         bytes: impl Into<Arc<[u8]>>,
         limits: AiToolResultMediaLimits,
     ) -> Result<Self, AiError> {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(limits.maximum_resolution_ms());
         static POOL: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
         let permit = POOL
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
@@ -78,7 +80,7 @@ impl AiResolvedToolImage {
         if resource.reference != reference.reference() {
             return Err(AiError::Forbidden);
         }
-        let work = tokio::task::spawn_blocking(move || {
+        let work = tokio::task::spawn_blocking(move || -> Result<Self, AiError> {
             let _permit = permit;
             decode_exact(&reference, &bytes, limits)?;
             Ok(Self {
@@ -87,13 +89,17 @@ impl AiResolvedToolImage {
                 bytes,
             })
         });
-        tokio::time::timeout(
+        let resolved = tokio::time::timeout(
             std::time::Duration::from_millis(limits.maximum_resolution_ms()),
             work,
         )
         .await
         .map_err(|_| AiError::ToolExecutionFailed)?
-        .map_err(|_| AiError::ToolExecutionFailed)?
+        .map_err(|_| AiError::ToolExecutionFailed)??;
+        if std::time::Instant::now() >= deadline {
+            return Err(AiError::ToolExecutionFailed);
+        }
+        Ok(resolved)
     }
     /// Verifies exact JPEG/PNG bytes against descriptive metadata with hard dimension/allocation
     /// ceilings. Never construct from a model-selected URL/path or cache between disclosures.

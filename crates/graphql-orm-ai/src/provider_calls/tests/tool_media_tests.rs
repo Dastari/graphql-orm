@@ -24,6 +24,7 @@ struct Custody {
     deny_model_disclosure_at: AtomicUsize,
     requests: Mutex<Vec<ModelRequest>>,
     delivered_images: AtomicUsize,
+    delay_open: AtomicBool,
 }
 struct SourceProtector(Arc<Custody>);
 #[async_trait]
@@ -134,6 +135,11 @@ impl crate::AiToolResultMediaResolver for Custody {
             return Err(AiError::Conflict);
         }
         self.opens.fetch_add(1, Ordering::SeqCst);
+        if self.delay_open.load(Ordering::SeqCst) {
+            // Deliberately model a host callback that returns late without yielding. A timeout
+            // future alone can observe its ready value before an elapsed timer is polled.
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
         crate::AiResolvedToolImage::decode_bounded(
             reference.clone(),
             crate::AiToolMediaResourceId::new("preview-v1", reference.reference())?,
@@ -406,6 +412,13 @@ async fn media_fixture_mode(
     supported: bool,
     supervised: bool,
 ) -> (Fixture, Arc<Custody>, Arc<OrmAiApplicationToolCallService>) {
+    media_fixture_resolution(supported, supervised, 5000).await
+}
+async fn media_fixture_resolution(
+    supported: bool,
+    supervised: bool,
+    resolution_ms: u64,
+) -> (Fixture, Arc<Custody>, Arc<OrmAiApplicationToolCallService>) {
     let mut fixture = fixture(Vec::new()).await;
     let custody = Arc::new(Custody::default());
     custody.allowed.store(true, Ordering::SeqCst);
@@ -466,7 +479,8 @@ async fn media_fixture_mode(
         .unwrap()
         .with_action_expires_at_ms("ActionExpiresAtMs")
         .unwrap(),
-        AiToolResultMediaLimits::new(1, 4 * 1024 * 1024, 1536, 4_000_000, 300_000, 5000).unwrap(),
+        AiToolResultMediaLimits::new(1, 4 * 1024 * 1024, 1536, 4_000_000, 300_000, resolution_ms)
+            .unwrap(),
         DataClassification::Restricted,
     )
     .unwrap();
@@ -844,6 +858,23 @@ async fn invalid_post_effect_media_is_saved_but_cannot_be_admitted_or_replayed()
 }
 
 struct MediaActionPreview;
+#[tokio::test]
+async fn late_owning_image_resolution_is_discarded_and_saved_effect_is_not_repeated() {
+    let (fixture, custody, service) = media_fixture_resolution(true, false, 25).await;
+    custody.delay_open.store(true, Ordering::SeqCst);
+    assert!(preview_turn(&fixture, service, 4).await.is_err());
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+    let call = AiToolCallRecord::query(fixture.database.pool())
+        .limit(1)
+        .fetch_one()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(call.protected_result.is_some());
+    assert!(call.protected_result_source.is_some());
+    assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
+}
+
 #[async_trait]
 impl AiCanonicalActionPreviewBuilder for MediaActionPreview {
     async fn build_preview(

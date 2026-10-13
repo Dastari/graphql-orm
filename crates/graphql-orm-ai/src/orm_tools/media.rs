@@ -622,10 +622,15 @@ impl OrmAiApplicationToolCallService {
         let policy = descriptor.result_media.as_ref().ok_or(AiError::Forbidden)?;
         crate::tool_media::validate_image_reference_batch(context.images(), policy.limits())?;
         let resolver = self.runtime.tool_media_resolver(policy.resolver_id())?;
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(policy.limits().maximum_resolution_ms());
         let operation = async {
             let mut images = Vec::with_capacity(context.images().len());
             let mut bytes = 0_u64;
             for reference in context.images() {
+                if std::time::Instant::now() >= deadline {
+                    return Err(AiError::ToolExecutionFailed);
+                }
                 self.run_service
                     .validate_tool_disclosure_fence(lease)
                     .await?;
@@ -636,6 +641,9 @@ impl OrmAiApplicationToolCallService {
                 let image = resolver
                     .resolve_for_provider(&principal, descriptor, context, reference)
                     .await?;
+                if std::time::Instant::now() >= deadline {
+                    return Err(AiError::ToolExecutionFailed);
+                }
                 if image.reference() != reference {
                     return Err(AiError::Conflict);
                 }
@@ -652,6 +660,9 @@ impl OrmAiApplicationToolCallService {
                 self.run_service
                     .validate_tool_disclosure_fence(lease)
                     .await?;
+                if std::time::Instant::now() >= deadline {
+                    return Err(AiError::ToolExecutionFailed);
+                }
                 images.push(image);
             }
             Ok(images)
