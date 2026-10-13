@@ -4009,7 +4009,7 @@ impl AiProviderCallExecutor {
     async fn execute_inner(
         &self,
         lease_state: Arc<Mutex<AiRunLease>>,
-        plan: AiProviderCallPlan,
+        mut plan: AiProviderCallPlan,
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
         provider_session: Option<crate::AiOpenedProviderSession>,
         native_session_claim: Option<Arc<Mutex<crate::AiProviderSessionClaim>>>,
