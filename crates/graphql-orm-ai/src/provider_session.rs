@@ -361,6 +361,7 @@ pub struct AiProviderSessionBindRequest {
 pub struct AiProviderSessionTurnPlan {
     descriptor: AiProviderSessionDescriptor,
     transcript_fingerprint: String,
+    pub(crate) native_context: Option<(std::sync::Arc<AiVerifiedNativeContinuation>, String)>,
 }
 
 impl AiProviderSessionTurnPlan {
@@ -378,6 +379,7 @@ impl AiProviderSessionTurnPlan {
         let plan = Self {
             descriptor,
             transcript_fingerprint: transcript_fingerprint.into(),
+            native_context: None,
         };
         if !crate::valid_sha256(&plan.transcript_fingerprint) {
             return Err(AiError::InvalidInput(

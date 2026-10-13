@@ -3773,7 +3773,7 @@ impl AiProviderCallExecutor {
         &self,
         lease_state: Arc<Mutex<AiRunLease>>,
         mut plan: AiProviderCallPlan,
-        session_plan: crate::AiProviderSessionTurnPlan,
+        mut session_plan: crate::AiProviderSessionTurnPlan,
         session_service: Arc<dyn crate::AiProviderSessionService>,
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
     ) -> Result<AiProviderCallResult, AiError> {
@@ -3806,6 +3806,11 @@ impl AiProviderCallExecutor {
                 .ok_or(AiError::RuntimeNotReady)?
                 .validate_task_continuation_context(&lease, &plan.budget.scope, context)
                 .await?;
+        }
+        if let Some(evidence) = &plan.native_reset_evidence
+            && plan.task_context.is_some()
+        {
+            session_plan.native_context = Some((evidence.clone(), plan.offering_fingerprint()));
         }
         let (mut claim, mut newly_bound_cursor) = match session_service
             .disposition_for_run(&lease, &session_plan)

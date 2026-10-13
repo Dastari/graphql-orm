@@ -2014,7 +2014,7 @@ impl crate::AiProviderSessionDeletionService for ConfirmPreviewDeletion {
 #[tokio::test]
 async fn owning_approved_static_reset_requires_confirmed_cleanup_and_current_source_without_effect_replay()
  {
-    for mode in [0, 1, 2, 4, 5] {
+    for mode in [0, 1, 2, 3, 4, 5, 6] {
         Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
     }
 }
@@ -2134,6 +2134,92 @@ async fn exercise_owned_static_reset(
     .with_tool_result_source_service(application.clone())
     .unwrap()
     .with_static_offering_reset_deletion_service(deletion.clone());
+    if mode == 3 {
+        let owning_sessions = OrmAiSessionService::new(
+            fixture.database.clone(),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+        );
+        let later = owning_sessions
+            .send_message(
+                &fixture.principal,
+                crate::SendAiMessageInput {
+                    session_id: lease.session_id().0,
+                    text: "A later independent task must not replace this completed effect's task"
+                        .into(),
+                    attachment_ids: Vec::new(),
+                    client_message_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(later.run_id, lease.run_id().0);
+        let events_before = AiSessionEventRecord::query(fixture.database.pool())
+            .count()
+            .await
+            .unwrap();
+        // An ordinary caller cannot admit the older input; only the owning completed-effect
+        // proof, attached privately by the executor, admits its exact original run context.
+        assert!(
+            sessions
+                .disposition_for_run(lease, &session_plan)
+                .await
+                .is_err()
+        );
+        custody.requests.lock().await.clear();
+        let result = executor
+            .execute_with_provider_session(
+                Arc::new(Mutex::new(lease.clone())),
+                next,
+                session_plan,
+                sessions,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(result.proves_static_offering_reset_from(Some(&original_reference)));
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(custody.created_threads.load(Ordering::SeqCst), 2);
+        assert_eq!(*deletion.created_at_delete.lock().await, vec![1]);
+        assert_eq!(result.usage().image_units, 1);
+        let sent = custody.requests.lock().await;
+        assert_eq!(sent.len(), 1);
+        let contents = serde_json::to_string(&sent[0].input).unwrap();
+        assert!(contents.contains("FrameworkTaskContinuationContext"));
+        assert!(!contents.contains("A later independent task"));
+        assert_eq!(
+            AiSessionEventRecord::query(fixture.database.pool())
+                .count()
+                .await
+                .unwrap(),
+            events_before,
+        );
+        return;
+    }
+    if mode == 6 {
+        let cancellation = crate::OrmAiRunCancellationService::new(
+            fixture.database.clone(),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(SystemClock),
+            crate::AiRunCancellationLimits::default(),
+            Arc::new(crate::AiRunCancellationHub::default()),
+        );
+        cancellation
+            .request_cancellation(
+                &fixture.principal,
+                crate::CancelAiRunInput {
+                    session_id: lease.session_id().0,
+                    run_id: lease.run_id().0,
+                    client_request_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .unwrap();
+    }
     if mode == 2 {
         custody
             .withdraw_access_after_effect

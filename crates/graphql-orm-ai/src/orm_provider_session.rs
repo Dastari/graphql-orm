@@ -534,6 +534,20 @@ mod service {
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                         }
+                        if let Some((evidence, offering)) = &planned.native_context {
+                            validate_static_reset_graph(
+                                tx,
+                                &lease,
+                                &crate::AiProviderStaticOfferingResetRequest {
+                                    evidence: evidence.clone(),
+                                    planned: planned.clone(),
+                                    desired_offering_fingerprint: offering.clone(),
+                                    definitely_unstarted_budget_denial: false,
+                                },
+                                now,
+                            )
+                            .await?;
+                        }
                         let input = tx
                             .find_by_id::<AiMessageRecord>(&lease.input_message_id())
                             .await
@@ -542,7 +556,13 @@ mod service {
                         if input.session_id != session.id
                             || input.message_role != "user"
                             || input.completion_state != "complete"
-                            || input.sequence != session.message_head
+                            || if planned.native_context.is_some() {
+                                input.run_id != Some(lease.run_id().0)
+                                    || input.content_purged_at.is_some()
+                                    || input.sequence > session.message_head
+                            } else {
+                                input.sequence != session.message_head
+                            }
                             || input.sequence <= 0
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
@@ -1011,7 +1031,13 @@ mod service {
                         if input.session_id != session.id
                             || input.message_role != "user"
                             || input.completion_state != "complete"
-                            || input.sequence != session.message_head
+                            || if authorization.static_offering_reset.is_some() {
+                                input.run_id != Some(lease.run_id().0)
+                                    || input.content_purged_at.is_some()
+                                    || input.sequence > session.message_head
+                            } else {
+                                input.sequence != session.message_head
+                            }
                             || input.sequence <= 0
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::Conflict));
