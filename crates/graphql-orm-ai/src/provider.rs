@@ -620,9 +620,15 @@ impl ModelRequest {
         ) {
             return None;
         }
-        let [ModelInputBlock::Json { value }] = self.input.as_slice() else {
+        let Some(ModelInputBlock::Json { value }) = self.input.first() else {
             return None;
         };
+        if self.input[1..]
+            .iter()
+            .any(|block| !matches!(block, ModelInputBlock::Text { .. }))
+        {
+            return None;
+        }
         native_approved_outcome_hash(value)
     }
 
@@ -1361,6 +1367,8 @@ pub struct ProviderRequestContext {
     transfers: Vec<AuthorizedProviderTransfer>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
     retained_tool_images: Vec<crate::AiResolvedToolImage>,
+    static_offering_reset_receipt:
+        Option<Arc<crate::provider_session::AiStaticOfferingResetReceipt>>,
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     tool_source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
 }
@@ -1390,6 +1398,7 @@ impl ProviderRequestContext {
             transfers: Vec::new(),
             resolved_attachments: Vec::new(),
             retained_tool_images: Vec::new(),
+            static_offering_reset_receipt: None,
             #[cfg(any(feature = "sqlite", feature = "postgres"))]
             tool_source_delivery: None,
         }
@@ -1519,6 +1528,26 @@ impl ProviderRequestContext {
             return Err(AiError::Conflict);
         }
         self.provider_session = Some(session);
+        Ok(self)
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_static_offering_reset_receipt(
+        mut self,
+        receipt: Arc<crate::provider_session::AiStaticOfferingResetReceipt>,
+    ) -> Result<Self, AiError> {
+        let binding = self.run_binding.ok_or(AiError::Conflict)?;
+        if receipt.session_id != binding.session_id()
+            || receipt.run_id != binding.run_id()
+            || receipt.attempt_id != binding.attempt_id()
+            || receipt.lease_generation != binding.lease_generation()
+            || self.provider_session.as_ref().is_none_or(|session| {
+                session.cursor().fingerprint() != receipt.replacement_cursor_fingerprint
+            })
+        {
+            return Err(AiError::Conflict);
+        }
+        self.static_offering_reset_receipt = Some(receipt);
         Ok(self)
     }
 
@@ -1667,7 +1696,28 @@ impl ProviderRequestContext {
             attachment_count,
             inference_bytes,
         )?;
-        if let Some(wrapper_hash) = request.native_approved_outcome_hash() {
+        let reset_wrapper_hash = self
+            .static_offering_reset_receipt
+            .as_ref()
+            .and_then(|receipt| {
+                if request.input.is_empty()
+                    || request.continuation.is_some()
+                    || request.continuation_mode != ModelContinuationMode::ProviderRetained
+                    || request.input[1..]
+                        .iter()
+                        .any(|input| !matches!(input, ModelInputBlock::Text { .. }))
+                {
+                    return None;
+                }
+                let Some(ModelInputBlock::Json { value }) = request.input.first() else {
+                    return None;
+                };
+                native_approved_outcome_hash(value).filter(|hash| *hash == receipt.outcome_hash)
+            });
+        if let Some(wrapper_hash) = request
+            .native_approved_outcome_hash()
+            .or(reset_wrapper_hash)
+        {
             let transfers = self
                 .transfers
                 .iter()

@@ -66,6 +66,50 @@ pub struct AiAgentContinuation {
     transfers: Vec<AiEgressManifest>,
     replay_transfers: Vec<AiEgressManifest>,
     native_outcome: bool,
+    pub(crate) native_reset_evidence:
+        Option<std::sync::Arc<crate::provider_session::AiVerifiedNativeContinuation>>,
+    pub(crate) task_context: Option<std::sync::Arc<AiPreparedTaskContinuationContext>>,
+}
+
+/// Read-only owning projection of an original task and actual saved invocation statuses.
+///
+/// Fields, original message/event identities and source proof are opaque. It has no public
+/// constructor/deserializer and grants no reset, cursor, approval, input effect or resource
+/// authority. The host prices its contribution before consuming this same value into an
+/// independently verified continuation; all content is freshly checked before dispatch.
+#[derive(Clone)]
+pub struct AiPreparedTaskContinuationContext {
+    pub(crate) session_id: AiSessionId,
+    pub(crate) run_id: crate::AiRunId,
+    pub(crate) attempt_id: uuid::Uuid,
+    pub(crate) lease_generation: i64,
+    pub(crate) frame: ModelInputBlock,
+    pub(crate) sources: Vec<crate::AiDataSourceRef>,
+    pub(crate) source_fingerprint: String,
+    pub(crate) bytes: u64,
+}
+
+impl std::fmt::Debug for AiPreparedTaskContinuationContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AiPreparedTaskContinuationContext")
+            .field("bytes", &self.bytes)
+            .field("source", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl AiPreparedTaskContinuationContext {
+    /// Conservative serialized contribution of the SDK-owned context block to input bytes.
+    pub const fn conservative_input_bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Conservative byte-sized token quote for the complete context block.
+    /// The host must also price the remainder of its actual final inference request.
+    pub const fn conservative_input_tokens(&self) -> u64 {
+        self.bytes
+    }
 }
 
 pub(crate) struct AiStatelessToolEvidence {
@@ -86,6 +130,60 @@ pub(crate) struct AiStatelessConversationEvidence {
 }
 
 impl AiAgentContinuation {
+    /// Conservative serialized bytes of all saved continuation input plus prepared task context.
+    ///
+    /// This is a read-only contribution for host pricing; the complete request must additionally
+    /// include provider framing, instructions, offered definitions and newly admitted images.
+    ///
+    /// # Errors
+    /// Returns [`AiError::Conflict`] when serialization or checked size accumulation fails.
+    pub fn conservative_input_bytes(&self) -> Result<u64, AiError> {
+        self.input
+            .iter()
+            .chain(self.task_context.iter().map(|context| &context.frame))
+            .try_fold(0_u64, |sum, block| {
+                let bytes = serde_json::to_vec(block).map_err(|_| AiError::Conflict)?;
+                sum.checked_add(u64::try_from(bytes.len()).map_err(|_| AiError::Conflict)?)
+                    .ok_or(AiError::Conflict)
+            })
+    }
+
+    /// Conservative byte-sized token contribution for host pricing of the saved input/context.
+    ///
+    /// # Errors
+    /// Returns the same bounded serialization errors as [`Self::conservative_input_bytes`].
+    pub fn conservative_input_tokens(&self) -> Result<u64, AiError> {
+        self.conservative_input_bytes()
+    }
+
+    /// Consumes the exact prepared owning context into one verified native continuation.
+    ///
+    /// Call before pricing and freezing the next provider plan. The original task remains
+    /// untrusted user content; completed statuses cannot become execution instructions.
+    /// A changed retained offering still requires verified cleanup and dedicated rebind.
+    ///
+    /// # Errors
+    /// Returns [`AiError::Conflict`] for absent verified checkpoint evidence, stale or swapped
+    /// session/run/attempt/generation, or an already attached context.
+    pub fn with_prepared_task_context(
+        mut self,
+        context: AiPreparedTaskContinuationContext,
+    ) -> Result<Self, AiError> {
+        let evidence = self
+            .native_reset_evidence
+            .as_ref()
+            .ok_or(AiError::Conflict)?;
+        if self.task_context.is_some()
+            || evidence.session_id != context.session_id
+            || evidence.run_id != context.run_id
+            || evidence.attempt_id != context.attempt_id
+            || evidence.lease_generation != context.lease_generation
+        {
+            return Err(AiError::Conflict);
+        }
+        self.task_context = Some(std::sync::Arc::new(context));
+        Ok(self)
+    }
     pub(crate) fn from_native_approved_outcome(
         continuation: ModelContinuation,
         reasoning_effort: ModelReasoningEffort,
@@ -99,6 +197,8 @@ impl AiAgentContinuation {
             transfers: vec![transfer],
             replay_transfers: Vec::new(),
             native_outcome: true,
+            native_reset_evidence: None,
+            task_context: None,
         };
         Self::from_checkpoint_value(candidate.checkpoint_value())
     }
@@ -123,6 +223,8 @@ impl AiAgentContinuation {
             transfers: vec![transfer],
             replay_transfers,
             native_outcome: false,
+            native_reset_evidence: None,
+            task_context: None,
         };
         Self::from_checkpoint_value(candidate.checkpoint_value())
     }
@@ -163,6 +265,8 @@ impl AiAgentContinuation {
             transfers,
             replay_transfers,
             native_outcome: false,
+            native_reset_evidence: None,
+            task_context: None,
         };
         Self::from_checkpoint_value(candidate.checkpoint_value())
     }
@@ -279,6 +383,8 @@ impl AiAgentContinuation {
             transfers: snapshot.transfers,
             replay_transfers: snapshot.replay_transfers,
             native_outcome: snapshot.format_version == 4,
+            native_reset_evidence: None,
+            task_context: None,
         };
         if let Some(evidence) = continuation.stateless_evidence()? {
             let historical_count = evidence
@@ -483,6 +589,9 @@ impl AiAgentContinuation {
         }
         request.continuation = Some(self.continuation);
         request.input = self.input;
+        if let Some(context) = self.task_context {
+            request.input.push(context.frame.clone());
+        }
         let mut transfers = self.replay_transfers;
         transfers.extend(self.transfers);
         Ok(transfers)
@@ -613,8 +722,10 @@ impl AiAgentLoopGuard {
             || result.run_id() != self.run_id
             || result.attempt_id() != self.attempt_id
             || result.lease_generation() != self.lease_generation
-            || result.previous_continuation_reference()
+            || (result.previous_continuation_reference()
                 != self.expected_previous_reference.as_deref()
+                && !result
+                    .proves_static_offering_reset_from(self.expected_previous_reference.as_deref()))
             || self.provider_turns >= self.limits.maximum_provider_turns
         {
             return Err(AiError::Conflict);
@@ -759,6 +870,8 @@ impl AiAgentLoopGuard {
             transfers,
             replay_transfers: std::mem::take(&mut self.replay_transfers),
             native_outcome: false,
+            native_reset_evidence: None,
+            task_context: None,
         };
         self.expected_previous_reference = Some(next.chain_reference()?);
         Ok(next)

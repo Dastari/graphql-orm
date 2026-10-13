@@ -3032,6 +3032,7 @@ mod tests {
                 idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
                 absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
                 row_version: 2,
+                installed_offering_fingerprint: None,
             })
         }
 
@@ -4496,6 +4497,7 @@ mod tests {
                 idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
                 absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
                 row_version: 2,
+                installed_offering_fingerprint: None,
             })
         }
 

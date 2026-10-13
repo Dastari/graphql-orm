@@ -5781,3 +5781,17 @@ content protection and immutable deployment boundaries, and keep the runtime
 start gate closed until readiness succeeds. PostgreSQL/MSSQL rehearsal must use
 a disposable Docker-owned database; never point migration commands at a live
 machine database.
+
+
+### Retained native static offering changes
+
+Hosts that change an originally bound static subset between native turns must
+use the same `AiCapabilityDeliveryTurn`, prepare and price the owning original
+task context, and register the exact provider-session deletion adapter with
+`with_static_offering_reset_deletion_service`. Installed Codex 0.159.1 requires
+confirmed cleanup and a fresh thread to advertise the changed definitions.
+Existing fixed offerings retain their prior path. The optional
+`replan_unstarted_static_offering` callback defaults to no retry and cannot
+change the original provider/model/selection, scope, rules or source proof.
+A host may offer ordinary semantic tools at zero image quota; no retained
+screenshot or completed native effect is replayed to manufacture capacity.

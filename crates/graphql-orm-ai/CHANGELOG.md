@@ -29,6 +29,13 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## [Unreleased]
 
+- Keep original static capability subsets in the same broker state, and require
+  confirmed exact old-thread deletion before a same-run native continuation
+  installs changed definitions on a fresh thread. The opaque original-task
+  context is priced and freshly checked; image quota replanning defaults off
+  and admits at most one proven unstarted reduction without effect replay.
+
+
 ### Added
 
 - Fingerprint-bound protected tool-result JPEG/PNG media, trusted owner resolvers,

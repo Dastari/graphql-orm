@@ -4,6 +4,7 @@
 
 mod media;
 mod native_preflight;
+mod task_context;
 pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
 };

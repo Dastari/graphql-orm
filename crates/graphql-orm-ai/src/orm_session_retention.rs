@@ -8718,6 +8718,7 @@ mod tests {
                     policy_fingerprint: "b".repeat(64),
                     cursor_kind: "test.thread".to_owned(),
                     cursor_fingerprint: "c".repeat(64),
+                    installed_offering_fingerprint: None,
                     protected_cursor: Some(serde_json::json!({"protected":true})),
                     through_message_sequence: 2,
                     transcript_fingerprint: "d".repeat(64),

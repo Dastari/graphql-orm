@@ -6,6 +6,7 @@ pub(crate) struct ToolSourceDelivery {
     lease: Arc<Mutex<AiRunLease>>,
     manifests: Vec<AiEgressManifest>,
     maximum_image_units: u64,
+    task_context: Option<Arc<crate::AiPreparedTaskContinuationContext>>,
 }
 impl std::fmt::Debug for ToolSourceDelivery {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -18,13 +19,17 @@ impl ToolSourceDelivery {
         lease: Arc<Mutex<AiRunLease>>,
         manifests: &[AiEgressManifest],
         maximum_image_units: u64,
+        task_context: Option<Arc<crate::AiPreparedTaskContinuationContext>>,
     ) -> Result<Option<Arc<Self>>, AiError> {
         let manifests = manifests
             .iter()
             .filter(|manifest| {
-                manifest.sources.iter().any(|source| {
-                    source.kind == "application_tool_result" && source.reference.starts_with("v2:")
-                })
+                (task_context.is_some()
+                    && manifest.capability == AiEgressCapability::ModelInference)
+                    || manifest.sources.iter().any(|source| {
+                        source.kind == "application_tool_result"
+                            && source.reference.starts_with("v2:")
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -47,6 +52,7 @@ impl ToolSourceDelivery {
                 lease,
                 manifests,
                 maximum_image_units,
+                task_context,
             })))
         }
     }
@@ -58,6 +64,17 @@ impl ToolSourceDelivery {
                 .validate_delivery_fence(&lease)
                 .await
                 .map_err(|_| ProviderError::Cancelled)?;
+            if let Some(context) = &self.task_context {
+                let inference = self
+                    .manifests
+                    .iter()
+                    .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+                    .ok_or(ProviderError::Rejected)?;
+                self.service
+                    .validate_task_continuation_context(&lease, &inference.scope, context)
+                    .await
+                    .map_err(|_| ProviderError::ToolSourceUnavailable)?;
+            }
             let mut seen = BTreeSet::new();
             let mut count = 0_u64;
             let mut bytes = 0_u64;

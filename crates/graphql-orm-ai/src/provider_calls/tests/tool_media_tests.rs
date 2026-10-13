@@ -1813,3 +1813,118 @@ async fn owner_cancellation_closes_source_retained_call_and_preserves_effect_cus
     );
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn prepared_original_task_survives_a_later_queued_message_without_new_human_dispatch() {
+    let (mut fixture, custody, application) = media_fixture(true).await;
+    let sessions = OrmAiSessionService::new(
+        fixture.database.clone(),
+        Arc::new(AllowAccess),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let session = sessions
+        .create_session(
+            &fixture.principal,
+            crate::CreateAiSessionInput {
+                execution_selection: None,
+                scope: crate::AiScopeInput {
+                    kind: fixture.scope.kind.clone(),
+                    id: fixture.scope.id.clone(),
+                    tenant_id: fixture.scope.tenant_id.clone(),
+                },
+                title: None,
+            },
+        )
+        .await
+        .unwrap();
+    let original_client_id = Uuid::new_v4();
+    let original = sessions
+        .send_message(
+            &fixture.principal,
+            crate::SendAiMessageInput {
+                session_id: session.id,
+                text: "Complete this exact original task".into(),
+                attachment_ids: Vec::new(),
+                client_message_id: original_client_id,
+            },
+        )
+        .await
+        .unwrap();
+    let claimed = fixture
+        .run_service
+        .claim_next("original-context")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.run_id().0, original.run_id);
+    fixture.lease = fixture.run_service.start(&claimed).await.unwrap();
+    let before = application
+        .prepare_task_continuation_context(&fixture.lease, &fixture.scope)
+        .await
+        .unwrap();
+    let later = sessions
+        .send_message(
+            &fixture.principal,
+            crate::SendAiMessageInput {
+                session_id: session.id,
+                text: "A separate later task must not replace the active task".into(),
+                attachment_ids: Vec::new(),
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(later.run_id, original.run_id);
+    let events_before = AiSessionEventRecord::query(fixture.database.pool())
+        .count()
+        .await
+        .unwrap();
+    let after = application
+        .prepare_task_continuation_context(&fixture.lease, &fixture.scope)
+        .await
+        .unwrap();
+    assert_eq!(before.source_fingerprint, after.source_fingerprint);
+    assert_eq!(before.frame, after.frame);
+    application
+        .validate_task_continuation_context(&fixture.lease, &fixture.scope, &before)
+        .await
+        .unwrap();
+    let ModelInputBlock::Text { text } = &after.frame else {
+        panic!("task context stays untrusted text")
+    };
+    let value: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(value["originalMessageId"], original.message_id.to_string());
+    assert_eq!(
+        value["originalClientMessageId"],
+        original_client_id.to_string()
+    );
+    assert_eq!(
+        value["goalContext"]["text"],
+        "Complete this exact original task"
+    );
+    assert_eq!(value["newHumanEventCreated"], false);
+    assert_eq!(value["priorProtectedContentIncluded"], false);
+    assert_eq!(value["savedInvocationStatuses"], json!([]));
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        AiSessionEventRecord::query(fixture.database.pool())
+            .count()
+            .await
+            .unwrap(),
+        events_before
+    );
+    assert!(
+        sessions
+            .delete_session(&fixture.principal, crate::AiSessionId(session.id))
+            .await
+            .unwrap()
+    );
+    assert!(
+        application
+            .validate_task_continuation_context(&fixture.lease, &fixture.scope, &before)
+            .await
+            .is_err()
+    );
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+}

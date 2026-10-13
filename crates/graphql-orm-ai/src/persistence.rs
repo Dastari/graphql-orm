@@ -754,10 +754,12 @@ pub(crate) struct AiSessionEventRecord {
     #[filterable(type = "string")]
     pub event_type: String,
     /// Optional run.
+    #[filterable(type = "uuid")]
     pub run_id: Option<graphql_orm::uuid::Uuid>,
     /// Causation reference.
     pub causation_id: Option<String>,
     /// Correlation reference.
+    #[filterable(type = "string")]
     pub correlation_id: String,
     /// Protected/ciphertext payload envelope.
     #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]

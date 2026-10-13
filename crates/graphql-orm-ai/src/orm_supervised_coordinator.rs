@@ -280,6 +280,23 @@ pub trait AiSupervisedAgentTurnPlanner: Send + Sync {
         provider_turns: u32,
         continuation: crate::AiAgentContinuation,
     ) -> Result<AiSupervisedAgentTurnPlan, AiError>;
+
+    /// Optionally reduces one SDK-proven unstarted image continuation after atomic quota denial.
+    ///
+    /// Default is no retry. The SDK releases its failed plan clones and refuses this callback
+    /// if any other frozen plan survives. A replacement must use the same opaque continuation,
+    /// prepared task context, shared delivery, provider/model/registration, scope and rules,
+    /// a strict subset of the original static offering and a strictly smaller image quote.
+    /// It grants no renewal of an original effect, human consent or observation deadline.
+    /// Only one retry is admitted; a second denial remains truthful and terminal.
+    async fn replan_unstarted_static_offering(
+        &self,
+        _lease: &AiRunLease,
+        _provider_turns: u32,
+        _context: crate::AiUnstartedStaticOfferingReplan,
+    ) -> Result<Option<AiSupervisedAgentTurnPlan>, AiError> {
+        Ok(None)
+    }
 }
 
 /// Durable wait created for one provider-requested supervised mutation.
@@ -986,6 +1003,30 @@ impl AiSupervisedAgentCoordinator {
     #[allow(clippy::too_many_arguments)]
     async fn execute_turn(
         &self,
+        lease: AiRunLease,
+        guard: AiAgentLoopGuard,
+        plan: AiSupervisedAgentTurnPlan,
+        rule_usage: AiRuleRunUsage,
+        adopted: Option<&AiAdoptedSupervisedToolBatch>,
+        adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
+        adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
+    ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
+        self.execute_turn_with_retry(
+            lease,
+            guard,
+            plan,
+            rule_usage,
+            adopted,
+            adopted_automatic,
+            adopted_subscription,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn_with_retry(
+        &self,
         mut lease: AiRunLease,
         mut guard: AiAgentLoopGuard,
         plan: AiSupervisedAgentTurnPlan,
@@ -993,6 +1034,7 @@ impl AiSupervisedAgentCoordinator {
         adopted: Option<&AiAdoptedSupervisedToolBatch>,
         adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
         adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
+        allow_unstarted_retry: bool,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
         if !guard.can_begin_provider_turn() {
             return self
@@ -1166,6 +1208,20 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
         }
+        let unstarted_replan = if native_mode && allow_unstarted_retry {
+            capability_delivery
+                .as_ref()
+                .zip(provider_session.as_ref())
+                .and_then(|(delivery, session)| {
+                    crate::AiUnstartedStaticOfferingReplan::prepare(
+                        &provider_plan,
+                        delivery,
+                        session,
+                    )
+                })
+        } else {
+            None
+        };
         let classified_bindings = provider_plan.clone();
         let resumed_checkpoint =
             adopted.is_some() || adopted_automatic.is_some() || adopted_subscription.is_some();
@@ -1279,6 +1335,83 @@ impl AiSupervisedAgentCoordinator {
                     .await;
             }
             Err(SupervisedProviderTurnFailure::BudgetDenied) => {
+                if let Some(context) = unstarted_replan {
+                    // The completed execution future owns no transport/effect. Release every
+                    // SDK clone before offering mutable static configuration to the host.
+                    drop(classified_bindings);
+                    drop(native_execution);
+                    if context.ready_for_callback().is_err() {
+                        return self
+                            .finish_recovery(
+                                &lease,
+                                &guard,
+                                AiAgentRecoveryPhase::ProviderTurn,
+                                "unstarted_static_offering_plan_still_frozen",
+                                None,
+                            )
+                            .await;
+                    }
+                    if self.run_control.cancellation(&lease).await?.is_some() {
+                        return Ok(AiSupervisedAgentRunOutcome::Cancelled {
+                            provider_turns: guard.provider_turns(),
+                            total_tool_calls: guard.total_tool_calls(),
+                        });
+                    }
+                    let replacement = match self
+                        .planner
+                        .replan_unstarted_static_offering(
+                            &lease,
+                            guard.provider_turns(),
+                            context.clone(),
+                        )
+                        .await
+                    {
+                        Ok(replacement) => replacement,
+                        Err(_) => {
+                            return self
+                                .finish_failed(
+                                    &lease,
+                                    &guard,
+                                    "unstarted_static_offering_replan_refused",
+                                )
+                                .await;
+                        }
+                    };
+                    if let Some(next) = replacement {
+                        if !next.native
+                            || next.uses_byok != uses_byok
+                            || next.result_egress_route != route
+                            || next.rules.fingerprint() != planned_rules.fingerprint()
+                            || next
+                                .capability_delivery
+                                .as_ref()
+                                .zip(next.provider_session.as_ref())
+                                .is_none_or(|(delivery, session)| {
+                                    context
+                                        .validate_replacement(
+                                            &next.provider_call,
+                                            delivery,
+                                            session,
+                                        )
+                                        .is_err()
+                                })
+                        {
+                            return self
+                                .finish_failed(
+                                    &lease,
+                                    &guard,
+                                    "unstarted_static_offering_replan_invalid",
+                                )
+                                .await;
+                        }
+                        // The original checkpoint was already consumed; recursive entry only
+                        // prices/discloses the same continuation and never consumes or invokes it again.
+                        return Box::pin(self.execute_turn_with_retry(
+                            lease, guard, next, rule_usage, None, None, None, false,
+                        ))
+                        .await;
+                    }
+                }
                 if let Some((service, claim)) = &reclaimed {
                     let _ = service
                         .require_cleanup(claim, "provider_session_reclaimed_handoff_failed")
@@ -2264,6 +2397,7 @@ mod tests {
                 idle_expires_at: time::OffsetDateTime::now_utc() + Duration::minutes(5),
                 absolute_expires_at: time::OffsetDateTime::now_utc() + Duration::hours(1),
                 row_version: 2,
+                installed_offering_fingerprint: None,
             })
         }
 

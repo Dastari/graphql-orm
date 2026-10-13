@@ -171,3 +171,43 @@ source metadata retain the general disclosure path and gain no scoped allowance.
 Apply the owned AI schema migration and restore reconciliation before opening the
 runtime. See the [migration guide](../MIGRATION.md), [attachments](attachments.md)
 and [recovery contract](recovery-and-restore.md).
+
+## Static offering changes across retained native waits
+
+`AiCapabilityDeliveryTurn::set_static_bootstrap_offering` selects only static
+fingerprints in the original immutable session binding. It keeps the same
+shared broker, loaded definitions and index. Obtain the current surface before
+freezing the next plan. A changed offering is refused while any plan clone still
+holds that surface; restoring the same definitions does not validate an older
+surface generation. Deferred reinstall preserves the selected static subset.
+
+Codex app-server 0.159.1 advertises dynamic tools at `thread/start`. Its retained
+`thread/resume` and `turn/start` do not offer a replacement definition set.
+Consequently the SDK requires its registered exact deletion adapter through
+`with_static_offering_reset_deletion_service`, confirmed absence of the old
+cursor, and a dedicated fenced rebind before starting a new thread. This keeps
+the same live run, lease, provider, model, selection, registration, settled
+budgets and actual saved effect. Cleanup uncertainty requires recovery; it
+admits neither another cursor nor input. Generic rebind reasons are unchanged.
+
+The owning application service prepares an opaque original-task continuation
+context with actual original message/event identity and saved invocation
+statuses. A later queued user message cannot substitute for that original task.
+The host prices `conservative_input_bytes`/`conservative_input_tokens` and
+consumes the same prepared context through `with_prepared_task_context` before
+constructing the final plan. User goal text stays untrusted user context.
+Reopening does not append a human event, renew consent or action freshness,
+synthesize a result, or repeat an effect. Every newly disclosed byte, token and
+image remains subject to the fresh atomic quote and current ordinary/source
+policy; task mutation, purge, withdrawal or cancellation refuses disclosure.
+
+`AiSupervisedAgentTurnPlanner::replan_unstarted_static_offering` defaults to no
+retry. Only an SDK-proven unstarted native image reservation denial can invoke
+it, after the exact empty thread is confirmed absent and SDK plan clones have
+been released. The callback receives the same opaque continuation/context and
+shared delivery state. Its replacement must be a strict subset with a smaller
+image quote, unchanged source, provider/model/selection, scope, rules and
+registration, and a fresh content-bound budget key. The SDK accepts at most one
+such retry. Another denial remains terminal. Saved historical content that is
+no longer admitted is withheld truthfully; an old screenshot cannot renew an
+observation or authorize input.

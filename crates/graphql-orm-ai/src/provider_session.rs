@@ -348,6 +348,7 @@ pub struct AiProviderSessionBindRequest {
     cursor: AiProviderSessionCursor,
     transcript_fingerprint: String,
     provider_expires_at: Option<OffsetDateTime>,
+    installed_offering_fingerprint: Option<String>,
 }
 
 /// Host-planned durable provider-session identity for one provider turn.
@@ -419,6 +420,7 @@ impl AiProviderSessionBindRequest {
             cursor,
             transcript_fingerprint: transcript_fingerprint.into(),
             provider_expires_at,
+            installed_offering_fingerprint: None,
         };
         if !crate::valid_sha256(&request.transcript_fingerprint) {
             return Err(AiError::InvalidInput(
@@ -438,6 +440,14 @@ impl AiProviderSessionBindRequest {
         self.provider_expires_at
     }
 
+    pub(crate) fn with_installed_offering(mut self, fingerprint: String) -> Result<Self, AiError> {
+        if !crate::valid_sha256(&fingerprint) {
+            return Err(AiError::Conflict);
+        }
+        self.installed_offering_fingerprint = Some(fingerprint);
+        Ok(self)
+    }
+
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -445,12 +455,14 @@ impl AiProviderSessionBindRequest {
         AiProviderSessionCursor,
         String,
         Option<OffsetDateTime>,
+        Option<String>,
     ) {
         (
             self.descriptor,
             self.cursor,
             self.transcript_fingerprint,
             self.provider_expires_at,
+            self.installed_offering_fingerprint,
         )
     }
 }
@@ -483,6 +495,63 @@ pub struct AiProviderSessionBindingView {
     pub(crate) idle_expires_at: OffsetDateTime,
     pub(crate) absolute_expires_at: OffsetDateTime,
     pub(crate) row_version: i64,
+    pub(crate) installed_offering_fingerprint: Option<String>,
+}
+
+// Minted only after the checkpoint owner reopens and validates the full native outcome.
+// No deserializer or public constructor turns a result body/hash into this proof.
+#[derive(Clone, Debug)]
+pub(crate) struct AiVerifiedNativeContinuation {
+    pub(crate) session_id: AiSessionId,
+    pub(crate) run_id: AiRunId,
+    pub(crate) attempt_id: Uuid,
+    pub(crate) lease_generation: i64,
+    pub(crate) checkpoint_id: Uuid,
+    pub(crate) checkpoint_hash: String,
+    pub(crate) tool_call_id: Uuid,
+    pub(crate) tool_row_version: i64,
+    pub(crate) approval_id: Uuid,
+    pub(crate) outcome_hash: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AiStaticOfferingResetReceipt {
+    pub(crate) session_id: AiSessionId,
+    pub(crate) run_id: AiRunId,
+    pub(crate) attempt_id: Uuid,
+    pub(crate) lease_generation: i64,
+    pub(crate) original_continuation_reference: String,
+    pub(crate) original_cursor_fingerprint: String,
+    pub(crate) replacement_cursor_fingerprint: String,
+    pub(crate) replacement_binding_id: Uuid,
+    pub(crate) cleanup_generation: i64,
+    pub(crate) offering_fingerprint: String,
+    pub(crate) outcome_hash: String,
+}
+
+/// SDK-owned request to change the offered static subset after an actual completed checkpoint.
+///
+/// It has no public constructor or deserializer. The checkpoint owner independently opens
+/// the original completed outcome before this evidence can reach a sealed provider plan.
+/// The request grants no provider input, image, application effect or human consent authority.
+#[derive(Clone, Debug)]
+pub struct AiProviderStaticOfferingResetRequest {
+    pub(crate) evidence: std::sync::Arc<AiVerifiedNativeContinuation>,
+    pub(crate) planned: AiProviderSessionTurnPlan,
+    pub(crate) desired_offering_fingerprint: String,
+    pub(crate) definitely_unstarted_budget_denial: bool,
+}
+
+impl AiProviderStaticOfferingResetRequest {
+    /// Exact immutable provider/model/registration contract retained across the reset.
+    pub fn descriptor(&self) -> &AiProviderSessionDescriptor {
+        self.planned.descriptor()
+    }
+
+    /// Exact SDK-derived newly offered definitions fingerprint, not a registration relabel.
+    pub fn offering_fingerprint(&self) -> &str {
+        &self.desired_offering_fingerprint
+    }
 }
 
 /// Crate-issued authority to replace one exact deleted provider-session
@@ -511,6 +580,7 @@ pub struct AiProviderSessionRebindAuthorization {
     pub(crate) scope: AiScope,
     pub(crate) descriptor: AiProviderSessionDescriptor,
     pub(crate) transcript_fingerprint: String,
+    pub(crate) static_offering_reset: Option<AiProviderStaticOfferingResetRequest>,
 }
 
 impl AiProviderSessionRebindAuthorization {
@@ -1338,6 +1408,60 @@ pub trait AiProviderSessionDeletionService: Send + Sync {
 #[async_trait]
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub trait AiProviderSessionService: Send + Sync {
+    /// Fences the exact old cursor into cleanup for one verified native continuation offering.
+    ///
+    /// Current access, same running lease/descriptor, independently verified completed
+    /// checkpoint, consumed approval and settled preceding budgets remain mandatory. The
+    /// returned request is only for the registered deletion adapter. No new cursor or business
+    /// input may be admitted before exact absence is committed.
+    ///
+    /// # Errors
+    /// Defaults closed when this dedicated lifecycle is unavailable, and rejects stale,
+    /// cancelled, pending, uncertain, swapped or unverified source evidence.
+    async fn prepare_static_offering_reset(
+        &self,
+        _lease: &AiRunLease,
+        _claim: &AiProviderSessionClaim,
+        _request: &AiProviderStaticOfferingResetRequest,
+    ) -> Result<
+        (
+            AiProviderSessionCleanupClaim,
+            AiProviderSessionDeletionRequest,
+        ),
+        AiError,
+    > {
+        Err(AiError::RuntimeNotReady)
+    }
+
+    /// Mints a one-shot rebind only after the exact dedicated cleanup committed absence.
+    ///
+    /// This does not widen the generic pre-dispatch rebind reasons. The current lease,
+    /// provider/model/selection, verified saved checkpoint and new offering must all still
+    /// match, and [`Self::rebind_for_run`] rechecks them at its cursor-replacement CAS.
+    ///
+    /// # Errors
+    /// Defaults closed and rejects unknown cleanup, obsolete fencing or altered evidence.
+    async fn authorize_static_offering_rebind(
+        &self,
+        _lease: &AiRunLease,
+        _cleanup: &AiProviderSessionCleanupClaim,
+        _request: &AiProviderStaticOfferingResetRequest,
+    ) -> Result<AiProviderSessionRebindAuthorization, AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
+    /// Reopens the SDK's exact confirmed-empty-thread cleanup after a definitely unstarted
+    /// native image reservation denial. Ordinary deleted bindings gain no new rebind reason.
+    /// The default refuses; the owning service repeats current access, the original completed
+    /// checkpoint graph and exact absence generation before minting a dedicated authorization.
+    async fn authorize_static_offering_budget_rebind(
+        &self,
+        _lease: &AiRunLease,
+        _request: &AiProviderStaticOfferingResetRequest,
+    ) -> Result<(AiProviderSessionRebindAuthorization, String), AiError> {
+        Err(AiError::RuntimeNotReady)
+    }
+
     /// Returns the current owner-visible binding shell, when one exists.
     ///
     /// Current principal, session, scope, and protection readiness are checked
