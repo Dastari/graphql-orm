@@ -36,13 +36,15 @@ fn genuine_pixels_are_decoded_and_bytes_are_redacted() {
             1500,
         )
         .unwrap();
-    assert!(image
-        .validate_policy(
-            "preview-v1",
-            AiToolResultMediaLimits::new(1, 4096, 10, 100, 1000, 100).unwrap(),
-            2000
-        )
-        .is_err());
+    assert!(
+        image
+            .validate_policy(
+                "preview-v1",
+                AiToolResultMediaLimits::new(1, 4096, 10, 100, 1000, 100).unwrap(),
+                2000
+            )
+            .is_err()
+    );
 }
 #[test]
 fn wrong_digest_dimensions_mime_and_resource_are_rejected() {
@@ -61,12 +63,14 @@ fn wrong_digest_dimensions_mime_and_resource_are_rejected() {
             "{field}"
         );
     }
-    assert!(AiResolvedToolImage::new(
-        reference.clone(),
-        AiToolMediaResourceId::new("preview-v1", Uuid::new_v4()).unwrap(),
-        bytes
-    )
-    .is_err());
+    assert!(
+        AiResolvedToolImage::new(
+            reference.clone(),
+            AiToolMediaResourceId::new("preview-v1", Uuid::new_v4()).unwrap(),
+            bytes
+        )
+        .is_err()
+    );
 }
 #[test]
 fn actual_decode_and_narrow_policy_limits_are_required() {
@@ -76,27 +80,34 @@ fn actual_decode_and_narrow_policy_limits_are_required() {
     let bytes = png();
     let reference = image_reference(&bytes);
     let image = AiResolvedToolImage::new(reference.clone(), resource(&reference), bytes).unwrap();
-    assert!(image
-        .validate_policy(
-            "other-v1",
-            AiToolResultMediaLimits::new(1, 4096, 10, 100, 1000, 100).unwrap(),
-            1500
-        )
-        .is_err());
-    assert!(image
-        .validate_policy(
-            "preview-v1",
-            AiToolResultMediaLimits::new(1, image.byte_count() - 1, 10, 100, 1000, 100).unwrap(),
-            1500
-        )
-        .is_err());
-    assert!(image
-        .validate_policy(
-            "preview-v1",
-            AiToolResultMediaLimits::new(1, 4096, 2, 5, 1000, 100).unwrap(),
-            1500
-        )
-        .is_err());
+    assert!(
+        image
+            .validate_policy(
+                "other-v1",
+                AiToolResultMediaLimits::new(1, 4096, 10, 100, 1000, 100).unwrap(),
+                1500
+            )
+            .is_err()
+    );
+    assert!(
+        image
+            .validate_policy(
+                "preview-v1",
+                AiToolResultMediaLimits::new(1, image.byte_count() - 1, 10, 100, 1000, 100)
+                    .unwrap(),
+                1500
+            )
+            .is_err()
+    );
+    assert!(
+        image
+            .validate_policy(
+                "preview-v1",
+                AiToolResultMediaLimits::new(1, 4096, 2, 5, 1000, 100).unwrap(),
+                1500
+            )
+            .is_err()
+    );
 }
 #[tokio::test]
 async fn bounded_decode_preserves_exact_immutable_payload() {
@@ -111,14 +122,16 @@ async fn bounded_decode_preserves_exact_immutable_payload() {
     .await
     .unwrap();
     assert_eq!(decoded.bytes(), bytes);
-    assert!(AiResolvedToolImage::decode_bounded(
-        reference.clone(),
-        resource(&reference),
-        bytes,
-        AiToolResultMediaLimits::new(1, 4096, 1, 100, 1000, 5000).unwrap()
-    )
-    .await
-    .is_err());
+    assert!(
+        AiResolvedToolImage::decode_bounded(
+            reference.clone(),
+            resource(&reference),
+            bytes,
+            AiToolResultMediaLimits::new(1, 4096, 1, 100, 1000, 5000).unwrap()
+        )
+        .await
+        .is_err()
+    );
 }
 
 #[test]
@@ -131,11 +144,10 @@ fn two_genuine_pngs_must_fit_the_complete_result_pixel_budget() {
     let limits = AiToolResultMediaLimits::new(2, 8192, 10, 6, 1000, 5000).unwrap();
     one.validate_policy("preview-v1", limits, 1500).unwrap();
     two.validate_policy("preview-v1", limits, 1500).unwrap();
-    assert!(crate::tool_media::validate_image_reference_batch(
-        &[first.clone(), second.clone()],
-        limits
-    )
-    .is_err());
+    assert!(
+        crate::tool_media::validate_image_reference_batch(&[first.clone(), second.clone()], limits)
+            .is_err()
+    );
     crate::tool_media::validate_image_reference_batch(std::slice::from_ref(&first), limits)
         .unwrap();
     crate::tool_media::validate_image_reference_batch(
