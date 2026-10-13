@@ -435,6 +435,19 @@ impl AiUnstartedStaticOfferingReplan {
         now: time::OffsetDateTime,
     ) -> Result<(), AiError> {
         self.ready_for_callback()?;
+        self.validate_current_unstarted_cleanup(lease, sessions, now)
+            .await
+    }
+
+    // After a successful host callback the replacement owns its legitimate new
+    // freeze. Recheck the same durable custody, without reapplying the pre-callback
+    // requirement that all failed-plan freezes have already been released.
+    pub(crate) async fn validate_current_unstarted_cleanup(
+        &self,
+        lease: &AiRunLease,
+        sessions: &dyn crate::AiProviderSessionService,
+        now: time::OffsetDateTime,
+    ) -> Result<(), AiError> {
         let request = crate::AiProviderStaticOfferingResetRequest {
             evidence: self
                 .failed_plan

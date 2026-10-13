@@ -2081,7 +2081,7 @@ impl AiSupervisedAgentCoordinator {
                 return Err(AiError::Conflict);
             }
             context
-                .validate_unstarted_cleanup(
+                .validate_current_unstarted_cleanup(
                     lease,
                     self.provider_session_service
                         .as_deref()
