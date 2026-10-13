@@ -1747,6 +1747,7 @@ async fn approved_media_lifecycle(
             &custody,
             application,
             sessions,
+            native,
             &current,
             &adopted,
             mode,
@@ -2095,6 +2096,7 @@ async fn exercise_owned_static_reset(
     custody: &Arc<Custody>,
     application: Arc<OrmAiApplicationToolCallService>,
     sessions: Arc<OrmAiProviderSessionService>,
+    native: Arc<NativePreviewExecution>,
     lease: &AiRunLease,
     adopted: &crate::AiAdoptedSupervisedToolBatch,
     mode: usize,
@@ -2240,6 +2242,13 @@ async fn exercise_owned_static_reset(
         return;
     }
     if mode == 3 {
+        let original_task_context = next
+            .request
+            .input
+            .iter()
+            .find(|input| matches!(input, ModelInputBlock::Text { text } if text.contains("FrameworkTaskContinuationContext")))
+            .unwrap()
+            .clone();
         let owning_sessions = OrmAiSessionService::new(
             fixture.database.clone(),
             Arc::new(AllowAccess),
@@ -2273,13 +2282,16 @@ async fn exercise_owned_static_reset(
                 .is_err()
         );
         custody.requests.lock().await.clear();
+        // Continue through the same owning native responder after the actual approved
+        // effect; this scripted turn completes without invoking another tool.
+        custody.complete_after_capture.store(true, Ordering::SeqCst);
         let result = executor
             .execute_with_provider_session(
                 Arc::new(Mutex::new(lease.clone())),
                 next,
                 session_plan,
                 sessions,
-                None,
+                Some(native),
             )
             .await
             .unwrap();
@@ -2288,10 +2300,19 @@ async fn exercise_owned_static_reset(
         assert_eq!(custody.created_threads.load(Ordering::SeqCst), 2);
         assert_eq!(*deletion.created_at_delete.lock().await, vec![1]);
         assert_eq!(result.usage().image_units, 1);
+        assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 1);
+        let approvals = AiApprovalRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].consumed_uses, 1);
         let sent = custody.requests.lock().await;
         assert_eq!(sent.len(), 1);
+        assert!(sent[0].input.contains(&original_task_context));
         let contents = serde_json::to_string(&sent[0].input).unwrap();
         assert!(contents.contains("FrameworkTaskContinuationContext"));
+        assert!(contents.contains(&lease.input_message_id().to_string()));
         assert!(!contents.contains("A later independent task"));
         assert_eq!(
             AiSessionEventRecord::query(fixture.database.pool())
