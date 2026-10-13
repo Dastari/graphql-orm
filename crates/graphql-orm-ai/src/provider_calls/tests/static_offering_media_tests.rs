@@ -39,7 +39,25 @@ impl QuotaRetryPlanner {
         base.budget.attempt_id = lease.attempt_id();
         base.budget.lease_generation = lease.lease_generation();
         base.budget.idempotency_key = "owning-quota-original".into();
-        base.budget.estimate.input_tokens = 8000;
+        let input_contribution = continuation.conservative_input_tokens()?;
+        let base_projection = base
+            .request
+            .conservative_provider_egress_tokens(&base.provider_kind)?;
+        let mut complete_projection = base.request.clone();
+        // Price the SDK's exact opaque input/context, including its actual reference
+        // and framing. No guessed allowance substitutes for the complete request.
+        continuation
+            .clone()
+            .apply_with_bound_task_context(&mut complete_projection)?;
+        let complete_quote =
+            complete_projection.conservative_provider_egress_tokens(&base.provider_kind)?;
+        assert!(
+            complete_quote
+                >= base_projection
+                    .checked_add(input_contribution)
+                    .ok_or(AiError::Conflict)?
+        );
+        base.budget.estimate.input_tokens = complete_quote;
         base.budget.estimate.image_units = 4;
         if let Some(mut budget) = exact_budget {
             budget.estimate.image_units = 0;
@@ -58,6 +76,12 @@ impl QuotaRetryPlanner {
             &policy,
             &self.fixture.generated_target_policy,
         )?;
+        assert!(
+            provider.budget.estimate.input_tokens
+                >= provider
+                    .request
+                    .conservative_provider_egress_tokens(&provider.provider_kind)?
+        );
         if self.mode == 9 {
             *self.held_plan.lock().await = Some(provider.clone());
         }
@@ -168,6 +192,29 @@ pub(super) async fn owning_coordinator_reset(
     approved: crate::AiApprovedRunClaim,
     mode: usize,
 ) {
+    let mut fixture = fixture;
+    // This extended original-task continuation is larger than the parent's 10,000
+    // token test profile. Give only this fixture finite capacity for its complete
+    // SDK-priced request; the separate zero image policy still forces the retry.
+    fixture.budget_service = Arc::new(OrmAiBudgetService::new(
+        fixture.database.clone(),
+        Arc::new(SystemClock),
+        crate::AiBudgetServiceLimits::new(
+            AiBudgetAmounts {
+                input_tokens: 20_000,
+                output_tokens: 10_000,
+                tool_units: 100,
+                image_units: 100,
+                cost_microunits: 1_000_000,
+                runs: 1,
+            },
+            Duration::minutes(5),
+            Duration::seconds(30),
+            16,
+            8,
+        )
+        .unwrap(),
+    ));
     let fixture = Arc::new(fixture);
     let policy = AiBudgetPolicyRecord::query(fixture.database.pool())
         .limit(1)
@@ -182,7 +229,7 @@ pub(super) async fn owning_coordinator_reset(
         &policy.id,
         crate::persistence::UpdateAiBudgetPolicyRecordInput {
             maximum_image_units: Some(Some(0)),
-            maximum_input_tokens: Some(Some(100_000)),
+            maximum_input_tokens: Some(Some(20_000)),
             maximum_runs: (mode == 10).then_some(Some(1)),
             ..Default::default()
         },
