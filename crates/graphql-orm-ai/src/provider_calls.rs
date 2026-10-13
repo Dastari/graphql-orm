@@ -843,12 +843,33 @@ impl AiProviderCallPlan {
         )?;
         plan.native_reset_evidence = native_reset_evidence;
         if let Some(context) = &task_context {
+            // A fresh cursor has no historical source index. Carry the exact SDK-verified
+            // completed native call into the whole inference proof, so its retained pixels
+            // are reopened and checked against the atomic image quote before transport.
+            let native_source = plan.native_reset_evidence.as_ref().and_then(|evidence| {
+                plan.transfers
+                    .iter()
+                    .filter(|manifest| manifest.capability == AiEgressCapability::ToolResult)
+                    .flat_map(|manifest| &manifest.sources)
+                    .find(|source| {
+                        source.kind == "application_tool_result"
+                            && source.reference.starts_with("v2:")
+                            && crate::tool_media::source_call_hint(&source.reference)
+                                == Some(evidence.tool_call_id)
+                    })
+                    .cloned()
+            });
             let inference = plan
                 .transfers
                 .iter_mut()
                 .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
                 .ok_or(AiError::EgressDenied)?;
             inference.sources.extend(context.sources.iter().cloned());
+            if let Some(source) = native_source
+                && !inference.sources.contains(&source)
+            {
+                inference.sources.push(source);
+            }
             if plan.budget.estimate.input_tokens < inference.estimated_tokens {
                 return Err(AiError::PreTransportBudgetDenied);
             }

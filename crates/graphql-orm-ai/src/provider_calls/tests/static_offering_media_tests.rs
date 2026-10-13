@@ -66,7 +66,7 @@ impl QuotaRetryPlanner {
             budget.idempotency_key = "owning-quota-reduced".into();
             base.budget = budget;
         }
-        let provider = AiProviderCallPlan::new_continuation_with_classified_capability_surface(
+        let mut provider = AiProviderCallPlan::new_continuation_with_classified_capability_surface(
             base.provider_kind,
             base.request,
             base.budget,
@@ -78,6 +78,28 @@ impl QuotaRetryPlanner {
             &policy,
             &self.fixture.generated_target_policy,
         )?;
+        let original_call = provider
+            .native_reset_evidence
+            .as_ref()
+            .unwrap()
+            .tool_call_id;
+        let inference = provider
+            .transfers
+            .iter_mut()
+            .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+            .unwrap();
+        let source = inference
+            .sources
+            .iter_mut()
+            .find(|source| {
+                source.kind == "application_tool_result"
+                    && crate::tool_media::source_call_hint(&source.reference) == Some(original_call)
+            })
+            .expect("whole inference proof includes the verified original native source");
+        if self.mode == 14 {
+            // Matching a call UUID alone cannot admit a caller-modified source proof.
+            source.reference = format!("v2:{original_call}:{}", "0".repeat(64));
+        }
         assert!(
             provider.budget.estimate.input_tokens
                 >= provider
@@ -231,7 +253,7 @@ pub(super) async fn owning_coordinator_reset(
         &fixture.database,
         &policy.id,
         crate::persistence::UpdateAiBudgetPolicyRecordInput {
-            maximum_image_units: Some(Some(0)),
+            maximum_image_units: Some(Some(if mode == 14 { 4 } else { 0 })),
             maximum_input_tokens: Some(Some(20_000)),
             maximum_runs: (mode == 10).then_some(Some(1)),
             ..Default::default()
@@ -369,7 +391,7 @@ pub(super) async fn owning_coordinator_reset(
             assert!(custody.created_threads.load(Ordering::SeqCst) >= 3);
             assert!(deletion.requests.lock().await.len() >= 2);
         }
-        9 => {
+        9 | 14 => {
             assert!(
                 matches!(
                     result,
@@ -378,7 +400,9 @@ pub(super) async fn owning_coordinator_reset(
                 "{result:?}"
             );
             assert_eq!(planner.retries.load(Ordering::SeqCst), 0);
-            assert!(planner.held_plan.lock().await.is_some());
+            if mode == 9 {
+                assert!(planner.held_plan.lock().await.is_some());
+            }
             assert!(requests.is_empty());
         }
         10 | 12 => {
@@ -439,4 +463,9 @@ async fn approved_native_pending_quota_replan_is_bounded_and_owner_cancellable()
     for mode in [12, 13] {
         Box::pin(approved_media_lifecycle(false, false, 0, Some(mode))).await;
     }
+}
+
+#[tokio::test]
+async fn verified_native_inference_refuses_modified_original_source_reference() {
+    Box::pin(approved_media_lifecycle(false, false, 0, Some(14))).await;
 }
