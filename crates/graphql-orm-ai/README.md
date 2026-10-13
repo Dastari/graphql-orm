@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.107.0` adds protected JPEG/PNG tool-result content and fenced
+static-tool offering changes for retained native runs. Completed effects remain
+durable; current source authorization, atomic image budgets and final transport
+guards govern redisclosure. Apply AI schema module `0.72.0` before starting the
+new runtime. See [protected tool-result media](docs/tool-result-media.md) and
+[MIGRATION.md](MIGRATION.md) for host admission and restore requirements.
+
 Version `0.106.1` admits up to 128 exact static bootstrap fingerprints and
 Grok SDK definitions, matching the existing Codex definition ceiling. Hosts
 with larger reviewed tool catalogues no longer fail provider-session admission

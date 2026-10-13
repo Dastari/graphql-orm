@@ -18,16 +18,9 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
-## [0.106.1] - 2026-10-01
+## [0.107.0] - 2026-10-13
 
-### Fixed
-
-- Raise the finite provider-session static bootstrap and Grok SDK definition
-  bounds from 64 to 128. Larger reviewed catalogues can start native sessions
-  without omitting tools; exact fingerprints, duplicate/schema rejection,
-  provider frame/byte limits and callback bounds remain mandatory.
-
-## [Unreleased]
+### Added
 
 - Keep original static capability subsets in the same broker state, and require
   confirmed exact old-thread deletion before a same-run native continuation
@@ -35,8 +28,6 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   context is priced and freshly checked; image quota replanning defaults off
   and admits at most one proven unstarted reduction without effect replay.
 
-
-### Added
 
 - Fingerprint-bound protected tool-result JPEG/PNG media, trusted owner resolvers,
   derived original/current disclosure contexts and current source-aware policy.
@@ -64,6 +55,17 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 - Unsupported adapters default-deny protected source delivery before Restricted
   or media effects. Native no-effect control receipts retain their owning
   admission while releasing unused image capacity.
+
+## [0.106.1] - 2026-10-01
+
+### Fixed
+
+- Raise the finite provider-session static bootstrap and Grok SDK definition
+  bounds from 64 to 128. Larger reviewed catalogues can start native sessions
+  without omitting tools; exact fingerprints, duplicate/schema rejection,
+  provider frame/byte limits and callback bounds remain mandatory.
+
+## [Unreleased]
 
 ### Added
 

@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## [Unreleased]
+## [0.16.0] - 2026-10-13
 
 ### Added
 
@@ -19,6 +19,10 @@ supersedes: []
   fingerprints. Secret/NeverExport ancestors and URL/path resolver IDs fail.
 - `PreTransportToolSourceUnavailable` retains safe no-dispatch classification
   for unavailable protected history after an unstarted reservation is released.
+
+## [Unreleased]
+
+### Added
 
 - Trusted `ToolPreExecutionRejection` carries an exact invocation hash and one
   closed public reason without resolver text, credentials or request content.
