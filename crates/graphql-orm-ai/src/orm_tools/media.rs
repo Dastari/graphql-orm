@@ -85,6 +85,21 @@ impl OrmAiApplicationToolCallService {
         trust: AiSourceTrust,
     ) -> Result<RetainedDisclosure, AiError> {
         self.current_access(lease, &call_context.scope).await?;
+        let protected_result = self
+            .protect(
+                policy,
+                protection_context(
+                    "graphql_orm_ai_tool_calls",
+                    provenance.tool_call_id().0,
+                    "protected_result",
+                    &call_context.scope,
+                ),
+                output.clone(),
+            )
+            .await?;
+        self.run_service
+            .retain_tool_effect_output(lease, provenance, protected_result.clone())
+            .await?;
         let images = extract_references(
             descriptor,
             output,
@@ -119,18 +134,6 @@ impl OrmAiApplicationToolCallService {
         )?;
         let image_count =
             i64::try_from(source_context.images().len()).map_err(|_| AiError::PersistenceFailed)?;
-        let protected_result = self
-            .protect(
-                policy,
-                protection_context(
-                    "graphql_orm_ai_tool_calls",
-                    provenance.tool_call_id().0,
-                    "protected_result",
-                    &call_context.scope,
-                ),
-                output.clone(),
-            )
-            .await?;
         let protected_source = self
             .protect(
                 policy,

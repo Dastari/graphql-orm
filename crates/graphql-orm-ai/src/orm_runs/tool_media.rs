@@ -3,6 +3,99 @@
 use super::*;
 
 impl OrmAiRunService {
+    // Save the actual bounded completed output before descriptive media parsing or resource IO.
+    // It is still an executing call without a source admission, so it cannot be disclosed or
+    // consumed as a completed checkpoint. A failed metadata check never replaces this output
+    // with a fabricated success/failure body and never makes the effect eligible for replay.
+    pub(crate) async fn retain_tool_effect_output(
+        &self,
+        lease: &AiRunLease,
+        origin: &crate::AiToolExecutionProvenance,
+        protected_result: serde_json::Value,
+    ) -> Result<(), AiError> {
+        let lease = lease.clone();
+        let origin = origin.clone();
+        let now = canonical_second(self.clock.now());
+        self.database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let current = load_and_validate_active_lease(tx, &lease, now).await?;
+                    let call = tx
+                        .find_by_id::<AiToolCallRecord>(&origin.tool_call_id().0)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let step = tx
+                        .find_by_id::<AiRunStepRecord>(&call.id)
+                        .await
+                        .map_err(OrmPublicError::from)?
+                        .ok_or_else(OrmPublicError::not_found)?;
+                    let expected = serde_json::to_value(origin.original_invocation())
+                        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                    if persisted_state(&current)? != AiRunState::Running
+                        || call.run_id != lease.run_id.0
+                        || origin.run_id() != lease.run_id
+                        || origin.session_id() != lease.session_id
+                        || step.run_id != call.run_id
+                        || call.lease_generation != lease.lease_generation
+                        || step.lease_generation != call.lease_generation
+                        || step.state != "running"
+                        || call.state != "executing"
+                        || call.protected_result.is_some()
+                        || call.protected_result_source.is_some()
+                        || call.execution_provenance.as_ref() != Some(&expected)
+                        || origin.argument_hash() != call.argument_hash
+                        || origin.tool_fingerprint() != call.tool_fingerprint
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    if let Some(approval_id) = origin.approval_id() {
+                        let approval = tx
+                            .find_by_id::<AiApprovalRecord>(&approval_id.0)
+                            .await
+                            .map_err(OrmPublicError::from)?
+                            .ok_or_else(OrmPublicError::not_found)?;
+                        if call.approval_id != Some(approval.id)
+                            || approval.tool_call_id != call.id
+                            || approval.state != "consumed"
+                            || approval.consumed_uses != 1
+                            || approval.consumed_at.is_none()
+                            || origin.approval_binding_hash()
+                                != Some(approval.binding_hash.as_str())
+                            || origin.policy_version() != Some(approval.policy_version.as_str())
+                            || origin.authorization_state_digest()
+                                != Some(approval.authorization_state_digest.as_str())
+                        {
+                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        }
+                    } else if call.approval_id.is_some()
+                        || origin.attempt_id() != lease.attempt_id
+                        || origin.lease_generation() != lease.lease_generation
+                    {
+                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                    }
+                    match tx
+                        .compare_and_swap::<AiToolCallRecord>(
+                            &call.id,
+                            call.row_version,
+                            AiToolCallRecordWhereInput::default(),
+                            UpdateAiToolCallRecordInput {
+                                protected_result: Some(Some(protected_result)),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .map_err(OrmPublicError::from)?
+                    {
+                        ConditionalUpdateOutcome::Updated(_) => Ok(()),
+                        _ => Err(OrmPublicError::new(OrmErrorCode::Conflict)),
+                    }
+                })
+            })
+            .await
+            .map_err(map_transaction)
+    }
+
     pub(crate) async fn validate_tool_disclosure_fence(
         &self,
         lease: &AiRunLease,
@@ -63,7 +156,7 @@ impl OrmAiRunService {
                         || step.lease_generation != call.lease_generation
                         || step.state != "running"
                         || call.state != "executing"
-                        || call.protected_result.is_some()
+                        || call.protected_result.as_ref() != Some(&protected_result)
                         || call.protected_result_source.is_some()
                         || call.execution_provenance.as_ref() != Some(&expected)
                         || origin.tool_call_id() != call_id

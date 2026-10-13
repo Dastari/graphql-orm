@@ -86,8 +86,8 @@ impl AiProviderCallExecutor {
             return Err(AiError::EgressDenied);
         }
         if !labels.is_empty() {
-            plan.request.input.push(ModelInputBlock::Json {
-                value: serde_json::json!({"retainedToolImageCaptureLabels":labels}),
+            plan.request.input.push(ModelInputBlock::Text {
+                text: serde_json::json!({"retainedToolImageCaptureLabels":labels}).to_string(),
             });
             inference.estimated_bytes = plan
                 .request
@@ -121,9 +121,9 @@ impl AiProviderCallExecutor {
         plan.request.input.insert(0, ModelInputBlock::Text { text });
         let notice = serde_json::json!({"savedToolResultsRetained":true,"historicalToolContentWithheld":true,
             "executionRepeated":false,"providerContextReset":true});
-        plan.request
-            .input
-            .push(ModelInputBlock::Json { value: notice });
+        plan.request.input.push(ModelInputBlock::Text {
+            text: notice.to_string(),
+        });
         plan.request.continuation = None;
         plan.request.continuation_mode = ModelContinuationMode::ProviderRetained;
         plan.request.tools.clear();

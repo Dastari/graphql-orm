@@ -68,8 +68,13 @@ static boundary on every disclosure.
 
 ## Durable results, provider delivery and budgets
 
-The application service protects the actual completed-effect result and source
-metadata before disclosure. A small internal source-address index bounds retained
+The application service protects and saves the actual bounded completed-effect
+result before parsing descriptive image metadata or opening resources. Invalid
+metadata preserves the saved output for owning recovery and denies disclosure; it does
+not replace the completed output or authorize effect replay. Source metadata is
+then admitted and protected before disclosure. Owner cancellation also closes
+source-retained unfinished calls while preserving their original saved output.
+A small internal source-address index bounds retained
 native-history lookup to 64 exact cursor sources; it grants no authorization and
 is never exposed as public CRUD. Owner loaders reopen the protected call,
 arguments and result, compare full provenance and canonical checksums, and

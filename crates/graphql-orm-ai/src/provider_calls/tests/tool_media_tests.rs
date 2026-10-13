@@ -19,6 +19,11 @@ struct Custody {
     ordinary_allowed: AtomicBool,
     revoke_before_delivery: AtomicBool,
     fail_next_source_open: AtomicBool,
+    invalid_image_metadata: AtomicBool,
+    model_disclosures: AtomicUsize,
+    deny_model_disclosure_at: AtomicUsize,
+    requests: Mutex<Vec<ModelRequest>>,
+    delivered_images: AtomicUsize,
 }
 struct SourceProtector(Arc<Custody>);
 #[async_trait]
@@ -91,7 +96,7 @@ impl AuthenticatedGraphqlExecutor for PreviewExecutor {
         Ok(ToolGraphqlResponse {
             data: json!({"Preview":{
                 "Reference":reference.reference(),"Sha256":reference.sha256(),"Mime":reference.mime(),
-                "Width":reference.width(),"Height":reference.height(),"CapturedAtMs":reference.captured_at_ms(),
+                "Width":if self.0.invalid_image_metadata.load(Ordering::SeqCst) {json!(-1)} else {json!(reference.width())},"Height":reference.height(),"CapturedAtMs":reference.captured_at_ms(),
                 "RetainedUntilMs":reference.retained_until_ms(),"ActionExpiresAtMs":reference.action_expires_at_ms()
             }}),
             error_codes: Vec::new(),
@@ -170,7 +175,12 @@ impl AiEgressPolicy for Custody {
         manifest: &AiEgressManifest,
         sources: &[crate::AiToolResultDisclosureContext],
     ) -> AiEgressDecision {
+        let model_denied = manifest.capability == AiEgressCapability::ModelInference
+            && self.deny_model_disclosure_at.load(Ordering::SeqCst) > 0
+            && self.model_disclosures.fetch_add(1, Ordering::SeqCst) + 1
+                >= self.deny_model_disclosure_at.load(Ordering::SeqCst);
         if self.allowed.load(Ordering::SeqCst)
+            && !model_denied
             && sources.iter().all(|source| {
                 source.current_principal_reference() == principal.reference()
                     && source.scope() == &manifest.scope
@@ -204,6 +214,7 @@ impl crate::AiProvider for MediaProvider {
     fn capabilities(&self) -> crate::ProviderCapabilities {
         crate::ProviderCapabilities {
             image_input: self.supported,
+            provider_retained_continuation: true,
             ..MockProvider::new(Vec::new()).capabilities()
         }
     }
@@ -213,11 +224,38 @@ impl crate::AiProvider for MediaProvider {
     fn supports_tool_result_image_policy(&self, _: &AiToolDescriptor) -> bool {
         self.supported
     }
+    async fn create_empty_session(
+        &self,
+        _: &crate::AiProviderRunBinding,
+        _: &AiProviderSessionDescriptor,
+        _: &ModelRequest,
+    ) -> Result<AiProviderSessionCursor, ProviderError> {
+        AiProviderSessionCursor::new("test.thread", "preview-thread")
+            .map_err(|_| ProviderError::InvalidRequest)
+    }
     async fn stream(
         &self,
         request: ModelRequest,
-        _: ProviderRequestContext,
+        context: ProviderRequestContext,
     ) -> Result<crate::ProviderEventStream, ProviderError> {
+        context.authorize_tool_source_delivery().await?;
+        self.custody.delivered_images.fetch_add(
+            context.retained_tool_result_images().len(),
+            Ordering::SeqCst,
+        );
+        self.custody.requests.lock().await.push(request.clone());
+        if request.tools.is_empty() {
+            return Ok(Box::pin(futures::stream::iter([
+                Ok(ProviderEvent::Usage {
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    cached_input_tokens: 0,
+                }),
+                Ok(ProviderEvent::ResponseCompleted {
+                    response_id: Some("fresh-text-turn".into()),
+                }),
+            ])));
+        }
         let definition = request.tools.first().ok_or(ProviderError::Rejected)?;
         Ok(Box::pin(futures::stream::iter([
             Ok(ProviderEvent::ResponseStarted {
@@ -768,6 +806,43 @@ async fn post_effect_source_open_failure_retains_actual_output_for_later_read_wi
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn invalid_post_effect_media_is_saved_but_cannot_be_admitted_or_replayed() {
+    let (fixture, custody, service) = media_fixture(true).await;
+    custody.invalid_image_metadata.store(true, Ordering::SeqCst);
+    assert!(preview_turn(&fixture, service.clone(), 4).await.is_err());
+    let calls = AiToolCallRecord::query(fixture.database.pool())
+        .limit(2)
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(calls.len(), 1);
+    assert!(calls[0].protected_result.is_some());
+    assert!(calls[0].protected_result_source.is_none());
+    assert_eq!(calls[0].state, "executing");
+    assert!(
+        AiToolResultSourceRecord::query(fixture.database.pool())
+            .limit(1)
+            .fetch_all()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        service
+            .reopen_tool_result_source(
+                &fixture.lease,
+                AiToolCallId(calls[0].id),
+                crate::AiToolResultDisclosurePurpose::Continuation
+            )
+            .await
+            .is_err()
+    );
+    assert!(preview_turn(&fixture, service, 4).await.is_err());
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+    assert_eq!(custody.opens.load(Ordering::SeqCst), 0);
+}
+
 struct MediaActionPreview;
 #[async_trait]
 impl AiCanonicalActionPreviewBuilder for MediaActionPreview {
@@ -788,6 +863,128 @@ impl AiCanonicalActionPreviewBuilder for MediaActionPreview {
             details: json!({"capture":true}),
         })
     }
+}
+
+async fn bind_original_media_session(
+    fixture: &Fixture,
+    provider: &mut AiProviderCallResult,
+) -> Arc<OrmAiProviderSessionService> {
+    // Initial fixture input uses generated ORM entities; all lifecycle transitions below use
+    // the owning session/approval/run services, never direct writes to their state fields.
+    let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    AiSessionRecord::compare_and_swap(
+        &fixture.database,
+        &session.id,
+        session.row_version,
+        AiSessionRecordWhereInput::default(),
+        UpdateAiSessionRecordInput {
+            message_head: Some(1),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    AiMessageRecord::insert(
+        &fixture.database,
+        CreateAiMessageRecordInput {
+            id: fixture.lease.input_message_id(),
+            session_id: session.id,
+            sequence: 1,
+            message_role: "user".into(),
+            author_principal_kind: Some("user".into()),
+            author_subject: Some(fixture.principal.subject().into()),
+            client_message_id: Some(Uuid::new_v4()),
+            content_hash: Some("c".repeat(64)),
+            run_id: Some(fixture.lease.run_id().0),
+            provider_kind: None,
+            provider_model: None,
+            protected_preview: None,
+            block_count: 1,
+            completion_state: "complete".into(),
+            finalized_at: Some(OffsetDateTime::now_utc().unix_timestamp()),
+            content_purged_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let block_id = Uuid::new_v4();
+    let policy = ProtectionPolicy
+        .resolve(&fixture.principal, &fixture.scope)
+        .await
+        .unwrap();
+    let envelope = crate::AiContentProtector::protect(
+        &DatabaseManagedContentProtector,
+        &policy,
+        &crate::ContentProtectionContext {
+            entity: "graphql_orm_ai_message_blocks".into(),
+            row_id: block_id.to_string(),
+            field: "protected_content".into(),
+            scope: fixture.scope.clone(),
+        },
+        json!({"text":"hello"}),
+    )
+    .await
+    .unwrap();
+    AiMessageBlockRecord::insert(
+        &fixture.database,
+        CreateAiMessageBlockRecordInput {
+            id: block_id,
+            message_id: fixture.lease.input_message_id(),
+            block_index: 0,
+            block_kind: "text".into(),
+            protected_content: serde_json::to_value(envelope).unwrap(),
+            byte_count: 5,
+            line_count: 1,
+        },
+    )
+    .await
+    .unwrap();
+    let sessions = Arc::new(
+        OrmAiProviderSessionService::new(
+            fixture.database.clone(),
+            Arc::new(AllowAccess),
+            Arc::new(ProtectionPolicy),
+            Arc::new(DatabaseManagedContentProtector),
+            Arc::new(Resolver(fixture.principal.clone())),
+            Arc::new(SystemClock),
+            AiProviderSessionLimits::default(),
+            Duration::minutes(5),
+        )
+        .unwrap(),
+    );
+    let descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::OpenAiCompatible,
+        "mock-profile",
+        "mock-model",
+        "a".repeat(64),
+        "mock/v1",
+        "b".repeat(64),
+    )
+    .unwrap();
+    let cursor = fixture
+        .runtime
+        .create_empty_provider_session(
+            &ProviderKind::OpenAiCompatible,
+            &crate::AiProviderRunBinding::from_lease(&fixture.lease).unwrap(),
+            &descriptor,
+            &provider.request_snapshot,
+        )
+        .await
+        .unwrap();
+    provider.provider_session_claim = Some(
+        sessions
+            .bind_for_run(
+                &fixture.lease,
+                AiProviderSessionBindRequest::new(descriptor, cursor, "d".repeat(64), None)
+                    .unwrap(),
+            )
+            .await
+            .unwrap(),
+    );
+    sessions
 }
 
 #[tokio::test]
@@ -834,7 +1031,8 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
         Arc::new(SystemClock),
         AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
     );
-    let provider = executor.execute(&fixture.lease, offered).await.unwrap();
+    let mut provider = executor.execute(&fixture.lease, offered).await.unwrap();
+    let sessions = bind_original_media_session(&fixture, &mut provider).await;
     assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
     let checkpoints = Arc::new(OrmAiCoordinatorCheckpointService::new(
         fixture.run_service.clone(),
@@ -862,23 +1060,26 @@ async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_exec
         .await
         .unwrap();
     let (_, approvals) = consequential_test_service(&fixture);
-    let consequential = Arc::new(OrmAiConsequentialToolCallService::new(
-        fixture.run_service.clone(),
-        fixture.runtime.clone(),
-        approvals.clone(),
-        Arc::new(MediaActionPreview),
-        fixture.audit.clone(),
-        Arc::new(SystemClock),
-        AiApplicationToolCallLimits::new(
-            8192,
-            16384,
-            4,
-            4,
-            Duration::seconds(30),
-            Duration::seconds(10),
+    let consequential = Arc::new(
+        OrmAiConsequentialToolCallService::new(
+            fixture.run_service.clone(),
+            fixture.runtime.clone(),
+            approvals.clone(),
+            Arc::new(MediaActionPreview),
+            fixture.audit.clone(),
+            Arc::new(SystemClock),
+            AiApplicationToolCallLimits::new(
+                8192,
+                16384,
+                4,
+                4,
+                Duration::seconds(30),
+                Duration::seconds(10),
+            )
+            .unwrap(),
         )
-        .unwrap(),
-    ));
+        .with_provider_session_service(sessions),
+    );
     let requested = consequential
         .request_approval(
             &protected,
