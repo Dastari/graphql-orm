@@ -40,6 +40,12 @@ results while retaining the permit until bounded work ends.
 
 ## Trusted owner and current source policy
 
+Hosts use `AiToolResultDisclosureContext::binds_egress_source` to match the SDK's
+original text/image source encoding without recreating it. This is correlation,
+not an allow proof: actual current source authorization, decoded bytes and atomic
+budgets remain mandatory. Ordinary, unknown and mixed unproven sources retain
+the host's unchanged general policy.
+
 Register `AiRuntimeBuilder::tool_result_media_resolver` with an
 `AiToolResultMediaResolver`. It receives the freshly resolved principal, exact
 registered descriptor, SDK-derived `AiToolResultDisclosureContext` and exact

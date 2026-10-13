@@ -195,6 +195,22 @@ impl AiToolResultDisclosureContext {
             trust: self.source.trust,
         }
     }
+
+    /// Whether this SDK-derived context binds the exact original text or declared image source.
+    ///
+    /// This uses the owning reference encoding and requires unchanged classification and trust.
+    /// It grants no disclosure authority: current principal/scope/resource/consent, egress and
+    /// atomic budget checks still apply on every delivery. Unknown or caller-labelled sources
+    /// must retain the host's ordinary policy rather than inheriting this context's allowance.
+    pub fn binds_egress_source(&self, source: &AiDataSourceRef) -> bool {
+        self.data_source() == *source
+            || (source.classification == self.classification()
+                && source.trust == self.source_trust()
+                && self
+                    .images()
+                    .iter()
+                    .any(|image| image.matches_egress_source(&self.source_reference(), source)))
+    }
 }
 
 /// Removes only sources independently bound by actual SDK-derived contexts. Unknown and mixed
@@ -206,14 +222,9 @@ pub(crate) fn ordinary_source_component(
     let mut ordinary = manifest.clone();
     let mut removed_images = 0_u32;
     ordinary.sources.retain(|source| {
-        let matched = contexts.iter().any(|context| {
-            context.data_source() == *source
-                || (source.classification == context.classification()
-                    && source.trust == context.source_trust()
-                    && context.images().iter().any(|image| {
-                        image.matches_egress_source(&context.source_reference(), source)
-                    }))
-        });
+        let matched = contexts
+            .iter()
+            .any(|context| context.binds_egress_source(source));
         if matched && source.kind == "tool_result_image" {
             removed_images = removed_images.saturating_add(1);
         }

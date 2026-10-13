@@ -5058,45 +5058,42 @@ impl AiProviderCallExecutor {
                     }
                     if manifest.capability == AiEgressCapability::ModelInference
                         && !context.images().is_empty()
+                        && image_sources.insert(context.source_reference())
                     {
-                        if image_sources.insert(context.source_reference()) {
-                            let images = tokio::time::timeout_at(
-                                tokio::time::Instant::from_std(deadline),
-                                service
-                                    .authorize_retained_image_analysis(lease, &context, manifest),
-                            )
-                            .await
-                            .map_err(|_| source_failure(AiError::ToolExecutionFailed))?
-                            .map_err(source_failure)?;
-                            image_count = image_count
-                                .checked_add(images.len() as u64)
-                                .ok_or(AiError::EgressDenied)?;
-                            image_bytes = images
-                                .iter()
-                                .try_fold(image_bytes, |sum, image| {
-                                    sum.checked_add(image.byte_count())
-                                })
-                                .ok_or(AiError::EgressDenied)?;
-                            image_pixels = images
-                                .iter()
-                                .try_fold(image_pixels, |sum, image| {
-                                    let reference = image.reference();
-                                    sum.checked_add(
-                                        u64::from(reference.width())
-                                            * u64::from(reference.height()),
-                                    )
-                                })
-                                .ok_or(AiError::EgressDenied)?;
-                            if image_count > 4
-                                || image_count > plan.budget.estimate.image_units
-                                || image_bytes > 16 * 1024 * 1024
-                                || image_pixels > 16_000_000
-                                || std::time::Instant::now() >= deadline
-                            {
-                                return Err(source_failure(AiError::EgressDenied));
-                            }
-                            retained_images.extend(images);
+                        let images = tokio::time::timeout_at(
+                            tokio::time::Instant::from_std(deadline),
+                            service.authorize_retained_image_analysis(lease, &context, manifest),
+                        )
+                        .await
+                        .map_err(|_| source_failure(AiError::ToolExecutionFailed))?
+                        .map_err(source_failure)?;
+                        image_count = image_count
+                            .checked_add(images.len() as u64)
+                            .ok_or(AiError::EgressDenied)?;
+                        image_bytes = images
+                            .iter()
+                            .try_fold(image_bytes, |sum, image| {
+                                sum.checked_add(image.byte_count())
+                            })
+                            .ok_or(AiError::EgressDenied)?;
+                        image_pixels = images
+                            .iter()
+                            .try_fold(image_pixels, |sum, image| {
+                                let reference = image.reference();
+                                sum.checked_add(
+                                    u64::from(reference.width()) * u64::from(reference.height()),
+                                )
+                            })
+                            .ok_or(AiError::EgressDenied)?;
+                        if image_count > 4
+                            || image_count > plan.budget.estimate.image_units
+                            || image_bytes > 16 * 1024 * 1024
+                            || image_pixels > 16_000_000
+                            || std::time::Instant::now() >= deadline
+                        {
+                            return Err(source_failure(AiError::EgressDenied));
                         }
+                        retained_images.extend(images);
                     }
                     if !sources
                         .iter()

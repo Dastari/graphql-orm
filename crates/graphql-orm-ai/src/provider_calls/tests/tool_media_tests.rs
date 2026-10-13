@@ -724,6 +724,29 @@ async fn typed_pixels_charge_atomic_budget_and_reopen_without_effect_replay() {
         .await
         .unwrap();
     assert_eq!(reopened.len(), 1);
+    assert!(source.binds_egress_source(&source.data_source()));
+    let image_source = source.images()[0].egress_source(&source, reopened[0].byte_count());
+    assert!(source.binds_egress_source(&image_source));
+    for replacement in [
+        AiDataSourceRef {
+            reference: "v2:unknown".into(),
+            ..image_source.clone()
+        },
+        AiDataSourceRef {
+            kind: "unknown_image".into(),
+            ..image_source.clone()
+        },
+        AiDataSourceRef {
+            classification: DataClassification::Internal,
+            ..image_source.clone()
+        },
+        AiDataSourceRef {
+            trust: AiSourceTrust::UserProvided,
+            ..image_source.clone()
+        },
+    ] {
+        assert!(!source.binds_egress_source(&replacement));
+    }
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
     let reservation =
         AiBudgetReservationRecord::find_by_id(&fixture.database, &result.budget_reservation_id().0)
