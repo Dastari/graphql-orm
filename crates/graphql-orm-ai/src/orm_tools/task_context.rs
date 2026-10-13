@@ -10,7 +10,7 @@ impl OrmAiApplicationToolCallService {
     /// before constructing the complete final plan. User text remains untrusted context.
     ///
     /// # Errors
-    /// Rejects cancelled/obsolete leases, current access denial, missing or purged original
+    /// Rejects cancelled/obsolete leases, inactive owning sessions, current access denial, missing or purged original
     /// source, non-terminal invocation rows, or more than 64 retained status records.
     pub async fn prepare_task_continuation_context(
         &self,
@@ -19,6 +19,12 @@ impl OrmAiApplicationToolCallService {
     ) -> Result<crate::AiPreparedTaskContinuationContext, AiError> {
         use crate::persistence::{AiSessionEventRecord, AiSessionEventRecordWhereInput};
         use graphql_orm::graphql::filters::{StringFilter, UuidFilter};
+        let session =
+            AiSessionRecord::find_by_id(self.run_service.database(), &lease.session_id().0)
+                .await
+                .map_err(|_| AiError::PersistenceFailed)?
+                .ok_or(AiError::Conflict)?;
+        validate_session_binding(&session, lease, scope)?;
         let text = self.current_user_text(lease, scope).await?;
         let message =
             AiMessageRecord::find_by_id(self.run_service.database(), &lease.input_message_id())
