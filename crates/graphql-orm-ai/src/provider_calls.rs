@@ -3656,6 +3656,28 @@ impl AiProviderCallExecutor {
     pub async fn execute_with_provider_session(
         &self,
         lease_state: Arc<Mutex<AiRunLease>>,
+        plan: AiProviderCallPlan,
+        session_plan: crate::AiProviderSessionTurnPlan,
+        session_service: Arc<dyn crate::AiProviderSessionService>,
+        dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
+    ) -> Result<AiProviderCallResult, AiError> {
+        // The complete retained lifecycle owns several mutually exclusive ORM/transport
+        // paths. Keep that state on the heap rather than embedding it in each coordinator
+        // continuation frame; native execution must work on the ordinary thread stack.
+        Box::pin(self.execute_with_provider_session_inner(
+            lease_state,
+            plan,
+            session_plan,
+            session_service,
+            dynamic_execution,
+        ))
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_with_provider_session_inner(
+        &self,
+        lease_state: Arc<Mutex<AiRunLease>>,
         mut plan: AiProviderCallPlan,
         session_plan: crate::AiProviderSessionTurnPlan,
         session_service: Arc<dyn crate::AiProviderSessionService>,
