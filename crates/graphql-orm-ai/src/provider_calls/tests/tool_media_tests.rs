@@ -1074,6 +1074,7 @@ async fn delivery_history_race_denies_protected_sources_but_preserves_general_de
         Arc::new(Mutex::new(call.lease().clone())),
         &[manifest],
         4,
+        None,
     )
     .unwrap()
     .unwrap();
@@ -1276,7 +1277,7 @@ async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSession
         AiSessionRecordWhereInput::default(),
         UpdateAiSessionRecordInput {
             message_head: Some(1),
-            event_head: Some(1),
+            stream_head: Some(1),
             ..Default::default()
         },
     )
