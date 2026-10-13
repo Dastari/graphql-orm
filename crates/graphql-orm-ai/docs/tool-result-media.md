@@ -85,7 +85,10 @@ completed output, while the exact live executing owner lease remains required
 for custody; cancelled or obsolete leases cannot revive a result. Invalid
 metadata preserves the saved output for owning recovery and denies disclosure; it does
 not replace the completed output or authorize effect replay. Source metadata is
-then admitted and protected before disclosure. Owner cancellation also closes
+then admitted and protected before disclosure. Native approved-result wrappers
+reauthorize the original protected source with the current source hook before
+checkpointing their truthful completed status; ordinary wrappers keep the general
+policy. Owner cancellation also closes
 source-retained unfinished calls while preserving their original saved output.
 A small internal source-address index bounds retained
 native-history lookup to 64 exact cursor sources; it grants no authorization and

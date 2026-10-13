@@ -44,6 +44,8 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 - Read-only SDK-minted actual effect attempt/generation remain separate from
   original provider provenance and current disclosure fencing, including after
   approved resume. Missing or changed retained effect evidence is refused.
+- Native approved-result wrappers reauthorize their exact protected original source
+  instead of falling back to the general boundary for Restricted output.
 - Retained unapproved source provenance preserves the exact executor authorization
   policy/digest alongside its effect fence; current source authorization stays separate.
 - Complete inference proofs count retained protected pixels together with ordinary

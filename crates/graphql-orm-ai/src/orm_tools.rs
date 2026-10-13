@@ -944,7 +944,7 @@ impl OrmAiApplicationToolCallService {
     ) -> Result<AiPersistedApplicationToolCall, AiError> {
         let fallback_context = context.clone();
         let fallback_route = route.clone();
-        match Box::pin(self.execute_unapproved(
+        match Box::pin(self.boxed_unapproved(
             lease,
             provider_result,
             context,
@@ -1927,7 +1927,7 @@ impl OrmAiApplicationToolCallService {
         context: AiApplicationToolCallContext,
         route: AiToolResultEgressRoute,
     ) -> Result<AiConsequentialToolCallOutcome, AiError> {
-        Box::pin(self.execute_unapproved(
+        Box::pin(self.boxed_unapproved(
             lease,
             provider_result,
             context,
@@ -1935,6 +1935,20 @@ impl OrmAiApplicationToolCallService {
             UnapprovedToolMode::AutomaticMutation,
         ))
         .await
+    }
+
+    // Construct the owning effect future in a short-lived frame that returns before polling.
+    // Boxing inside an async poll keeps large construction temporaries on the nested stack.
+    #[inline(never)]
+    fn boxed_unapproved<'a>(
+        &'a self,
+        lease: &'a AiRunLease,
+        provider_result: &'a AiProviderCallResult,
+        context: AiApplicationToolCallContext,
+        route: AiToolResultEgressRoute,
+        mode: UnapprovedToolMode,
+    ) -> futures::future::BoxFuture<'a, Result<AiConsequentialToolCallOutcome, AiError>> {
+        Box::pin(self.execute_unapproved(lease, provider_result, context, route, mode))
     }
 
     async fn execute_unapproved(

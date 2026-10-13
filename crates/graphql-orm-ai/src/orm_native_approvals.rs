@@ -427,10 +427,35 @@ impl crate::OrmAiConsequentialToolCallService {
             )
             .map_err(|_| AiError::PersistenceFailed)?,
         );
-        let decision = tools
-            .runtime()
-            .authorize_egress(lease.principal_reference(), &manifest)
-            .await?;
+        let decision = if original
+            .sources
+            .iter()
+            .any(|source| source.reference.starts_with("v2:"))
+        {
+            let source = tools
+                .reopen_tool_result_source(
+                    lease,
+                    result.id(),
+                    crate::AiToolResultDisclosurePurpose::Continuation,
+                )
+                .await?;
+            if original.sources.as_slice() != [source.data_source()] {
+                return Err(AiError::EgressDenied);
+            }
+            tools
+                .runtime()
+                .authorize_tool_source_egress(
+                    lease.principal_reference(),
+                    &manifest,
+                    std::slice::from_ref(&source),
+                )
+                .await?
+        } else {
+            tools
+                .runtime()
+                .authorize_egress(lease.principal_reference(), &manifest)
+                .await?
+        };
         tools.egress_audit().record(&manifest, &decision).await?;
         decision.authorize(&manifest)?;
         let plaintext = serde_json::json!({

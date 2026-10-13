@@ -1399,10 +1399,13 @@ async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool, wi
             let captures = custody.captures.lock().await;
             let capture = captures.values().next().unwrap();
             assert_eq!(
-                value["Preview"]["Reference"],
+                value["data"]["Preview"]["Reference"],
                 json!(capture.reference.reference())
             );
-            assert_eq!(value["Preview"]["Sha256"], capture.reference.sha256());
+            assert_eq!(
+                value["data"]["Preview"]["Sha256"],
+                capture.reference.sha256()
+            );
             assert!(custody.access_withdrawn.load(Ordering::SeqCst));
             assert_eq!(custody.opens.load(Ordering::SeqCst), 0);
             assert_eq!(custody.model_disclosures.load(Ordering::SeqCst), 0);
