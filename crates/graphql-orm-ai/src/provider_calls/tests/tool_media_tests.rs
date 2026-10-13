@@ -849,6 +849,8 @@ async fn legacy_codex_dynamic_factory_refuses_protected_tool_before_launch_or_ef
     let mut ordinary = super::plan(&fixture);
     ordinary.provider_kind = ProviderKind::LocalHarness;
     ordinary.budget.provider_kind = ProviderKind::LocalHarness;
+    ordinary.budget.idempotency_key = "legacy-ordinary-text".into();
+    ordinary.request.continuation_mode = ModelContinuationMode::StatelessReplay;
     for transfer in &mut ordinary.transfers {
         transfer.provider_kind = ProviderKind::LocalHarness.as_str().into();
     }
