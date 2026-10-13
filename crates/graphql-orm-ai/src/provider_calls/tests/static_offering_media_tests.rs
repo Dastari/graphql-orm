@@ -407,6 +407,30 @@ pub(super) async fn owning_coordinator_reset(
                 task["originalMessageId"],
                 approved.lease().input_message_id().to_string()
             );
+            let original_message = AiMessageRecord::find_by_id(
+                &fixture.database,
+                &approved.lease().input_message_id(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let original_event = AiSessionEventRecord::query(fixture.database.pool())
+                .filter(crate::persistence::AiSessionEventRecordWhereInput {
+                    event_type: Some(graphql_orm::graphql::filters::StringFilter {
+                        eq: Some("message_queued".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .fetch_one()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(task["originalEventId"], original_event.id.to_string());
+            assert_eq!(
+                task["originalClientMessageId"],
+                original_message.client_message_id.unwrap().to_string()
+            );
             assert_eq!(task["goalContext"]["text"], "hello");
             assert_eq!(task["priorProtectedContentIncluded"], false);
             assert_eq!(task["newHumanEventCreated"], false);
