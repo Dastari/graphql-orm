@@ -101,7 +101,9 @@ re-executes an effect.
 `AiProviderCallExecutor::with_tool_result_source_service` binds the owning source
 loader to the same runtime. Dynamic execution supplies the same owning service.
 Media-required tools fail adapter/policy/capacity preflight before effect
-admission. Adapters also default-deny source delivery for declared
+admission. Dynamic dispatch also checks exact registered definition fingerprints and
+the adapter's protected-result capability before launching an offered protected tool.
+Adapters default-deny source delivery for declared
 Restricted/media effects unless they implement the final current source guard;
 Codex requires both an explicit factory `supports_tool_result_source_delivery`
 attestation and `AiCodexAppServerRegistration::with_guarded_tool_result_source_delivery`.

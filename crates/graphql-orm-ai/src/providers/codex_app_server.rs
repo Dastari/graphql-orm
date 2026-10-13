@@ -7970,7 +7970,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn legacy_dynamic_factory_refuses_protected_effect_preflight() {
+    fn legacy_dynamic_factory_refuses_protected_source_capability() {
         let counters = Arc::new(Counters::new());
         let reviewed = (*dynamic_registration("1.0.0"))
             .clone()
@@ -7982,24 +7982,6 @@ pub(crate) mod tests {
         assert!(provider.capabilities().custom_tools);
         assert!(!provider.supports_tool_result_source_delivery());
         assert!(!provider.supports_tool_result_images());
-        let runtime = crate::AiRuntime::builder()
-            .provider(provider)
-            .unwrap()
-            .build()
-            .unwrap();
-        let mut descriptor = crate::AiToolDescriptor::new("preview.read", "Read preview", crate::AiToolOperationKind::Query, "query Preview { Preview }", json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false})).unwrap();
-        descriptor.maximum_classification = crate::DataClassification::Restricted;
-        assert!(
-            runtime
-                .preflight_tool_result_media(&descriptor, &ProviderKind::LocalHarness)
-                .is_err()
-        );
-        descriptor.maximum_classification = crate::DataClassification::Public;
-        assert!(
-            runtime
-                .preflight_tool_result_media(&descriptor, &ProviderKind::LocalHarness)
-                .is_ok()
-        );
         assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
         assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
     }

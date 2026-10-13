@@ -28,6 +28,8 @@ struct Custody {
     source_delivery_allowed: AtomicBool,
     withdraw_access_after_effect: AtomicUsize,
     access_withdrawn: AtomicBool,
+    #[cfg(feature = "provider-codex-app-server")]
+    legacy_factory_launches: AtomicUsize,
 }
 #[async_trait]
 impl crate::AiAccessPolicy for Custody {
@@ -59,6 +61,53 @@ impl crate::AiAccessPolicy for Custody {
             crate::AiAccessDecision::allow("current_session", "preview-access-v1")
         }
     }
+}
+#[cfg(feature = "provider-codex-app-server")]
+struct LegacyDynamicFactory(Arc<Custody>);
+#[cfg(feature = "provider-codex-app-server")]
+#[async_trait]
+impl crate::providers::AiCodexAppServerRunProcessFactory for LegacyDynamicFactory {
+    fn supports_launch_profile(&self, _: crate::providers::AiCodexAppServerLaunchProfile) -> bool {
+        true
+    }
+    async fn launch(
+        &self,
+        _: Arc<crate::providers::AiCodexAppServerRegistration>,
+    ) -> Result<crate::providers::AiCodexAppServerLaunchedProcess, ProviderError> {
+        self.0
+            .legacy_factory_launches
+            .fetch_add(1, Ordering::SeqCst);
+        Err(ProviderError::Unavailable)
+    }
+}
+#[cfg(feature = "provider-codex-app-server")]
+fn legacy_dynamic_provider(
+    custody: Arc<Custody>,
+) -> Arc<crate::providers::AiCodexAppServerProvider> {
+    use crate::providers::*;
+    let registration = AiCodexAppServerRegistration::new(
+        "mock-profile",
+        "mock-model",
+        "a".repeat(64),
+        "1.0.0",
+        "isolated-test",
+        AI_CODEX_APP_SERVER_PROTOCOL_V2,
+    )
+    .unwrap()
+    .with_launch_profile(
+        AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+            AiCodexAppServerModelToolMode::Direct,
+        )
+        .unwrap(),
+    )
+    .with_guarded_tool_result_source_delivery();
+    Arc::new(AiCodexAppServerProvider::new(
+        Arc::new(registration),
+        AiCodexAppServerRunPool::new(
+            Arc::new(LegacyDynamicFactory(custody)),
+            AiCodexAppServerRunLimits::default(),
+        ),
+    ))
 }
 struct SourceProtector(Arc<Custody>);
 #[async_trait]
@@ -559,7 +608,7 @@ async fn media_fixture_resolution(
             schema_fingerprint: "schema-v1".into(),
         })
         .unwrap();
-    let runtime = AiRuntime::builder()
+    let builder = AiRuntime::builder()
         .maximum_tool_maturity(ToolMaturity::SupervisedWrite)
         .principal_resolver(Arc::new(CountingResolver {
             principal: fixture.principal.clone(),
@@ -583,9 +632,12 @@ async fn media_fixture_resolution(
             custody: custody.clone(),
             supported,
         }))
-        .unwrap()
-        .build()
         .unwrap();
+    #[cfg(feature = "provider-codex-app-server")]
+    let builder = builder
+        .provider(legacy_dynamic_provider(custody.clone()))
+        .unwrap();
+    let runtime = builder.build().unwrap();
     runtime
         .start_gate()
         .open(&AiRuntimeReadinessReport {
@@ -740,6 +792,77 @@ async fn absent_image_capacity_and_unsupported_adapter_refuse_before_effect() {
         assert!(preview_turn(&fixture, service, units).await.is_err());
         assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
     }
+}
+
+#[cfg(feature = "provider-codex-app-server")]
+#[tokio::test]
+async fn legacy_codex_dynamic_factory_refuses_protected_tool_before_launch_or_effect() {
+    let (fixture, custody, service) = media_fixture(true).await;
+    let mut plan = tool_plan(&fixture);
+    plan.provider_kind = ProviderKind::LocalHarness;
+    plan.budget.provider_kind = ProviderKind::LocalHarness;
+    plan.budget.estimate.image_units = 4;
+    for transfer in &mut plan.transfers {
+        transfer.provider_kind = ProviderKind::LocalHarness.as_str().into();
+    }
+    let plan = AiProviderCallPlan::new_with_tools(
+        plan.provider_kind,
+        plan.request,
+        plan.budget,
+        plan.transfers,
+        plan.correlation_id,
+        fixture.runtime.tool_catalog(),
+        &static_read_policy(&fixture),
+    )
+    .unwrap();
+    let executor = AiProviderCallExecutor::new(
+        fixture.runtime.clone(),
+        fixture.budget_service.clone(),
+        fixture.audit.clone(),
+        Arc::new(ImageAccounting),
+        Arc::new(SystemClock),
+        AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+    );
+    let result = executor
+        .execute_with_dynamic_tools(
+            Arc::new(Mutex::new(fixture.lease.clone())),
+            plan,
+            Arc::new(PreviewExecution {
+                service,
+                scope: fixture.scope.clone(),
+            }),
+        )
+        .await;
+    assert!(matches!(result, Err(AiError::PreTransportProviderFailed)));
+    assert_eq!(custody.legacy_factory_launches.load(Ordering::SeqCst), 0);
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    assert!(custody.captures.lock().await.is_empty());
+    let budgets = AiBudgetReservationRecord::query(fixture.database.pool())
+        .fetch_all()
+        .await
+        .unwrap();
+    assert_eq!(budgets.len(), 1);
+    assert_eq!(budgets[0].state, "released");
+
+    // The legacy factory remains usable for ordinary text. Its intentional launch failure
+    // proves the protected refusal above happened earlier than the factory transport seam.
+    let mut ordinary = super::plan(&fixture);
+    ordinary.provider_kind = ProviderKind::LocalHarness;
+    ordinary.budget.provider_kind = ProviderKind::LocalHarness;
+    for transfer in &mut ordinary.transfers {
+        transfer.provider_kind = ProviderKind::LocalHarness.as_str().into();
+    }
+    let ordinary = AiProviderCallPlan::new(
+        ordinary.provider_kind,
+        ordinary.request,
+        ordinary.budget,
+        ordinary.transfers,
+        ordinary.correlation_id,
+    )
+    .unwrap();
+    assert!(executor.execute(&fixture.lease, ordinary).await.is_err());
+    assert_eq!(custody.legacy_factory_launches.load(Ordering::SeqCst), 1);
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

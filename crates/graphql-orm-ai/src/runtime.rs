@@ -1184,6 +1184,21 @@ impl AiRuntime {
                     "provider registry kind mismatch".to_owned(),
                 ));
             }
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            for definition in &request.tools {
+                let id = AiToolId::parse(definition.tool_id.clone())
+                    .map_err(|_| ProviderError::Rejected)?;
+                if let Some(descriptor) = self.tool_catalog.descriptor(&id) {
+                    if descriptor.fingerprint != definition.fingerprint {
+                        return Err(ProviderError::Rejected);
+                    }
+                    // Admission of a declared protected result requires the actual adapter's
+                    // final source guards before launch. The owning callback repeats this
+                    // check before any effect; ordinary definitions need no media capability.
+                    self.preflight_tool_result_media(descriptor, provider_kind)
+                        .map_err(|_| ProviderError::Unsupported)?;
+                }
+            }
             if !context.retained_tool_result_images().is_empty()
                 && (!provider.capabilities().image_input || !provider.supports_tool_result_images())
             {
