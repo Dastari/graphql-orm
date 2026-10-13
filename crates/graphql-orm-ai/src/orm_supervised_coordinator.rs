@@ -1015,7 +1015,9 @@ impl AiSupervisedAgentCoordinator {
         adopted_automatic: Option<&AiAdoptedAutomaticMutationBatch>,
         adopted_subscription: Option<&crate::AiAdoptedReadOnlyToolBatch>,
     ) -> Result<AiSupervisedAgentRunOutcome, AiError> {
-        self.execute_turn_with_retry(
+        // The private retry state retains several exact plans and proofs. Keep that
+        // future off every native continuation caller's inline polling frame.
+        Box::pin(self.execute_turn_with_retry(
             lease,
             guard,
             plan,
@@ -1024,7 +1026,7 @@ impl AiSupervisedAgentCoordinator {
             adopted_automatic,
             adopted_subscription,
             true,
-        )
+        ))
         .await
     }
 

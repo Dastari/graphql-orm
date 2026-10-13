@@ -3960,15 +3960,14 @@ impl AiProviderCallExecutor {
                 && plan.task_context.is_some() =>
             {
                 let current = lease_state.lock().await;
-                let (claim, cursor) = self
-                    .reset_static_offering(
-                        &current,
-                        &mut plan,
-                        &session_plan,
-                        &session_service,
-                        None,
-                    )
-                    .await?;
+                let (claim, cursor) = Box::pin(self.reset_static_offering(
+                    &current,
+                    &mut plan,
+                    &session_plan,
+                    &session_service,
+                    None,
+                ))
+                .await?;
                 (claim, Some(cursor))
             }
             crate::AiProviderSessionRunDisposition::Unavailable(_) => {
@@ -3991,15 +3990,14 @@ impl AiProviderCallExecutor {
                 // The shared lease lock keeps heartbeats from rotating the row fence while this
                 // finite cleanup transition holds it; owner cancellation remains independently fenced.
                 let current = lease_state.lock().await;
-                let reset = self
-                    .reset_static_offering(
-                        &current,
-                        &mut plan,
-                        &session_plan,
-                        &session_service,
-                        Some(&claim),
-                    )
-                    .await;
+                let reset = Box::pin(self.reset_static_offering(
+                    &current,
+                    &mut plan,
+                    &session_plan,
+                    &session_service,
+                    Some(&claim),
+                ))
+                .await;
                 match reset {
                     Ok((fresh_claim, cursor)) => {
                         claim = fresh_claim;
@@ -4024,15 +4022,14 @@ impl AiProviderCallExecutor {
                 | AiError::Conflict,
             ) => {
                 if plan.native_reset_evidence.is_some() && plan.task_context.is_some() {
-                    return self
-                        .execute_withheld_native_task_context(
-                            lease_state,
-                            plan,
-                            &session_plan,
-                            &session_service,
-                            &claim,
-                        )
-                        .await;
+                    return Box::pin(self.execute_withheld_native_task_context(
+                        lease_state,
+                        plan,
+                        &session_plan,
+                        &session_service,
+                        &claim,
+                    ))
+                    .await;
                 }
                 session_service
                     .require_cleanup(&claim, "retained_tool_source_withheld")
@@ -4148,15 +4145,14 @@ impl AiProviderCallExecutor {
                 if withheld_plan.native_reset_evidence.is_some()
                     && withheld_plan.task_context.is_some()
                 {
-                    return self
-                        .execute_withheld_native_task_context(
-                            lease_state,
-                            withheld_plan,
-                            &session_plan,
-                            &session_service,
-                            &current_claim,
-                        )
-                        .await;
+                    return Box::pin(self.execute_withheld_native_task_context(
+                        lease_state,
+                        withheld_plan,
+                        &session_plan,
+                        &session_service,
+                        &current_claim,
+                    ))
+                    .await;
                 }
                 session_service
                     .require_cleanup(
@@ -4178,13 +4174,13 @@ impl AiProviderCallExecutor {
                     let current = lease_state.lock().await;
                     // No provider input or native callback was admitted. Confirm absence of
                     // this exact empty thread before exposing a static subset retry.
-                    self.confirm_unstarted_static_offering_cleanup(
+                    Box::pin(self.confirm_unstarted_static_offering_cleanup(
                         &current,
                         &withheld_plan,
                         &session_plan,
                         &session_service,
                         &current_claim,
-                    )
+                    ))
                     .await
                     .map_err(|_| AiError::ProviderFailed)?;
                 }
