@@ -2270,9 +2270,20 @@ async fn exercise_owned_static_reset(
             .unwrap();
         assert_ne!(later.run_id, lease.run_id().0);
         let events_before = AiSessionEventRecord::query(fixture.database.pool())
-            .count()
+            .limit(32)
+            .fetch_all()
             .await
             .unwrap();
+        let event_ids_before = events_before
+            .iter()
+            .map(|event| event.id)
+            .collect::<BTreeSet<_>>();
+        let human_ids_before = events_before
+            .iter()
+            .filter(|event| event.event_type == "message_queued")
+            .map(|event| event.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(human_ids_before.len(), 2);
         // An ordinary caller cannot admit the older input; only the owning completed-effect
         // proof, attached privately by the executor, admits its exact original run context.
         assert!(
@@ -2314,13 +2325,34 @@ async fn exercise_owned_static_reset(
         assert!(contents.contains("FrameworkTaskContinuationContext"));
         assert!(contents.contains(&lease.input_message_id().to_string()));
         assert!(!contents.contains("A later independent task"));
-        assert_eq!(
-            AiSessionEventRecord::query(fixture.database.pool())
-                .count()
-                .await
-                .unwrap(),
-            events_before,
+        let events_after = AiSessionEventRecord::query(fixture.database.pool())
+            .limit(32)
+            .fetch_all()
+            .await
+            .unwrap();
+        let human_ids_after = events_after
+            .iter()
+            .filter(|event| event.event_type == "message_queued")
+            .map(|event| event.id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(human_ids_after, human_ids_before);
+        assert!(
+            events_before
+                .iter()
+                .all(|before| events_after.iter().any(|after| after.id == before.id))
         );
+        let new_events = events_after
+            .iter()
+            .filter(|event| !event_ids_before.contains(&event.id))
+            .collect::<Vec<_>>();
+        assert_eq!(new_events.len(), 1);
+        assert_eq!(
+            new_events[0].event_type,
+            crate::orm_runs::PROVIDER_SESSION_REBOUND_EVENT
+        );
+        assert_eq!(new_events[0].session_id, lease.session_id().0);
+        assert_eq!(new_events[0].run_id, Some(lease.run_id().0));
+        assert_eq!(new_events[0].correlation_id, claim.binding_id().to_string());
         return;
     }
     if mode == 6 {
