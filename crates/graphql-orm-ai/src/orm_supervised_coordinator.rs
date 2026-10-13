@@ -289,6 +289,10 @@ pub trait AiSupervisedAgentTurnPlanner: Send + Sync {
     /// a strict subset of the original static offering and a strictly smaller image quote.
     /// It grants no renewal of an original effect, human consent or observation deadline.
     /// Only one retry is admitted; a second denial remains truthful and terminal.
+    ///
+    /// # Errors
+    /// Return a safe refusal when current host configuration cannot produce the exact
+    /// smaller offering. The SDK separately validates cleanup, source, fencing and quote.
     async fn replan_unstarted_static_offering(
         &self,
         _lease: &AiRunLease,

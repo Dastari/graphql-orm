@@ -208,6 +208,18 @@ been released. The callback receives the same opaque continuation/context and
 shared delivery state. Its replacement must be a strict subset with a smaller
 image quote, unchanged source, provider/model/selection, scope, rules and
 registration, and a fresh content-bound budget key. The SDK accepts at most one
-such retry. Another denial remains terminal. Saved historical content that is
-no longer admitted is withheld truthfully; an old screenshot cannot renew an
-observation or authorize input.
+such retry. Its `original_budget_request()` is the SDK-owned failed quote: keep
+all non-image monetary, input, output, time, tool, rule, resource and destination
+fields unchanged, reduce image units, and use a new content-bound idempotency
+key. A pricing error alone cannot invoke the callback; the owning service must
+freshly verify the exact SDK-marked confirmed deletion record before exposing
+this opportunity. Another denial remains terminal.
+
+Saved historical content that is no longer admitted is withheld through another
+confirmed deletion and a fresh tool-free cursor. That turn sends only the same
+prepared original task and actual saved statuses under current ordinary policy;
+it sends no old tool payload, tree, image or approved-outcome JSON. Actual newly
+admitted retained pixels determine allocation and settlement even when the
+replacement cursor has no prior history rows. They must still fit the atomic
+image quote before transport. An old screenshot cannot renew an observation or
+authorize input.

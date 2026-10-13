@@ -1457,6 +1457,10 @@ pub trait AiProviderSessionService: Send + Sync {
     /// native image reservation denial. Ordinary deleted bindings gain no new rebind reason.
     /// The default refuses; the owning service repeats current access, the original completed
     /// checkpoint graph and exact absence generation before minting a dedicated authorization.
+    ///
+    /// # Errors
+    /// Defaults closed and rejects an ordinary, missing, claimed, uncertain, stale or
+    /// cancelled binding, or any different cleanup cause, owner, checkpoint or descriptor.
     async fn authorize_static_offering_budget_rebind(
         &self,
         _lease: &AiRunLease,

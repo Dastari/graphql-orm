@@ -5793,5 +5793,9 @@ confirmed cleanup and a fresh thread to advertise the changed definitions.
 Existing fixed offerings retain their prior path. The optional
 `replan_unstarted_static_offering` callback defaults to no retry and cannot
 change the original provider/model/selection, scope, rules or source proof.
+Retain every non-image field from `original_budget_request()` when building its
+strictly smaller image quote, and reuse `continuation()` with its already
+attached prepared context. The SDK verifies the exact confirmed unstarted
+cleanup again before this callback; an error category alone is insufficient.
 A host may offer ordinary semantic tools at zero image quota; no retained
 screenshot or completed native effect is replayed to manufacture capacity.
