@@ -27,6 +27,8 @@ use crate::{
 };
 
 mod tool_media;
+mod tool_source_delivery;
+pub(crate) use tool_source_delivery::ToolSourceDelivery;
 
 #[path = "provider_maintenance.rs"]
 pub(crate) mod maintenance;
@@ -4189,6 +4191,31 @@ impl AiProviderCallExecutor {
                 }
             };
         }
+        if plan.transfers.iter().any(|manifest| {
+            manifest.sources.iter().any(|source| {
+                source.kind == "application_tool_result" && source.reference.starts_with("v2:")
+            })
+        }) {
+            let delivery = match self
+                .tool_result_source_service
+                .as_ref()
+                .ok_or(AiError::EgressDenied)
+                .and_then(|service| {
+                    ToolSourceDelivery::new(
+                        service.clone(),
+                        lease_state.clone(),
+                        &plan.transfers,
+                        reservation.reserved().image_units,
+                    )
+                }) {
+                Ok(delivery) => delivery,
+                Err(error) => {
+                    self.release_unstarted(&lease, &reservation).await?;
+                    return Err(error);
+                }
+            };
+            context = context.with_tool_source_delivery(delivery);
+        }
         let provider_model = plan.request.model.clone();
         let live_scope = plan.budget.scope.clone();
         let live_correlation_id = plan.correlation_id.clone();
@@ -4306,7 +4333,11 @@ impl AiProviderCallExecutor {
             crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error) => {
                 self.record_provider_error(&error);
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(AiError::PreTransportProviderFailed);
+                return Err(if matches!(error, ProviderError::ToolSourceUnavailable) {
+                    AiError::PreTransportToolSourceUnavailable
+                } else {
+                    AiError::PreTransportProviderFailed
+                });
             }
             crate::AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error) => {
                 let error = self.classify_dispatched_provider_error(&error);
@@ -5033,7 +5064,30 @@ impl AiProviderCallExecutor {
                     .map_err(source_failure)?
             };
             self.egress_audit.record(manifest, &decision).await?;
-            let proof = decision.authorize(manifest)?;
+            let proof = match decision.authorize(manifest) {
+                Ok(proof) => proof,
+                Err(error)
+                    if !sources.is_empty()
+                        && native_session_claim.is_some()
+                        && manifest.capability == AiEgressCapability::ModelInference =>
+                {
+                    // A normal current source-hook DENY is eligible for withholding only if the
+                    // independently checked ordinary component still admits. General denials
+                    // remain closed rather than being reclassified as unavailable history.
+                    let ordinary =
+                        crate::tool_media::ordinary_source_component(manifest, &sources)?;
+                    let ordinary_decision = self
+                        .runtime
+                        .authorize_egress(lease.principal_reference(), &ordinary)
+                        .await?;
+                    self.egress_audit
+                        .record(&ordinary, &ordinary_decision)
+                        .await?;
+                    ordinary_decision.authorize(&ordinary)?;
+                    return Err(source_failure(error));
+                }
+                Err(error) => return Err(error),
+            };
             authorized.push((manifest.clone(), proof));
         }
         let mut authorized = authorized.into_iter();

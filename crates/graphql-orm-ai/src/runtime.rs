@@ -1103,7 +1103,12 @@ impl AiRuntime {
             Ok(provider)
         };
         match local() {
-            Ok(provider) => provider.dispatch(request, context).await,
+            Ok(provider) => {
+                if let Err(error) = context.authorize_tool_source_delivery().await {
+                    return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+                }
+                provider.dispatch(request, context).await
+            }
             Err(error) => crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
         }
     }
@@ -1167,6 +1172,9 @@ impl AiRuntime {
         };
         match local() {
             Ok(provider) => {
+                if let Err(error) = context.authorize_tool_source_delivery().await {
+                    return crate::AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+                }
                 provider
                     .dispatch_with_dynamic_tools(request, context, responder)
                     .await

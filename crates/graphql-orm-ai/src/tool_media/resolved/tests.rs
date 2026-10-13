@@ -133,3 +133,25 @@ async fn bounded_decode_preserves_exact_immutable_payload() {
         .is_err()
     );
 }
+
+#[test]
+fn two_genuine_pngs_must_fit_the_complete_result_pixel_budget() {
+    let bytes = png();
+    let first = image_reference(&bytes);
+    let second = image_reference(&bytes);
+    let one = AiResolvedToolImage::new(first.clone(), resource(&first), bytes.clone()).unwrap();
+    let two = AiResolvedToolImage::new(second.clone(), resource(&second), bytes).unwrap();
+    let limits = AiToolResultMediaLimits::new(2, 8192, 10, 6, 1000, 5000).unwrap();
+    one.validate_policy("preview-v1", limits, 1500).unwrap();
+    two.validate_policy("preview-v1", limits, 1500).unwrap();
+    assert!(
+        crate::tool_media::validate_image_reference_batch(&[first.clone(), second.clone()], limits)
+            .is_err()
+    );
+    crate::tool_media::validate_image_reference_batch(&[first.clone()], limits).unwrap();
+    crate::tool_media::validate_image_reference_batch(
+        &[first, second],
+        AiToolResultMediaLimits::new(2, 8192, 10, 12, 1000, 5000).unwrap(),
+    )
+    .unwrap();
+}

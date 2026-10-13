@@ -201,7 +201,7 @@ impl crate::AiProvider for MediaProvider {
         if result.images().len() != 1 || result.images()[0].bytes().is_empty() {
             return Err(ProviderError::Rejected);
         }
-        Ok(Box::pin(futures_util::stream::iter([
+        Ok(Box::pin(futures::stream::iter([
             Ok(ProviderEvent::ResponseStarted {
                 response_id: Some("preview-turn".into()),
             }),

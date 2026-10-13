@@ -130,7 +130,6 @@ impl OrmAiRunService {
                         source_reference,
                         classification,
                         image_count,
-                        created_at: now.unix_timestamp(),
                     })
                     .await
                     .map_err(OrmPublicError::from)?;

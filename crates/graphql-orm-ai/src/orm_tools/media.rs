@@ -13,6 +13,14 @@ pub(super) struct RetainedDisclosure {
 }
 
 impl OrmAiApplicationToolCallService {
+    pub(crate) async fn record_current_source_decision(
+        &self,
+        manifest: &AiEgressManifest,
+        decision: &crate::AiEgressDecision,
+    ) -> Result<(), AiError> {
+        self.egress_audit.record(manifest, decision).await
+    }
+
     pub(crate) async fn validate_delivery_fence(&self, lease: &AiRunLease) -> Result<(), AiError> {
         self.run_service.validate_tool_disclosure_fence(lease).await
     }
@@ -604,6 +612,7 @@ impl OrmAiApplicationToolCallService {
             return Ok(Vec::new());
         }
         let policy = descriptor.result_media.as_ref().ok_or(AiError::Forbidden)?;
+        crate::tool_media::validate_image_reference_batch(context.images(), policy.limits())?;
         let resolver = self.runtime.tool_media_resolver(policy.resolver_id())?;
         let operation = async {
             let mut images = Vec::with_capacity(context.images().len());
@@ -701,5 +710,6 @@ fn extract_references_inner(
             images.push(image);
         }
     }
+    crate::tool_media::validate_image_reference_batch(&images, policy.limits())?;
     Ok(images)
 }

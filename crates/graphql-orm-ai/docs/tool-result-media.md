@@ -31,7 +31,8 @@ an image never refreshes action evidence. No image requires a null reference and
 null digest/MIME/dimensions; mixed absent-reference/non-null-image metadata fails.
 
 Policy limits bound one through four images, at most 16 MiB total raw bytes,
-8192 pixels per edge, 16 million decoded pixels, original retention at most one
+8192 pixels per edge, 16 million aggregate decoded pixels per complete result,
+original retention at most one
 day, and one resolution pass at most five seconds. Hosts should choose narrower
 limits. Actual digest, codec and decoded dimensions are checked. Asynchronous
 decode uses a finite two-worker pool, refuses a busy queue and discards timed-out
@@ -85,6 +86,12 @@ static capacity is released only after a definite completed result; ambiguous
 provider delivery keeps the reservation uncertain. Settlement must include
 `AiProviderUsageObservation::tool_result_image_units()`; provider-reported zero
 cannot erase SDK-derived image usage.
+
+Adapters await `ProviderRequestContext::authorize_tool_source_delivery` after
+preparation/queueing and immediately before model/history transport. Its owning
+callback is privately installed after actual source/body admission and reopens
+current grants, resource bytes and run fences. A general/ordinary denial remains
+closed rather than being reclassified as unavailable history.
 
 Adapters await `ProviderDynamicToolResponder::authorize_delivery` immediately
 before encoding/sending the exact result. Its compatibility default refuses

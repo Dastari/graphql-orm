@@ -1360,6 +1360,8 @@ pub struct ProviderRequestContext {
     budget: AuthorizedBudgetReservation,
     transfers: Vec<AuthorizedProviderTransfer>,
     resolved_attachments: Vec<AiResolvedProviderAttachment>,
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    tool_source_delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
 }
 
 impl ProviderRequestContext {
@@ -1386,8 +1388,34 @@ impl ProviderRequestContext {
             budget,
             transfers: Vec::new(),
             resolved_attachments: Vec::new(),
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            tool_source_delivery: None,
         }
         .with_authorized_transfer(manifest, proof)
+    }
+
+    /// Revalidates protected retained sources under the current owning principal/grant/resource
+    /// and uncancelled fence after adapter preparation/queueing and immediately before transport.
+    /// Ordinary contexts have no additional source allowance or callback. Protected callbacks
+    /// are privately derived from actual admitted owner records; JSON/source markers cannot
+    /// install them. Adapters must await this along with `validate_request` before each disclosure.
+    ///
+    /// # Errors
+    /// Returns a safe provider error for unavailable/revoked/expired/cancelled source content.
+    pub async fn authorize_tool_source_delivery(&self) -> Result<(), ProviderError> {
+        #[cfg(any(feature = "sqlite", feature = "postgres"))]
+        if let Some(delivery) = &self.tool_source_delivery {
+            delivery.authorize().await?;
+        }
+        Ok(())
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_tool_source_delivery(
+        mut self,
+        delivery: Option<Arc<crate::provider_calls::ToolSourceDelivery>>,
+    ) -> Self {
+        self.tool_source_delivery = delivery;
+        self
     }
 
     /// Adds a separately authorized built-in or attachment transfer.
@@ -1955,6 +1983,11 @@ pub enum ProviderError {
     /// Provider rejected safe request metadata.
     #[error("provider rejected request")]
     Rejected,
+    /// Current protected tool source became unavailable at the delivery checkpoint. This proves
+    /// no dispatch only when carried by `RejectedBeforeDispatch`; after possible transport the
+    /// owning executor keeps the reservation uncertain and permits no automatic effect replay.
+    #[error("provider protected tool source is unavailable")]
+    ToolSourceUnavailable,
     /// A completed, metered stateless turn contained one provider-native item
     /// that the adapter's deployment contract proves was contained outside
     /// the admitted host tool surface.
@@ -1996,6 +2029,7 @@ impl ProviderError {
             | Self::BudgetDenied
             | Self::Unsupported
             | Self::Rejected
+            | Self::ToolSourceUnavailable
             | Self::StatelessNativeItemRejected
             | Self::NewlyBoundTurnRejected(_) => AiProviderFailureCategory::ProviderRejection,
             Self::RetainedTurnRejected(_) => AiProviderFailureCategory::RetainedResumeRejection,
@@ -3366,6 +3400,9 @@ pub trait AiProvider: Send + Sync {
         if let Err(error) = self.prepare_dispatch(&request, &context).await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
+        if let Err(error) = context.authorize_tool_source_delivery().await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
         match self.stream(request, context).await {
             Ok(stream) => AiProviderDispatchOutcome::Dispatched(stream),
             Err(error) => AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error),
@@ -3401,6 +3438,9 @@ pub trait AiProvider: Send + Sync {
         responder: Arc<dyn ProviderDynamicToolResponder>,
     ) -> AiProviderDispatchOutcome {
         if let Err(error) = self.prepare_dispatch(&request, &context).await {
+            return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
+        }
+        if let Err(error) = context.authorize_tool_source_delivery().await {
             return AiProviderDispatchOutcome::RejectedBeforeDispatch(error);
         }
         match self

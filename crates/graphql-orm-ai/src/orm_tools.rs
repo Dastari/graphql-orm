@@ -3778,7 +3778,7 @@ impl OrmAiConsequentialToolCallService {
             .map(|origin| {
                 origin
                     .with_consumed_approval(&approval, &binding)
-                    .map_err(AiError::from)
+                    .map_err(|_| AiError::Conflict)
             })
             .transpose()?;
         let execution = if let Some(prepared) = prepared {

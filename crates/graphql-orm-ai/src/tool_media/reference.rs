@@ -183,3 +183,24 @@ impl AiToolImageReference {
         Ok(())
     }
 }
+
+/// Applies the immutable complete-result aggregate count and decoded-pixel ceiling. Reference
+/// shape remains descriptive; actual codecs/digests/resources are independently verified.
+pub(crate) fn validate_image_reference_batch(
+    images: &[AiToolImageReference],
+    limits: AiToolResultMediaLimits,
+) -> Result<(), AiError> {
+    if images.len() > usize::from(limits.maximum_images()) {
+        return Err(AiError::ResultBudgetExceeded);
+    }
+    let pixels = images
+        .iter()
+        .try_fold(0_u64, |sum, image| {
+            sum.checked_add(u64::from(image.width()).checked_mul(u64::from(image.height()))?)
+        })
+        .ok_or(AiError::ResultBudgetExceeded)?;
+    if pixels > limits.maximum_pixels() {
+        return Err(AiError::ResultBudgetExceeded);
+    }
+    Ok(())
+}

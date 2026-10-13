@@ -194,3 +194,32 @@ impl AiToolResultDisclosureContext {
         }
     }
 }
+
+/// Removes only sources independently bound by actual SDK-derived contexts. Unknown and mixed
+/// caller sources retain the complete general policy check, aggregate bytes and count ceiling.
+pub(crate) fn ordinary_source_component(
+    manifest: &crate::AiEgressManifest,
+    contexts: &[AiToolResultDisclosureContext],
+) -> Result<crate::AiEgressManifest, AiError> {
+    let mut ordinary = manifest.clone();
+    let mut removed_images = 0_u32;
+    ordinary.sources.retain(|source| {
+        let matched = contexts.iter().any(|context| {
+            context.data_source() == *source
+                || (source.classification == context.classification()
+                    && source.trust == context.source_trust()
+                    && context.images().iter().any(|image| {
+                        image.matches_egress_source(&context.source_reference(), source)
+                    }))
+        });
+        if matched && source.kind == "tool_result_image" {
+            removed_images = removed_images.saturating_add(1);
+        }
+        !matched
+    });
+    ordinary.attachment_count = ordinary
+        .attachment_count
+        .checked_sub(removed_images)
+        .ok_or(AiError::EgressDenied)?;
+    Ok(ordinary)
+}
