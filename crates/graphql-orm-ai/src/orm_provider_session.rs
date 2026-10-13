@@ -4539,6 +4539,7 @@ mod service {
                     protected_arguments: Some(serde_json::json!({"protected": true})),
                     argument_hash: "f".repeat(64),
                     protected_result: None,
+                    protected_result_source: None,
                     payload_purged_at: None,
                     risk: "high_impact".to_owned(),
                     authorization_code: None,

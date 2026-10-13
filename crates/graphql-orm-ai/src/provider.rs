@@ -2480,6 +2480,7 @@ pub struct ProviderDynamicToolResult {
     call_id: String,
     tool_id: String,
     output: serde_json::Value,
+    images: Vec<crate::AiResolvedToolImage>,
 }
 
 impl std::fmt::Debug for ProviderDynamicToolResult {
@@ -2500,6 +2501,7 @@ impl ProviderDynamicToolResult {
             call_id,
             tool_id,
             output: serde_json::json!({"ready": true}),
+            images: Vec::new(),
         }
     }
 
@@ -2519,6 +2521,7 @@ impl ProviderDynamicToolResult {
             call_id: call.call_id.clone(),
             tool_id: call.tool_id.clone(),
             output,
+            images: Vec::new(),
         })
     }
 
@@ -2537,6 +2540,7 @@ impl ProviderDynamicToolResult {
             call_id,
             tool_id,
             output,
+            images: Vec::new(),
         })
     }
 
@@ -2553,6 +2557,31 @@ impl ProviderDynamicToolResult {
     /// Separately egress-authorized model-visible result.
     pub fn output(&self) -> &serde_json::Value {
         &self.output
+    }
+
+    /// Actual currently authorized typed image content for this exact call. Output reference JSON
+    /// alone supplies no image. Adapters must use real image parts, never serialize these bytes
+    /// into the result text or fetch a source URL/path.
+    pub fn images(&self) -> &[crate::AiResolvedToolImage] {
+        &self.images
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_images(
+        mut self,
+        images: Vec<crate::AiResolvedToolImage>,
+    ) -> Result<Self, ProviderError> {
+        if images.len() > 4
+            || images
+                .iter()
+                .map(crate::AiResolvedToolImage::byte_count)
+                .sum::<u64>()
+                > 16 * 1024 * 1024
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.images = images;
+        Ok(self)
     }
 }
 
@@ -3261,6 +3290,13 @@ pub trait AiProvider: Send + Sync {
 
     /// Adapter/model capabilities used before routing.
     fn capabilities(&self) -> ProviderCapabilities;
+
+    /// Whether this adapter has a reviewed typed image tool-result transport. The compatibility
+    /// default denies media-required effects before application execution; JSON references are
+    /// never treated as image content.
+    fn supports_tool_result_images(&self) -> bool {
+        false
+    }
 
     /// Starts a streaming request. The context can only be constructed from an
     /// allowed exact egress decision.

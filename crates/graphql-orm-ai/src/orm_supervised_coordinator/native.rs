@@ -34,6 +34,9 @@ pub(super) struct NativeExecution {
 
 #[async_trait]
 impl AiProviderDynamicToolExecution for NativeExecution {
+    fn tool_result_source_service(&self) -> Option<&OrmAiApplicationToolCallService> {
+        Some(self.services.applications.as_ref())
+    }
     async fn execute_dynamic_tool(
         &self,
         _lease: &AiRunLease,

@@ -16,6 +16,7 @@ mod execution;
 mod execution_rejection;
 mod profiles;
 mod query_plans;
+mod tool_media;
 mod tools;
 
 pub use capability_index::*;
@@ -26,4 +27,5 @@ pub use execution::*;
 pub use execution_rejection::*;
 pub use profiles::*;
 pub use query_plans::*;
+pub use tool_media::*;
 pub use tools::*;

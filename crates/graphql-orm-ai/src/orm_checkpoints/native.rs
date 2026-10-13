@@ -144,6 +144,9 @@ impl OrmAiCoordinatorCheckpointService {
                 }
             }
             let manifest = persisted.egress_manifest().ok_or(AiError::EgressDenied)?;
+            let expected_source = self
+                .expected_application_source(lease, scope, &call, output)
+                .await?;
             if !route.matches_manifest(
                 manifest,
                 lease,
@@ -152,7 +155,7 @@ impl OrmAiCoordinatorCheckpointService {
                 result.provider_model(),
             ) || manifest.sources.len() != 1
                 || manifest.sources[0].kind != "application_tool_result"
-                || manifest.sources[0].reference != call.id.to_string()
+                || manifest.sources[0].reference != expected_source
                 || manifest.capability != crate::AiEgressCapability::ToolResult
                 || call.result_egress_manifest_hash.as_deref()
                     != Some(manifest.stable_hash().as_str())
@@ -639,7 +642,10 @@ impl OrmAiCoordinatorCheckpointService {
                         )
                         || (index > source.pending_call_index && call.risk != "read_only")
                         || manifest.sources[0].kind != "application_tool_result"
-                        || manifest.sources[0].reference != call.id.to_string()
+                        || manifest.sources[0].reference
+                            != self
+                                .expected_application_source(lease, &source.scope, &call, output)
+                                .await?
                         || call.result_egress_manifest_hash.as_deref()
                             != Some(manifest.stable_hash().as_str())
                     {
@@ -1341,7 +1347,10 @@ impl OrmAiCoordinatorCheckpointService {
             &proof.provider.provider_model,
         ) || original.sources.len() != 1
             || original.sources[0].kind != "application_tool_result"
-            || original.sources[0].reference != call.id.to_string()
+            || original.sources[0].reference
+                != self
+                    .expected_application_source(lease, &payload.source.scope, &call, output)
+                    .await?
         {
             return Err(AiError::EgressDenied);
         }

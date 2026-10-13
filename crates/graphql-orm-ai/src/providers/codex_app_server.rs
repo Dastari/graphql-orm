@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use agql_auth::Clock;
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1318,6 +1319,13 @@ impl crate::AiProviderSessionDeletionService for AiCodexAppServerProviderSession
 impl AiProvider for AiCodexAppServerProvider {
     fn provider_kind(&self) -> ProviderKind {
         ProviderKind::LocalHarness
+    }
+
+    fn supports_tool_result_images(&self) -> bool {
+        self.registration.experimental_dynamic_tools()
+            && self
+                .pool
+                .supports_launch_profile(self.registration.launch_profile())
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -4227,8 +4235,8 @@ impl AiCodexAppServerProtocolActor {
     /// Encodes the only allowed successful response to an admitted dynamic
     /// tool request.
     ///
-    /// The result is serialized as one text content item because arbitrary
-    /// image/audio URLs are outside this integration.
+    /// Sends the exact authorized JSON text and any SDK-verified images as separate typed content
+    /// items. Images use inline verified bytes; this path accepts no source URL/path or audio.
     ///
     /// # Errors
     ///
@@ -4249,10 +4257,15 @@ impl AiCodexAppServerProtocolActor {
         if text.len() > MAXIMUM_TEXT_BYTES {
             return Err(ProviderError::Rejected);
         }
+        let mut content = vec![json!({"type":"inputText","text":text})];
+        for image in result.images() {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(image.bytes());
+            content.push(json!({"type":"inputImage","imageUrl":format!("data:{};base64,{encoded}", image.reference().mime())}));
+        }
         let frame = self.encode(json!({
             "id": request_id,
             "result": {
-                "contentItems": [{"type": "inputText", "text": text}],
+                "contentItems": content,
                 "success": true,
             }
         }))?;

@@ -2,6 +2,7 @@
 
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+mod media;
 mod native_preflight;
 pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
@@ -2150,6 +2151,8 @@ impl OrmAiApplicationToolCallService {
         } else {
             None
         };
+        self.runtime
+            .preflight_tool_result_media(&descriptor, provider_result.provider_kind())?;
         let protected_arguments = self
             .protect(
                 &policy,
@@ -2372,6 +2375,40 @@ impl OrmAiApplicationToolCallService {
             if output_bytes.len() > self.limits.maximum_model_output_bytes {
                 return Err(AiError::ToolExecutionFailed);
             }
+            let retained = match (&provenance, failure_code) {
+                (Some(origin), None)
+                    if descriptor.result_media.is_some()
+                        || classification >= DataClassification::Restricted =>
+                {
+                    Some(
+                        self.retain_disclosure_source(
+                            lease,
+                            &descriptor,
+                            origin,
+                            &context,
+                            &policy,
+                            &model_output,
+                            &disclosure_fingerprint,
+                            classification,
+                            source_trust,
+                        )
+                        .await?,
+                    )
+                }
+                _ => None,
+            };
+            let retained_context = if retained.is_some() {
+                Some(
+                    self.reopen_tool_result_source(
+                        lease,
+                        id,
+                        crate::AiToolResultDisclosurePurpose::ToolResult,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             let outbound_bytes = output_bytes
                 .len()
                 .checked_add(provider_call.call_id().len())
@@ -2394,12 +2431,17 @@ impl OrmAiApplicationToolCallService {
                 scope: context.scope.clone(),
                 session_id: Some(lease.session_id()),
                 run_id: Some(lease.run_id()),
-                sources: vec![AiDataSourceRef {
-                    kind: "application_tool_result".to_owned(),
-                    reference: id.0.to_string(),
-                    classification,
-                    trust: source_trust,
-                }],
+                sources: vec![
+                    retained_context
+                        .as_ref()
+                        .map(|source| source.data_source())
+                        .unwrap_or_else(|| AiDataSourceRef {
+                            kind: "application_tool_result".to_owned(),
+                            reference: id.0.to_string(),
+                            classification,
+                            trust: source_trust,
+                        }),
+                ],
                 estimated_bytes: u64::try_from(outbound_bytes)
                     .map_err(|_| AiError::InvalidInput("tool result is too large".to_owned()))?,
                 estimated_tokens: 0,
@@ -2410,10 +2452,19 @@ impl OrmAiApplicationToolCallService {
                 policy_version: route.policy_version,
                 consent_reference: route.consent_reference,
             };
-            let decision = self
-                .runtime
-                .authorize_egress(lease.principal_reference(), &manifest)
-                .await?;
+            let decision = if let Some(source) = &retained_context {
+                self.runtime
+                    .authorize_tool_source_egress(
+                        lease.principal_reference(),
+                        &manifest,
+                        std::slice::from_ref(source),
+                    )
+                    .await?
+            } else {
+                self.runtime
+                    .authorize_egress(lease.principal_reference(), &manifest)
+                    .await?
+            };
             let audit_result = self.egress_audit.record(&manifest, &decision).await;
             let (final_state, model_input, decision_id, manifest_hash, final_authorization_code) =
                 if audit_result.is_err() {
@@ -2447,8 +2498,10 @@ impl OrmAiApplicationToolCallService {
                 };
             #[cfg(test)]
             self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::ProtectResult)?;
-            let protected_result = self
-                .protect(
+            let protected_result = if let Some(retained) = &retained {
+                retained.protected_result.clone()
+            } else {
+                self.protect(
                     &policy,
                     protection_context(
                         "graphql_orm_ai_tool_calls",
@@ -2458,7 +2511,8 @@ impl OrmAiApplicationToolCallService {
                     ),
                     model_output,
                 )
-                .await?;
+                .await?
+            };
             let event_id = Uuid::new_v4();
             let inbox_event_id = Uuid::new_v4();
             let protected_event = self
@@ -2499,7 +2553,7 @@ impl OrmAiApplicationToolCallService {
             self.inject_automatic_mutation_fault(mode, AutomaticMutationTestFault::FinishResult)?;
             let renewed = self
                 .run_service
-                .finish_tool_call(
+                .finish_tool_call_with_source(
                     lease,
                     PreparedToolCallFinish {
                         id: id.0,
@@ -2530,6 +2584,7 @@ impl OrmAiApplicationToolCallService {
                         expected_scope_id: context.scope.id,
                         expected_tenant_id: context.scope.tenant_id,
                     },
+                    retained.map(|source| source.protected_source),
                 )
                 .await?;
             Ok(AiConsequentialToolCallOutcome::Persisted(Box::new(

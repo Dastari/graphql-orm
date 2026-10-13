@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 use crate::{
     AiApprovalRule, AiBrowserResultPreviewPolicy, AiDisclosureDisposition, AiDisclosureSchema,
     AiDisclosureShape, AiError, AiGeneratedGraphqlOperationPolicy, AiToolDescriptor,
-    AiToolOperationDomain, AiToolOperationKind, AiToolRisk, DataClassification,
-    GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
+    AiToolOperationDomain, AiToolOperationKind, AiToolResultMediaPolicy, AiToolRisk,
+    DataClassification, GraphqlExecutionTargetId, GraphqlOperationContract, ToolMaturity,
     canonical_json::canonical_json_bytes,
 };
 
@@ -416,6 +416,8 @@ pub struct AiGraphqlToolProfile {
     idempotent: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     browser_result_preview: Option<AiBrowserResultPreviewPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result_media: Option<AiToolResultMediaPolicy>,
 }
 
 impl AiGraphqlToolProfile {
@@ -448,6 +450,7 @@ impl AiGraphqlToolProfile {
             approval: AiApprovalRule::None,
             idempotent: true,
             browser_result_preview: None,
+            result_media: None,
         }
     }
 
@@ -492,6 +495,7 @@ impl AiGraphqlToolProfile {
             approval: AiApprovalRule::OneShot,
             idempotent,
             browser_result_preview: None,
+            result_media: None,
         })
     }
 
@@ -576,6 +580,14 @@ impl AiGraphqlToolProfile {
     #[must_use]
     pub fn with_browser_result_preview(mut self, policy: AiBrowserResultPreviewPolicy) -> Self {
         self.browser_result_preview = Some(policy);
+        self
+    }
+
+    /// Declares exact selected output-image metadata and one deployment-owned resolver. The
+    /// compiler validates static disclosure paths and includes this policy in the tool fingerprint.
+    #[must_use]
+    pub fn with_result_media(mut self, policy: AiToolResultMediaPolicy) -> Self {
+        self.result_media = Some(policy);
         self
     }
 
@@ -1000,6 +1012,9 @@ impl AiGraphqlToolManifestBuilder {
             projected_shape,
         )]));
         validate_disclosure_shape(&profile.disclosure_schema.root, &response_shape)?;
+        if let Some(media) = &profile.result_media {
+            media.validate_disclosure(&profile.disclosure_schema.root)?;
+        }
 
         let operation_name = operation_name(
             &self.subgraph_id,
@@ -1087,6 +1102,10 @@ impl AiGraphqlToolManifestBuilder {
         .with_idempotent(profile.idempotent);
         let descriptor = match profile.browser_result_preview {
             Some(policy) => descriptor.with_browser_result_preview(policy),
+            None => descriptor,
+        };
+        let descriptor = match profile.result_media {
+            Some(policy) => descriptor.with_result_media(policy)?,
             None => descriptor,
         };
         Ok(AiGraphqlToolManifestEntry {
@@ -1524,6 +1543,9 @@ fn wrap_list(shape: ProjectedShape, maximum_items: Option<u32>) -> ProjectedShap
 }
 
 fn validate_profile_shape(profile: &AiGraphqlToolProfile) -> Result<(), AiError> {
+    if let Some(media) = &profile.result_media {
+        media.validate_disclosure(&profile.disclosure_schema.root)?;
+    }
     validate_public_token(&profile.profile_id, "profile ID")?;
     validate_graphql_name(&profile.field_name, "root field")?;
     validate_model_description(&profile.description, "tool description")?;
@@ -1619,6 +1641,9 @@ fn validate_profile_shape(profile: &AiGraphqlToolProfile) -> Result<(), AiError>
 
 fn validate_compiled_descriptor(entry: &AiGraphqlToolManifestEntry) -> Result<(), AiError> {
     let descriptor = &entry.descriptor;
+    if let Some(media) = &descriptor.result_media {
+        media.validate_disclosure(&entry.disclosure_schema.root)?;
+    }
     let safe_read = entry.root_type == AiGraphqlRootType::Query
         && descriptor.maturity == ToolMaturity::ReadOnly
         && descriptor.risk == AiToolRisk::ReadOnly
@@ -1643,7 +1668,12 @@ fn validate_compiled_descriptor(entry: &AiGraphqlToolManifestEntry) -> Result<()
         || descriptor.maximum_result_bytes == 0
         || descriptor.maximum_result_records == 0
         || descriptor.maximum_classification
-            != maximum_classification(&entry.disclosure_schema.root)?
+            != maximum_classification(&entry.disclosure_schema.root)?.max(
+                descriptor
+                    .result_media
+                    .as_ref()
+                    .map_or(DataClassification::Public, |media| media.classification()),
+            )
         || descriptor.browser_result_preview.is_some_and(|preview| {
             preview.maximum_bytes > descriptor.maximum_result_bytes
                 || preview.maximum_records > descriptor.maximum_result_records

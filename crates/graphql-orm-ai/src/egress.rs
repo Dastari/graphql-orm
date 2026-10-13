@@ -240,6 +240,33 @@ pub trait AiEgressPolicy: Send + Sync {
         principal: &ResolvedPrincipal,
         manifest: &AiEgressManifest,
     ) -> AiEgressDecision;
+
+    /// Authorizes an exact result/image/history transfer with independently reopened retained
+    /// source contexts. The owning host must recheck current grant/resource policy for each
+    /// context, including the original result checksum and current disclosure fence. Provider
+    /// delivery never converts a retained image into renewed action evidence.
+    ///
+    /// The default preserves ordinary existing text policy but refuses image or Restricted
+    /// source disclosure until the host explicitly implements this current-source boundary.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    async fn authorize_tool_sources(
+        &self,
+        principal: &ResolvedPrincipal,
+        manifest: &AiEgressManifest,
+        sources: &[crate::AiToolResultDisclosureContext],
+    ) -> AiEgressDecision {
+        if sources.iter().any(|source| {
+            !source.images().is_empty() || source.classification() >= DataClassification::Restricted
+        }) {
+            return AiEgressDecision::deny(
+                manifest,
+                AiEgressReason::PolicyDenied,
+                "current-tool-source-policy-required",
+                principal.principal().subject(),
+            );
+        }
+        self.authorize(principal, manifest).await
+    }
 }
 
 /// Durable append-only audit boundary for exact egress decisions.

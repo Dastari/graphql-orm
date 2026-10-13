@@ -598,6 +598,11 @@ impl AiAgentProviderTurnExecutor for AiProviderCallExecutor {
 /// Protected read-only application-tool execution boundary.
 #[async_trait]
 pub trait AiAgentReadOnlyToolExecutor: Send + Sync {
+    /// Owning protected result loader for typed media/current source disclosure. The default
+    /// admits no media-required execution; a text-only executor cannot fabricate media authority.
+    fn tool_result_source_service(&self) -> Option<&OrmAiApplicationToolCallService> {
+        None
+    }
     /// Executes and durably resolves one exact provider-requested query.
     ///
     /// # Errors
@@ -674,6 +679,9 @@ pub trait AiAgentReadOnlyToolExecutor: Send + Sync {
 
 #[async_trait]
 impl AiAgentReadOnlyToolExecutor for OrmAiApplicationToolCallService {
+    fn tool_result_source_service(&self) -> Option<&OrmAiApplicationToolCallService> {
+        Some(self)
+    }
     async fn execute_tool(
         &self,
         lease: &AiRunLease,
@@ -820,6 +828,9 @@ impl ReadOnlyDynamicToolExecution {
 
 #[async_trait]
 impl AiProviderDynamicToolExecution for ReadOnlyDynamicToolExecution {
+    fn tool_result_source_service(&self) -> Option<&OrmAiApplicationToolCallService> {
+        self.tool_executor.tool_result_source_service()
+    }
     async fn execute_dynamic_tool(
         &self,
         lease: &AiRunLease,
