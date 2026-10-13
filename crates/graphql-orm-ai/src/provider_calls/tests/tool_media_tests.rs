@@ -215,10 +215,31 @@ impl crate::AiProvider for MediaProvider {
     }
     async fn stream(
         &self,
-        _: ModelRequest,
+        request: ModelRequest,
         _: ProviderRequestContext,
     ) -> Result<crate::ProviderEventStream, ProviderError> {
-        Err(ProviderError::Rejected)
+        let definition = request.tools.first().ok_or(ProviderError::Rejected)?;
+        Ok(Box::pin(futures::stream::iter([
+            Ok(ProviderEvent::ResponseStarted {
+                response_id: Some("preview-turn".into()),
+            }),
+            Ok(ProviderEvent::ToolCallStarted {
+                call_id: "preview-call".into(),
+                tool_id: definition.tool_id.clone(),
+            }),
+            Ok(ProviderEvent::ToolCallCompleted {
+                call_id: "preview-call".into(),
+                arguments: json!({}),
+            }),
+            Ok(ProviderEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cached_input_tokens: 0,
+            }),
+            Ok(ProviderEvent::ResponseCompleted {
+                response_id: Some("preview-turn".into()),
+            }),
+        ])))
     }
     async fn stream_with_dynamic_tools(
         &self,
@@ -341,6 +362,12 @@ fn boundary(classification: DataClassification, attachments: u32) -> AiDeploymen
 async fn media_fixture(
     supported: bool,
 ) -> (Fixture, Arc<Custody>, Arc<OrmAiApplicationToolCallService>) {
+    media_fixture_mode(supported, false).await
+}
+async fn media_fixture_mode(
+    supported: bool,
+    supervised: bool,
+) -> (Fixture, Arc<Custody>, Arc<OrmAiApplicationToolCallService>) {
     let mut fixture = fixture(Vec::new()).await;
     let custody = Arc::new(Custody::default());
     custody.allowed.store(true, Ordering::SeqCst);
@@ -372,7 +399,11 @@ async fn media_fixture(
         ),
     )
     .unwrap();
-    let document = "query Preview { Preview { Reference Sha256 Mime Width Height CapturedAtMs RetainedUntilMs ActionExpiresAtMs } }";
+    let document = if supervised {
+        "mutation Preview { Preview { Reference Sha256 Mime Width Height CapturedAtMs RetainedUntilMs ActionExpiresAtMs } }"
+    } else {
+        "query Preview { Preview { Reference Sha256 Mime Width Height CapturedAtMs RetainedUntilMs ActionExpiresAtMs } }"
+    };
     let contract = GraphqlOperationContract::new(
         GraphqlExecutionTargetId::parse("local-application").unwrap(),
         "schema-v1",
@@ -404,7 +435,7 @@ async fn media_fixture(
     let descriptor = AiToolDescriptor::new(
         "records.read",
         "Read a bounded retained preview",
-        AiToolOperationKind::Query,
+        if supervised { AiToolOperationKind::Mutation } else { AiToolOperationKind::Query },
         document,
         json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false}),
     )
@@ -413,6 +444,14 @@ async fn media_fixture(
     .with_graphql_contract(contract)
     .with_result_media(media)
     .unwrap();
+    let descriptor = if supervised {
+        descriptor
+            .with_maturity(ToolMaturity::SupervisedWrite)
+            .with_risk(AiToolRisk::NonIdempotentWrite, AiApprovalRule::OneShot)
+            .with_idempotent(false)
+    } else {
+        descriptor
+    };
     let scoped = crate::AiToolResultEgressBoundary::new(
         descriptor.fingerprint.clone(),
         "mock-profile",
@@ -436,6 +475,7 @@ async fn media_fixture(
         })
         .unwrap();
     let runtime = AiRuntime::builder()
+        .maximum_tool_maturity(ToolMaturity::SupervisedWrite)
         .principal_resolver(Arc::new(CountingResolver {
             principal: fixture.principal.clone(),
             resolutions: fixture.principal_resolutions.clone(),
@@ -725,5 +765,201 @@ async fn post_effect_source_open_failure_retains_actual_output_for_later_read_wi
         .await
         .unwrap();
     assert_eq!(images.len(), 1);
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+}
+
+struct MediaActionPreview;
+#[async_trait]
+impl AiCanonicalActionPreviewBuilder for MediaActionPreview {
+    async fn build_preview(
+        &self,
+        _: &ResolvedPrincipal,
+        _: &AiToolDescriptor,
+        _: &ToolGraphqlRequest,
+    ) -> Result<AiCanonicalActionPreview, AiError> {
+        Ok(AiCanonicalActionPreview {
+            action_kind: "capture_preview".into(),
+            title: "Capture one authorized preview".into(),
+            targets: vec![AiApprovalResourceBinding {
+                resource_type: "preview".into(),
+                resource_id: "original-resource".into(),
+                expected_version: "1".into(),
+            }],
+            details: json!({"capture":true}),
+        })
+    }
+}
+
+#[tokio::test]
+async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_executing_again() {
+    let (fixture, custody, application) = media_fixture_mode(true, true).await;
+    let descriptor = fixture
+        .runtime
+        .tool_catalog()
+        .descriptor(&AiToolId::parse("records.read").unwrap())
+        .unwrap();
+    let mut base = plan(&fixture);
+    base.budget.estimate.image_units = 4;
+    base.request.tools = vec![ModelToolDefinition {
+        tool_id: descriptor.id.as_str().into(),
+        provider_name: "records_read".into(),
+        fingerprint: descriptor.fingerprint.clone(),
+        description: descriptor.description.clone(),
+        parameters: descriptor.argument_schema.clone(),
+        strict: true,
+        defer_loading: false,
+    }];
+    base.transfers[0].estimated_bytes = base.request.conservative_egress_bytes();
+    let mut policy = AiToolPolicySet::new(ToolMaturity::SupervisedWrite);
+    policy.bind(AiToolPolicyBinding {
+        tool_id: descriptor.id.clone(),
+        fingerprint: descriptor.fingerprint.clone(),
+        enabled: true,
+    });
+    let offered = AiProviderCallPlan::new_with_supervised_tools(
+        base.provider_kind,
+        base.request,
+        base.budget,
+        base.transfers,
+        "approved-media-test",
+        fixture.runtime.tool_catalog(),
+        &policy,
+    )
+    .unwrap();
+    let executor = AiProviderCallExecutor::new(
+        fixture.runtime.clone(),
+        fixture.budget_service.clone(),
+        fixture.audit.clone(),
+        Arc::new(ImageAccounting),
+        Arc::new(SystemClock),
+        AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
+    );
+    let provider = executor.execute(&fixture.lease, offered).await.unwrap();
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    let checkpoints = Arc::new(OrmAiCoordinatorCheckpointService::new(
+        fixture.run_service.clone(),
+        Arc::new(Resolver(fixture.principal.clone())),
+        Arc::new(AllowAccess),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+        Arc::new(TestRuleResolver::default()),
+        Arc::new(SystemClock),
+        AiCoordinatorCheckpointLimits::new(256 * 1024, Duration::minutes(5)).unwrap(),
+    ));
+    let (rules, usage) = test_rule_checkpoint(&fixture.scope, &[&provider], 0);
+    let protected = checkpoints
+        .persist_provider_turn(
+            &fixture.lease,
+            &provider,
+            &fixture.scope,
+            "approved-media-test",
+            &preview_route(),
+            &rules,
+            usage,
+            1,
+            1,
+        )
+        .await
+        .unwrap();
+    let (_, approvals) = consequential_test_service(&fixture);
+    let consequential = Arc::new(OrmAiConsequentialToolCallService::new(
+        fixture.run_service.clone(),
+        fixture.runtime.clone(),
+        approvals.clone(),
+        Arc::new(MediaActionPreview),
+        fixture.audit.clone(),
+        Arc::new(SystemClock),
+        AiApplicationToolCallLimits::new(
+            8192,
+            16384,
+            4,
+            4,
+            Duration::seconds(30),
+            Duration::seconds(10),
+        )
+        .unwrap(),
+    ));
+    let requested = consequential
+        .request_approval(
+            &protected,
+            &provider,
+            AiApplicationToolCallContext::new(
+                0,
+                0,
+                fixture.scope.clone(),
+                "approved-media-test",
+                provider.budget_reservation_id().0.to_string(),
+            )
+            .unwrap(),
+            OffsetDateTime::now_utc() + Duration::minutes(5),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(requested.lease().state(), AiRunState::WaitingApproval);
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    let pending = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+        .await
+        .unwrap()
+        .unwrap();
+    approvals
+        .decide_approval(
+            &fixture.principal,
+            DecideAiApprovalInput {
+                id: pending.id,
+                decision: AiApprovalDecision::Approve,
+                expected_version: pending.row_version,
+            },
+        )
+        .await
+        .unwrap();
+    let claim = fixture
+        .run_service
+        .claim_next_approved("approved-media-resume")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(claim.lease().lease_generation() > fixture.lease.lease_generation());
+    let resume =
+        OrmAiSupervisedResumeService::new(fixture.run_service.clone(), checkpoints, consequential);
+    let completed = resume.execute_claimed(&claim).await.unwrap();
+    let current = completed.checkpointed().unwrap().lease();
+    let source = application
+        .reopen_tool_result_source(
+            current,
+            requested.tool_call_id(),
+            crate::AiToolResultDisclosurePurpose::Continuation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        source.execution_provenance().attempt_id(),
+        fixture.lease.attempt_id()
+    );
+    assert_eq!(source.effect_attempt_id(), claim.lease().attempt_id());
+    assert_eq!(
+        source.effect_lease_generation(),
+        claim.lease().lease_generation()
+    );
+    assert_eq!(
+        source.execution_provenance().approval_id(),
+        Some(requested.approval_id())
+    );
+    assert_eq!(source.current_attempt_id(), claim.lease().attempt_id());
+    assert_eq!(
+        application
+            .reopen_tool_images(current, &source)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+    assert!(resume.execute_claimed(&claim).await.is_err());
+    let consumed = AiApprovalRecord::find_by_id(&fixture.database, &pending.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(consumed.consumed_uses, 1);
     assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
 }

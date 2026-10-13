@@ -41,10 +41,11 @@ fn reopened_original_pixels_are_real_image_input_and_keep_original_action_label(
     assert!(!debug.contains("data:image"));
 }
 #[test]
-fn JSON_reference_is_text_only_and_unadmitted_image_batches_are_refused() {
+fn json_reference_is_text_only_and_unadmitted_image_batches_are_refused() {
     let mut request = model_request();
-    request.input = vec![ModelInputBlock::Json {
-        value: json!({"ImageReference":uuid::Uuid::new_v4(),"ImageMimeType":"image/png"}),
+    request.input = vec![ModelInputBlock::Text {
+        text: json!({"ImageReference":uuid::Uuid::new_v4(),"ImageMimeType":"image/png"})
+            .to_string(),
     }];
     let input = AiCodexAppServerTurnInput::try_from_model_request(request).unwrap();
     assert!(

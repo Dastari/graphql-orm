@@ -4959,6 +4959,7 @@ impl AiProviderCallExecutor {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let mut image_bytes = 0_u64;
         let mut image_count = 0_u64;
+        let mut image_pixels = 0_u64;
         let mut image_sources = BTreeSet::new();
         let mut retained_images = Vec::new();
         let mut authorized = Vec::with_capacity(plan.transfers.len());
@@ -5035,9 +5036,20 @@ impl AiProviderCallExecutor {
                                     sum.checked_add(image.byte_count())
                                 })
                                 .ok_or(AiError::EgressDenied)?;
+                            image_pixels = images
+                                .iter()
+                                .try_fold(image_pixels, |sum, image| {
+                                    let reference = image.reference();
+                                    sum.checked_add(
+                                        u64::from(reference.width())
+                                            * u64::from(reference.height()),
+                                    )
+                                })
+                                .ok_or(AiError::EgressDenied)?;
                             if image_count > 4
                                 || image_count > plan.budget.estimate.image_units
                                 || image_bytes > 16 * 1024 * 1024
+                                || image_pixels > 16_000_000
                                 || std::time::Instant::now() >= deadline
                             {
                                 return Err(source_failure(AiError::EgressDenied));

@@ -61,6 +61,7 @@ impl ToolSourceDelivery {
             let mut seen = BTreeSet::new();
             let mut count = 0_u64;
             let mut bytes = 0_u64;
+            let mut pixels = 0_u64;
             for manifest in &self.manifests {
                 let mut contexts = Vec::new();
                 for source in &manifest.sources {
@@ -108,7 +109,19 @@ impl ToolSourceDelivery {
                             .iter()
                             .try_fold(bytes, |sum, image| sum.checked_add(image.byte_count()))
                             .ok_or(ProviderError::BudgetDenied)?;
-                        if count > 4 || count > self.maximum_image_units || bytes > 16 * 1024 * 1024
+                        pixels = images
+                            .iter()
+                            .try_fold(pixels, |sum, image| {
+                                let reference = image.reference();
+                                sum.checked_add(
+                                    u64::from(reference.width()) * u64::from(reference.height()),
+                                )
+                            })
+                            .ok_or(ProviderError::BudgetDenied)?;
+                        if count > 4
+                            || count > self.maximum_image_units
+                            || bytes > 16 * 1024 * 1024
+                            || pixels > 16_000_000
                         {
                             return Err(ProviderError::BudgetDenied);
                         }
