@@ -24,7 +24,16 @@ async fn validate_static_reset_graph(
         return Err(conflict());
     }
     let checkpoint = tx
-        .find_by_id::<AiRunCheckpointRecord>(&evidence.checkpoint_id)
+        .query::<AiRunCheckpointRecord>()
+        .filter(crate::persistence::AiRunCheckpointRecordWhereInput {
+            id: Some(UuidFilter {
+                eq: Some(evidence.checkpoint_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .limit(1)
+        .fetch_one()
         .await
         .map_err(OrmPublicError::from)?
         .ok_or_else(conflict)?;

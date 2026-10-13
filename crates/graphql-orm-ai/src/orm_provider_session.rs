@@ -3514,7 +3514,6 @@ mod service {
             cleanup_generation: record.cleanup_generation,
             cleanup_expires_at: parse_time(record.cleanup_lease_expires_at)?,
             row_version: record.row_version,
-            installed_offering_fingerprint: record.installed_offering_fingerprint.clone(),
         })
     }
 
@@ -3538,6 +3537,7 @@ mod service {
             idle_expires_at: parse_required_time(record.idle_expires_at)?,
             absolute_expires_at: parse_required_time(record.absolute_expires_at)?,
             row_version: record.row_version,
+            installed_offering_fingerprint: record.installed_offering_fingerprint.clone(),
         })
     }
 

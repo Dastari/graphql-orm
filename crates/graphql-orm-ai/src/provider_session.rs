@@ -500,7 +500,7 @@ pub struct AiProviderSessionBindingView {
 
 // Minted only after the checkpoint owner reopens and validates the full native outcome.
 // No deserializer or public constructor turns a result body/hash into this proof.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AiVerifiedNativeContinuation {
     pub(crate) session_id: AiSessionId,
     pub(crate) run_id: AiRunId,
@@ -535,7 +535,7 @@ pub(crate) struct AiStaticOfferingResetReceipt {
 /// It has no public constructor or deserializer. The checkpoint owner independently opens
 /// the original completed outcome before this evidence can reach a sealed provider plan.
 /// The request grants no provider input, image, application effect or human consent authority.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiProviderStaticOfferingResetRequest {
     pub(crate) evidence: std::sync::Arc<AiVerifiedNativeContinuation>,
     pub(crate) planned: AiProviderSessionTurnPlan,
