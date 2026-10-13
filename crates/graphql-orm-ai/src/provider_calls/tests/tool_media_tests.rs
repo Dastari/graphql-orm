@@ -1592,7 +1592,7 @@ async fn approved_media_lifecycle(
         consequential.clone(),
     );
     if let Some(delivery) = coordinator_delivery {
-        static_offering_tests::owning_coordinator_reset(
+        Box::pin(static_offering_tests::owning_coordinator_reset(
             fixture,
             custody,
             application,
@@ -1603,7 +1603,7 @@ async fn approved_media_lifecycle(
             delivery,
             claim,
             reset_mode.unwrap(),
-        )
+        ))
         .await;
         return;
     }

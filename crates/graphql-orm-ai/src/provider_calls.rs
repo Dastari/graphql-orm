@@ -4315,6 +4315,16 @@ impl AiProviderCallExecutor {
         };
 
         plan.transfers = effective_transfers;
+        // A fresh cursor has no old history rows, but the exact retained native outcome
+        // can still disclose its current authorized pixels. Allocation and settlement use
+        // the actual admitted typed transport, never just the old-cursor preflight count.
+        let actual_image_units = u64::try_from(context.retained_tool_result_images().len())
+            .map_err(|_| AiError::EgressDenied)?;
+        if actual_image_units < historical_image_units {
+            self.release_unstarted(&lease, &reservation).await?;
+            return Err(AiError::PreTransportToolSourceUnavailable);
+        }
+        let historical_image_units = actual_image_units;
 
         let mut current = match self
             .runtime
