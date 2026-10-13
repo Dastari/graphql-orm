@@ -406,7 +406,7 @@ async fn media_fixture(
         "Read a bounded retained preview",
         AiToolOperationKind::Query,
         document,
-        json!({"type":"object","properties":{},"additionalProperties":false}),
+        json!({"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false}),
     )
     .unwrap()
     .with_result_projection("preview-projection-v1")
@@ -494,8 +494,6 @@ async fn preview_turn(
     image_units: u64,
 ) -> Result<AiProviderCallResult, AiError> {
     let mut plan = tool_plan(fixture);
-    plan.request.tools[0].parameters =
-        json!({"type":"object","properties":{},"additionalProperties":false});
     plan.budget.estimate.image_units = image_units;
     let executor = AiProviderCallExecutor::new(
         fixture.runtime.clone(),
