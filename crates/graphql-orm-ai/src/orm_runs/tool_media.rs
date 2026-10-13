@@ -46,6 +46,8 @@ impl OrmAiRunService {
                         || call.execution_provenance.as_ref() != Some(&expected)
                         || origin.argument_hash() != call.argument_hash
                         || origin.tool_fingerprint() != call.tool_fingerprint
+                        || origin.effect_attempt_id() != Some(lease.attempt_id)
+                        || origin.effect_lease_generation() != Some(lease.lease_generation)
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
@@ -164,6 +166,8 @@ impl OrmAiRunService {
                         || origin.session_id() != lease.session_id
                         || origin.argument_hash() != call.argument_hash
                         || origin.tool_fingerprint() != call.tool_fingerprint
+                        || origin.effect_attempt_id() != Some(lease.attempt_id)
+                        || origin.effect_lease_generation() != Some(lease.lease_generation)
                     {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }

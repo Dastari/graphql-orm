@@ -336,6 +336,15 @@ impl AiRuntime {
         descriptor: &AiToolDescriptor,
         kind: &ProviderKind,
     ) -> Result<(), AiError> {
+        if (descriptor.result_media.is_some()
+            || descriptor.maximum_classification >= crate::DataClassification::Restricted)
+            && !self
+                .providers
+                .get(kind)
+                .is_some_and(|provider| provider.supports_tool_result_source_delivery())
+        {
+            return Err(AiError::Forbidden);
+        }
         if let Some(policy) = &descriptor.result_media {
             self.tool_media_resolver(policy.resolver_id())?;
             if !self.providers.get(kind).is_some_and(|provider| {
@@ -1101,6 +1110,12 @@ impl AiRuntime {
             {
                 return Err(ProviderError::ToolSourceUnavailable);
             }
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            if context.tool_source_delivery_check().is_some()
+                && !provider.supports_tool_result_source_delivery()
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
             provider
                 .capabilities()
                 .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
@@ -1171,6 +1186,12 @@ impl AiRuntime {
             }
             if !context.retained_tool_result_images().is_empty()
                 && (!provider.capabilities().image_input || !provider.supports_tool_result_images())
+            {
+                return Err(ProviderError::ToolSourceUnavailable);
+            }
+            #[cfg(any(feature = "sqlite", feature = "postgres"))]
+            if context.tool_source_delivery_check().is_some()
+                && !provider.supports_tool_result_source_delivery()
             {
                 return Err(ProviderError::ToolSourceUnavailable);
             }

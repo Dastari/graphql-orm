@@ -1381,6 +1381,13 @@ impl AiProvider for AiCodexAppServerProvider {
                 .supports_launch_profile(self.registration.launch_profile())
     }
 
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        self.registration.experimental_dynamic_tools()
+            && self
+                .pool
+                .supports_launch_profile(self.registration.launch_profile())
+    }
+
     fn supports_tool_result_image_policy(&self, descriptor: &crate::AiToolDescriptor) -> bool {
         let Some(policy) = &descriptor.result_media else {
             return true;

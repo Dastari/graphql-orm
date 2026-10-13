@@ -25,6 +25,7 @@ struct Custody {
     requests: Mutex<Vec<ModelRequest>>,
     delivered_images: AtomicUsize,
     delay_open: AtomicBool,
+    source_delivery_allowed: AtomicBool,
 }
 struct SourceProtector(Arc<Custody>);
 #[async_trait]
@@ -128,8 +129,7 @@ impl crate::AiToolResultMediaResolver for Custody {
             .cloned()
             .ok_or(AiError::NotFound)?;
         if capture.reference != *reference
-            || capture.origin.original_invocation()
-                != context.execution_provenance().original_invocation()
+            || &capture.origin != context.execution_provenance()
             || descriptor.fingerprint != capture.origin.tool_fingerprint()
         {
             return Err(AiError::Conflict);
@@ -227,6 +227,9 @@ impl crate::AiProvider for MediaProvider {
     fn supports_tool_result_images(&self) -> bool {
         self.supported
     }
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        self.supported && self.custody.source_delivery_allowed.load(Ordering::SeqCst)
+    }
     fn supports_tool_result_image_policy(&self, _: &AiToolDescriptor) -> bool {
         self.supported
     }
@@ -304,7 +307,9 @@ impl crate::AiProvider for MediaProvider {
             self.custody.allowed.store(false, Ordering::SeqCst);
         }
         responder.authorize_delivery(&result).await?;
-        if result.images().len() != 1 || result.images()[0].bytes().is_empty() {
+        if result.output()["status"] != "ApprovalPending"
+            && (result.images().len() != 1 || result.images()[0].bytes().is_empty())
+        {
             return Err(ProviderError::Rejected);
         }
         Ok(Box::pin(futures::stream::iter([
@@ -423,6 +428,9 @@ async fn media_fixture_resolution(
     let custody = Arc::new(Custody::default());
     custody.allowed.store(true, Ordering::SeqCst);
     custody.ordinary_allowed.store(true, Ordering::SeqCst);
+    custody
+        .source_delivery_allowed
+        .store(true, Ordering::SeqCst);
     let rule = AiDisclosureRule::exportable(DataClassification::Restricted);
     let fields = [
         "Reference",
@@ -626,6 +634,14 @@ async fn typed_pixels_charge_atomic_budget_and_reopen_without_effect_replay() {
     );
     assert_eq!(source.current_attempt_id(), fixture.lease.attempt_id());
     assert_eq!(source.effect_attempt_id(), fixture.lease.attempt_id());
+    assert_eq!(
+        source.execution_provenance().effect_attempt_id(),
+        Some(fixture.lease.attempt_id())
+    );
+    assert_eq!(
+        source.execution_provenance().effect_lease_generation(),
+        Some(fixture.lease.lease_generation())
+    );
     let reopened = service
         .authorize_tool_images(call.lease(), call.id(), call.egress_manifest().unwrap())
         .await
@@ -658,6 +674,70 @@ async fn absent_image_capacity_and_unsupported_adapter_refuse_before_effect() {
         let (fixture, custody, service) = media_fixture(supported).await;
         assert!(preview_turn(&fixture, service, units).await.is_err());
         assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn image_capable_adapter_without_current_source_delivery_refuses_before_effect() {
+    let (fixture, custody, service) = media_fixture(true).await;
+    custody
+        .source_delivery_allowed
+        .store(false, Ordering::SeqCst);
+    assert!(preview_turn(&fixture, service, 4).await.is_err());
+    assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
+    assert!(custody.captures.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn absent_or_changed_retained_effect_fence_is_refused_without_reexecution() {
+    for omit in [true, false] {
+        let (fixture, custody, service) = media_fixture(true).await;
+        let result = preview_turn(&fixture, service.clone(), 4).await.unwrap();
+        let call = &result.interactive_tool_results()[0];
+        let saved = AiToolCallRecord::find_by_id(&fixture.database, &call.id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut envelope: crate::ProtectedContentEnvelope =
+            serde_json::from_value(saved.protected_result_source.clone().unwrap()).unwrap();
+        let crate::ProtectedContentEnvelope::DatabaseManaged { value } = &mut envelope else {
+            unreachable!()
+        };
+        if omit {
+            value["execution"]
+                .as_object_mut()
+                .unwrap()
+                .remove("effect_attempt_id");
+            value["execution"]
+                .as_object_mut()
+                .unwrap()
+                .remove("effect_lease_generation");
+        } else {
+            value["execution"]["effect_attempt_id"] = json!(Uuid::new_v4());
+        }
+        AiToolCallRecord::compare_and_swap(
+            &fixture.database,
+            &saved.id,
+            saved.row_version,
+            AiToolCallRecordWhereInput::default(),
+            UpdateAiToolCallRecordInput {
+                protected_result_source: Some(Some(serde_json::to_value(envelope).unwrap())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            service
+                .reopen_tool_result_source(
+                    call.lease(),
+                    call.id(),
+                    crate::AiToolResultDisclosurePurpose::Continuation
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
     }
 }
 #[tokio::test]
@@ -858,6 +938,61 @@ async fn invalid_post_effect_media_is_saved_but_cannot_be_admitted_or_replayed()
 }
 
 struct MediaActionPreview;
+struct NativePreviewExecution {
+    application: Arc<OrmAiApplicationToolCallService>,
+    consequential: Arc<OrmAiConsequentialToolCallService>,
+    scope: AiScope,
+    prepared: Mutex<Option<crate::AiPreparedNativeApproval>>,
+    last_lease: Mutex<Option<AiRunLease>>,
+}
+#[async_trait]
+impl AiProviderDynamicToolExecution for NativePreviewExecution {
+    fn tool_result_source_service(&self) -> Option<&OrmAiApplicationToolCallService> {
+        Some(&self.application)
+    }
+    async fn execute_dynamic_tool(
+        &self,
+        _: &AiRunLease,
+        _: &AiProviderCallResult,
+        _: usize,
+    ) -> Result<AiPersistedApplicationToolCall, AiError> {
+        Err(AiError::Forbidden)
+    }
+    async fn execute_dynamic_outcome(
+        &self,
+        lease: &AiRunLease,
+        result: &AiProviderCallResult,
+        index: usize,
+    ) -> Result<AiProviderDynamicToolOutcome, AiError> {
+        let prepared = self
+            .consequential
+            .prepare_native_approval(
+                lease,
+                result,
+                AiApplicationToolCallContext::new(
+                    0,
+                    index,
+                    self.scope.clone(),
+                    "approved-media-test",
+                    result.budget_reservation_id().0.to_string(),
+                )?,
+            )
+            .await?;
+        *self.last_lease.lock().await = Some(prepared.lease().clone());
+        let receipt = self
+            .consequential
+            .prepare_native_approval_receipt(prepared.lease(), &prepared, &preview_route())
+            .await?;
+        *self.last_lease.lock().await = Some(receipt.lease().clone());
+        *self.prepared.lock().await = Some(prepared);
+        Ok(AiProviderDynamicToolOutcome::NativeControl(Box::new(
+            receipt,
+        )))
+    }
+    async fn failed_callback_lease(&self) -> Option<AiRunLease> {
+        self.last_lease.lock().await.clone()
+    }
+}
 #[tokio::test]
 async fn late_owning_image_resolution_is_discarded_and_saved_effect_is_not_repeated() {
     let (fixture, custody, service) = media_fixture_resolution(true, false, 25).await;
@@ -896,10 +1031,7 @@ impl AiCanonicalActionPreviewBuilder for MediaActionPreview {
     }
 }
 
-async fn bind_original_media_session(
-    fixture: &Fixture,
-    provider: &mut AiProviderCallResult,
-) -> Arc<OrmAiProviderSessionService> {
+async fn media_input_and_sessions(fixture: &Fixture) -> Arc<OrmAiProviderSessionService> {
     // Initial fixture input uses generated ORM entities; all lifecycle transitions below use
     // the owning session/approval/run services, never direct writes to their state fields.
     let session = AiSessionRecord::find_by_id(&fixture.database, &fixture.lease.session_id().0)
@@ -986,50 +1118,26 @@ async fn bind_original_media_session(
         )
         .unwrap(),
     );
-    let descriptor = AiProviderSessionDescriptor::new(
-        ProviderKind::OpenAiCompatible,
-        "mock-profile",
-        "mock-model",
-        "a".repeat(64),
-        "mock/v1",
-        "b".repeat(64),
-    )
-    .unwrap();
-    let cursor = fixture
-        .runtime
-        .create_empty_provider_session(
-            &ProviderKind::OpenAiCompatible,
-            &crate::AiProviderRunBinding::from_lease(&fixture.lease).unwrap(),
-            &descriptor,
-            &provider.request_snapshot,
-        )
-        .await
-        .unwrap();
-    provider.provider_session_claim = Some(
-        sessions
-            .bind_for_run(
-                &fixture.lease,
-                AiProviderSessionBindRequest::new(descriptor, cursor, "d".repeat(64), None)
-                    .unwrap(),
-            )
-            .await
-            .unwrap(),
-    );
     sessions
 }
 
 #[tokio::test]
 async fn approved_media_effect_reopens_under_new_lease_without_consuming_or_executing_again() {
-    approved_media_lifecycle(false).await;
+    approved_media_lifecycle(false, false).await;
 }
 
 #[tokio::test]
 async fn native_history_normal_deny_after_preflight_withholds_saved_effect_and_releases_unstarted_budget()
  {
-    approved_media_lifecycle(true).await;
+    approved_media_lifecycle(true, false).await;
 }
 
-async fn approved_media_lifecycle(deny_history: bool) {
+#[tokio::test]
+async fn approved_effect_with_invalid_media_keeps_output_and_enters_recovery_without_replay() {
+    approved_media_lifecycle(false, true).await;
+}
+
+async fn approved_media_lifecycle(deny_history: bool, invalid_metadata: bool) {
     let (fixture, custody, application) = media_fixture_mode(true, true).await;
     let descriptor = fixture
         .runtime
@@ -1054,7 +1162,7 @@ async fn approved_media_lifecycle(deny_history: bool) {
         fingerprint: descriptor.fingerprint.clone(),
         enabled: true,
     });
-    let offered = AiProviderCallPlan::new_with_supervised_tools(
+    let offered = AiProviderCallPlan::new_with_classified_tools(
         base.provider_kind,
         base.request,
         base.budget,
@@ -1062,6 +1170,7 @@ async fn approved_media_lifecycle(deny_history: bool) {
         "approved-media-test",
         fixture.runtime.tool_catalog(),
         &policy,
+        &fixture.generated_target_policy,
     )
     .unwrap();
     let executor = AiProviderCallExecutor::new(
@@ -1072,8 +1181,7 @@ async fn approved_media_lifecycle(deny_history: bool) {
         Arc::new(SystemClock),
         AiProviderCallLimits::new(64, 8192, 65536).unwrap(),
     );
-    let mut provider = executor.execute(&fixture.lease, offered).await.unwrap();
-    let sessions = bind_original_media_session(&fixture, &mut provider).await;
+    let sessions = media_input_and_sessions(&fixture).await;
     assert_eq!(custody.effects.load(Ordering::SeqCst), 0);
     let checkpoints = Arc::new(OrmAiCoordinatorCheckpointService::new(
         fixture.run_service.clone(),
@@ -1106,27 +1214,37 @@ async fn approved_media_lifecycle(deny_history: bool) {
         )
         .with_provider_session_service(sessions.clone()),
     );
-    let prepared = consequential
-        .prepare_native_approval(
-            &fixture.lease,
-            &provider,
-            AiApplicationToolCallContext::new(
-                0,
-                0,
-                fixture.scope.clone(),
-                "approved-media-test",
-                provider.budget_reservation_id().0.to_string(),
-            )
-            .unwrap(),
+    let native = Arc::new(NativePreviewExecution {
+        application: application.clone(),
+        consequential: consequential.clone(),
+        scope: fixture.scope.clone(),
+        prepared: Mutex::new(None),
+        last_lease: Mutex::new(None),
+    });
+    let active = Arc::new(Mutex::new(fixture.lease.clone()));
+    let selected = AiProviderSessionDescriptor::new(
+        ProviderKind::OpenAiCompatible,
+        "mock-profile",
+        "mock-model",
+        "a".repeat(64),
+        "mock/v1",
+        "b".repeat(64),
+    )
+    .unwrap();
+    let provider = executor
+        .with_tool_result_source_service(application.clone())
+        .unwrap()
+        .execute_with_provider_session(
+            active.clone(),
+            offered,
+            crate::AiProviderSessionTurnPlan::new(selected, "d".repeat(64)).unwrap(),
+            sessions.clone(),
+            Some(native.clone()),
         )
         .await
         .unwrap();
-    let receipt = consequential
-        .prepare_native_approval_receipt(prepared.lease(), &prepared, &preview_route())
-        .await
-        .unwrap();
-    let active = receipt.lease().clone();
-    provider.native_control_receipts = vec![receipt];
+    let prepared = native.prepared.lock().await.take().unwrap();
+    let active = active.lock().await.clone();
     let (_, usage) = test_rule_checkpoint(&fixture.scope, &[&provider], 1);
     let protected = checkpoints
         .persist_native_approval_provider_turn(
@@ -1182,7 +1300,31 @@ async fn approved_media_lifecycle(deny_history: bool) {
         checkpoints.clone(),
         consequential,
     );
+    custody
+        .invalid_image_metadata
+        .store(invalid_metadata, Ordering::SeqCst);
     let completed = resume.execute_claimed(&claim).await.unwrap();
+    if invalid_metadata {
+        assert!(matches!(
+            completed,
+            crate::AiSupervisedResumeOutcome::RecoveryRequired { .. }
+        ));
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &requested.tool_call_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(call.protected_result.is_some());
+        assert!(call.protected_result_source.is_none());
+        let run = AiRunRecord::find_by_id(&fixture.database, &claim.lease().run_id().0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "recovery_required");
+        assert!(resume.execute_claimed(&claim).await.is_err());
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+        assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 0);
+        return;
+    }
     let current = completed.checkpointed().unwrap().lease();
     let source = application
         .reopen_tool_result_source(
@@ -1197,6 +1339,14 @@ async fn approved_media_lifecycle(deny_history: bool) {
         fixture.lease.attempt_id()
     );
     assert_eq!(source.effect_attempt_id(), claim.lease().attempt_id());
+    assert_eq!(
+        source.execution_provenance().effect_attempt_id(),
+        Some(claim.lease().attempt_id())
+    );
+    assert_eq!(
+        source.execution_provenance().effect_lease_generation(),
+        Some(claim.lease().lease_generation())
+    );
     assert_eq!(
         source.effect_lease_generation(),
         claim.lease().lease_generation()
@@ -1301,6 +1451,14 @@ async fn approved_media_lifecycle(deny_history: bool) {
             2
         );
         assert!(budgets.iter().all(|row| row.state != "uncertain"));
+        assert_eq!(
+            budgets
+                .iter()
+                .find(|row| row.id == continued.budget_reservation_id().0)
+                .unwrap()
+                .reserved_image_units,
+            0
+        );
     } else {
         assert_eq!(continued.usage().image_units, 1);
         assert_eq!(custody.delivered_images.load(Ordering::SeqCst), 1);

@@ -41,6 +41,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
   ambiguous delivery remains uncertain. Codex tool output uses genuine image
   provider parts and source capture labels, with final delivery reauthorization.
 - Schema module 0.72.0 adds protected source metadata and a private source index.
+- Read-only SDK-minted actual effect attempt/generation remain separate from
+  original provider provenance and current disclosure fencing, including after
+  approved resume. Missing or changed retained effect evidence is refused.
+- Unsupported adapters default-deny protected source delivery before Restricted
+  or media effects. Native no-effect control receipts retain their owning
+  admission while releasing unused image capacity.
 
 ### Added
 

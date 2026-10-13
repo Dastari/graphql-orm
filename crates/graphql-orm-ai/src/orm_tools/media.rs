@@ -458,6 +458,8 @@ impl OrmAiApplicationToolCallService {
             || origin.session_id() != lease.session_id()
             || origin.tool_call_id() != id
             || source.effect_lease_generation != call.lease_generation
+            || origin.effect_attempt_id() != Some(source.effect_attempt_id)
+            || origin.effect_lease_generation() != Some(source.effect_lease_generation)
             || source.provider_cursor_fingerprint.as_deref() != origin.provider_cursor_fingerprint()
             || origin.approval_id().map(|id| id.0) != call.approval_id
             || (call.state != "source_retained"

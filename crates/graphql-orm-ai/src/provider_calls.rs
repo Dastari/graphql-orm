@@ -2589,9 +2589,10 @@ impl DynamicToolResponder {
             }) if call_id == call.call_id() && tool_id == call.tool_id().as_str() => output.clone(),
             _ => return Err(ProviderError::Rejected),
         };
-        let images = if media_ceiling > 0 && failure.is_none() {
+        let application_result = matches!(&persisted, AiProviderDynamicToolOutcome::Application(_));
+        let images = if media_ceiling > 0 && failure.is_none() && application_result {
             let AiProviderDynamicToolOutcome::Application(application) = &persisted else {
-                return Err(ProviderError::Rejected);
+                unreachable!()
             };
             self.execution
                 .tool_result_source_service()
@@ -2649,7 +2650,10 @@ impl DynamicToolResponder {
             output,
         )?
         .with_images(images)
-        .map(|result| result.require_source_delivery(requires_source && failure.is_none()))
+        .map(|result| {
+            result
+                .require_source_delivery(requires_source && failure.is_none() && application_result)
+        })
     }
 }
 
@@ -3607,14 +3611,14 @@ impl AiProviderCallExecutor {
         lease: &AiRunLease,
         plan: AiProviderCallPlan,
     ) -> Result<AiProviderCallResult, AiError> {
-        self.execute_inner(
+        Box::pin(self.execute_inner(
             Arc::new(Mutex::new(lease.clone())),
             plan,
             None,
             None,
             None,
             0,
-        )
+        ))
         .await
     }
 
@@ -3644,8 +3648,7 @@ impl AiProviderCallExecutor {
         {
             return Err(AiError::Conflict);
         }
-        self.execute_inner(lease, plan, Some(execution), None, None, 0)
-            .await
+        Box::pin(self.execute_inner(lease, plan, Some(execution), None, None, 0)).await
     }
 
     /// Executes through one exact durable provider-session binding.
@@ -3841,16 +3844,15 @@ impl AiProviderCallExecutor {
                 session_service
                     .require_cleanup(&claim, "retained_tool_source_withheld")
                     .await?;
-                return self
-                    .execute_inner(
-                        lease_state,
-                        self.withheld_tool_history_plan(&lease, plan).await?,
-                        None,
-                        None,
-                        None,
-                        0,
-                    )
-                    .await;
+                return Box::pin(self.execute_inner(
+                    lease_state,
+                    self.withheld_tool_history_plan(&lease, plan).await?,
+                    None,
+                    None,
+                    None,
+                    0,
+                ))
+                .await;
             }
             Err(error) => return Err(error),
         };
@@ -3960,8 +3962,7 @@ impl AiProviderCallExecutor {
                 let safe_plan = self
                     .withheld_tool_history_plan(&current_lease, withheld_plan)
                     .await?;
-                self.execute_inner(lease_state, safe_plan, None, None, None, 0)
-                    .await
+                Box::pin(self.execute_inner(lease_state, safe_plan, None, None, None, 0)).await
             }
             Err(error @ AiError::PreTransportBudgetDenied) => Err(error),
             Err(AiError::PreTransportProviderFailed) => {

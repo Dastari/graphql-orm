@@ -26,6 +26,16 @@ non-media tool fingerprints remain unchanged. New media declarations require a
 trusted logical resolver, explicit exact provider destination policy and a current
 source-aware egress hook. The compatibility defaults deny image delivery and
 Restricted-source overrides. Unsupported adapters refuse media-required effects.
+The new `AiProvider::supports_tool_result_source_delivery` compatibility default
+also denies declared Restricted effects and protected history until an adapter
+preserves and awaits the owning guard immediately before delivery.
+
+Original provider provenance getters keep their meaning. Optional effect attempt
+and generation getters are minted from the actual executing SDK lease, after
+human approval consumption when required. They remain separate from the current
+disclosure lease. Absent fields preserve old serialization and fingerprints;
+deserialized fields never prove authority. Protected result admission compares
+the complete actual effect fence, without stripping it during capture/reopening.
 
 Apply owned AI schema module 0.72.0 before runtime admission. It adds nullable
 `protected_result_source` to tool calls and an internal source-address table;

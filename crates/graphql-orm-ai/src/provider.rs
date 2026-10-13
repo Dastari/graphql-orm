@@ -3394,6 +3394,15 @@ pub trait AiProvider: Send + Sync {
     /// Adapter/model capabilities used before routing.
     fn capabilities(&self) -> ProviderCapabilities;
 
+    /// Whether this adapter revalidates protected tool sources after queueing and immediately
+    /// before every actual text/image delivery. The default refuses declared Restricted/media
+    /// effects and protected retained history; ordinary text is unchanged. Returning true must
+    /// include both `ProviderDynamicToolResponder::authorize_delivery` and the owning request
+    /// context's current source guard, preserved across any host process queue.
+    fn supports_tool_result_source_delivery(&self) -> bool {
+        false
+    }
+
     /// Whether this adapter has a reviewed typed image tool-result transport. The compatibility
     /// default denies media-required effects before application execution; JSON references are
     /// never treated as image content.

@@ -2270,6 +2270,9 @@ impl OrmAiApplicationToolCallService {
             }
         }
 
+        let provenance = provenance
+            .map(|origin| origin.with_effect_execution(lease))
+            .transpose()?;
         let execution =
             tokio::time::timeout(self.limits.maximum_execution_time.unsigned_abs(), async {
                 if generated_query {
@@ -3773,6 +3776,9 @@ impl OrmAiConsequentialToolCallService {
             .consume_approval(lease, approval_id, &binding, &preview)
             .await?;
         let (approval, running_lease) = consumed.into_parts();
+        let provenance = provenance
+            .map(|origin| origin.with_effect_execution(&running_lease))
+            .transpose()?;
         let retained_origin = provenance
             .clone()
             .map(|origin| {
@@ -3892,34 +3898,59 @@ impl OrmAiConsequentialToolCallService {
             && (descriptor.result_media.is_some()
                 || classification >= DataClassification::Restricted)
         {
-            let origin = retained_origin.as_ref().ok_or(AiError::Forbidden)?;
-            Some(
-                Box::pin(self.application_tools.retain_disclosure_source(
-                    &running_lease,
-                    &descriptor,
-                    origin,
-                    &context,
-                    &policy,
-                    &model_output,
-                    &disclosure_schema_fingerprint,
-                    classification,
-                    source_trust,
-                ))
-                .await?,
-            )
+            let Some(origin) = retained_origin.as_ref() else {
+                return self
+                    .mark_consequential_recovery(&running_lease, tool_call_id, provider_response_id)
+                    .await;
+            };
+            let retained = Box::pin(self.application_tools.retain_disclosure_source(
+                &running_lease,
+                &descriptor,
+                origin,
+                &context,
+                &policy,
+                &model_output,
+                &disclosure_schema_fingerprint,
+                classification,
+                source_trust,
+            ))
+            .await;
+            match retained {
+                Ok(retained) => Some(retained),
+                Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id,
+                        )
+                        .await;
+                }
+            }
         } else {
             None
         };
         let retained_context = if retained.is_some() {
-            Some(
-                self.application_tools
-                    .reopen_tool_result_source(
-                        &running_lease,
-                        tool_call_id,
-                        crate::AiToolResultDisclosurePurpose::ToolResult,
-                    )
-                    .await?,
-            )
+            let reopened = self
+                .application_tools
+                .reopen_tool_result_source(
+                    &running_lease,
+                    tool_call_id,
+                    crate::AiToolResultDisclosurePurpose::ToolResult,
+                )
+                .await;
+            match reopened {
+                Ok(context) => Some(context),
+                Err(_) => {
+                    return self
+                        .mark_consequential_recovery(
+                            &running_lease,
+                            tool_call_id,
+                            provider_response_id,
+                        )
+                        .await;
+                }
+            }
         } else {
             None
         };

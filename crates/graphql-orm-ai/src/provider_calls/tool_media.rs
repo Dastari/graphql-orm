@@ -129,6 +129,17 @@ impl AiProviderCallExecutor {
         plan.request.tools.clear();
         plan.request.builtin_tools.clear();
         plan.request.maximum_builtin_tool_calls = None;
+        if !plan
+            .request
+            .input
+            .iter()
+            .any(|input| matches!(input, ModelInputBlock::Attachment { .. }))
+        {
+            // No offered tools or image input remain. Quote zero image units so withheld
+            // historical media cannot strand an otherwise ordinary text turn at a zero quota.
+            // Ordinary retained attachments keep their original conservative quote and verifier.
+            plan.budget.estimate.image_units = 0;
+        }
         plan.tool_rule_bindings.clear();
         plan.classified_native = false;
         plan.transfers.retain(|manifest| {
@@ -164,8 +175,8 @@ impl AiProviderCallExecutor {
             "withheld:{}",
             crate::tools::canonical_json_digest(&idempotency)
         );
-        // Original estimate/counters are preserved as an upper bound; no budget or general
-        // source boundary is widened by removing unavailable content or resetting context.
+        // Remaining ordinary estimates stay conservative; removing unavailable source media
+        // never widens any budget or general source boundary.
         Ok(plan)
     }
 }

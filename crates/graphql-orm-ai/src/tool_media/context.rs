@@ -85,6 +85,8 @@ impl AiToolResultDisclosureContext {
             || source.classification == DataClassification::Secret
             || source.effect_attempt_id.is_nil()
             || source.effect_lease_generation <= 0
+            || source.execution.effect_attempt_id() != Some(source.effect_attempt_id)
+            || source.execution.effect_lease_generation() != Some(source.effect_lease_generation)
             || source.execution.provider_session_binding_id().is_some()
                 != source.provider_cursor_fingerprint.is_some()
         {

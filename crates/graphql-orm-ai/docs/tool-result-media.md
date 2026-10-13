@@ -57,6 +57,14 @@ is captured from the owning admitted binding before effect admission, rather tha
 being relabelled from a later rebind. Images and original output are reopened
 under current protection, access and uncancelled run fences; no effect is rerun.
 
+`AiToolExecutionProvenance::attempt_id` and `lease_generation` name the original
+provider admission. Optional `effect_attempt_id` and `effect_lease_generation`
+are minted only by the owning SDK from the actual executing lease immediately
+before invocation, after approval consumption where required. They remain fixed
+in the captured and protected result, and must match the separate retained effect
+fence when reopened. Missing or deserialized claims grant no effect authority.
+Old absent-field serialization remains unchanged.
+
 Override `AiEgressPolicy::authorize_tool_sources` to check current grants and
 resource policy for ToolResult, ImageAnalysis and later ModelInference/history.
 Its default denies images and Restricted sources. A narrow
@@ -85,7 +93,12 @@ re-executes an effect.
 `AiProviderCallExecutor::with_tool_result_source_service` binds the owning source
 loader to the same runtime. Dynamic execution supplies the same owning service.
 Media-required tools fail adapter/policy/capacity preflight before effect
-admission. The existing atomic provider-turn reservation allocates image units
+admission. Adapters also default-deny source delivery for declared
+Restricted/media effects unless they implement the final current source guard;
+the reviewed Codex adapter preserves that guard through its process queue.
+No-effect native approval/control receipts contain no images and release their
+unused media allocation while retaining ordinary protected receipt admission.
+The existing atomic provider-turn reservation allocates image units
 before callbacks. Callbacks share one count and 16 MiB raw-byte ceiling. Unused
 static capacity is released only after a definite completed result; ambiguous
 provider delivery keeps the reservation uncertain. Settlement must include

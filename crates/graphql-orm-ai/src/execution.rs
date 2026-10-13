@@ -159,6 +159,10 @@ pub struct AiToolExecutionProvenance {
     tool_call_id: AiToolCallId,
     attempt_id: uuid::Uuid,
     lease_generation: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effect_attempt_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effect_lease_generation: Option<i64>,
     provider_kind: crate::ProviderKind,
     provider_model: String,
     provider_profile_id: String,
@@ -205,6 +209,36 @@ impl AiToolExecutionProvenance {
     /// Provider execution fencing generation.
     pub fn lease_generation(&self) -> i64 {
         self.lease_generation
+    }
+
+    /// Actual effect attempt minted by the owning SDK immediately before invocation. It may
+    /// differ from the originating provider attempt after human approval; absence proves no
+    /// current effect fence. Deserialization alone grants no authority.
+    pub const fn effect_attempt_id(&self) -> Option<uuid::Uuid> {
+        self.effect_attempt_id
+    }
+
+    /// Actual effect generation minted alongside its attempt, never renewed by disclosure.
+    pub const fn effect_lease_generation(&self) -> Option<i64> {
+        self.effect_lease_generation
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    pub(crate) fn with_effect_execution(
+        mut self,
+        lease: &crate::AiRunLease,
+    ) -> Result<Self, AiError> {
+        if self.run_id != lease.run_id()
+            || self.session_id != lease.session_id()
+            || lease.state() != crate::AiRunState::Running
+            || self.effect_attempt_id.is_some()
+            || self.effect_lease_generation.is_some()
+        {
+            return Err(AiError::Conflict);
+        }
+        self.effect_attempt_id = Some(lease.attempt_id());
+        self.effect_lease_generation = Some(lease.lease_generation());
+        Ok(self)
     }
 
     /// Actual provider family.
@@ -345,6 +379,8 @@ impl AiToolExecutionProvenance {
             tool_call_id: request.invocation.tool_call_id,
             attempt_id: lease.attempt_id(),
             lease_generation: lease.lease_generation(),
+            effect_attempt_id: None,
+            effect_lease_generation: None,
             provider_kind: provider.provider_kind().clone(),
             provider_model: provider.provider_model().to_owned(),
             provider_profile_id: provider
@@ -397,6 +433,8 @@ impl AiToolExecutionProvenance {
         original.approval_binding_hash = None;
         original.policy_version = None;
         original.authorization_state_digest = None;
+        original.effect_attempt_id = None;
+        original.effect_lease_generation = None;
         original
     }
 
