@@ -123,7 +123,7 @@ pub enum StorageError {
 }
 
 impl StorageError {
-    /// Returns whether retrying the failed operation may succeed.
+    /// Returns whether this failure permits retrying the operation.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
