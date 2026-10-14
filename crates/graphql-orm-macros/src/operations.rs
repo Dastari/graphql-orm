@@ -3705,7 +3705,7 @@ pub(crate) fn generate_graphql_operations(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
-                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 {
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::graphql_in_transaction(
                         ctx,
@@ -3720,7 +3720,7 @@ pub(crate) fn generate_graphql_operations(
 
                 let current_entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &input)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 if let Some(current_entity) = current_entity.as_ref() {
                     db.ensure_writable_row(
                         Some(ctx),
@@ -3742,7 +3742,7 @@ pub(crate) fn generate_graphql_operations(
                     .as_ref()
                     .map(#struct_name::__gom_capture_entity_state)
                     .transpose()
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let event_id = current_entity
                     .as_ref()
                     .map(|entity| #pk_id_for_entity)
@@ -3779,14 +3779,14 @@ pub(crate) fn generate_graphql_operations(
 
                 hook_ctx.execute(&sql, &bind_values)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let entity = #struct_name::__gom_fetch_by_upsert_on(&mut hook_ctx, &lookup_input)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after upsert"))?;
                 let after_state = Some(
                     #struct_name::__gom_capture_entity_state(&entity)
-                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                 );
 
                 hook_ctx.run_mutation_hook(
@@ -3806,11 +3806,11 @@ pub(crate) fn generate_graphql_operations(
 
                 #struct_name::__gom_queue_changed_event(&mut hook_ctx, action, Some(&entity))
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx
                     .commit_and_emit()
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 match action {
                     ::graphql_orm::graphql::orm::ChangeAction::Created => {
@@ -4614,7 +4614,7 @@ pub(crate) fn generate_graphql_operations(
                     let hits = query
                         .fetch_all_with_auth(auth_context.as_ref())
                         .await
-                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                     let mut visible_hits = Vec::new();
                     for hit in hits {
                         if db.can_read_row(
@@ -4670,7 +4670,7 @@ pub(crate) fn generate_graphql_operations(
                 let mut generic_conn = query
                     .fetch_connection_with_auth(auth_context.as_ref())
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 #relation_preload_search_list
 
@@ -4921,7 +4921,7 @@ pub(crate) fn generate_graphql_operations(
                         move |tx| Box::pin(async move { tx.insert::<#struct_name>(input).await.map_err(Into::into) }),
                     ).await {
                         Ok(entity) => Ok(#result_type { success: true, error: None, entity: Some(entity) }),
-                        Err(error) => Ok(#result_type { success: false, error: Some(error.to_string()), entity: None }),
+                        Err(error) => Ok(#result_type { success: false, error: Some(error.into_graphql_error().message), entity: None }),
                     }
                 }
             }
@@ -6630,7 +6630,7 @@ pub(crate) fn generate_graphql_operations(
                         let mut all_rows = base_query
                             .fetch_all_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         let mut visible_rows = Vec::new();
                         for row in all_rows.drain(..) {
@@ -6692,7 +6692,7 @@ pub(crate) fn generate_graphql_operations(
                     let mut generic_conn = query
                         .fetch_connection_with_auth(db, auth_context.as_ref())
                         .await
-                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                     #relation_preload_list
 
@@ -6735,7 +6735,7 @@ pub(crate) fn generate_graphql_operations(
                         .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
                         .fetch_one_with_auth(db, auth_context.as_ref())
                         .await
-                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                     if let Some(ref loaded) = entity {
                         if !db.can_read_row(
@@ -7029,7 +7029,7 @@ pub(crate) fn generate_graphql_operations(
                     let mut all_rows = base_query
                         .fetch_all_with_auth(db, auth_context.as_ref())
                         .await
-                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                     let mut visible_rows = Vec::new();
                     for row in all_rows.drain(..) {
@@ -7091,7 +7091,7 @@ pub(crate) fn generate_graphql_operations(
                 let mut generic_conn = query
                     .fetch_connection_with_auth(db, auth_context.as_ref())
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 #relation_preload_list
 
@@ -7134,7 +7134,7 @@ pub(crate) fn generate_graphql_operations(
                     .where_values(&#struct_name::__gom_key_where_clause(), #struct_name::__gom_key_values(&key))
                     .fetch_one_with_auth(db, auth_context.as_ref())
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 if let Some(ref loaded) = entity {
                     if !db.can_read_row(
@@ -7215,7 +7215,7 @@ pub(crate) fn generate_graphql_operations(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::Default,
                     auth_context.as_ref(),
-                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
@@ -7233,15 +7233,15 @@ pub(crate) fn generate_graphql_operations(
 
                 hook_ctx.execute(&sql, &bind_values)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 let entity = #struct_name::__gom_fetch_by_id_on(&mut hook_ctx, &created_pk)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after creation"))?;
                 let after_state = Some(
                     #struct_name::__gom_capture_entity_state(&entity)
-                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                 );
 
                 hook_ctx.run_mutation_hook(
@@ -7263,8 +7263,8 @@ pub(crate) fn generate_graphql_operations(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Created,
                     Some(&entity),
-                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-                hook_ctx.commit_and_emit().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 #notify_on_created
                 Ok(#result_type::ok(entity))
             }
@@ -7305,7 +7305,7 @@ pub(crate) fn generate_graphql_operations(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
-                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let current_entity = EntityQuery::<#struct_name, #backend_marker>::new()
                     .where_clause(
                         &format!("{} = {}", #struct_name::PRIMARY_KEY, #struct_name::__gom_placeholder(1)),
@@ -7313,7 +7313,7 @@ pub(crate) fn generate_graphql_operations(
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 if current_entity.is_none() {
                     return Ok(#result_type::err("Entity not found"));
@@ -7356,7 +7356,7 @@ pub(crate) fn generate_graphql_operations(
                     return Ok(#result_type::err("No fields to update"));
                 }
                 let before_state = #struct_name::__gom_capture_entity_state(&current_entity)
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
@@ -7389,13 +7389,13 @@ pub(crate) fn generate_graphql_operations(
                     Ok(r) if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&r) == 1 => {
                         let entity = #struct_name::__gom_fetch_by_id_on(&mut hook_ctx, &id)
                             .await
-                            .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         match entity {
                             Some(entity) => {
                                 let after_state = Some(
                                     #struct_name::__gom_capture_entity_state(&entity)
-                                        .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?
+                                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                                 );
 
                                 hook_ctx.run_mutation_hook(
@@ -7416,8 +7416,8 @@ pub(crate) fn generate_graphql_operations(
                                     &mut hook_ctx,
                                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                                     Some(&entity),
-                                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-                                hook_ctx.commit_and_emit().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                                hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                                 // Invoke optional post-mutation hook.
                                 #notify_on_updated
@@ -7428,7 +7428,7 @@ pub(crate) fn generate_graphql_operations(
                         }
                     }
                     Ok(_) => Err(::graphql_orm::async_graphql::Error::new("authorized update did not affect the exact locked row")),
-                    Err(e) => Ok(#result_type::err(e.to_string())),
+                    Err(e) => Ok(#result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
                 }
             }
 
@@ -7465,7 +7465,7 @@ pub(crate) fn generate_graphql_operations(
                     db,
                     ::graphql_orm::graphql::orm::TransactionMode::StateMachine,
                     auth_context.as_ref(),
-                ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 // Fetch entity before deletion for notification purposes
                 let entity = EntityQuery::<#struct_name, #backend_marker>::new()
@@ -7475,7 +7475,7 @@ pub(crate) fn generate_graphql_operations(
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
                     .await
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                 if entity.is_none() {
                     return Ok(#result_type::err("Entity not found"));
@@ -7489,7 +7489,7 @@ pub(crate) fn generate_graphql_operations(
                     &entity as &(dyn ::std::any::Any + Send + Sync),
                 ).await?;
                 let before_state = #struct_name::__gom_capture_entity_state(&entity)
-                    .map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.run_mutation_hook(
                     Some(ctx),
                     &::graphql_orm::graphql::orm::MutationEvent {
@@ -7532,8 +7532,8 @@ pub(crate) fn generate_graphql_operations(
                             &mut hook_ctx,
                             ::graphql_orm::graphql::orm::ChangeAction::Deleted,
                             Some(&entity),
-                        ).await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
-                        hook_ctx.commit_and_emit().await.map_err(|e| ::graphql_orm::async_graphql::Error::new(e.to_string()))?;
+                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                        hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         // Invoke optional post-mutation hook.
                         #notify_on_deleted
@@ -7545,7 +7545,7 @@ pub(crate) fn generate_graphql_operations(
                         })
                     },
                     Ok(_) => Err(::graphql_orm::async_graphql::Error::new("authorized delete did not affect the exact locked row")),
-                    Err(e) => Ok(#result_type::err(e.to_string())),
+                    Err(e) => Ok(#result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
                 }
             }
 
@@ -7586,7 +7586,7 @@ pub(crate) fn generate_graphql_operations(
 
                 match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), Some(ctx)).await {
                     Ok(affected_count) => Ok(#update_many_result_type::ok(affected_count)),
-                    Err(e) => Ok(#update_many_result_type::err(e.to_string())),
+                    Err(e) => Ok(#update_many_result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
                 }
             }
 
@@ -7625,7 +7625,7 @@ pub(crate) fn generate_graphql_operations(
 
                 match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), Some(ctx)).await {
                     Ok(deleted_count) => Ok(#delete_many_result_type::ok(deleted_count)),
-                    Err(e) => Ok(#delete_many_result_type::err(e.to_string())),
+                    Err(e) => Ok(#delete_many_result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
                 }
             }
         }
