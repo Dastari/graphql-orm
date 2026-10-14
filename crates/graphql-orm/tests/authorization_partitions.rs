@@ -245,6 +245,8 @@ mod sqlite_batch {
     #[graphql_entity(table = "partition_children", plural = "PartitionChildren")]
     struct Child {
         #[primary_key]
+        #[filterable(type = "string")]
+        #[sortable]
         id: String,
         parent_id: String,
     }
@@ -314,6 +316,8 @@ mod postgres_batch {
     )]
     struct Child {
         #[primary_key]
+        #[filterable(type = "string")]
+        #[sortable]
         id: String,
         parent_id: String,
     }
