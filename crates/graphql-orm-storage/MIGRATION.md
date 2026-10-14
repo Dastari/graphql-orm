@@ -27,6 +27,11 @@ Ordinary idempotent deletion with retries is insufficient when the key can be
 reused immediately. Native local deletion uses one filesystem removal, native
 S3 disables SDK operation retries, and native SMB never reopens the key after
 mutation may have applied. Ordinary `delete_blob` behavior is unchanged.
+SMB conditional creation also uses handle-only failure/cancellation cleanup.
+After the original handle closes, no fallback deletion reopens the shared key:
+a new owner may already have acquired it. Ambiguous cleanup/disarm can leave an
+orphan object requiring offline recovery instead of risking another writer's
+lock. Cleanup of unique temporary upload keys retains its previous behavior.
 A failure/cancellation leaves an unknown outcome; do not retry or reclaim until
 all writers and in-flight requests are quiesced and no handles remain.
 

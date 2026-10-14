@@ -62,6 +62,9 @@ Native local release issues one filesystem removal. Native S3 disables SDK
 operation retries for lock release. Native SMB never reopens the path after a
 possibly applied disposition/close. Ordinary blob deletion retains its existing
 provider behavior.
+SMB conditional-create failures and cancellation close only the original handle;
+there is no shared-key fallback cleanup after that handle closes. Ambiguous
+cleanup/disarm may leave an orphan lock until offline recovery.
 
 The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
 after updating the reviewed monorepo revision.
