@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-06
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---

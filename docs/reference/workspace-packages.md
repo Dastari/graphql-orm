@@ -3,7 +3,7 @@ title: Generated workspace package inventory
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-11
+last_reviewed: 2026-10-14
 review_by: 2026-11-01
 supersedes: []
 ---

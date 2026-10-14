@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---

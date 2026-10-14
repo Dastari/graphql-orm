@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-12
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
