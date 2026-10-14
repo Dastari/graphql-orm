@@ -280,3 +280,59 @@ impl BackupObjectIndex for MockObjectIndex {
         Ok(self.bytes.clone())
     }
 }
+
+#[tokio::test]
+async fn expired_holder_cannot_be_taken_over_or_release_a_new_owner() {
+    use graphql_orm_backup::RepositoryLock;
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+    let options = RepositoryLockOptions {
+        stale_after_seconds: -1,
+    };
+    let first = RepositoryLock::acquire(&repository, &options)
+        .await
+        .expect("first");
+    // Deterministically simulate a writer running beyond its former TTL.
+    repository
+        .put_blob("locks/repository.lock", Bytes::from_static(b"0"))
+        .await
+        .expect("age lock");
+    let (second, third) = tokio::join!(
+        RepositoryLock::acquire(&repository, &options),
+        RepositoryLock::acquire(&repository, &options),
+    );
+    assert!(matches!(second, Err(BackupError::RepositoryLocked { .. })));
+    assert!(matches!(third, Err(BackupError::RepositoryLocked { .. })));
+    assert_eq!(
+        repository
+            .get_blob("locks/repository.lock")
+            .await
+            .expect("lock intact"),
+        "0"
+    );
+    first.release().await.expect("owner releases");
+    let next = RepositoryLock::acquire(&repository, &options)
+        .await
+        .expect("next owner");
+    assert!(matches!(
+        RepositoryLock::acquire(&repository, &options).await,
+        Err(BackupError::RepositoryLocked { .. })
+    ));
+    next.release().await.expect("release next");
+}
+
+#[tokio::test]
+async fn dropped_holder_leaves_lock_for_offline_recovery() {
+    use graphql_orm_backup::RepositoryLock;
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+    let options = RepositoryLockOptions::default();
+    let holder = RepositoryLock::acquire(&repository, &options)
+        .await
+        .expect("holder");
+    drop(holder);
+    assert!(matches!(
+        RepositoryLock::acquire(&repository, &options).await,
+        Err(BackupError::RepositoryLocked { .. })
+    ));
+}

@@ -31,7 +31,7 @@ This crate is a reusable backup and restore companion for applications that use 
 
 ## Current Agent Handoff
 
-- Current crate version is `0.7.2`.
+- Current crate version is `0.8.0`.
 - The optional ORM adapter resolves `graphql-orm` 0.29.0 from the workspace.
   Internal packages use workspace path dependencies and the root `Cargo.lock`.
   Keep downstream applications on one reviewed monorepo revision so ORM,

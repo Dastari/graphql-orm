@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.8.0 - 2026-10-14
+
+- Fixed S-005 writer exclusion: existing locks never expire automatically,
+  preventing stale takeover from removing a running writer's lock.
+- Breaking: lock handles borrow their repository, are no longer cloneable or
+  comparable, and release through `release()` with no repository argument.
+- Custom repository conditional creation now fails closed unless an atomic
+  implementation is supplied. Built-in local, SMB and S3 creation is retained.
+- Documented coordinated upgrade and offline lock recovery in the migration
+  guide; snapshot formats and restore preflight are unchanged.
+
 ## 0.7.2 - 2026-08-31
 
 - Refreshed the package's maintained workspace handoff to the current ORM,
