@@ -45,6 +45,9 @@ for historical context.
 - Pin external CI/release actions to full revisions and restrict workflow tokens
   to read-only contents outside the publication job. No library API or migration
   change; all backend/provider validation lanes remain enabled.
+- Refresh compatible TLS/QUIC lockfile dependencies to address published
+  advisories. Dependency review remains required for unresolved transitive
+  packages; this maintenance changes no library API or data format.
 
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse
   typed key binding for bare-pool readback and related single-key lookups/updates,
