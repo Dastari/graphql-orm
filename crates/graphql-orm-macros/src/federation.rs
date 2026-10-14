@@ -445,7 +445,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                             auth_context: auth_context.clone(),
                         })
                         .await
-                        .map_err(::graphql_orm::graphql::errors::graphql_internal_error)?;
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
 
                     let mut entity = __gom_federation_loaded.flatten();
 

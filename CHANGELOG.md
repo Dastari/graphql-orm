@@ -17,8 +17,8 @@ for historical context.
 ## 0.44.1 (unreleased)
 
 - Route generated query, search, keyset, mutation and Federation backend failures
-  through the public error sanitizer. Relationship loader/fallback errors reuse
-  the shared internal-error boundary; SQL/schema/record diagnostics stay private.
+  through the public error sanitizer. Relationship/Federation loaders retain
+  safe public categories in a code-only String transport; SQL/schema/record diagnostics stay private.
 - Sanitize legacy update/delete/bulk mutation error payloads without changing
   their GraphQL shape. Preserve established safe SQLx public categories and
   log internal detail only through the existing opt-in server diagnostic path.

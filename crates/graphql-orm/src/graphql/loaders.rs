@@ -759,7 +759,7 @@ where
                 sample.auth_context.as_ref(),
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
 
             let mut total_counts: HashMap<RelationKey, i64> = parent_key_order
                 .iter()
@@ -770,14 +770,14 @@ where
                 let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
                 for index in 0..sample.fk_columns.len() {
                     let alias = relation_key_alias(index);
-                    let part =
-                        B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                    let part = B::try_get_string(&row, &alias)
+                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                     key_parts.push(part);
                 }
                 let parent_key =
                     RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
                 let total = B::try_get_i64(&row, "__gom_relation_total_count")
-                    .map_err(|error| error.to_string())?;
+                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                 total_counts.insert(parent_key, total);
             }
 
@@ -790,13 +790,14 @@ where
                 let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
                 for index in 0..sample.fk_columns.len() {
                     let alias = relation_key_alias(index);
-                    let part =
-                        B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                    let part = B::try_get_string(&row, &alias)
+                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                     key_parts.push(part);
                 }
                 let parent_key =
                     RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
-                let entity = T::from_row(&row).map_err(|error| error.to_string())?;
+                let entity =
+                    T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                 grouped_entities.entry(parent_key).or_default().push(entity);
             }
 
@@ -843,7 +844,7 @@ where
             sample.auth_context.as_ref(),
         )
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
 
         let mut grouped_entities: HashMap<RelationKey, Vec<T>> = parent_key_order
             .iter()
@@ -855,11 +856,13 @@ where
             let mut key_parts = Vec::with_capacity(sample.fk_columns.len());
             for index in 0..sample.fk_columns.len() {
                 let alias = relation_key_alias(index);
-                let part = B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                let part = B::try_get_string(&row, &alias)
+                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                 key_parts.push(part);
             }
             let parent_key = RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
-            let entity = T::from_row(&row).map_err(|error| error.to_string())?;
+            let entity =
+                T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
             grouped_entities.entry(parent_key).or_default().push(entity);
         }
 
@@ -957,14 +960,16 @@ where
 
             let rows = B::fetch_rows(db.pool(), &sql, &values)
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
 
             let mut grouped: HashMap<String, Vec<T>> =
                 keys.into_iter().map(|key| (key, Vec::new())).collect();
 
             for row in rows {
-                let key = T::batch_key_from_row(&row).map_err(|error| error.to_string())?;
-                let entity = T::from_row(&row).map_err(|error| error.to_string())?;
+                let key = T::batch_key_from_row(&row)
+                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+                let entity =
+                    T::from_row(&row).map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                 grouped.entry(key).or_default().push(entity);
             }
 
@@ -1238,18 +1243,19 @@ where
                     sample.auth_context.as_ref(),
                 )
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
 
                 let mut resolved: HashMap<RelationKey, T> = HashMap::new();
                 for row in rows {
                     let mut key_parts = Vec::with_capacity(sample.columns.len());
                     for index in 0..sample.columns.len() {
                         let alias = relation_key_alias(index);
-                        let part =
-                            B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
+                        let part = B::try_get_string(&row, &alias)
+                            .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                         key_parts.push(part);
                     }
-                    let entity = T::from_row(&row).map_err(|error| error.to_string())?;
+                    let entity = T::from_row(&row)
+                        .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
                     // A `@key` is validated to be unique, so a second row for the
                     // same representation cannot be distinguished; keep the first.
                     resolved

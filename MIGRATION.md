@@ -28,9 +28,11 @@ safe `INTERNAL_ERROR` classification.
 No data/schema/SDL migration is required. Internal details continue through the
 existing opt-in `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` server diagnostic path and are
 excluded from client extensions. Host-defined errors and deliberately mapped
-extensions remain host-owned. Low-level repository/loader errors remain internal
-values; applications exposing them through handwritten resolvers must use the
-public error mapping helpers rather than forwarding their Display text.
+extensions remain host-owned. Low-level repository errors remain internal values. Loader String failures now
+carry only a public category; handwritten loader consumers should use
+`graphql_error_from_loader`. Applications exposing repository errors through
+handwritten resolvers must use the public mapping instead of forwarding Display
+text. Unknown host loader failures are sanitized as `INTERNAL_ERROR`.
 
 ## 0.43.1 to 0.44.0: authorization and relation partition identities
 

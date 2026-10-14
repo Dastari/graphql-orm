@@ -349,6 +349,13 @@ fn timeout_connection_and_decode_diagnostics_do_not_enter_public_fields() {
         source: "password=synthetic-secret".into(),
     });
     let other = graphql_internal_error("loader SELECT sanitizer_private password=synthetic-secret");
+    let encoded = graphql_orm::graphql::errors::loader_error_from_sqlx(
+        graphql_orm::sqlx::Error::ColumnNotFound("sanitizer_private_column".into()),
+    );
+    assert_eq!(encoded, "graphql-orm-public:INTERNAL_ERROR");
+    let decoded = graphql_orm::graphql::errors::graphql_error_from_loader(encoded);
+    assert_eq!(decoded.message, "internal error");
+
     for error in [public, other] {
         assert_eq!(error.message, "internal error");
         assert!(!format!("{:?}", error.extensions).contains("synthetic-secret"));
@@ -366,16 +373,43 @@ async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() 
         .unwrap();
     let schema = schema_builder(Database::new(pool.clone())).finish();
     let lease = pool.acquire().await.unwrap();
-    let response = schema
-        .execute(request("{ sanitizerNode(id: \"a\") { id label } }"))
-        .await;
-    assert_code(&response, "SERVICE_UNAVAILABLE", "service unavailable");
+    let queries = [
+        "{ sanitizerNode(id: \"a\") { id label } }",
+        "{ sanitizerNodes { edges { node { id } } } }",
+        "{ _entities(representations: [{__typename: \"SanitizerNode\", id: \"a\"}]) { ... on SanitizerNode { id } } }",
+    ];
+    for query in queries {
+        let response = schema.execute(request(query)).await;
+        assert_code(&response, "SERVICE_UNAVAILABLE", "service unavailable");
+    }
     drop(lease);
     pool.close().await;
-    let response = schema
-        .execute(request("{ sanitizerNode(id: \"a\") { id label } }"))
-        .await;
-    assert_code(&response, "SERVICE_UNAVAILABLE", "service unavailable");
+    for query in queries {
+        let response = schema.execute(request(query)).await;
+        assert_code(&response, "SERVICE_UNAVAILABLE", "service unavailable");
+    }
+    for use_loader in [false, true] {
+        let db = Database::new(pool.clone());
+        let builder =
+            Schema::build(PreloadedQuery, EmptyMutation, EmptySubscription).data(db.clone());
+        let schema = if use_loader {
+            builder
+                .data(async_graphql::dataloader::DataLoader::new(
+                    RelationLoader::<SanitizerNode>::new(db),
+                    tokio::spawn,
+                ))
+                .finish()
+        } else {
+            builder.finish()
+        };
+        for query in [
+            "{ source { parent { id } } }",
+            "{ source { children { edges { node { id } } } } }",
+        ] {
+            let response = schema.execute(request(query)).await;
+            assert_code(&response, "SERVICE_UNAVAILABLE", "service unavailable");
+        }
+    }
 }
 
 #[tokio::test]

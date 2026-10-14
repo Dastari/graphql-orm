@@ -154,7 +154,8 @@ public error sanitizer. Top-level GraphQL errors expose a safe message and
 `extensions.code`; existing mutation payload `error` strings contain only the
 safe message. Backend SQL, schema and record diagnostics are not client fields.
 Handwritten resolvers exposing low-level repository/loader failures must use
-`graphql_error_from_sqlx` or `graphql_internal_error` from `graphql::errors`.
+`graphql_error_from_sqlx`, `graphql_error_from_loader`, or `graphql_internal_error`
+from `graphql::errors`.
 
 Do not treat entity
 descriptions, generated operation metadata, `auth = "required"`, or a tool
