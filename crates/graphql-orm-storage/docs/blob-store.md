@@ -93,6 +93,10 @@ path reopening after disposition/close; local uses one filesystem removal.
 Ordinary `delete_blob` can retain provider retry behavior. A lost response or
 cancellation leaves outcome unknown: do not retry by key, and establish that all
 writers, handles and in-flight requests are quiesced before offline recovery.
+Operation errors from this capability must report non-retryable. Native providers
+use `StorageError::SingleAttemptFailed` to preserve the cause in the error source
+chain; the backup adapter also suppresses erroneous custom-provider retry hints.
+A non-retryable flag does not mean that storage was unchanged.
 
 `copy_blob` may use provider-side copy and does not return a SHA-256 checksum.
 Callers can use `head_blob` after copying when they need backend metadata.

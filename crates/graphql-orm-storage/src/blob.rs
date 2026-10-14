@@ -288,8 +288,10 @@ pub trait BlobStore: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`StorageError::UnsupportedOperation`] unless the provider opts in,
-    /// or another [`StorageError`] on failure. Never retry an ambiguous failure.
+    /// Returns [`StorageError::UnsupportedOperation`] unless the provider opts in.
+    /// Operation failures must be non-retryable (for example,
+    /// [`StorageError::SingleAttemptFailed`]). This does not mean the operation
+    /// had no effect. Never retry an ambiguous failure.
     async fn delete_blob_once(&self, _key: &str) -> Result<(), StorageError> {
         Err(StorageError::UnsupportedOperation {
             operation: "single-attempt blob deletion".to_string(),

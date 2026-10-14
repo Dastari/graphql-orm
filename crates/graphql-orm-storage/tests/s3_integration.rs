@@ -197,7 +197,8 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
     .expect("bounded fixture execution");
     done.store(true, Ordering::SeqCst);
     server.join().expect("fixture thread");
-    release.expect_err("lost response must remain ambiguous, without retry");
+    let release_error = release.expect_err("lost response must remain ambiguous, without retry");
+    assert!(!release_error.is_retryable());
     assert!(replacement.expect("replacement create").is_some());
     assert_eq!(deletes.load(Ordering::SeqCst), 1);
     assert!(replacement_alive.load(Ordering::SeqCst));

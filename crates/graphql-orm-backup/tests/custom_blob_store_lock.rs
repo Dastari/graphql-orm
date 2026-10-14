@@ -89,3 +89,67 @@ async fn inherited_single_attempt_delete_fails_closed_through_backup_adapter() {
         .expect_err("adapter must not use ordinary delete");
     assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
 }
+
+struct RetryAdvertiser;
+
+#[async_trait]
+impl BlobStore for RetryAdvertiser {
+    fn backend(&self) -> StorageBackend {
+        StorageBackend::Local
+    }
+    async fn put_blob(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        options: BlobPutOptions,
+    ) -> Result<BlobWriteOutcome, StorageError> {
+        NoAtomicCreate.put_blob(key, body, options).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
+        NoAtomicCreate.get_blob(key).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, StorageError> {
+        NoAtomicCreate.blob_exists(key).await
+    }
+    async fn head_blob(&self, key: &str) -> Result<Option<BlobMetadata>, StorageError> {
+        NoAtomicCreate.head_blob(key).await
+    }
+    async fn list_blobs_page(
+        &self,
+        prefix: &str,
+        continuation: Option<String>,
+        limit: usize,
+    ) -> Result<BlobListPage, StorageError> {
+        NoAtomicCreate
+            .list_blobs_page(prefix, continuation, limit)
+            .await
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
+        NoAtomicCreate.delete_blob(key).await
+    }
+    async fn delete_blob_once(&self, _: &str) -> Result<(), StorageError> {
+        Err(StorageError::Provider {
+            backend: "owned fixture".to_string(),
+            message: "ambiguous deletion".to_string(),
+            retryable: true,
+        })
+    }
+}
+
+#[tokio::test]
+async fn adapter_suppresses_incorrect_custom_provider_retry_hint_for_once_delete() {
+    use graphql_orm_backup::BackupRepository;
+    let repository = BlobStoreBackupRepository::new(Arc::new(RetryAdvertiser));
+    let error = repository
+        .delete_blob_once("locks/repository.lock")
+        .await
+        .expect_err("ambiguous result");
+    let BackupError::Storage { source } = error else {
+        panic!("preserve the storage error source");
+    };
+    assert!(!source.is_retryable());
+    let StorageError::SingleAttemptFailed { source } = source else {
+        panic!("single-attempt failure classification");
+    };
+    assert!(source.is_retryable(), "original cause remains available");
+}

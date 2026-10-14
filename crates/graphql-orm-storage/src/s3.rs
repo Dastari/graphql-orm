@@ -321,7 +321,7 @@ impl BlobStore for S3StorageBackend {
             .config_override(S3ConfigBuilder::new().retry_config(RetryConfig::disabled()))
             .send()
             .await
-            .map_err(map_s3_error)?;
+            .map_err(|error| StorageError::single_attempt(map_s3_error(error)))?;
         Ok(())
     }
 

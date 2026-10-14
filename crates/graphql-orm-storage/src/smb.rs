@@ -1839,9 +1839,9 @@ where
     let handle = match open.await {
         Ok(handle) => handle,
         Err(error) if is_not_found(&error) => return Ok(()),
-        Err(error) => return Err(error),
+        Err(error) => return Err(StorageError::single_attempt(error)),
     };
-    dispose(handle).await
+    dispose(handle).await.map_err(StorageError::single_attempt)
 }
 
 async fn connect_client(
@@ -2476,7 +2476,12 @@ mod tests {
             },
         )
         .await;
-        assert!(result.expect_err("ambiguous failure").is_retryable());
+        let error = result.expect_err("ambiguous failure");
+        assert!(!error.is_retryable());
+        let StorageError::SingleAttemptFailed { source } = error else {
+            panic!("original failure must be preserved as a source");
+        };
+        assert!(source.is_retryable());
         assert_eq!(opens.load(Ordering::SeqCst), 1);
         assert!(replacement_alive.load(Ordering::SeqCst));
     }

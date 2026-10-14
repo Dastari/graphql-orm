@@ -194,8 +194,21 @@ impl std::fmt::Debug for BlobStoreBackupRepository {
 #[async_trait]
 impl BackupRepository for BlobStoreBackupRepository {
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
-        self.store.delete_blob_once(&self.apply_prefix(key)).await?;
-        Ok(())
+        self.store
+            .delete_blob_once(&self.apply_prefix(key))
+            .await
+            .map_err(|source| {
+                // A custom provider may incorrectly advertise retryability. Never
+                // propagate that hint through the lock-release adapter.
+                let source = if source.is_retryable() {
+                    graphql_orm_storage::StorageError::SingleAttemptFailed {
+                        source: Box::new(source),
+                    }
+                } else {
+                    source
+                };
+                BackupError::from(source)
+            })
     }
 
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {

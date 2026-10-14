@@ -109,7 +109,9 @@ impl LocalStorageBackend {
 impl BlobStore for LocalStorageBackend {
     async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {
         // One filesystem removal, with no retry or background path replay.
-        self.delete_blob(key).await
+        self.delete_blob(key)
+            .await
+            .map_err(StorageError::single_attempt)
     }
 
     fn backend(&self) -> StorageBackend {

@@ -40,6 +40,19 @@ Provider configuration, storage keys and stored data are unchanged. No data
 migration is required. Update all selected workspace packages to one reviewed
 revision and regenerate `Cargo.lock`.
 
+
+### Single-attempt error classification
+
+`StorageError::SingleAttemptFailed` preserves the underlying failure in its
+source chain and always reports `is_retryable() == false`. Update exhaustive
+storage error matches for this added variant as well as `UnsupportedOperation`.
+Native single-attempt deletion and the backup adapter never advertise retrying
+by key, even when the underlying ordinary I/O/provider failure was retryable.
+Non-retryable here does **not** mean the operation had no effect: a request can
+have succeeded remotely while its response was lost. Establish quiescence
+before offline recovery; never infer that the lock is safe to reclaim from this
+flag. Ordinary deletion retains its prior error taxonomy.
+
 ## 0.6.1 to 0.6.2
 
 Version 0.6.2 refreshes maintained workspace guidance and establishes a new
