@@ -191,6 +191,15 @@ fn set_order_and_json_object_order_preserve_equivalent_partitions() {
 
 #[test]
 fn sql_relation_keys_preserve_binary_type_null_and_component_boundaries() {
+    let uuid = graphql_orm::uuid::Uuid::parse_str("abcdef12-3456-789a-bcde-0123456789ab").unwrap();
+    assert_eq!(
+        RelationKey::from_sql_values(&[SqlValue::Uuid(uuid)]),
+        RelationKey::from_projected_parts(
+            vec![uuid.to_string().to_uppercase()],
+            &[RelationKeyPartKind::Uuid]
+        )
+    );
+
     let values = vec![
         SqlValue::Bytes(vec![0xff]),
         SqlValue::Bytes(vec![0xfe]),

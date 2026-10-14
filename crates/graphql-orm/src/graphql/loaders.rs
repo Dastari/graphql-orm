@@ -85,8 +85,18 @@ impl RelationKey {
     /// # Panics
     ///
     /// Panics when the number of parts and declared kinds differs.
-    pub fn from_projected_parts(parts: Vec<String>, kinds: &[RelationKeyPartKind]) -> Self {
+    pub fn from_projected_parts(mut parts: Vec<String>, kinds: &[RelationKeyPartKind]) -> Self {
         assert_eq!(parts.len(), kinds.len(), "relation key type arity mismatch");
+        // SQL Server may render UUID text with a different case than Rust.
+        // Normalize the declared UUID domain, keeping ordinary strings exact.
+        for (part, kind) in parts.iter_mut().zip(kinds) {
+            if *kind == RelationKeyPartKind::Uuid
+                && let Ok(uuid) = uuid::Uuid::parse_str(part)
+            {
+                *part = uuid.to_string();
+            }
+        }
+
         let types = kinds
             .iter()
             .map(|kind| {
