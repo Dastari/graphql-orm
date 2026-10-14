@@ -88,6 +88,9 @@ impl BackupError {
 impl From<graphql_orm_storage::StorageError> for BackupError {
     fn from(source: graphql_orm_storage::StorageError) -> Self {
         match source {
+            graphql_orm_storage::StorageError::UnsupportedOperation { operation } => {
+                Self::UnsupportedOperation { operation }
+            }
             graphql_orm_storage::StorageError::UnsupportedBackend { backend } => {
                 Self::UnsupportedProvider { provider: backend }
             }

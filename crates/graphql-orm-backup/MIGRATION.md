@@ -40,8 +40,13 @@ its streaming default delegates to that fail-closed method. An existence check
 followed by a write does not satisfy this contract. Local, SMB and S3 adapters
 retain their native atomic conditional creation.
 
-The snapshot format, repository layout, storage dependency and restore preflight
-are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
+Storage advances independently to 0.7.0 so custom `BlobStore` providers also
+fail closed when inheriting conditional creation. Override that method atomically
+when using `BlobStoreBackupRepository`; backup maps its unsupported-operation
+error to `BackupError::UnsupportedOperation`. Update exhaustive storage error
+matches for the new variant.
+
+The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
 after updating the reviewed monorepo revision.
 
 ## 0.7.1 to 0.7.2

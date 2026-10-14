@@ -31,8 +31,8 @@ This crate is a reusable storage companion for applications that use `graphql-or
 
 ## Current Agent Handoff
 
-- Current crate version is `0.6.2`.
-- The workspace resolves `graphql-orm` 0.29.0 and `graphql-orm-backup` 0.7.2
+- Current crate version is `0.7.0`.
+- The workspace resolves `graphql-orm` 0.29.0 and `graphql-orm-backup` 0.8.0
   through workspace path dependencies and one root `Cargo.lock`. Keep
   downstream companion packages on one reviewed monorepo revision.
 - `graphql-orm` owns the optional `agql-auth` integration, pinned at

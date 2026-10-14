@@ -162,7 +162,11 @@ pub trait BlobStore: Send + Sync {
         options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError>;
 
-    /// Writes a blob only when the destination key does not exist.
+    /// Atomically writes a blob only when the destination key does not exist.
+    ///
+    /// Implementations must preserve create-if-absent across all writers.
+    /// Existence checks followed by writes do not satisfy this contract.
+    /// The default fails closed without provider I/O.
     ///
     /// # Errors
     ///
@@ -170,15 +174,13 @@ pub trait BlobStore: Send + Sync {
     /// conditionally write the blob.
     async fn put_blob_if_not_exists(
         &self,
-        key: &str,
-        body: StorageByteStream,
-        options: BlobPutOptions,
+        _key: &str,
+        _body: StorageByteStream,
+        _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        if self.blob_exists(key).await? {
-            return Ok(None);
-        }
-
-        self.put_blob(key, body, options).await.map(Some)
+        Err(StorageError::UnsupportedOperation {
+            operation: "atomic conditional blob write".to_string(),
+        })
     }
 
     /// Loads a blob stream.

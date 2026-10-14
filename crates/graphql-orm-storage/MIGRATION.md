@@ -10,6 +10,25 @@ supersedes: []
 
 # Migration Guide
 
+## 0.6.2 to 0.7.0: atomic conditional creation
+
+This is a breaking pre-1.0 release. Custom `BlobStore` providers must override
+`put_blob_if_not_exists` with an atomic create-if-absent operation across all
+writers. The default now returns the new non-retryable
+`StorageError::UnsupportedOperation` without provider I/O. Update exhaustive
+matches on `StorageError` for the added variant. An existence check followed by
+a write does not meet the conditional-create contract.
+
+Local, SMB and S3 retain their native atomic overrides. The Azure placeholder
+continues to report unsupported backend. `graphql-orm-backup` 0.8.0 uses this
+contract for fail-closed writer locks; custom providers inheriting the default
+can no longer create an unsafe lock through the adapter. Follow backup's
+migration guide for coordinated upgrades and offline lock recovery.
+
+Provider configuration, storage keys and stored data are unchanged. No data
+migration is required. Update all selected workspace packages to one reviewed
+revision and regenerate `Cargo.lock`.
+
 ## 0.6.1 to 0.6.2
 
 Version 0.6.2 refreshes maintained workspace guidance and establishes a new

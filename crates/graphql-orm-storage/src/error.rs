@@ -31,6 +31,13 @@ pub enum StorageProviderErrorKind {
 /// Errors returned by storage services and provider backends.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    /// The provider does not implement the required operation safely.
+    #[error("unsupported storage operation: {operation}")]
+    UnsupportedOperation {
+        /// Operation that requires an explicit provider implementation.
+        operation: String,
+    },
+
     /// The selected provider is known but is not implemented by this build.
     #[error("unsupported storage backend: {backend}")]
     UnsupportedBackend {
@@ -113,7 +120,8 @@ impl StorageError {
             Self::Provider { retryable, .. } => *retryable,
             Self::RemoteProvider { retryable, .. } => *retryable,
             Self::Io { .. } => true,
-            Self::UnsupportedBackend { .. }
+            Self::UnsupportedOperation { .. }
+            | Self::UnsupportedBackend { .. }
             | Self::InvalidStorageKey { .. }
             | Self::MissingBlob { .. }
             | Self::PreconditionFailed { .. }

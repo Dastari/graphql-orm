@@ -78,7 +78,10 @@ pub trait BlobStore: Send + Sync {
 Provider implementations should make `list_blobs_page` the native listing path.
 
 `put_blob_if_not_exists` returns `Ok(None)` when the target key already exists.
-It is the race-safe primitive for content-addressed deduplication.
+Implementations must make this operation atomic across all writers. The default
+returns non-retryable `StorageError::UnsupportedOperation` without provider I/O;
+custom providers must override it using a native atomic primitive. A separate
+existence check followed by a write is unsafe for deduplication and backup locks.
 
 `copy_blob` may use provider-side copy and does not return a SHA-256 checksum.
 Callers can use `head_blob` after copying when they need backend metadata.
