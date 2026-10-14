@@ -327,10 +327,11 @@ async fn dropped_holder_leaves_lock_for_offline_recovery() {
     let temp = TempDir::new().expect("temp dir");
     let repository = LocalBackupRepository::new(temp.path());
     let options = RepositoryLockOptions::default();
-    let holder = RepositoryLock::acquire(&repository, &options)
-        .await
-        .expect("holder");
-    drop(holder);
+    {
+        let _holder = RepositoryLock::acquire(&repository, &options)
+            .await
+            .expect("holder");
+    }
     assert!(matches!(
         RepositoryLock::acquire(&repository, &options).await,
         Err(BackupError::RepositoryLocked { .. })
