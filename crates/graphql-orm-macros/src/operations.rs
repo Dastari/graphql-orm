@@ -4921,7 +4921,7 @@ pub(crate) fn generate_graphql_operations(
                         move |tx| Box::pin(async move { tx.insert::<#struct_name>(input).await.map_err(Into::into) }),
                     ).await {
                         Ok(entity) => Ok(#result_type { success: true, error: None, entity: Some(entity) }),
-                        Err(error) => Ok(#result_type { success: false, error: Some(error.into_graphql_error().message), entity: None }),
+                        Err(error) => Ok(#result_type { success: false, error: Some(error.to_string()), entity: None }),
                     }
                 }
             }
