@@ -305,16 +305,16 @@ async fn constraint_failures_sanitize_top_level_and_legacy_mutation_payloads()
             "updateSanitizerNode",
         ),
         (
-            "mutation { updateManySanitizerNodes(where: {id: {eq: \"a\"}}, input: {label: \"beta\"}) { success error affectedCount } }",
-            "updateManySanitizerNodes",
+            "mutation { updateSanitizerNodes(where: {id: {eq: \"a\"}}, input: {label: \"beta\"}) { success error affectedCount } }",
+            "updateSanitizerNodes",
         ),
         (
             "mutation { deleteSanitizerNode(id: \"a\") { success error } }",
             "deleteSanitizerNode",
         ),
         (
-            "mutation { deleteManySanitizerNodes(where: {id: {eq: \"a\"}}) { success error deletedCount } }",
-            "deleteManySanitizerNodes",
+            "mutation { deleteSanitizerNodes(where: {id: {eq: \"a\"}}) { success error deletedCount } }",
+            "deleteSanitizerNodes",
         ),
     ] {
         let response = schema.execute(request(query)).await;
