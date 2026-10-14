@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-12
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,10 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## 0.43.1 (unreleased)
+
+- Refresh compatible TLS/QUIC lockfile dependencies to address published
+  advisories. Dependency review remains required for unresolved transitive
+  packages; this maintenance changes no library API or data format.
 
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse
   typed key binding for bare-pool readback and related single-key lookups/updates,

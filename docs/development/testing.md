@@ -64,6 +64,25 @@ cargo test -p graphql-orm-router --features auth-agql
 Run package-local tests and their required feature matrices whenever a change
 crosses the package boundary.
 
+## Dependency security review
+
+Run `cargo audit --json` against the committed root lockfile and retain the
+advisory database revision and output with verification evidence. A nonzero
+result requires triage; it must not be silently converted into a successful
+security check. Inspect vulnerability, unsoundness, unmaintained and yanked
+reports, and check each selected backend/provider graph with `cargo tree
+--locked -p <package> --no-default-features --features <lane> -i <dependency>`.
+An optional dependency in the lockfile is not proof of runtime reachability.
+
+Prefer compatible patched dependencies and removal of unused legacy features.
+For unresolved advisories, record the affected path, exposure conditions,
+mitigation, owner and next review date. Recheck those decisions when features
+or upstream adapters change. Do not use blanket advisory ignores or substitute
+a passing build for security review. Use the
+[RustSec advisory database](https://rustsec.org/advisories/) as the source of
+affected and patched ranges; keep version inventories generated from Cargo
+metadata instead of maintaining a second dependency list here.
+
 Provider implementations are separate feature lanes. Run them locally one at
 a time so an accidental dependency on another provider feature cannot make a
 lane pass:
