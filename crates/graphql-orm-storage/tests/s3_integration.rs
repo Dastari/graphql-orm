@@ -152,7 +152,16 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
             assert!(content_length < 65_536, "bounded fixture body");
             let mut body = vec![0; content_length];
             stream.read_exact(&mut body).expect("request body");
-            if headers.starts_with("DELETE /fixture/locks/repository.lock ") {
+            let request_line = headers.lines().next().expect("request line");
+            let mut request_parts = request_line.split_whitespace();
+            let method = request_parts.next().expect("method");
+            let path = request_parts
+                .next()
+                .expect("target")
+                .split('?')
+                .next()
+                .expect("path");
+            if method == "DELETE" && path == "/fixture/locks/repository.lock" {
                 let attempt = server_deletes.fetch_add(1, Ordering::SeqCst);
                 // The server applies the deletion, but the first response is lost.
                 server_replacement.store(false, Ordering::SeqCst);
@@ -161,12 +170,12 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
                     continue;
                 }
                 stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("delete response");
-            } else if headers.starts_with("PUT /fixture/locks/repository.lock ") {
+            } else if method == "PUT" && path == "/fixture/locks/repository.lock" {
                 assert!(headers.to_ascii_lowercase().contains("if-none-match: *"));
                 server_replacement.store(true, Ordering::SeqCst);
                 stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"replacement\"\r\nConnection: close\r\n\r\n").expect("create response");
             } else {
-                panic!("unexpected request method/path");
+                panic!("unexpected request method/path: {method} {path}");
             }
         }
     });
