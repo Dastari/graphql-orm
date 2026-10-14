@@ -19,7 +19,18 @@ writers. The default now returns the new non-retryable
 matches on `StorageError` for the added variant. An existence check followed by
 a write does not meet the conditional-create contract.
 
-Local, SMB and S3 retain their native atomic overrides. The Azure placeholder
+The new `BlobStore::delete_blob_once` capability also defaults to
+`UnsupportedOperation` without I/O. Custom providers used for backup locks must
+explicitly implement it without replaying deletion by key after the server may
+have applied the mutation, including after cancellation or a lost response.
+Ordinary idempotent deletion with retries is insufficient when the key can be
+reused immediately. Native local deletion uses one filesystem removal, native
+S3 disables SDK operation retries, and native SMB never reopens the key after
+mutation may have applied. Ordinary `delete_blob` behavior is unchanged.
+A failure/cancellation leaves an unknown outcome; do not retry or reclaim until
+all writers and in-flight requests are quiesced and no handles remain.
+
+Local, SMB and S3 retain their native atomic creation overrides. The Azure placeholder
 continues to report unsupported backend. `graphql-orm-backup` 0.8.0 uses this
 contract for fail-closed writer locks; custom providers inheriting the default
 can no longer create an unsafe lock through the adapter. Follow backup's

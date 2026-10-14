@@ -64,3 +64,8 @@ This crate is a reusable storage companion for applications that use `graphql-or
   `docs/native-smb.md`, and `MIGRATION.md` before making provider or
   backup-facing changes. Historical agent handoffs are archived outside this
   crate and are not current guidance.
+
+- Lock release requires explicit single-attempt deletion through
+  `delete_blob_once`; never fall back to retrying ordinary deletion after a
+  mutation may have reached the server. Ambiguous outcomes require quiescing
+  all writers, handles and in-flight requests before offline recovery.

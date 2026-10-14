@@ -145,3 +145,12 @@ multi-gigabyte object, interrupt one transfer, and race two lock acquisitions:
 
 Record dialect, security mode, filesystem, reconnect behavior, and flush/rename
 limitations without recording usernames or secrets.
+
+## Lock release
+
+Backup lock release uses `BlobStore::delete_blob_once`: the handle is opened,
+disposition is attempted and the same handle is closed, without reopening the
+path after either mutation step may have succeeded. Ordinary blob deletion
+retains its reconnect/retry behavior. A timeout or lost response during lock
+release leaves its outcome unknown; do not retry deletion by key. Offline lock
+recovery requires quiescing all writers, handles and in-flight requests.

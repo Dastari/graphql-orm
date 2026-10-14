@@ -99,3 +99,106 @@ fn backend_from_env() -> Option<S3StorageBackend> {
         path_style,
     }))
 }
+
+#[tokio::test]
+async fn single_attempt_delete_does_not_replay_after_lost_response_and_replacement() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("owned loopback listener");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let deletes = Arc::new(AtomicUsize::new(0));
+    let replacement_alive = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let server_deletes = Arc::clone(&deletes);
+    let server_replacement = Arc::clone(&replacement_alive);
+    let server_done = Arc::clone(&done);
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !server_done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(error) => panic!("accept: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).expect("request headers");
+                request.push(byte[0]);
+                assert!(request.len() < 32_768, "bounded headers");
+            }
+            let headers = String::from_utf8(request).expect("HTTP headers");
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value.trim().parse::<usize>().expect("content length"))
+                .unwrap_or(0);
+            assert!(content_length < 65_536, "bounded fixture body");
+            let mut body = vec![0; content_length];
+            stream.read_exact(&mut body).expect("request body");
+            if headers.starts_with("DELETE /fixture/locks/repository.lock ") {
+                let attempt = server_deletes.fetch_add(1, Ordering::SeqCst);
+                // The server applies the deletion, but the first response is lost.
+                server_replacement.store(false, Ordering::SeqCst);
+                if attempt == 0 {
+                    drop(stream);
+                    continue;
+                }
+                stream.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("delete response");
+            } else if headers.starts_with("PUT /fixture/locks/repository.lock ") {
+                assert!(headers.to_ascii_lowercase().contains("if-none-match: *"));
+                server_replacement.store(true, Ordering::SeqCst);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nETag: \"replacement\"\r\nConnection: close\r\n\r\n").expect("create response");
+            } else {
+                panic!("unexpected request method/path");
+            }
+        }
+    });
+    let backend = S3StorageBackend::new(S3StorageConfig {
+        endpoint_url: endpoint,
+        region: "us-east-1".to_string(),
+        bucket: "fixture".to_string(),
+        key_prefix: None,
+        access_key_id: "owned-fixture".to_string(),
+        secret_access_key: "owned-fixture-secret".to_string(),
+        path_style: true,
+    });
+    let (release, replacement) = tokio::time::timeout(Duration::from_secs(12), async {
+        tokio::join!(backend.delete_blob_once("locks/repository.lock"), async {
+            while deletes.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            backend
+                .put_blob_if_not_exists(
+                    "locks/repository.lock",
+                    StorageByteStream::from_bytes(Bytes::from_static(b"new-owner")),
+                    BlobPutOptions::default(),
+                )
+                .await
+        })
+    })
+    .await
+    .expect("bounded fixture execution");
+    done.store(true, Ordering::SeqCst);
+    server.join().expect("fixture thread");
+    release.expect_err("lost response must remain ambiguous, without retry");
+    assert!(replacement.expect("replacement create").is_some());
+    assert_eq!(deletes.load(Ordering::SeqCst), 1);
+    assert!(replacement_alive.load(Ordering::SeqCst));
+}

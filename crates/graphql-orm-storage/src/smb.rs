@@ -1068,6 +1068,25 @@ impl SmbStorageBackend {
         combined
     }
 
+    async fn remove_file_once(&self, key: &str) -> Result<(), StorageError> {
+        remove_file_without_replay(
+            self.open_file(key, FileAccessMask::new().with_delete(true)),
+            |file| async move {
+                let result = self
+                    .with_timeout(
+                        "delete",
+                        file.set_info(FileDispositionInformation::default()),
+                    )
+                    .await;
+                let close_result = self.with_timeout("close", file.close()).await;
+                // Never reconnect and reopen this path after disposition or
+                // close may have deleted it. The key may already have a new owner.
+                result.and(close_result)
+            },
+        )
+        .await
+    }
+
     async fn remove_file(&self, key: &str) -> Result<(), StorageError> {
         for attempt in 0..2 {
             let file = match self
@@ -1544,6 +1563,11 @@ fn write_create_args(exclusive: bool) -> FileCreateArgs {
 
 #[async_trait]
 impl BlobStore for SmbStorageBackend {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {
+        validate_blob_key(key)?;
+        self.remove_file_once(key).await
+    }
+
     fn backend(&self) -> StorageBackend {
         StorageBackend::Smb
     }
@@ -1802,6 +1826,22 @@ impl BlobStore for SmbStorageBackend {
         validate_blob_key(key)?;
         self.remove_file(key).await
     }
+}
+
+async fn remove_file_without_replay<H, O, D, F>(open: O, dispose: D) -> Result<(), StorageError>
+where
+    O: std::future::Future<Output = Result<H, StorageError>>,
+    D: FnOnce(H) -> F,
+    F: std::future::Future<Output = Result<(), StorageError>>,
+{
+    // A future and FnOnce encode a single open/dispose attempt. An ambiguous
+    // mutation error is returned directly, never followed by a new path open.
+    let handle = match open.await {
+        Ok(handle) => handle,
+        Err(error) if is_not_found(&error) => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    dispose(handle).await
 }
 
 async fn connect_client(
@@ -2413,5 +2453,31 @@ mod tests {
         }
         assert_eq!(remote_creates.load(Ordering::Relaxed), 1);
         assert_eq!(cache.len().await, 1);
+    }
+    #[tokio::test]
+    async fn single_attempt_delete_never_reopens_after_ambiguous_disposition() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let opens = AtomicUsize::new(0);
+        let replacement_alive = std::sync::atomic::AtomicBool::new(false);
+        let result = remove_file_without_replay(
+            async {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |()| async {
+                // Disposition deleted the old object and another writer acquired.
+                replacement_alive.store(true, Ordering::SeqCst);
+                Err(remote_error(
+                    StorageProviderErrorKind::Timeout,
+                    "close",
+                    "response lost after disposition",
+                    true,
+                ))
+            },
+        )
+        .await;
+        assert!(result.expect_err("ambiguous failure").is_retryable());
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert!(replacement_alive.load(Ordering::SeqCst));
     }
 }

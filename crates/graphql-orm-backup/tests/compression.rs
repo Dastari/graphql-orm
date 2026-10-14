@@ -23,6 +23,10 @@ mod support {
 
     #[async_trait]
     impl BackupRepository for RecordingRepository {
+        async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+            self.delete_blob(key).await
+        }
+
         async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
             let mut blobs = self.blobs.lock().expect("blobs lock");
             if blobs.contains_key(key) {

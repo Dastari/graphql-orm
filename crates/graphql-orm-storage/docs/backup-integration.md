@@ -46,6 +46,11 @@ pub struct BlobStoreBackupRepository {
 
 Mapping:
 
+- Lock release uses `BackupRepository::delete_blob_once` through
+  `BlobStore::delete_blob_once`; both require explicit provider opt-in and never
+  replay deletion by key after the server may have applied it. Ordinary deletion
+  remains a separate operation. Failed/cancelled release has an unknown outcome.
+
 - `BackupRepository::put_blob` calls `BlobStore::put_blob` with backup-owned
   write options
 - `BackupRepository::get_blob_stream` preserves `BlobStore` streaming, while

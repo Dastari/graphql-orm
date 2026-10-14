@@ -278,6 +278,24 @@ pub trait BlobStore: Send + Sync {
         Ok(())
     }
 
+    /// Deletes a blob without replaying deletion against a replacement object.
+    ///
+    /// After a deletion may have reached the server, implementations must never
+    /// retry by key. A lost response leaves the outcome unknown. This capability
+    /// is required for lock release; ordinary idempotent deletion is insufficient
+    /// when another writer can immediately reuse the key. Cancellation must not
+    /// schedule a later replay. The default fails closed without provider I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::UnsupportedOperation`] unless the provider opts in,
+    /// or another [`StorageError`] on failure. Never retry an ambiguous failure.
+    async fn delete_blob_once(&self, _key: &str) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedOperation {
+            operation: "single-attempt blob deletion".to_string(),
+        })
+    }
+
     /// Deletes a blob.
     ///
     /// # Errors

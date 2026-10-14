@@ -16,6 +16,9 @@ supersedes: []
   preventing stale takeover from removing a running writer's lock.
 - Breaking: lock handles borrow their repository, are no longer cloneable or
   comparable, and release through `release()` with no repository argument.
+- Lock release requires explicit single-attempt deletion; custom defaults fail
+  closed, S3 disables SDK operation retries and SMB avoids reopening a lock path
+  after a possibly applied mutation. Ambiguous failures require offline recovery.
 - Uses storage 0.7.0 so custom `BlobStore` conditional creation also fails closed.
 - Custom repository conditional creation now fails closed unless an atomic
   implementation is supplied. Built-in local, SMB and S3 creation is retained.

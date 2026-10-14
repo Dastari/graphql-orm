@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{
     Client,
-    config::{Builder as S3ConfigBuilder, Region},
+    config::{Builder as S3ConfigBuilder, Region, retry::RetryConfig},
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
 };
@@ -311,6 +311,20 @@ impl S3StorageBackend {
 
 #[async_trait]
 impl BlobStore for S3StorageBackend {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {
+        let provider_key = self.provider_key(key)?;
+        self.client
+            .delete_object()
+            .bucket(&self.config.bucket)
+            .key(provider_key)
+            .customize()
+            .config_override(S3ConfigBuilder::new().retry_config(RetryConfig::disabled()))
+            .send()
+            .await
+            .map_err(map_s3_error)?;
+        Ok(())
+    }
+
     fn backend(&self) -> StorageBackend {
         StorageBackend::S3
     }

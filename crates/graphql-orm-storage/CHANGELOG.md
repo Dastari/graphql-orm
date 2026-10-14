@@ -16,6 +16,9 @@ supersedes: []
   fails closed instead of performing an existence check followed by a write.
 - Breaking: added non-retryable `StorageError::UnsupportedOperation`; custom
   providers must implement atomic `BlobStore::put_blob_if_not_exists`.
+- Added explicit `delete_blob_once` capability for lock release, defaulting to
+  unsupported. Native local uses one removal; S3 disables SDK operation retries
+  and SMB does not reopen paths after a possibly applied deletion.
 - Native local, SMB and S3 overrides and Azure unsupported behavior are retained;
   provider configuration and persisted data are unchanged.
 

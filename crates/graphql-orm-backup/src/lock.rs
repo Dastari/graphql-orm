@@ -75,13 +75,17 @@ impl<'a> RepositoryLock<'a> {
         })
     }
 
-    /// Releases the repository writer lock.
+    /// Releases the repository writer lock through single-attempt deletion.
+    ///
+    /// A failed or cancelled release leaves its outcome unknown. Do not retry
+    /// deletion by key or reclaim the lock while writers or requests can remain
+    /// active. The handle is consumed even when release fails.
     ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the repository cannot delete the lock blob.
     pub async fn release(self) -> Result<(), BackupError> {
-        self.repository.delete_blob(REPOSITORY_LOCK_KEY).await
+        self.repository.delete_blob_once(REPOSITORY_LOCK_KEY).await
     }
 }
 

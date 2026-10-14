@@ -72,3 +72,20 @@ async fn inherited_storage_default_fails_closed_directly_and_through_backup_adap
         .expect_err("adapter must not bypass fail-closed conditional creation");
     assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
 }
+
+#[tokio::test]
+async fn inherited_single_attempt_delete_fails_closed_through_backup_adapter() {
+    use graphql_orm_backup::BackupRepository;
+    let store = Arc::new(NoAtomicCreate);
+    let error = store
+        .delete_blob_once("locks/repository.lock")
+        .await
+        .expect_err("single-attempt delete requires explicit opt-in");
+    assert!(matches!(error, StorageError::UnsupportedOperation { .. }));
+    let repository = BlobStoreBackupRepository::new(store);
+    let error = repository
+        .delete_blob_once("locks/repository.lock")
+        .await
+        .expect_err("adapter must not use ordinary delete");
+    assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
+}

@@ -27,9 +27,12 @@ effect: old, malformed, and unreadable existing locks all block acquisition.
 A slow writer retains exclusion indefinitely. A crashed, cancelled, or timed-out
 operation may leave a lock; there is no automatic Drop release or lease expiry.
 For deliberate offline recovery, stop and quiesce **all** repository writers,
-including older processes and pending tasks, and ensure no lock handles remain.
+including older processes, pending tasks and in-flight provider requests, and
+ensure no lock handles remain.
 Only then remove `locks/repository.lock` using provider administration, and
-restart upgraded writers. Never clear a lock based on elapsed time alone.
+restart upgraded writers. An ambiguous remote failure requires establishing that
+its request has finished before recovery. Never clear a lock based on elapsed
+time alone.
 Deleting or replacing lock blobs during live operation invalidates exclusion;
 this design does not provide fencing against administrative storage mutation.
 
@@ -45,6 +48,20 @@ fail closed when inheriting conditional creation. Override that method atomicall
 when using `BlobStoreBackupRepository`; backup maps its unsupported-operation
 error to `BackupError::UnsupportedOperation`. Update exhaustive storage error
 matches for the new variant.
+
+Lock release now requires explicit `BackupRepository::delete_blob_once` and,
+for storage adapters, `BlobStore::delete_blob_once`. Both default to unsupported
+without I/O. Custom providers must implement a single-attempt deletion that never
+replays by key after a mutation may have reached the server, including after
+cancellation or a lost response. Do not delegate to an ordinary delete method
+that may retry. Acquisition can succeed while release is unsupported; implement
+and verify both capabilities before enabling a custom repository for writers.
+Release consumes the handle on success or failure. Failed/cancelled release has
+an unknown outcome: never retry by key or reclaim while any request can remain.
+Native local release issues one filesystem removal. Native S3 disables SDK
+operation retries for lock release. Native SMB never reopens the path after a
+possibly applied disposition/close. Ordinary blob deletion retains its existing
+provider behavior.
 
 The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
 after updating the reviewed monorepo revision.

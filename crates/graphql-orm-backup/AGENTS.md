@@ -64,3 +64,8 @@ This crate is a reusable backup and restore companion for applications that use 
 - Read `docs/smb.md` and `MIGRATION.md` before changing provider integration or
   host guidance. Host-specific integration records are archived outside this
   crate and are not reusable guidance.
+
+- Lock release requires explicit single-attempt deletion through
+  `delete_blob_once`; never fall back to retrying ordinary deletion after a
+  mutation may have reached the server. Ambiguous outcomes require quiescing
+  all writers, handles and in-flight requests before offline recovery.
