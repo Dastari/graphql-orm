@@ -13,6 +13,35 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.43.1 to 0.44.0: authorization and relation partition identities
+
+Upgrade `graphql-orm` and `graphql-orm-macros` together. No database schema or
+GraphQL SDL migration is required. `AuthSubject::canonical_key()` and
+`DbAuthContext::canonical_key()` now return `auth-v2:` plus a SHA-256 digest of
+unambiguous, versioned structural fields. Invalidate stored authorization cache
+keys and any host cursors derived from the old format; never compare old and new
+keys. Hashes are opaque identifiers, not encryption or an authentication proof.
+
+Use the new `partition_key()` value for in-memory authorization partitions.
+Equality/hash include complete claims rather than a short fingerprint and
+preserve absent versus present-empty metadata. Roles/scopes are treated as sets,
+normalizing order and duplicates. JSON object property order is immaterial.
+Structural keys retain claim bodies in memory and redact Debug output; external
+canonical keys expose only the digest. Continue to exclude tokens/secrets from
+claims and protect authorization metadata in host logs and caches.
+
+`RelationKey::from_sql_values()` now preserves SQL type and lossless binary
+identity. `RelationKey::new()`/`single()` construct text-only keys. Hosts manually
+constructing numeric/UUID/composite loader keys should use `from_sql_values()`
+for bind values, or `from_projected_parts(parts, kinds)` for non-null SQL text
+projections with exactly one declared type per part. `parts()` remains a text
+view, not a complete identity; binary entries now use lossless `bin:` hexadecimal.
+Do not rebuild typed identities using `new(key.parts().to_vec())`. Recreate
+application-owned loader caches during upgrade. Generated keys and SQL row
+projections use matching declared types on SQLite/PostgreSQL/MSSQL. This fix does
+not add binary/JSON/decimal source support to the relationship derive; those
+values have lossless identity in the general SQL-value key constructor only.
+
 ## 0.43.0 to 0.43.1: host-supplied integer primary-key binding
 
 No data migration, public signature, feature or GraphQL SDL change. Fields declared

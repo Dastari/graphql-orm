@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.44.0 (unreleased)
+
+- Add opaque structural authorization partitions retaining all identity, policy,
+  assurance and claim fields for relation/Federation equality and batch grouping.
+  Delimiters, optional empty fields and distinct scope sets cannot merge callers.
+- Replace ambiguous external authorization keys and short claim fingerprints with
+  versioned `auth-v2:` SHA-256 digests. Normalize role/scope order and duplicates;
+  redact structural partition Debug output. Hosts must invalidate prior cache keys.
+- Retain SQL type identity and lossless binary bytes in relation keys, separating
+  strings, numbers, typed nulls and composite boundaries. Align generated source
+  keys and projected SQL row keys on SQLite, PostgreSQL and MSSQL.
+- Align ORM/macros at 0.44.0. Existing relationship target authorization checks
+  remain covered by cross-crate policy, preload, cache and pagination regressions.
+
 ## 0.43.1 (unreleased)
 
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse

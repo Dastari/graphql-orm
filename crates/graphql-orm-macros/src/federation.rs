@@ -439,8 +439,8 @@ pub(crate) fn federation_entity_resolver_tokens(
                             columns: vec![#(#key_columns),*],
                             key_part_kinds: vec![#(#key_part_kinds),*],
                             values: __gom_federation_values,
-                            representation: ::graphql_orm::graphql::loaders::RelationKey::new(
-                                __gom_federation_parts,
+                            representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
+                                __gom_federation_parts, &[#(#key_part_kinds),*],
                             ),
                             auth_context: auth_context.clone(),
                         })

@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.43.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.43.1", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -186,3 +186,9 @@ Complete SQLite/PostgreSQL text-group pages and SQL-visible ordinary aggregates:
 Version 0.43.1 fixes typed binding for host-supplied integer primary keys and retains the 0.43.0 runtime additions. Released host-managed
 timestamps, framework-neutral repository aggregate helpers and static GraphQL SDL
 remain unchanged.
+
+Authorization-aware loaders use complete structural partitions in 0.44.0.
+External authorization keys use the versioned `auth-v2:` digest; invalidate old
+cache identities when upgrading. SQL-value relation keys preserve binary bytes
+and SQL types. See the [0.44.0 migration guide](../../MIGRATION.md#0431-to-0440-authorization-and-relation-partition-identities)
+for host cache and manually constructed key changes.

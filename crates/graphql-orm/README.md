@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.43.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -210,3 +210,9 @@ atomic host journals and cancellation poisoning are documented in
 [runtime mutations](../../docs/reference/graphql-orm/runtime-mutations.md).
 
 The opt-in `runtime-graphql` feature provides [authorized dynamic reads and checked composition](../../docs/reference/graphql-orm/runtime-graphql.md), with host-owned authority and confidential cursors. It does not change static SDL or add mutations.
+
+Authorization-aware loaders use complete structural partitions in 0.44.0.
+External authorization keys use the versioned `auth-v2:` digest; invalidate old
+cache identities when upgrading. SQL-value relation keys preserve binary bytes
+and SQL types. See the [0.44.0 migration guide](../../MIGRATION.md#0431-to-0440-authorization-and-relation-partition-identities)
+for host cache and manually constructed key changes.

@@ -610,7 +610,7 @@ The generated batch hook uses `DataLoader<RelationLoader<T, B>>` with its defaul
 `NoCache` storage. It batches concurrent loads without reusing results across
 requests; other cache types are not accepted as authoritative targets and the
 resolver falls back to a fresh typed query. Current visibility predicates and
-canonical `DbAuthContext` participate in SQL batch grouping. A cursor, snapshot,
+structural `DbAuthContext::partition_key()` values participate in SQL batch grouping. A cursor, snapshot,
 source record or cached row never grants target access.
 
 To-many SQL-complete visibility is applied before page windows and counts.

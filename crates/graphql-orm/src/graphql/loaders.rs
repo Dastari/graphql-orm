@@ -13,24 +13,96 @@ pub enum RelationKeyPartKind {
     Bool,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+enum RelationValueType {
+    String,
+    Uuid,
+    Int,
+    Float,
+    Decimal(crate::graphql::orm::DecimalDef),
+    Bool,
+    Bytes,
+    Json,
+    UntypedNull,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct RelationKey {
     parts: Vec<String>,
+    types: Vec<(RelationValueType, bool)>,
 }
 
 impl RelationKey {
     pub fn new(parts: Vec<String>) -> Self {
-        Self { parts }
+        let types = vec![(RelationValueType::String, false); parts.len()];
+        Self { parts, types }
     }
 
     pub fn single(part: String) -> Self {
-        Self { parts: vec![part] }
+        Self::new(vec![part])
     }
 
+    /// Build a lossless, typed identity from SQL bind values.
+    ///
+    /// Binary data is hex encoded; nulls retain their SQL type and cannot equal
+    /// empty strings or empty byte arrays. This changes pre-v2 cache identities.
     pub fn from_sql_values(values: &[crate::graphql::orm::SqlValue]) -> Self {
+        use crate::graphql::orm::SqlValue;
+        use RelationValueType as Type;
+        let types = values
+            .iter()
+            .map(|value| match value {
+                SqlValue::String(_) => (Type::String, false),
+                SqlValue::Uuid(_) => (Type::Uuid, false),
+                SqlValue::Int(_) => (Type::Int, false),
+                SqlValue::Float(_) => (Type::Float, false),
+                SqlValue::Decimal(value) => (Type::Decimal(value.definition()), false),
+                SqlValue::Bool(_) => (Type::Bool, false),
+                SqlValue::Bytes(_) => (Type::Bytes, false),
+                SqlValue::Json(_) => (Type::Json, false),
+                SqlValue::StringNull => (Type::String, true),
+                SqlValue::UuidNull => (Type::Uuid, true),
+                SqlValue::IntNull => (Type::Int, true),
+                SqlValue::FloatNull => (Type::Float, true),
+                SqlValue::DecimalNull(definition) => (Type::Decimal(*definition), true),
+                SqlValue::BoolNull => (Type::Bool, true),
+                SqlValue::BytesNull => (Type::Bytes, true),
+                SqlValue::JsonNull => (Type::Json, true),
+                SqlValue::Null => (Type::UntypedNull, true),
+            })
+            .collect();
         Self {
             parts: values.iter().map(sql_value_key_part).collect(),
+            types,
         }
+    }
+
+    /// Interpret non-null SQL text projections using their declared key types.
+    ///
+    /// Callers must supply one kind per part. Generated code uses this only for
+    /// the supported String/UUID/integer/float/boolean relation source types.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the number of parts and declared kinds differs.
+    pub fn from_projected_parts(parts: Vec<String>, kinds: &[RelationKeyPartKind]) -> Self {
+        assert_eq!(parts.len(), kinds.len(), "relation key type arity mismatch");
+        let types = kinds
+            .iter()
+            .map(|kind| {
+                (
+                    match kind {
+                        RelationKeyPartKind::String => RelationValueType::String,
+                        RelationKeyPartKind::Uuid => RelationValueType::Uuid,
+                        RelationKeyPartKind::Int => RelationValueType::Int,
+                        RelationKeyPartKind::Float => RelationValueType::Float,
+                        RelationKeyPartKind::Bool => RelationValueType::Bool,
+                    },
+                    false,
+                )
+            })
+            .collect();
+        Self { parts, types }
     }
 
     pub fn parts(&self) -> &[String] {
@@ -92,16 +164,18 @@ pub struct CompositeRelationQueryKey {
 impl PartialEq for RelationQueryKey {
     fn eq(&self, other: &Self) -> bool {
         self.relation == other.relation
+            && RelationKey::from_sql_values(std::slice::from_ref(&self.parent_value))
+                == RelationKey::from_sql_values(std::slice::from_ref(&other.parent_value))
             && self.parent_key == other.parent_key
             && self.fk_column == other.fk_column
             && self.where_signature == other.where_signature
             && self.order_signature == other.order_signature
             && self.page_signature == other.page_signature
-            && self.auth_context.as_ref().map(DbAuthContext::canonical_key)
+            && self.auth_context.as_ref().map(DbAuthContext::partition_key)
                 == other
                     .auth_context
                     .as_ref()
-                    .map(DbAuthContext::canonical_key)
+                    .map(DbAuthContext::partition_key)
     }
 }
 
@@ -110,6 +184,7 @@ impl Eq for RelationQueryKey {}
 impl Hash for RelationQueryKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.relation.hash(state);
+        RelationKey::from_sql_values(std::slice::from_ref(&self.parent_value)).hash(state);
         self.parent_key.hash(state);
         self.fk_column.hash(state);
         self.where_signature.hash(state);
@@ -117,7 +192,7 @@ impl Hash for RelationQueryKey {
         self.page_signature.hash(state);
         self.auth_context
             .as_ref()
-            .map(DbAuthContext::canonical_key)
+            .map(DbAuthContext::partition_key)
             .hash(state);
     }
 }
@@ -125,16 +200,19 @@ impl Hash for RelationQueryKey {
 impl PartialEq for CompositeRelationQueryKey {
     fn eq(&self, other: &Self) -> bool {
         self.relation == other.relation
+            && RelationKey::from_sql_values(&self.parent_values)
+                == RelationKey::from_sql_values(&other.parent_values)
             && self.parent_key == other.parent_key
             && self.fk_columns == other.fk_columns
+            && self.key_part_kinds == other.key_part_kinds
             && self.where_signature == other.where_signature
             && self.order_signature == other.order_signature
             && self.page_signature == other.page_signature
-            && self.auth_context.as_ref().map(DbAuthContext::canonical_key)
+            && self.auth_context.as_ref().map(DbAuthContext::partition_key)
                 == other
                     .auth_context
                     .as_ref()
-                    .map(DbAuthContext::canonical_key)
+                    .map(DbAuthContext::partition_key)
     }
 }
 
@@ -143,14 +221,16 @@ impl Eq for CompositeRelationQueryKey {}
 impl Hash for CompositeRelationQueryKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.relation.hash(state);
+        RelationKey::from_sql_values(&self.parent_values).hash(state);
         self.parent_key.hash(state);
         self.fk_columns.hash(state);
+        self.key_part_kinds.hash(state);
         self.where_signature.hash(state);
         self.order_signature.hash(state);
         self.page_signature.hash(state);
         self.auth_context
             .as_ref()
-            .map(DbAuthContext::canonical_key)
+            .map(DbAuthContext::partition_key)
             .hash(state);
     }
 }
@@ -411,7 +491,7 @@ struct RelationGroupKey {
     where_signature: Option<String>,
     order_signature: Option<String>,
     page_signature: Option<String>,
-    auth_context_key: Option<String>,
+    auth_context_key: Option<crate::graphql::auth::AuthPartitionKey>,
 }
 
 fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
@@ -422,7 +502,7 @@ fn sql_value_key_part(value: &crate::graphql::orm::SqlValue) -> String {
         crate::graphql::orm::SqlValue::Float(value) => value.to_string(),
         crate::graphql::orm::SqlValue::Decimal(value) => value.value().to_string(),
         crate::graphql::orm::SqlValue::Bool(value) => value.to_string(),
-        crate::graphql::orm::SqlValue::Bytes(value) => String::from_utf8_lossy(value).to_string(),
+        crate::graphql::orm::SqlValue::Bytes(value) => crate::graphql::orm::binary_key_id(value),
         crate::graphql::orm::SqlValue::Json(value) => value.to_string(),
         crate::graphql::orm::SqlValue::StringNull
         | crate::graphql::orm::SqlValue::BytesNull
@@ -533,7 +613,7 @@ where
             where_signature: key.where_signature.clone(),
             order_signature: key.order_signature.clone(),
             page_signature: key.page_signature.clone(),
-            auth_context_key: key.auth_context.as_ref().map(DbAuthContext::canonical_key),
+            auth_context_key: key.auth_context.as_ref().map(DbAuthContext::partition_key),
         };
         grouped_keys.entry(group_key).or_default().push(key);
     }
@@ -684,7 +764,8 @@ where
                         B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
                     key_parts.push(part);
                 }
-                let parent_key = RelationKey::new(key_parts);
+                let parent_key =
+                    RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
                 let total = B::try_get_i64(&row, "__gom_relation_total_count")
                     .map_err(|error| error.to_string())?;
                 total_counts.insert(parent_key, total);
@@ -703,7 +784,8 @@ where
                         B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
                     key_parts.push(part);
                 }
-                let parent_key = RelationKey::new(key_parts);
+                let parent_key =
+                    RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
                 let entity = T::from_row(&row).map_err(|error| error.to_string())?;
                 grouped_entities.entry(parent_key).or_default().push(entity);
             }
@@ -766,7 +848,7 @@ where
                 let part = B::try_get_string(&row, &alias).map_err(|error| error.to_string())?;
                 key_parts.push(part);
             }
-            let parent_key = RelationKey::new(key_parts);
+            let parent_key = RelationKey::from_projected_parts(key_parts, &sample.key_part_kinds);
             let entity = T::from_row(&row).map_err(|error| error.to_string())?;
             grouped_entities.entry(parent_key).or_default().push(entity);
         }
@@ -995,13 +1077,16 @@ pub struct FederationEntityKey {
 impl PartialEq for FederationEntityKey {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
+            && RelationKey::from_sql_values(&self.values)
+                == RelationKey::from_sql_values(&other.values)
             && self.columns == other.columns
+            && self.key_part_kinds == other.key_part_kinds
             && self.representation == other.representation
-            && self.auth_context.as_ref().map(DbAuthContext::canonical_key)
+            && self.auth_context.as_ref().map(DbAuthContext::partition_key)
                 == other
                     .auth_context
                     .as_ref()
-                    .map(DbAuthContext::canonical_key)
+                    .map(DbAuthContext::partition_key)
     }
 }
 
@@ -1010,11 +1095,13 @@ impl Eq for FederationEntityKey {}
 impl Hash for FederationEntityKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.key.hash(state);
+        RelationKey::from_sql_values(&self.values).hash(state);
         self.columns.hash(state);
+        self.key_part_kinds.hash(state);
         self.representation.hash(state);
         self.auth_context
             .as_ref()
-            .map(DbAuthContext::canonical_key)
+            .map(DbAuthContext::partition_key)
             .hash(state);
     }
 }
@@ -1024,7 +1111,7 @@ struct FederationGroupKey {
     key: &'static str,
     columns: Vec<&'static str>,
     key_part_kinds: Vec<RelationKeyPartKind>,
-    auth_context_key: Option<String>,
+    auth_context_key: Option<crate::graphql::auth::AuthPartitionKey>,
 }
 
 /// Batches Federation entity lookups for one entity type.
@@ -1083,7 +1170,7 @@ where
                     key: key.key,
                     columns: key.columns.clone(),
                     key_part_kinds: key.key_part_kinds.clone(),
-                    auth_context_key: key.auth_context.as_ref().map(DbAuthContext::canonical_key),
+                    auth_context_key: key.auth_context.as_ref().map(DbAuthContext::partition_key),
                 };
                 grouped_keys.entry(group_key).or_default().push(key);
             }
@@ -1156,7 +1243,10 @@ where
                     // A `@key` is validated to be unique, so a second row for the
                     // same representation cannot be distinguished; keep the first.
                     resolved
-                        .entry(RelationKey::new(key_parts))
+                        .entry(RelationKey::from_projected_parts(
+                            key_parts,
+                            &sample.key_part_kinds,
+                        ))
                         .or_insert(entity);
                 }
 
