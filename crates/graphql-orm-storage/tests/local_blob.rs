@@ -390,3 +390,69 @@ async fn single_attempt_local_delete_failure_is_not_retryable() {
     );
     assert!(matches!(once, StorageError::SingleAttemptFailed { .. }));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn local_blob_sweep_skips_linked_files_directories_and_cycles() {
+    use std::os::unix::fs::symlink;
+
+    let owned = TempDir::new().expect("owned fixture");
+    let root = owned.path().join("storage");
+    let outside = owned.path().join("outside-storage");
+    tokio::fs::create_dir_all(&root).await.expect("root");
+    tokio::fs::create_dir_all(&outside).await.expect("outside");
+    let outside_upload = outside.join("preserve.uploading");
+    tokio::fs::write(&outside_upload, b"owned external fixture")
+        .await
+        .expect("outside upload");
+    let real_upload = root.join("remove.uploading");
+    tokio::fs::write(&real_upload, b"abandoned")
+        .await
+        .expect("real upload");
+    symlink(&outside, root.join("linked-directory")).expect("directory link");
+    symlink(&outside_upload, root.join("linked-file.uploading")).expect("file link");
+    symlink(&root, root.join("cycle")).expect("cycle");
+    symlink(outside.join("missing"), root.join("broken.uploading")).expect("broken link");
+
+    let backend = LocalStorageBackend::new(&root);
+    let removed = tokio::time::timeout(
+        Duration::from_secs(5),
+        backend.sweep_temp_files(Duration::ZERO),
+    )
+    .await
+    .expect("cycle must not cause unbounded traversal")
+    .expect("sweep");
+    assert_eq!(removed, 1);
+    assert!(!real_upload.exists());
+    assert_eq!(
+        tokio::fs::read(&outside_upload)
+            .await
+            .expect("outside preserved"),
+        b"owned external fixture"
+    );
+    for name in [
+        "linked-directory",
+        "linked-file.uploading",
+        "cycle",
+        "broken.uploading",
+    ] {
+        assert!(
+            tokio::fs::symlink_metadata(root.join(name))
+                .await
+                .expect("link retained")
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    let linked_root = owned.path().join("linked-root");
+    symlink(&outside, &linked_root).expect("root link");
+    assert_eq!(
+        LocalStorageBackend::new(linked_root)
+            .sweep_temp_files(Duration::ZERO)
+            .await
+            .expect("skip linked root"),
+        0
+    );
+    assert!(outside_upload.exists());
+}

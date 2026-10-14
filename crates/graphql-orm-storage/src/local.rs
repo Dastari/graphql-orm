@@ -24,6 +24,12 @@ const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
 const OBJECT_METADATA_DIR: &str = "object-metadata";
 
 /// Local filesystem object storage backend.
+///
+/// The root tree must be exclusively managed by the trusted storage deployment.
+/// Filesystem permissions must protect its entries and ancestor path components
+/// against replacement by untrusted local actors.
+/// Validated keys do not confine access against symlinks or concurrent local path
+/// replacement. Ordinary reads and writes follow existing filesystem links.
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,
@@ -40,7 +46,10 @@ impl LocalStorageBackend {
     ///
     /// Files are considered temporary when their filename ends with
     /// `.uploading`. Callers should schedule this periodically if the process
-    /// may be interrupted during writes.
+    /// may be interrupted during writes. Symbolic links (including directory
+    /// links and cycles) are skipped. This does not protect against a concurrent
+    /// local actor replacing a path after inspection; the trusted-root contract
+    /// on [`LocalStorageBackend`] still applies.
     ///
     /// # Errors
     ///
@@ -52,7 +61,7 @@ impl LocalStorageBackend {
         let mut stack = vec![self.root.clone()];
 
         while let Some(path) = stack.pop() {
-            let metadata = match tokio::fs::metadata(&path).await {
+            let metadata = match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(source) => return Err(StorageError::io(&path, source)),
@@ -68,8 +77,10 @@ impl LocalStorageBackend {
                 continue;
             }
 
-            let entries = sorted_child_paths(&path).await?;
-            stack.extend(entries);
+            if metadata.is_dir() {
+                let entries = sorted_child_paths(&path).await?;
+                stack.extend(entries);
+            }
         }
 
         Ok(removed)

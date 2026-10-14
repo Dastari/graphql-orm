@@ -120,6 +120,32 @@ Blob keys are `/`-separated relative keys. `validate_blob_key` rejects:
 
 `list_blobs("")` is allowed and lists all blobs.
 
+## Local filesystem trust boundary
+
+Use a root managed exclusively by the trusted storage deployment. Restrict
+permissions on the root and its descendants so untrusted local users/applications
+cannot create or replace storage entries. Protect ancestor path components against
+replacement too. This applies equally to
+local backups and OS-mounted shares using this backend.
+
+Key validation is lexical. Ordinary local reads/writes follow existing links;
+the configured root is not a confinement boundary against a hostile local
+writer. Keep links that could resolve outside the intended tree out of the
+storage hierarchy. The temporary-file sweep skips symbolic links, including
+linked directories, broken links and cycles; it also skips non-file/non-directory
+entries. A root that is itself a symbolic link is skipped by the sweep.
+Deployments intentionally using links must arrange cleanup of their real target
+roots explicitly.
+
+The sweep inspects paths before operating on them. A concurrent replacement can
+still race that inspection. Race-resistant confinement would require directory
+handle relative resolution and no-follow operations at every path component,
+with platform-specific handling of reparse points and all read/write/delete
+paths. That is not implemented here. Canonicalizing a path before opening it
+would still leave a check/use race. Do not use this backend as a sandbox for
+untrusted local filesystem writers; isolate them through host permissions or a
+separate storage provider.
+
 ## Error Taxonomy
 
 `StorageError::Provider` includes a `retryable` flag for future network
