@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
+    /// A configured buffering or decoding byte limit was exceeded.
+    #[error("backup payload exceeds configured byte limit {limit_bytes}")]
+    CapacityExceeded {
+        /// Maximum accepted bytes.
+        limit_bytes: u64,
+    },
+
     /// A snapshot-chain restore failed; progress describes possible target effects.
     #[error("{progress}")]
     RestoreStageFailed {

@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, collect_storage_stream};
+use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::{
     BackupChangeExport, BackupCompression, BackupError, BackupObjectRef, BackupRepository,
     BackupSnapshotManifest, BackupTableExport, GraphqlOrmBackupAdapter, ObjectBackupEntry,
-    TableBackupEntry, decompress_payload, load_manifest_chain, verify_manifest_and_objects,
+    TableBackupEntry, BackupByteLimit, collect_backup_stream, load_manifest_chain, verify_manifest_and_objects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,6 +114,8 @@ pub struct RestoreResult {
 #[async_trait]
 /// Sink used by `restore_objects` to rehydrate application object stores.
 pub trait RestoreObjectSink: Send + Sync {
+    /// Limit used by the buffered default, independently for each object.
+    fn buffered_byte_limit(&self) -> BackupByteLimit { BackupByteLimit::default() }
     /// Restores one object loaded from a backup repository.
     ///
     /// # Errors
@@ -135,7 +137,7 @@ pub trait RestoreObjectSink: Send + Sync {
         object: BackupObjectRef,
         body: StorageByteStream,
     ) -> Result<(), BackupError> {
-        self.restore_object(object, collect_storage_stream(body).await?)
+        self.restore_object(object(body).await?)
             .await
     }
 }
@@ -507,9 +509,10 @@ pub(crate) async fn load_table_exports(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
 ) -> Result<Vec<BackupTableExport>, BackupError> {
-    let mut exports = Vec::with_capacity(manifest.database.tables.len());
+    let mut exports = Vec::new();
+    let mut stage_bytes = 0_u64;
     for table in &manifest.database.tables {
-        let rows = load_jsonl_entries(repository, manifest, table).await?;
+        let rows = load_jsonl_entries(repository, manifest, table, &mut stage_bytes).await?;
         exports.push(BackupTableExport {
             table_name: table.table_name.clone(),
             rows,
@@ -523,8 +526,9 @@ pub(crate) async fn load_change_exports(
     manifest: &BackupSnapshotManifest,
 ) -> Result<Vec<BackupChangeExport>, BackupError> {
     let mut changes = Vec::new();
+    let mut stage_bytes = 0_u64;
     for table in &manifest.database.changes {
-        changes.extend(load_jsonl_entries(repository, manifest, table).await?);
+        changes.extend(load_jsonl_entries(repository, manifest, table, &mut stage_bytes).await?);
     }
     Ok(changes)
 }
@@ -533,6 +537,7 @@ async fn load_jsonl_entries<T>(
     repository: &dyn BackupRepository,
     manifest: &BackupSnapshotManifest,
     entry: &TableBackupEntry,
+    stage_bytes: &mut u64,
 ) -> Result<Vec<T>, BackupError>
 where
     T: DeserializeOwned,
@@ -543,15 +548,19 @@ where
         });
     }
 
-    let stored = repository.get_blob(&entry.content_key).await?;
-    let payload = decode_payload(&stored, &manifest.database.compression)?;
+    let limits = repository.capacity_limits();
+    let stored = collect_backup_stream(repository.get_blob_stream(&entry.content_key).await?, limits.buffered_bytes).await?;
+    let payload = decode_payload(&stored, &manifest.database.compression, limits.decompressed_bytes)?;
+    *stage_bytes = stage_bytes.checked_add(payload.len() as u64)
+        .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
+    limits.stage_bytes.check(*stage_bytes)?;
     parse_jsonl(&payload)
 }
 
-fn decode_payload(bytes: &[u8], compression: &BackupCompression) -> Result<Vec<u8>, BackupError> {
+fn decode_payload(bytes: &[u8], compression: &BackupCompression, limit: BackupByteLimit) -> Result<Vec<u8>, BackupError> {
     match compression {
-        BackupCompression::None => Ok(bytes.to_vec()),
-        BackupCompression::Zstd => decompress_payload(bytes),
+        BackupCompression::None => { limit.check(bytes.len() as u64)?; Ok(bytes.to_vec()) },
+        BackupCompression::Zstd => crate::manifest::decompress_payload_with_limit(bytes, limit),
     }
 }
 

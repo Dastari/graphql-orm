@@ -266,6 +266,20 @@ async fn restore_object_store(
 }
 ```
 
+## Buffer and decoding limits
+
+Compatibility buffering defaults to 64 MiB per body. Database restore accepts at
+most 256 MiB of decoded bytes per payload and 512 MiB per manifest stage by
+default. Configure reviewed larger finite limits with `BackupCapacityLimits` on
+the repository; custom indexes/sinks expose `buffered_byte_limit` for their
+compatibility defaults. `BackupByteLimit::Unbounded` explicitly accepts memory
+risk. Capacity errors are permanent for the same input and configuration.
+
+Native streams avoid compatibility collection. These byte limits do not bound
+RSS or total snapshot size: provider-owned buffers/current chunks, parsed JSON,
+accumulated rows and adapter/application allocations still require a separate
+resource budget. See the migration guide before restoring large existing data.
+
 ## Restore failures and recovery
 
 `restore_snapshot` reports `BackupError::RestoreStageFailed` with typed

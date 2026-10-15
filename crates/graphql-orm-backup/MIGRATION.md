@@ -10,6 +10,38 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.0 to 0.10.0: explicit buffer and decompression limits
+
+This is a breaking pre-1.0 capacity-policy change. Previously accepted large
+buffered payloads can now fail with `BackupError::CapacityExceeded`; snapshot
+format and stored data are unchanged. Update exhaustive error matches.
+
+Defaults are 64 MiB for each buffered repository body or compatibility stream
+fallback, 256 MiB for each decoded database payload, and 512 MiB of decoded
+payloads across one full/incremental manifest stage. Limits are inclusive.
+Stored payloads are limited before decoding; compressed expansion is checked
+incrementally before appending output. Aggregate decoded limits are checked
+before parsing each next payload. They do not limit the whole chain or row count.
+
+For legitimate larger backups, set reviewed finite `BackupCapacityLimits` via
+`LocalBackupRepository::with_capacity_limits` or
+`BlobStoreBackupRepository::with_capacity_limits`; custom repositories override
+`BackupRepository::capacity_limits`. Indexes and sinks override
+`buffered_byte_limit` for their buffered compatibility defaults. Direct zstd
+callers use `decompress_payload_with_limit`. `BackupByteLimit::Unbounded` is an
+explicit opt-in accepting the associated allocation risk; it is not recommended
+for untrusted input. Do not retry capacity errors without changing the relevant
+limit or input. Restore errors retain the Q003 stage/progress boundary.
+
+Native streaming implementations bypass compatibility collection. Local repository
+stream methods now delegate directly to the storage stream API. This is not a
+bounded-RSS guarantee: a custom buffered provider or index may allocate before
+returning; a stream's current chunk already exists; parsed JSON, manifests,
+adapter exports, accumulated restored/compacted rows and application state may
+use additional memory. Streaming source metadata is only an early rejection
+hint; actual collected bytes are checked independently. Audit native provider
+and adapter behavior and apply process resource limits for hostile input.
+
 ## 0.8.0 to 0.9.0: restore failure progress
 
 This is a breaking pre-1.0 error-contract change. `restore_snapshot` returns

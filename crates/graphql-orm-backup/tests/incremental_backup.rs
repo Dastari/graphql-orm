@@ -515,3 +515,31 @@ async fn partially_applied_stage_reports_uncertainty_and_requires_fresh_target_r
     assert_eq!(recovered.restored_full().len(), 1);
     assert_eq!(recovered.restored_incremental(), sample_changes());
 }
+
+#[tokio::test]
+async fn database_stage_capacity_fails_before_apply_and_finite_override_restores() {
+    use graphql_orm_backup::{BackupByteLimit, BackupCapacityLimits};
+    let temp = TempDir::new().expect("owned repository");
+    let repository = LocalBackupRepository::new(temp.path());
+    create_restore_fault_fixture(&repository).await;
+    let limited = repository.clone().with_capacity_limits(BackupCapacityLimits {
+        stage_bytes: BackupByteLimit::Bytes(1), ..BackupCapacityLimits::default()
+    });
+    let target = MockDatabase::empty_restore_target();
+    let error = restore_snapshot(&limited, &target, incremental_id(), RestoreContext::empty_database())
+        .await.expect_err("decoded stage exceeds budget");
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("typed progress for capacity failure");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Preparation);
+    assert!(!progress.target_may_have_changed());
+    assert!(matches!(*source, BackupError::CapacityExceeded { limit_bytes: 1 }));
+    assert!(target.restored_full().is_empty());
+    let reviewed = repository.with_capacity_limits(BackupCapacityLimits {
+        stage_bytes: BackupByteLimit::Bytes(1024 * 1024), ..BackupCapacityLimits::default()
+    });
+    restore_snapshot(&reviewed, &target, incremental_id(), RestoreContext::empty_database())
+        .await.expect("reviewed finite stage budget");
+    assert_eq!(target.restored_full().len(), 1);
+    assert_eq!(target.restored_incremental(), sample_changes());
+}

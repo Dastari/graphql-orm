@@ -2,9 +2,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use graphql_orm_storage::LocalStorageBackend;
+use graphql_orm_storage::{LocalStorageBackend, StorageByteStream};
 
-use crate::{BackupError, BackupRepository, BlobStoreBackupRepository};
+use crate::{BackupCapacityLimits, BackupError, BackupRepository, BlobStoreBackupRepository};
 
 /// Local filesystem implementation of [`BackupRepository`].
 #[derive(Clone, Debug)]
@@ -19,6 +19,13 @@ impl LocalBackupRepository {
         Self {
             inner: BlobStoreBackupRepository::new(Arc::new(LocalStorageBackend::new(root))),
         }
+    }
+
+    /// Configures per-payload buffering and decoding limits.
+    #[must_use]
+    pub fn with_capacity_limits(mut self, limits: BackupCapacityLimits) -> Self {
+        self.inner = self.inner.with_capacity_limits(limits);
+        self
     }
 
     /// Opens an existing local repository root.
@@ -43,10 +50,20 @@ impl LocalBackupRepository {
 
 #[async_trait]
 impl BackupRepository for LocalBackupRepository {
+    fn capacity_limits(&self) -> BackupCapacityLimits { self.inner.capacity_limits() }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.inner.delete_blob_once(key).await
     }
 
+    async fn put_blob_stream(&self, key: &str, body: StorageByteStream) -> Result<(), BackupError> {
+        self.inner.put_blob_stream(key, body).await
+    }
+    async fn put_blob_stream_if_absent(&self, key: &str, body: StorageByteStream) -> Result<bool, BackupError> {
+        self.inner.put_blob_stream_if_absent(key, body).await
+    }
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        self.inner.get_blob_stream(key).await
+    }
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.inner.put_blob(key, body).await
     }

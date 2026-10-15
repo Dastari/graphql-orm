@@ -70,6 +70,7 @@
 //! ```
 
 mod backup;
+mod capacity;
 mod database;
 mod error;
 #[cfg(feature = "local")]
@@ -97,6 +98,7 @@ pub use database::{
     BackupChangeAction, BackupChangeExport, BackupRow, BackupTableExport, GraphqlOrmBackupAdapter,
     GraphqlOrmBackupSchema,
 };
+pub use capacity::{BackupByteLimit, BackupCapacityLimits, collect_backup_stream};
 pub use error::BackupError;
 #[cfg(feature = "orm")]
 pub use graphql_orm::graphql::orm::ColumnBackupPolicy;
@@ -106,7 +108,7 @@ pub use lock::{DEFAULT_LOCK_STALE_AFTER_SECONDS, RepositoryLock, RepositoryLockO
 pub use manifest::{
     BACKUP_FORMAT_VERSION, BackupCompression, BackupKind, BackupSnapshotManifest, BackupTombstone,
     DatabaseBackupManifest, ObjectBackupEntry, TableBackupEntry, compress_payload,
-    decompress_payload, load_manifest, load_manifest_chain, manifest_checksum,
+    decompress_payload, decompress_payload_with_limit, load_manifest, load_manifest_chain, manifest_checksum,
     set_manifest_checksum, validate_manifest_chain, verify_manifest_checksum,
 };
 pub use object_index::{BackupObjectIndex, BackupObjectRef};

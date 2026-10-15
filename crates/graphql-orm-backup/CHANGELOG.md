@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## 0.10.0 - 2026-10-15
+
+- Breaking: compatibility stream buffering and buffered repository reads default
+  to 64 MiB per body; database decoding defaults to 256 MiB per payload and
+  512 MiB aggregate decoded bytes per manifest stage. Large legitimate inputs
+  require reviewed finite overrides or an explicit unbounded opt-in.
+- Added typed capacity failures, bounded incremental zstd decoding and native
+  local stream delegation. These byte limits do not guarantee bounded RSS for
+  buffered providers, parsed data or accumulated application state.
+
 ## 0.9.0 - 2026-10-15
 
 - Added typed snapshot-restore failure progress for validation, preparation and
