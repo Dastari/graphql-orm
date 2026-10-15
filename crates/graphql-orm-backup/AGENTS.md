@@ -29,17 +29,18 @@ This crate is a reusable backup and restore companion for applications that use 
 - Full backup and restore ship before incremental backup.
 - Incremental backup depends on a reliable graphql-orm change journal.
 
-## Current Agent Handoff
+## Integration contracts
 
-- Current crate version is `0.7.2`.
-- The optional ORM adapter resolves `graphql-orm` 0.29.0 from the workspace.
-  Internal packages use workspace path dependencies and the root `Cargo.lock`.
-  Keep downstream applications on one reviewed monorepo revision so ORM,
-  backup, and storage share the same canonical source/type universe.
-- `graphql-orm` owns its optional `agql-auth` integration and pins
-  `agql-auth` 0.19.0 at
-  `1d2e9fe2e1576105212a7b340a11abf8cad0382d`. This crate must not enable or
-  depend directly on application authorization.
+- Package versions and workspace dependency identities belong to the generated
+  [workspace inventory](../../docs/reference/workspace-packages.md).
+- The optional ORM adapter resolves `graphql-orm` through workspace path
+  dependencies and the root `Cargo.lock`. Keep downstream applications on one
+  reviewed monorepo revision so ORM, backup and storage share one canonical
+  source/type universe.
+- `graphql-orm` owns its optional `agql-auth` integration. The root
+  [Cargo.lock](../../Cargo.lock) and published workspace release manifest own
+  the external authorization revision. This crate must not enable or depend
+  directly on application authorization.
 - Applying and dry-run restore compare the manifest backend/schema hash with
   the target before target checks or writes. Preserve that fail-closed
   preflight.
@@ -56,11 +57,15 @@ This crate is a reusable backup and restore companion for applications that use 
 - Repository locking depends on atomic
   `BlobStore::put_blob_if_not_exists`. Never implement locking with an
   existence check followed by a write.
-- Snapshot manifests and repository key layout are provider-independent and
-  unchanged in 0.4.0.
+- Snapshot manifests and repository key layout are provider-independent.
 - Run the managed real-Samba suite with
   `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root; it
   includes this crate's complete SMB snapshot lifecycle test.
 - Read `docs/smb.md` and `MIGRATION.md` before changing provider integration or
   host guidance. Host-specific integration records are archived outside this
   crate and are not reusable guidance.
+
+- Lock release requires explicit single-attempt deletion through
+  `delete_blob_once`; never fall back to retrying ordinary deletion after a
+  mutation may have reached the server. Ambiguous outcomes require quiescing
+  all writers, handles and in-flight requests before offline recovery.

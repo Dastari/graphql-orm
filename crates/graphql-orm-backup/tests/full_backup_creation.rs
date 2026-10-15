@@ -293,6 +293,23 @@ impl RecordingRepository {
 
 #[async_trait]
 impl BackupRepository for RecordingRepository {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.delete_blob(key).await
+    }
+
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        let mut blobs = self.blobs.lock().expect("blobs lock");
+        if blobs.contains_key(key) {
+            return Ok(false);
+        }
+        blobs.insert(key.to_string(), body);
+        self.writes
+            .lock()
+            .expect("writes lock")
+            .push(key.to_string());
+        Ok(true)
+    }
+
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.blobs
             .lock()
@@ -354,6 +371,14 @@ struct StreamingProbeRepository {
 
 #[async_trait]
 impl BackupRepository for StreamingProbeRepository {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob_once(key).await
+    }
+
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        self.inner.put_blob_if_absent(key, body).await
+    }
+
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.inner.put_blob(key, body).await
     }

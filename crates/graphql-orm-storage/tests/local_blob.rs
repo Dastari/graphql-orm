@@ -367,3 +367,26 @@ fn assert_invalid<T>(result: Result<T, StorageError>) {
         Err(StorageError::InvalidStorageKey { .. })
     ));
 }
+
+#[tokio::test]
+async fn single_attempt_local_delete_failure_is_not_retryable() {
+    let temp = TempDir::new().expect("owned fixture");
+    tokio::fs::create_dir(temp.path().join("directory"))
+        .await
+        .expect("directory");
+    let backend = LocalStorageBackend::new(temp.path());
+    let ordinary = backend
+        .delete_blob("directory")
+        .await
+        .expect_err("cannot unlink directory");
+    assert!(ordinary.is_retryable(), "ordinary I/O taxonomy is retained");
+    let once = backend
+        .delete_blob_once("directory")
+        .await
+        .expect_err("cannot unlink directory");
+    assert!(
+        !once.is_retryable(),
+        "lock deletion must not invite a retry"
+    );
+    assert!(matches!(once, StorageError::SingleAttemptFailed { .. }));
+}

@@ -143,7 +143,7 @@ async fn full_smb_snapshot_lifecycle_and_locking() {
         | (Err(BackupError::RepositoryLocked { .. }), Ok(lock)) => lock,
         other => panic!("exactly one repository lock must succeed: {other:?}"),
     };
-    acquired.release(&repository).await.expect("release lock");
+    acquired.release().await.expect("release lock");
 
     let deleted = delete_snapshot(&repository, second_id, &RepositoryLockOptions::default())
         .await

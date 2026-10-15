@@ -10,6 +10,54 @@ supersedes: []
 
 # Migration Guide
 
+## 0.6.2 to 0.7.0: atomic conditional creation
+
+This is a breaking pre-1.0 release. Custom `BlobStore` providers must override
+`put_blob_if_not_exists` with an atomic create-if-absent operation across all
+writers. The default now returns the new non-retryable
+`StorageError::UnsupportedOperation` without provider I/O. Update exhaustive
+matches on `StorageError` for the added variant. An existence check followed by
+a write does not meet the conditional-create contract.
+
+The new `BlobStore::delete_blob_once` capability also defaults to
+`UnsupportedOperation` without I/O. Custom providers used for backup locks must
+explicitly implement it without replaying deletion by key after the server may
+have applied the mutation, including after cancellation or a lost response.
+Ordinary idempotent deletion with retries is insufficient when the key can be
+reused immediately. Native local deletion uses one filesystem removal, native
+S3 disables SDK operation retries, and native SMB never reopens the key after
+mutation may have applied. Ordinary `delete_blob` behavior is unchanged.
+SMB conditional creation also uses handle-only failure/cancellation cleanup.
+After the original handle closes, no fallback deletion reopens the shared key:
+a new owner may already have acquired it. Ambiguous cleanup/disarm can leave an
+orphan object requiring offline recovery instead of risking another writer's
+lock. Cleanup of unique temporary upload keys retains its previous behavior.
+A failure/cancellation leaves an unknown outcome; do not retry or reclaim until
+all writers and in-flight requests are quiesced and no handles remain.
+
+Local, SMB and S3 retain their native atomic creation overrides. The Azure placeholder
+continues to report unsupported backend. `graphql-orm-backup` 0.8.0 uses this
+contract for fail-closed writer locks; custom providers inheriting the default
+can no longer create an unsafe lock through the adapter. Follow backup's
+migration guide for coordinated upgrades and offline lock recovery.
+
+Provider configuration, storage keys and stored data are unchanged. No data
+migration is required. Update all selected workspace packages to one reviewed
+revision and regenerate `Cargo.lock`.
+
+
+### Single-attempt error classification
+
+`StorageError::SingleAttemptFailed` preserves the underlying failure in its
+source chain and always reports `is_retryable() == false`. Update exhaustive
+storage error matches for this added variant as well as `UnsupportedOperation`.
+Native single-attempt deletion and the backup adapter never advertise retrying
+by key, even when the underlying ordinary I/O/provider failure was retryable.
+Non-retryable here does **not** mean the operation had no effect: a request can
+have succeeded remotely while its response was lost. Establish quiescence
+before offline recovery; never infer that the lock is safe to reclaim from this
+flag. Ordinary deletion retains its prior error taxonomy.
+
 ## 0.6.1 to 0.6.2
 
 Version 0.6.2 refreshes maintained workspace guidance and establishes a new

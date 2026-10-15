@@ -32,18 +32,18 @@ pub trait BackupRepository: Send + Sync {
     /// Writes a blob only when no blob exists at the key.
     ///
     /// Returns `true` when the blob was written and `false` when the key
-    /// already existed.
+    /// already existed. Implementations must atomically create the blob only
+    /// if absent across all writers. Existence checks followed by writes are
+    /// insufficient. The default fails closed without reading or writing.
     ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the key is invalid or the backend cannot
     /// perform the conditional write.
-    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
-        if self.blob_exists(key).await? {
-            return Ok(false);
-        }
-        self.put_blob(key, body).await?;
-        Ok(true)
+    async fn put_blob_if_absent(&self, _key: &str, _body: Bytes) -> Result<bool, BackupError> {
+        Err(BackupError::UnsupportedOperation {
+            operation: "atomic conditional repository write".to_string(),
+        })
     }
 
     /// Streams a blob only when no blob exists at the key.
@@ -89,6 +89,23 @@ pub trait BackupRepository: Send + Sync {
     /// Returns [`BackupError`] if the prefix is invalid or the backend cannot
     /// list blobs.
     async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError>;
+
+    /// Deletes a blob without replaying deletion against a replacement object.
+    ///
+    /// Required for lock release. Once a deletion may have reached storage,
+    /// implementations must not retry by key, including after cancellation or
+    /// a lost response. Such failures leave the outcome unknown. The default
+    /// fails closed without repository I/O; custom providers must opt in.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BackupError::UnsupportedOperation`] by default, or another
+    /// [`BackupError`] on failure. Never retry an ambiguous failure.
+    async fn delete_blob_once(&self, _key: &str) -> Result<(), BackupError> {
+        Err(BackupError::UnsupportedOperation {
+            operation: "single-attempt repository deletion".to_string(),
+        })
+    }
 
     /// Deletes a blob if it exists.
     ///
@@ -176,6 +193,24 @@ impl std::fmt::Debug for BlobStoreBackupRepository {
 
 #[async_trait]
 impl BackupRepository for BlobStoreBackupRepository {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.store
+            .delete_blob_once(&self.apply_prefix(key))
+            .await
+            .map_err(|source| {
+                // A custom provider may incorrectly advertise retryability. Never
+                // propagate that hint through the lock-release adapter.
+                let source = if source.is_retryable() {
+                    graphql_orm_storage::StorageError::SingleAttemptFailed {
+                        source: Box::new(source),
+                    }
+                } else {
+                    source
+                };
+                BackupError::from(source)
+            })
+    }
+
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.store
             .put_blob(
@@ -241,5 +276,88 @@ impl BackupRepository for BlobStoreBackupRepository {
 
     async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
         Ok(self.store.delete_blob(&self.apply_prefix(key)).await?)
+    }
+}
+
+#[cfg(test)]
+mod conditional_write_tests {
+    use super::*;
+
+    struct NoConditionalWrite;
+
+    #[async_trait]
+    impl BackupRepository for NoConditionalWrite {
+        async fn put_blob(&self, _: &str, _: Bytes) -> Result<(), BackupError> {
+            panic!("default conditional create must not write")
+        }
+        async fn get_blob(&self, _: &str) -> Result<Bytes, BackupError> {
+            panic!("default conditional create must not read")
+        }
+        async fn blob_exists(&self, _: &str) -> Result<bool, BackupError> {
+            panic!("default conditional create must not check existence")
+        }
+        async fn list_blobs(&self, _: &str) -> Result<Vec<String>, BackupError> {
+            panic!("default conditional create must not list")
+        }
+        async fn delete_blob(&self, _: &str) -> Result<(), BackupError> {
+            panic!("default conditional create must not delete")
+        }
+    }
+
+    #[tokio::test]
+    async fn inherited_conditional_create_fails_closed_without_repository_io() {
+        let repository = NoConditionalWrite;
+        let error = repository
+            .put_blob_if_absent("lock", Bytes::new())
+            .await
+            .expect_err("atomic creation unsupported");
+        assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
+        let error = repository
+            .put_blob_stream_if_absent("lock", StorageByteStream::from_bytes(Bytes::new()))
+            .await
+            .expect_err("streaming default must also fail closed");
+        assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
+        let error =
+            crate::RepositoryLock::acquire(&repository, &crate::RepositoryLockOptions::default())
+                .await
+                .expect_err("lock requires atomic conditional create");
+        assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
+    }
+    struct CreateWithoutRelease;
+
+    #[async_trait]
+    impl BackupRepository for CreateWithoutRelease {
+        async fn put_blob_if_absent(&self, _: &str, _: Bytes) -> Result<bool, BackupError> {
+            Ok(true)
+        }
+        async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+            NoConditionalWrite.put_blob(key, body).await
+        }
+        async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+            NoConditionalWrite.get_blob(key).await
+        }
+        async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+            NoConditionalWrite.blob_exists(key).await
+        }
+        async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+            NoConditionalWrite.list_blobs(prefix).await
+        }
+        async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+            NoConditionalWrite.delete_blob(key).await
+        }
+    }
+
+    #[tokio::test]
+    async fn release_never_falls_back_to_ordinary_provider_delete() {
+        let repository = CreateWithoutRelease;
+        let lock =
+            crate::RepositoryLock::acquire(&repository, &crate::RepositoryLockOptions::default())
+                .await
+                .expect("explicit atomic creation");
+        let error = lock
+            .release()
+            .await
+            .expect_err("release requires explicit opt-in");
+        assert!(matches!(error, BackupError::UnsupportedOperation { .. }));
     }
 }

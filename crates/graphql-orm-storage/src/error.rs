@@ -31,6 +31,23 @@ pub enum StorageProviderErrorKind {
 /// Errors returned by storage services and provider backends.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
+    /// A single-attempt operation failed; retrying by key is unsafe.
+    ///
+    /// Non-retryable does not establish that the operation had no effect.
+    #[error("single-attempt storage operation failed; outcome may be unknown")]
+    SingleAttemptFailed {
+        /// Original failure, preserved only in the error source chain.
+        #[source]
+        source: Box<StorageError>,
+    },
+
+    /// The provider does not implement the required operation safely.
+    #[error("unsupported storage operation: {operation}")]
+    UnsupportedOperation {
+        /// Operation that requires an explicit provider implementation.
+        operation: String,
+    },
+
     /// The selected provider is known but is not implemented by this build.
     #[error("unsupported storage backend: {backend}")]
     UnsupportedBackend {
@@ -106,18 +123,27 @@ pub enum StorageError {
 }
 
 impl StorageError {
-    /// Returns whether retrying the failed operation may succeed.
+    /// Returns whether this failure permits retrying the operation.
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
             Self::Provider { retryable, .. } => *retryable,
             Self::RemoteProvider { retryable, .. } => *retryable,
             Self::Io { .. } => true,
-            Self::UnsupportedBackend { .. }
+            Self::SingleAttemptFailed { .. }
+            | Self::UnsupportedOperation { .. }
+            | Self::UnsupportedBackend { .. }
             | Self::InvalidStorageKey { .. }
             | Self::MissingBlob { .. }
             | Self::PreconditionFailed { .. }
             | Self::MissingParent { .. } => false,
+        }
+    }
+
+    #[cfg(any(feature = "local", feature = "s3", feature = "smb"))]
+    pub(crate) fn single_attempt(source: Self) -> Self {
+        Self::SingleAttemptFailed {
+            source: Box::new(source),
         }
     }
 

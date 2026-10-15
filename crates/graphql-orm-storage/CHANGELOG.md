@@ -10,6 +10,22 @@ supersedes: []
 
 # Changelog
 
+## 0.7.0 - 2026-10-14
+
+- Fixed the S-005 custom-provider path: inherited conditional creation now
+  fails closed instead of performing an existence check followed by a write.
+- Breaking: added non-retryable `StorageError::UnsupportedOperation`; custom
+  providers must implement atomic `BlobStore::put_blob_if_not_exists`.
+- SMB conditional-create failure/cancellation cleanup closes only its original
+  handle and never removes a replacement object by reopening the shared key.
+- Added non-retryable `SingleAttemptFailed` errors preserving the original cause
+  without advertising unsafe retries after an ambiguous deletion.
+- Added explicit `delete_blob_once` capability for lock release, defaulting to
+  unsupported. Native local uses one removal; S3 disables SDK operation retries
+  and SMB does not reopen paths after a possibly applied deletion.
+- Native local, SMB and S3 overrides and Azure unsupported behavior are retained;
+  provider configuration and persisted data are unchanged.
+
 ## 0.6.2 - 2026-08-31
 
 - Refreshed the package's maintained workspace handoff to the current ORM,
