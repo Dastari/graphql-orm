@@ -16,6 +16,10 @@ resolver types. It supports managed SQLite and PostgreSQL schemas plus
 read-only or deliberately `ExternalWritable` SQL Server integration for
 externally owned tables.
 
+Version 0.48.1 fixes PostgreSQL TEXT literal-default replanning and owned runtime
+certification while retaining physical hashes, migration history and timestamp
+contracts. See the [migration guide](../../MIGRATION.md).
+
 It is not a database server, migration runner, HTTP framework, authorization
 system, or a promise that a generated field is safe to expose. Applications
 own connection lifecycle, schema-application decisions, request identity,
@@ -45,7 +49,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.48.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.48.1", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

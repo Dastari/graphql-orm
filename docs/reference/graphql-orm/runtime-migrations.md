@@ -205,6 +205,15 @@ emit UTC RFC 3339 with six fractional digits (`strftime` has millisecond resolut
 so the final three are zero); PostgreSQL uses its native timestamp default. SQL
 NULL and JSON null semantics remain those of the runtime record API.
 
+PostgreSQL TEXT string defaults compare complete quoted literals with the same
+literal deparsed with `::text`, including doubled quotes, Unicode and the
+deparser's E-string backslash/quote escaping. Cast-looking text inside a literal
+is data. This comparison does not rewrite the target, introspected expression,
+physical/plan hashes or history; genuinely different literals and unsupported
+casts/expressions remain distinct. Runtime literal SQL assumes PostgreSQL's
+standard string mode (`standard_conforming_strings=on`); nonstandard session
+escape modes are not newly supported. SQLite default behavior is unchanged.
+
 Static-to-runtime conversion rejects legacy epoch-second defaults on fields
 marked DateTime with a scoped `RuntimeSchemaDiagnosticCode::UnsupportedDefault`.
 The diagnostic identifies the collection and field and explains the incompatible

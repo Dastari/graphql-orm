@@ -13,6 +13,24 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.48.0 to 0.48.1: PostgreSQL string default round trips
+
+Upgrade ORM/macros together. PostgreSQL TEXT literal defaults now compare equal
+to the same complete literal with PostgreSQL's deparsed `::text` cast. This fixes
+unchanged owned-migration replans and runtime mutation certification after a
+successful apply. Different literal values and unsupported SQL/casts remain
+distinct; this does not interpret arbitrary default expressions.
+
+No stored-data, SQL schema, GraphQL SDL or migration-history rewrite is required.
+Default SQL and physical/plan hash representations remain unchanged. Existing
+guarded baselines still detect physical drift; regenerate plans only when the
+actual live baseline changes. Runtime string rendering continues to use standard
+SQL string semantics (`standard_conforming_strings=on` on PostgreSQL).
+Legacy epoch-second DateTime rejection and host-managed Integer timestamps are
+unchanged. The macros patch version keeps the paired packages aligned.
+SQLite CHECK introspection also handles preceding Unicode defaults without a
+UTF-8 boundary panic and retains the original constraint semantics.
+
 ## 0.47.0 to 0.48.0: SQL Server platform TLS
 
 Upgrade ORM/macros together. The `mssql` feature now selects Tiberius native TLS

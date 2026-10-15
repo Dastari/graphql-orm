@@ -14,6 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.48.1 (unreleased)
+
+- Compare complete PostgreSQL TEXT literal defaults with their deparsed `::text`
+  spelling without creating a spurious column alteration or rejecting an
+  unchanged runtime mutation environment. Preserve exact string values,
+  physical/plan hashes, guarded baselines and migration history identities.
+- Align ORM/macros at 0.48.1; generated macros and datetime/timestamp contracts
+  are unchanged.
+- Avoid a SQLite CHECK introspection panic when Unicode appears before the
+  constraint, retaining the complete CHECK expression.
+
 ## 0.48.0 (unreleased)
 
 - Use the maintained native TLS transport for SQL Server while retaining the

@@ -640,3 +640,44 @@ fn postgres_timestamp_aliases_share_planning_without_rewriting_hashes_or_real_ty
         .is_empty()
     );
 }
+
+#[test]
+fn postgres_text_literal_deparse_shares_planning_without_rewriting_hashes() {
+    fn model(default: &str) -> SchemaModel {
+        let mut table = users_v1();
+        table.columns[1].default = Some(default.into());
+        SchemaModel {
+            extensions: vec![],
+            tables: vec![table],
+        }
+    }
+    let plain = model("'O''Reilly::text'");
+    let deparsed = model("'O''Reilly::text'::text");
+    let plain_hash = plain.stable_hash();
+    let deparsed_hash = deparsed.stable_hash();
+    assert_ne!(
+        plain_hash, deparsed_hash,
+        "legacy representation hashes remain distinct"
+    );
+    for (before, after) in [(&plain, &deparsed), (&deparsed, &plain)] {
+        let plan = build_migration_plan(DatabaseBackend::Postgres, before, after);
+        assert!(plan.steps.is_empty());
+        assert!(plan.statements.is_empty());
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Mssql] {
+            assert!(
+                !build_migration_plan(backend, before, after)
+                    .steps
+                    .is_empty()
+            );
+        }
+    }
+    assert_eq!(plain.stable_hash(), plain_hash);
+    assert_eq!(deparsed.stable_hash(), deparsed_hash);
+    let changed = build_migration_plan(DatabaseBackend::Postgres, &deparsed, &model("'different'"));
+    assert!(
+        changed
+            .steps
+            .iter()
+            .any(|step| matches!(step, MigrationStep::AlterColumn { .. }))
+    );
+}

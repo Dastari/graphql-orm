@@ -1983,3 +1983,238 @@ async fn postgres_datetime_required_nullable_defaults_and_composition_fixed_poin
     owned.cleanup()?;
     Ok(())
 }
+
+// Exercise the same canonical diff for runtime ownership and the legacy static
+// adapter; raw default/hash identities must not be rewritten to obtain a no-op.
+async fn owned_string_defaults_fixed_point<B: RuntimeMigrationBackend>(
+    database: &Database<B>,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let mut values = Vec::new();
+    for (position, literal) in [
+        "",
+        "plain",
+        "O'Reilly",
+        "雪🦀",
+        "x::text",
+        "('x')::text",
+        "path\\file",
+        "quote'\\tail",
+        "line\n\tend",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let table = format!("literal_defaults_{position}");
+        let mut definition = schema().schema().clone();
+        let collection = &mut definition.collections[0];
+        collection.physical_table = table.clone();
+        collection.fields.truncate(1);
+        collection.indexes.clear();
+        collection.fields.push(RuntimeField {
+            id: FieldId::new("value")?,
+            api_name: "value".into(),
+            physical_column: "value".into(),
+            value_kind: RuntimeValueKind::String,
+            nullable: false,
+            unique: position == 1,
+            filterable: false,
+            sortable: false,
+            generated: false,
+            default: Some(RuntimeDefault::Literal(literal.into())),
+        });
+        if position == 2 {
+            collection.indexes.push(RuntimeIndex {
+                id: IndexId::new("literal_index")?,
+                name: "idx_literal_value".into(),
+                fields: vec![FieldId::new("value")?],
+                unique: false,
+            });
+        }
+        if position == 3 {
+            collection.composite_unique.push(vec![
+                collection.fields[0].id.clone(),
+                FieldId::new("value")?,
+            ]);
+        }
+        let runtime = std::sync::Arc::new(definition.validate()?);
+        let target = runtime.physical_schema::<B>(Default::default())?;
+        let hash = target.stable_hash();
+        let ownership = ManagedTableSet::new([table.clone()])?;
+        let manager = database.schema();
+        let plan = manager
+            .plan_owned_migration(
+                &table,
+                "string literal",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await?;
+        manager
+            .apply_owned_migration(
+                &plan,
+                ApplyOptions {
+                    additive_only: true,
+                    expected_current_schema_hash: Some(plan.source_schema_hash().into()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let noop = manager
+            .plan_owned_migration(
+                &table,
+                "same literal",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await?;
+        assert!(
+            noop.steps().is_empty(),
+            "string-default-roundtrip-unexpected-alter:{literal:?}: {noop:?}"
+        );
+        assert!(noop.statements().is_empty());
+        assert!(
+            manager
+                .apply_owned_migration(&noop, Default::default())
+                .await?
+                .already_applied
+        );
+        manager
+            .runtime_mutation_environment(runtime.clone(), &target, &ownership)
+            .await?;
+        assert_eq!(target.stable_hash(), hash);
+
+        let mut changed = runtime.schema().clone();
+        changed.collections[0].fields[1].default =
+            Some(RuntimeDefault::Literal(format!("{literal}!")));
+        let changed = std::sync::Arc::new(changed.validate()?);
+        let changed_target = changed.physical_schema::<B>(Default::default())?;
+        let difference = manager
+            .plan_owned_migration(
+                format!("{table}_different"),
+                "different literal",
+                &changed_target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await?;
+        assert!(
+            !difference.steps().is_empty(),
+            "different literal must not compare equal"
+        );
+        rejected(
+            manager
+                .runtime_mutation_environment(changed, &changed_target, &ownership)
+                .await
+                .unwrap_err(),
+            RuntimeMigrationDiagnosticCode::BaselineMismatch,
+        );
+        let unchanged = manager
+            .plan_owned_migration(
+                &table,
+                "still unchanged",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await?;
+        assert_eq!(unchanged.source_schema_hash(), noop.source_schema_hash());
+        assert_eq!(target.stable_hash(), hash);
+        values.push((table, literal.into()));
+    }
+    Ok(values)
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_owned_string_literal_defaults_round_trip_exact_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = sqlite().await;
+    for (table, expected) in owned_string_defaults_fixed_point(&db).await? {
+        sqlx::query(&format!("INSERT INTO {table}(id) VALUES ('stored')"))
+            .execute(db.pool())
+            .await?;
+        let stored: String =
+            sqlx::query_scalar(&format!("SELECT value FROM {table} WHERE id='stored'"))
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(stored, expected, "{table}");
+    }
+    db.pool().close().await;
+    Ok(())
+}
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_owned_string_literal_defaults_round_trip_exact_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("string-defaults")?;
+    let db = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
+    // Runtime literal rendering follows PostgreSQL's standard SQL string mode.
+    let standard: String = sqlx::query_scalar("SHOW standard_conforming_strings")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(standard, "on");
+    for (table, expected) in owned_string_defaults_fixed_point(&db).await? {
+        sqlx::query(&format!("INSERT INTO {table}(id) VALUES ('stored')"))
+            .execute(db.pool())
+            .await?;
+        let stored: String =
+            sqlx::query_scalar(&format!("SELECT value FROM {table} WHERE id='stored'"))
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(stored, expected, "{table}");
+    }
+    let live = PostgresBackend::introspect_owned(db.pool()).await?;
+    let ownership = ManagedTableSet::new((0..9).map(|i| format!("literal_defaults_{i}")))?;
+    let manager = db.schema();
+    let stale = manager
+        .plan_owned_migration(
+            "stale-literal",
+            "guard literal drift",
+            &live,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(stale.steps().is_empty());
+    let history_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_migrations")
+        .fetch_one(db.pool())
+        .await?;
+    sqlx::query(
+        "ALTER TABLE literal_defaults_1 ALTER COLUMN value SET DEFAULT 'actually different'",
+    )
+    .execute(db.pool())
+    .await?;
+    rejected(
+        manager
+            .apply_owned_migration(
+                &stale,
+                ApplyOptions {
+                    expected_current_schema_hash: Some(stale.source_schema_hash().into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err(),
+        RuntimeMigrationDiagnosticCode::BaselineMismatch,
+    );
+    let history_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_migrations")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(history_before, history_after);
+    let changed = manager
+        .plan_owned_migration(
+            "different-live-literal",
+            "real drift remains visible",
+            &live,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await?;
+    assert!(!changed.steps().is_empty());
+    db.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}
