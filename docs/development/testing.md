@@ -94,6 +94,11 @@ bash scripts/run-security-test-targets.sh postgres subscription_portable_authori
 bash scripts/run-security-test-targets.sh mssql subscription_portable_authorization bounded_protected_scans
 ```
 
+Nested fixture Cargo commands inherit the caller's `CARGO_BUILD_JOBS` budget.
+The cross-crate, backend-coexistence and federation fixture drivers use locked
+dependency resolution; a stale fixture lockfile fails validation instead of
+being silently rewritten during a test.
+
 The existing `sqlserver-security` job separately executes the ignored owned TLS,
 writable-transaction and query-notification tests. Release security jobs depend
 on the protected `guard`; the aggregate `validate` gate requires them before
@@ -147,8 +152,9 @@ scripts/check-ai-provider-lanes.sh doc
 ```
 
 The runner covers `provider-openai`, `provider-anthropic`, `provider-xai`,
-`provider-ollama`, `provider-openai-compatible`, `local-harness`, and
-`provider-codex-app-server`, each with only SQLite and that provider enabled.
+`provider-ollama`, `provider-openai-compatible`, `local-harness`,
+`provider-codex-app-server`, and `provider-grok-acp`, each with only SQLite and
+that provider enabled.
 Pass one provider feature as the second argument for a focused run, and
 `--list` to print the lane set as JSON. The release workflow uses both to give
 every provider lane its own runner and its own `target/`. These local commands

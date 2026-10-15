@@ -21,6 +21,7 @@ fn two_orm_subgraphs_compose_and_join_through_the_router() {
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
             "test",
+            "--locked",
             "--manifest-path",
             manifest,
             "-p",
