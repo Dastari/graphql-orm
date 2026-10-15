@@ -39,7 +39,7 @@ private compatibility behavior. Existing configured GraphQL scalar limits and
 legacy logical bind admission remain unchanged; the new public checked artifact
 reserves worst-case emitted binds, including SQLite suffix duplication. Existing
 canonical execution is not upgraded to a new actual-bind policy by this change. The core builder has
-fixed text/binary literal caps of64KiB/32KiB and counts SQLite suffix binds twice;
+fixed text/binary literal caps of 64 KiB/32 KiB and counts SQLite suffix binds twice;
 imported/reused nodes revalidate full bounds on each composition/finalization.
 
 `prepare_match` validates the full original operator profile; `matches` validates
@@ -52,13 +52,13 @@ record values.
 
 Profile selection is a trusted physical-storage assertion, not inferred from a
 backend or decoded record. SQLite requires String TEXT/BINARY UTF-8, booleans
-INTEGER0/1, exact i64 INTEGER, finite REAL, bytes BLOB, lowercase canonical UUID
+INTEGER 0/1, exact i64 INTEGER, finite REAL, bytes BLOB, lowercase canonical UUID
 TEXT and microsecond UTC timestamp TEXT. PostgreSQL requires UTF-8/C String TEXT
 (or proven equivalent VARCHAR, never fixed CHAR/bpchar), native typed values and
-finite floats. Date-times are restricted to canonical years0001–9999 without
+finite floats. Date-times are restricted to canonical years 0001–9999 without
 leap seconds; control/NUL strings are rejected. Foreign storage spelling/classes
 can be normalized by row decoding, so the matcher cannot detect prior violations
-(e.g. SQLite integer7 decoded as true or uppercase UUID text). Unsupported
+(e.g. SQLite integer 7 decoded as true or uppercase UUID text). Unsupported
 profiles must fail closed; do not guess Rust comparison equivalence.
 
 An authoritative immutable image remains a host premise. Matching supplies no
