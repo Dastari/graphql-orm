@@ -119,13 +119,22 @@ omitted-value behavior and replan. See [the migration guide](../../../MIGRATION.
 
 In 0.48.3, existing fallible managed planning/application rejects unsupported
 changes to per-column primary-key or constraint-backed unique flags, and spatial
-metadata changes without an actual SQL type change. Direct/owned rejection precedes managed
-runtime/history preparation and allow_destructive cannot bypass capability admission.
-Owned paths use InvalidPhysicalContract; static managers use a fixed Protocol
-error. Legacy staged/ABI planning may initialize an empty validated
-bookkeeping table while reading existing versions; it admits the complete stage
-sequence before executing any target DDL or recording migration history rows. Actual geometry SQL type changes remain eligible under existing database
-conversion rules; this adds no new DDL or automatic postapply contract.
+metadata changes with the same SQL type expression. Same-type uses the existing
+case-insensitive comparison or exact `TIMESTAMPTZ`/`timestamp with time zone`
+aliases. Direct/owned rejection precedes managed runtime/history preparation;
+`allow_destructive` cannot bypass capability admission. Owned paths use
+`InvalidPhysicalContract`; static managers use a fixed `Protocol` error. Legacy
+staged/ABI planning may initialize an empty validated bookkeeping table while
+reading versions, but admits the complete stage sequence before target DDL or
+migration history rows.
+
+Changed SQL type expressions retain the existing renderer path. This comparison
+does not prove semantic type difference or `sql_type`/spatial metadata coherence:
+whitespace, other aliases and incoherent host declarations remain outside this
+bounded guard. Trusted direct `SchemaModel`/`OwnedSchemaModel` hosts own that
+coherence; the runtime IR rejects all spatial metadata. The geometry positive
+regression proves planning/rendering, not live conversion or target certification.
+This adds no new DDL or automatic postapply contract.
 
 PostgreSQL column uniqueness is introspected from unique constraints, not
 standalone unique indexes. Explicit standalone unique index operations with

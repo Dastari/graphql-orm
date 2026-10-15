@@ -17,7 +17,7 @@ neither the runtime nor macros crate is published to crates.io.
 
 Upgrade ORM/macros together. Existing fallible managed planning and application
 now reject unsupported changes to per-column primary-key or constraint-backed
-unique flags, and spatial metadata changes without an actual SQL type change.
+unique flags, and spatial metadata changes with the same SQL type expression.
 Owned paths return `InvalidPhysicalContract`; static managers return a fixed
 `Protocol` error. Direct/owned rejection occurs before runtime/history
 preparation. Legacy staged/ABI planning may initialize an empty validated history
@@ -27,9 +27,15 @@ rows. `allow_destructive` cannot bypass capability admission. No new constraint 
 PostgreSQL introspection obtains column uniqueness from unique constraints,
 not standalone unique indexes. An explicit standalone unique index with unchanged
 column flags remains supported; it does not repair an unsupported flag change.
-Actual geometry SQL type changes remain eligible and can still fail under
-existing database conversion rules. Real owned primary-key vector transitions
-were already rejected. SQLite/MSSQL behavior is unchanged.
+Same-type means the existing case-insensitive expression comparison or exact
+`TIMESTAMPTZ`/`timestamp with time zone` aliases. Changed SQL type expressions
+retain the existing renderer path; this does not prove semantic type difference
+or correspondence between `sql_type` and spatial metadata. Whitespace, other
+aliases and incoherent host metadata remain outside this bounded guard. Trusted
+direct `SchemaModel`/`OwnedSchemaModel` hosts own that coherence; the runtime IR
+rejects all spatial metadata. The geometry positive test proves planning/rendering,
+not a live conversion or target certification. Real owned primary-key vector
+transitions were already rejected. SQLite/MSSQL behavior is unchanged.
 
 Low-level infallible diff/render/build functions remain structural previews,
 not certification that every requested step can execute. Do not bypass the

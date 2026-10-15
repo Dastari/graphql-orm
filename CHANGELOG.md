@@ -17,10 +17,9 @@ for historical context.
 ## 0.48.3 (unreleased)
 
 - Fail closed before managed PostgreSQL target DDL or history rows for unsupported
-  primary-key
-  flag, constraint-backed unique flag and same-type spatial metadata alterations.
-  Explicit standalone unique indexes with unchanged flags and actual geometry
-  SQL type conversions remain eligible for their existing execution paths.
+  primary-key flags, constraint-backed unique flags and same-type spatial
+  metadata alterations. Explicit standalone unique indexes with unchanged flags
+  and changed SQL type expressions retain their existing renderer paths.
 
 ## 0.48.2 (unreleased)
 
