@@ -744,6 +744,35 @@ fn postgres_timestamptz_alias(sql_type: &str) -> bool {
         || sql_type.eq_ignore_ascii_case("timestamp with time zone")
 }
 
+// Constraint-backed column flags are not implemented by ALTER TYPE/nullability.
+// A standalone unique index is separate metadata and never repairs these flags.
+pub(super) fn postgres_alter_metadata_supported(before: &ColumnModel, after: &ColumnModel) -> bool {
+    let same_type = before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+        || (postgres_timestamptz_alias(&before.sql_type)
+            && postgres_timestamptz_alias(&after.sql_type));
+    before.is_primary_key == after.is_primary_key
+        && before.is_unique == after.is_unique
+        && (before.spatial == after.spatial || !same_type)
+}
+
+pub(super) fn validate_migration_step_capabilities<'a>(
+    backend: DatabaseBackend,
+    steps: impl Iterator<Item = StepRef<'a>>,
+) -> crate::Result<()> {
+    if backend == DatabaseBackend::Postgres {
+        for step in steps {
+            if let StepRef::AlterColumn { before, after, .. } = step {
+                if !postgres_alter_metadata_supported(before, after) {
+                    return Err(sqlx::Error::Protocol(
+                        "unsupported PostgreSQL column metadata alteration".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
     before: &ColumnModel,

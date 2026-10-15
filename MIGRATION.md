@@ -13,6 +13,31 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.48.2 to 0.48.3: unsupported PostgreSQL alterations fail closed
+
+Upgrade ORM/macros together. Existing fallible managed planning and application
+now reject unsupported changes to per-column primary-key or constraint-backed
+unique flags, and spatial metadata changes without an actual SQL type change.
+Owned paths return `InvalidPhysicalContract`; static managers return a fixed
+`Protocol` error. Direct/owned rejection occurs before runtime/history
+preparation. Legacy staged/ABI planning may initialize an empty validated history
+table, but rejects the complete stage sequence before target DDL or history
+rows. `allow_destructive` cannot bypass capability admission. No new constraint DDL, public API signature or automatic postapply contract is added.
+
+PostgreSQL introspection obtains column uniqueness from unique constraints,
+not standalone unique indexes. An explicit standalone unique index with unchanged
+column flags remains supported; it does not repair an unsupported flag change.
+Actual geometry SQL type changes remain eligible and can still fail under
+existing database conversion rules. Real owned primary-key vector transitions
+were already rejected. SQLite/MSSQL behavior is unchanged.
+
+Low-level infallible diff/render/build functions remain structural previews,
+not certification that every requested step can execute. Do not bypass the
+managed preflight by converting an unsupported preview to trusted raw SQL.
+Review already recorded ineffective alterations against actual physical state;
+remaining-work version reuse fails closed. Use a fresh reviewed supported repair
+version or host-managed DDL, without rewriting historical records.
+
 ## 0.48.1 to 0.48.2: PostgreSQL default alterations
 
 Upgrade ORM/macros together. PostgreSQL plans now execute real default changes

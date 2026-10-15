@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.48.3 (unreleased)
+
+- Fail closed before managed PostgreSQL target DDL or history rows for unsupported
+  primary-key
+  flag, constraint-backed unique flag and same-type spatial metadata alterations.
+  Explicit standalone unique indexes with unchanged flags and actual geometry
+  SQL type conversions remain eligible for their existing execution paths.
+
 ## 0.48.2 (unreleased)
 
 - PostgreSQL static/owned migration plans now apply real SET, replacement and

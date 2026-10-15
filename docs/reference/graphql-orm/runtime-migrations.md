@@ -115,6 +115,26 @@ history-rewritten. A recorded version with remaining planned work fails closed.
 Use a fresh reviewed repair version, retain history and confirm physical default,
 omitted-value behavior and replan. See [the migration guide](../../../MIGRATION.md#0481-to-0482-postgresql-default-alterations).
 
+## Unsupported PostgreSQL column alterations
+
+In 0.48.3, existing fallible managed planning/application rejects unsupported
+changes to per-column primary-key or constraint-backed unique flags, and spatial
+metadata changes without an actual SQL type change. Direct/owned rejection precedes managed
+runtime/history preparation and allow_destructive cannot bypass capability admission.
+Owned paths use InvalidPhysicalContract; static managers use a fixed Protocol
+error. Legacy staged/ABI planning may initialize an empty validated
+bookkeeping table while reading existing versions; it admits the complete stage
+sequence before executing any target DDL or recording migration history rows. Actual geometry SQL type changes remain eligible under existing database
+conversion rules; this adds no new DDL or automatic postapply contract.
+
+PostgreSQL column uniqueness is introspected from unique constraints, not
+standalone unique indexes. Explicit standalone unique index operations with
+unchanged column flags remain supported and do not repair a flag alteration.
+Low-level infallible diff/render/build functions remain structural previews, not
+executable capability certificates. Trusted raw SQL does not gain this managed
+preflight. For existing recorded ineffective work, retain history and use a fresh
+reviewed supported repair; see [the migration guide](../../../MIGRATION.md#0482-to-0483-unsupported-postgresql-alterations-fail-closed).
+
 ## Ownership, composition and dependencies
 
 `ManagedTableSet` is trusted host state. Its portable table identifiers are unique,

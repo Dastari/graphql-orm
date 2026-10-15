@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+The paired 0.48.3 release rejects unsupported PostgreSQL column constraint-flag
+or spatial-metadata-only alterations before managed target DDL/history rows.
+Legacy staged planning may initialize empty bookkeeping; direct/owned paths
+reject before runtime preparation. Infallible previews remain structural views;
+see the root migration guide for the supported boundary.
+
 PostgreSQL migration default alterations are corrected in the paired 0.48.2
 runtime/macros release: future omitted-value inserts use the changed default;
 existing rows and recorded migration history are not rewritten. See the root

@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.48.2"
+version = "0.48.3"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1440,7 +1440,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.48.2"
+version = "0.48.3"
 dependencies = [
  "convert_case",
  "proc-macro2",
