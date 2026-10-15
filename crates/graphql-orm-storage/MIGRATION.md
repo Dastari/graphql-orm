@@ -10,6 +10,23 @@ supersedes: []
 
 # Migration Guide
 
+## 0.7.1 to 0.7.2: modern S3 transport selection
+
+The `s3` feature now disables the AWS SDK's defaults and explicitly retains
+`sigv4a`, `http-1x`, `default-https-client`, `rt-tokio` and
+`behavior-version-latest`. It omits the SDK's legacy `rustls` alias, which also
+activated an obsolete HTTP/TLS connector. HTTPS remains enabled through the
+modern default HTTPS client; certificate validation remains enabled.
+
+The storage S3 feature graph no longer selects Rustls 0.21/WebPKI 0.101 or
+Hyper 0.14/H2 0.3. Other workspace backend selections can retain independent
+legacy TLS dependencies; this change does not migrate those backends.
+
+No API, provider configuration or persisted-data migration is required. Keep
+selected workspace packages on one reviewed revision and regenerate `Cargo.lock`.
+See the [development guide](docs/development.md#owned-https-transport-fixture)
+for the opt-in disposable HTTPS validation command.
+
 ## 0.7.0 to 0.7.1: local temporary-file sweep
 
 The local sweep skips symbolic links, linked roots, directory cycles and
