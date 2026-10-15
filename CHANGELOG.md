@@ -58,6 +58,10 @@ for historical context.
 
 ## 0.43.1 (unreleased)
 
+- Pin external CI/release actions to full revisions and restrict workflow tokens
+  to read-only contents outside the publication job. No library API or migration
+  change; all backend/provider validation lanes remain enabled.
+
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse
   typed key binding for bare-pool readback and related single-key lookups/updates,
   preserving supplied keys and String/UUID/binary/composite key behavior.
