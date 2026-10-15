@@ -16,6 +16,10 @@ for historical context.
 
 ## 0.44.1 (unreleased)
 
+- Refresh compatible TLS/QUIC dependencies and yanked patch releases. Require
+  the Decimal release that removes its old optional rkyv bridge; consumers of
+  that upstream archival feature must migrate it as described in MIGRATION.md.
+  Other unresolved transitive advisories retain explicit reachability review.
 - Route generated query, search, keyset, mutation and Federation backend failures
   through the public error sanitizer. Relationship/Federation loaders retain
   safe public categories in a code-only String transport; SQL/schema/record diagnostics stay private.
