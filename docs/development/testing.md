@@ -58,6 +58,48 @@ cargo tree -p graphql-orm --locked --no-default-features --features mssql
 cargo tree --duplicates --workspace --locked
 ```
 
+## Required authorization and privacy regressions
+
+CI and release validation select security integration targets explicitly. The
+default SQLite package suite does not enable `auth-agql` and therefore cannot
+exercise the current-authority integration tests. The `orm-security-sqlite` job
+enables `sqlite,auth-agql` and runs `current_authority`, `authorization_mode`,
+`authorized_pagination`, `subscription_release_authorization`,
+`subscription_provenance_authorization` and `subscription_repository_provenance`.
+These cover accepted-request coherence and revocation, strict policy modes,
+bounded authorized pagination, event-time authority and private provenance.
+
+The `orm-security-portable` matrix runs `subscription_portable_authorization` and
+`bounded_protected_scans` with exactly one backend selected: SQLite, PostgreSQL
+or MSSQL. SQLite uses temporary in-memory databases. The other profiles create
+their own disposable loopback containers with random ownership identities and
+exact-identity cleanup; they do not take an application database URL. These
+portable tests are not ignored, so an `--ignored` invocation would skip them.
+The matrix also compiles and runs warnings-denied library Clippy with
+`auth-agql` on each backend; this is compile/lint coverage for PostgreSQL/MSSQL
+current-authority integration, not a claim of runtime parity for SQLite-only
+tests.
+
+Both jobs use one Cargo build worker and one test thread; the portable matrix
+admits one backend at a time and each job has a finite timeout. The shared
+`scripts/run-security-test-targets.sh` executes each selected target separately
+and requires a nonzero passing-test count in its output, so a feature-gated
+zero-test binary cannot satisfy the security gate. Ordinary ignored benchmarks
+remain excluded. Run the same explicit targets locally through the applicable
+resource-controlled runner:
+
+```sh
+bash scripts/run-security-test-targets.sh sqlite,auth-agql current_authority authorization_mode authorized_pagination subscription_release_authorization subscription_provenance_authorization subscription_repository_provenance
+bash scripts/run-security-test-targets.sh postgres subscription_portable_authorization bounded_protected_scans
+bash scripts/run-security-test-targets.sh mssql subscription_portable_authorization bounded_protected_scans
+```
+
+The existing `sqlserver-security` job separately executes the ignored owned TLS,
+writable-transaction and query-notification tests. Release security jobs depend
+on the protected `guard`; the aggregate `validate` gate requires them before
+publication. Workflow configuration establishes required execution, not a
+passing result for an unexecuted candidate.
+
 ## Package-specific lanes
 
 Select companion crates explicitly and use their documented provider features.
