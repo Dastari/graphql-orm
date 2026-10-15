@@ -531,7 +531,14 @@ async fn initialize_connection(
             .borrow_mut()
             .terminate_with_public_close(4401, "Bearer credential has no usable expiry");
     };
-    let now = gateway.authentication.current_time();
+    let now = match gateway.authentication.current_time() {
+        Ok(now) => now,
+        Err(_) => {
+            return state
+                .borrow_mut()
+                .terminate_with_public_close(1011, "Authentication service unavailable");
+        }
+    };
     if expires_at <= now {
         return state
             .borrow_mut()

@@ -87,8 +87,8 @@ dependencies = [
 
 [[package]]
 name = "agql-auth"
-version = "0.21.2"
-source = "git+https://github.com/Dastari/agql-auth.git?rev=406e12b74a9e31326b03ebcd3940610fa010f942#406e12b74a9e31326b03ebcd3940610fa010f942"
+version = "0.21.3"
+source = "git+https://github.com/Dastari/agql-auth.git?rev=59c0a38f82e8c75459474238799a81f29d4ffa58#59c0a38f82e8c75459474238799a81f29d4ffa58"
 dependencies = [
  "argon2",
  "async-graphql",
@@ -3236,7 +3236,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.5.4"
+version = "0.6.0"
 dependencies = [
  "agql-auth",
  "arc-swap",
@@ -3256,6 +3256,7 @@ dependencies = [
  "sha2 0.10.9",
  "signal-hook",
  "thiserror 2.0.18",
+ "time",
  "tracing",
  "url",
 ]

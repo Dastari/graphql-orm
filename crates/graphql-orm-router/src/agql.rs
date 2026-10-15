@@ -1,4 +1,8 @@
-use std::{fmt, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    fmt,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use agql_auth::{AccessTokenValidator, AuthError, ScopeMatch};
 
@@ -40,16 +44,34 @@ impl AuthenticationProvider for AgqlAuthenticationProvider {
             .validator
             .authenticate_access_token(token)
             .map_err(map_agql_error)?;
-        let expires_at = user
-            .token_claims
-            .expires_at
-            .and_then(|expiry| u64::try_from(expiry.unix_timestamp()).ok())
-            .and_then(|expiry| UNIX_EPOCH.checked_add(std::time::Duration::from_secs(expiry)))
-            .ok_or_else(|| {
-                AuthenticationError::invalid_credential("validated token has no usable expiry")
-            })?;
+        let expires_at = user.token_claims.expires_at.ok_or_else(|| {
+            AuthenticationError::invalid_credential("validated token has no usable expiry")
+        })?;
+        let expires_at = checked_system_time(expires_at.unix_timestamp_nanos()).map_err(|_| {
+            AuthenticationError::invalid_credential("validated token has no usable expiry")
+        })?;
         AuthenticatedPrincipal::new(user.user_id, user.scopes, Some(expires_at))
     }
+
+    fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
+        // One sample supplies both seconds and fractional precision.
+        checked_system_time(self.validator.current_time().unix_timestamp_nanos())
+    }
+}
+
+fn checked_system_time(unix_nanos: i128) -> Result<SystemTime, AuthenticationError> {
+    let unavailable =
+        || AuthenticationError::unavailable("authentication time is not representable");
+    let magnitude = unix_nanos.checked_abs().ok_or_else(unavailable)?;
+    let seconds = u64::try_from(magnitude / 1_000_000_000).map_err(|_| unavailable())?;
+    let nanos = u32::try_from(magnitude % 1_000_000_000).map_err(|_| unavailable())?;
+    let duration = Duration::new(seconds, nanos);
+    if unix_nanos < 0 {
+        UNIX_EPOCH.checked_sub(duration)
+    } else {
+        UNIX_EPOCH.checked_add(duration)
+    }
+    .ok_or_else(unavailable)
 }
 
 /// Router matcher backed by the exact pinned `agql-auth` matcher contract.
@@ -176,6 +198,126 @@ mod tests {
                 .expires_at()
                 .is_some_and(|expiry| expiry > SystemTime::now() + Duration::from_secs(30))
         );
+    }
+
+    #[test]
+    fn injected_validator_clock_preserves_subscription_lifetime_and_nanoseconds() {
+        let signing_key = EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap();
+        let mut jwk = Jwk::from_encoding_key(&signing_key, Algorithm::RS256).unwrap();
+        jwk.common.key_id = Some("agql-key".to_owned());
+        let jwks = serde_json::to_string(&json!({"keys": [jwk]})).unwrap();
+        // Both epochs differ substantially from the system clock. No wall-time
+        // sleeps or real services participate in this regression.
+        for seconds in [1_600_000_000, 4_102_444_800] {
+            let now = time::OffsetDateTime::from_unix_timestamp(seconds)
+                .unwrap()
+                .replace_nanosecond(123_456_789)
+                .unwrap();
+            let clock = Arc::new(agql_auth::FixedClock::new(now));
+            let validator = Arc::new(
+                AccessTokenValidator::builder()
+                    .issuer("https://issuer.test")
+                    .audience("graphql-router")
+                    .jwks_json(jwks.clone())
+                    .clock(clock.clone())
+                    .build()
+                    .unwrap(),
+            );
+            let provider = AgqlAuthenticationProvider::new(validator);
+            let token = signed_token(
+                &signing_key,
+                json!({
+                    "sub": "clock-user", "sid": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+                    "roles": [], "iss": "https://issuer.test", "aud": "graphql-router",
+                    "iat": seconds, "exp": seconds + 60, "scope": "products.read"
+                }),
+            );
+            let principal = provider.authenticate_bearer(&token).unwrap();
+            let expected_now = UNIX_EPOCH
+                .checked_add(Duration::new(u64::try_from(seconds).unwrap(), 123_456_789))
+                .unwrap();
+            assert_eq!(provider.current_time().unwrap(), expected_now);
+            // These are the exact expiry/current-time inputs used by the
+            // WebSocket admission check and expiry scheduler.
+            assert_eq!(
+                principal
+                    .expires_at()
+                    .unwrap()
+                    .duration_since(provider.current_time().unwrap())
+                    .unwrap(),
+                Duration::new(59, 876_543_211)
+            );
+            clock.advance_seconds(10);
+            assert_eq!(
+                principal
+                    .expires_at()
+                    .unwrap()
+                    .duration_since(provider.current_time().unwrap())
+                    .unwrap(),
+                Duration::new(49, 876_543_211)
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_samples_validator_clock_once_per_time_decision() {
+        #[derive(Debug)]
+        struct CountingClock {
+            reads: std::sync::atomic::AtomicUsize,
+            now: time::OffsetDateTime,
+        }
+        impl agql_auth::Clock for CountingClock {
+            fn now(&self) -> time::OffsetDateTime {
+                self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.now
+            }
+        }
+        let signing_key = EncodingKey::from_rsa_pem(RSA_PRIVATE_KEY.as_bytes()).unwrap();
+        let mut jwk = Jwk::from_encoding_key(&signing_key, Algorithm::RS256).unwrap();
+        jwk.common.key_id = Some("agql-key".to_owned());
+        let clock = Arc::new(CountingClock {
+            reads: std::sync::atomic::AtomicUsize::new(0),
+            now: time::OffsetDateTime::from_unix_timestamp(1_600_000_000).unwrap(),
+        });
+        let validator = Arc::new(
+            AccessTokenValidator::builder()
+                .issuer("https://issuer.test")
+                .audience("graphql-router")
+                .jwks_json(serde_json::to_string(&json!({"keys": [jwk]})).unwrap())
+                .clock(clock.clone())
+                .build()
+                .unwrap(),
+        );
+        let provider = AgqlAuthenticationProvider::new(validator);
+        clock.reads.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            provider.current_time().unwrap(),
+            UNIX_EPOCH + Duration::from_secs(1_600_000_000)
+        );
+        assert_eq!(clock.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn checked_time_conversion_preserves_signed_precision_and_rejects_overflow() {
+        assert_eq!(
+            checked_system_time(1_123_456_789).unwrap(),
+            UNIX_EPOCH + Duration::new(1, 123_456_789)
+        );
+        // A platform without pre-epoch SystemTime support must return a safe
+        // unavailable error rather than panic or silently use another clock.
+        match UNIX_EPOCH.checked_sub(Duration::new(1, 123_456_789)) {
+            Some(expected) => assert_eq!(checked_system_time(-1_123_456_789).unwrap(), expected),
+            None => assert_eq!(
+                checked_system_time(-1_123_456_789).unwrap_err().kind(),
+                crate::AuthenticationErrorKind::Unavailable
+            ),
+        }
+        for unsupported in [i128::MIN, i128::MAX] {
+            assert_eq!(
+                checked_system_time(unsupported).unwrap_err().kind(),
+                crate::AuthenticationErrorKind::Unavailable
+            );
+        }
     }
 
     fn signed_token(key: &EncodingKey, claims: serde_json::Value) -> String {

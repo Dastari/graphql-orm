@@ -3,12 +3,25 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-27
+last_reviewed: 2026-10-15
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.6.0 - 2026-10-15
+
+- Use the pinned agql access-token validator's exact injected clock for router
+  subscription admission and expiry scheduling; preserve nanosecond precision
+  with checked signed timestamp conversion.
+- Make `AuthenticationProvider::current_time` return
+  `Result<SystemTime, AuthenticationError>`. Unavailable/unrepresentable clock
+  observations reject connection initialization with service-unavailable close
+  code 1011, without forwarding to a subgraph or falling back to wall time.
+- Add synthetic signed-token past/ahead clock controls, precision/overflow and
+  one-sample checks, plus owned loopback WebSocket admission/expiry/failure tests.
+  The agql provider constructor and stateless revocation boundary are unchanged.
 
 ## 0.5.4 - 2026-10-01
 

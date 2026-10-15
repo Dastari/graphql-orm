@@ -3,12 +3,56 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-27
+last_reviewed: 2026-10-15
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.5.4 to 0.6.0: coherent fallible authentication clocks
+
+The agql adapter now observes the same injected clock as its access-token
+validator. `AgqlAuthenticationProvider::new(validator)` is unchanged. Adopt the
+reviewed auth revision exposing `AccessTokenValidator::current_time`; retain its
+full locked commit in the release manifest. No token, GraphQL, descriptor or
+stored-data migration is required. Standard system-clock configurations retain
+their behavior; injected clocks no longer silently use a different wall clock.
+
+Custom implementations overriding `AuthenticationProvider::current_time` must
+change their return type from `SystemTime` to
+`Result<SystemTime, AuthenticationError>`. For an infallible host clock, wrap the
+same clock observation in `Ok`:
+
+```rust,ignore
+fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
+    Ok(self.clock.now())
+}
+```
+
+For a fallible host clock, preserve the error and use a safe unavailable category:
+
+```rust,ignore
+fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
+    self.clock.now().map_err(|_| {
+        AuthenticationError::unavailable("authentication clock unavailable")
+    })
+}
+```
+
+Providers using the default system clock need no override. Observe the same clock
+used for credential validation exactly once per decision; do not return an
+unrelated fallback clock or panic on conversion. The agql adapter preserves signed
+nanoseconds using checked `SystemTime` arithmetic. A platform that cannot represent
+a supplied clock timestamp returns unavailable. WebSocket initialization closes
+with code 1011 for a clock failure, rather than labeling a server fault as invalid
+client credentials; no upstream subscription is opened.
+
+The gateway samples time at admission and schedules the remaining lifetime.
+It does not poll token status, track later arbitrary clock jumps or promise
+immediate revocation. Authoritative subgraphs must continue to validate the
+forwarded credential and enforce current authority/bindings/row policy, including
+per-event subscription checks when required.
 
 ## 0.5.3 to 0.5.4
 

@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-09-27
+last_reviewed: 2026-10-15
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -26,8 +26,14 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.5.4" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0" }
 ```
+
+Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
+adapter uses its validator's exact injected clock, including subsecond precision,
+for subscription admission and expiry scheduling. Clock failures reject a new
+connection as service unavailable; they never select a fallback clock. Custom
+provider migration is described in [MIGRATION.md](MIGRATION.md).
 
 Enable `auth-agql` only when adapting a separately configured
 `agql-auth::AccessTokenValidator`. The router never accepts private keys,
