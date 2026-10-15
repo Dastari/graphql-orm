@@ -161,9 +161,14 @@ impl CurrentPrincipalResolver for Host {
         let live_users = self.live_users.lock().unwrap().clone();
         if let Some(store) = live_users {
             let user = agql_auth::UserStore::find_user_by_id(store.as_ref(), &reference.subject)
-                .await?.ok_or(AuthError::InvalidCredentials)?;
-            if user.disabled { return Err(AuthError::UserDisabled); }
-            let AuthPrincipal::User(current) = &mut principal else { return Err(AuthError::Forbidden); };
+                .await?
+                .ok_or(AuthError::InvalidCredentials)?;
+            if user.disabled {
+                return Err(AuthError::UserDisabled);
+            }
+            let AuthPrincipal::User(current) = &mut principal else {
+                return Err(AuthError::Forbidden);
+            };
             current.roles = user.roles;
             current.scopes = user.scopes;
         }
@@ -336,7 +341,9 @@ async fn fixture_config(
         AgqlCurrentAuthorityPolicy::new(enforcement.clone(), Business(host.clone())),
     )
     .with_authorization_mode(AuthorizationMode::ExplicitPolicyForAllExposedOperations);
-    if let Some(allowed) = deleted_grant { db.set_row_policy(DeletedRows { allowed }); }
+    if let Some(allowed) = deleted_grant {
+        db.set_row_policy(DeletedRows { allowed });
+    }
     let mut builder = schema_builder(db).data(enforcement).data(host.clone());
     if let Some(subject) = schema_subject {
         builder = builder.data(subject);
@@ -851,7 +858,6 @@ async fn malformed_or_expired_accepted_references_deny() {
     }
 }
 
-
 // These exercise the S007 per-event hook with the real current-authority
 // adapter. Generate witnessed events through mutations rather than raw senders.
 #[tokio::test]
@@ -861,37 +867,60 @@ async fn subscription_event_revalidates_status_and_current_grants() {
     use tokio::time::{Duration, timeout};
     for revoke in [true, false] {
         let (schema, host, bundle) = fixture().await;
-        let mut stream = Box::pin(schema.execute_stream(request(&bundle,
-            "subscription { secureRecordChanged { id secureRecord { value } } }")));
+        let mut stream = Box::pin(schema.execute_stream(request(
+            &bundle,
+            "subscription { secureRecordChanged { id secureRecord { value } } }",
+        )));
         poll_fn(|cx| match stream.as_mut().poll_next_unpin(cx) {
             Poll::Pending => Poll::Ready(()),
             other => panic!("subscription did not wait for an event: {other:?}"),
-        }).await;
+        })
+        .await;
         let admitted_checks = host.checks.load(Ordering::SeqCst);
         assert!(admitted_checks > 0);
         let control = schema.execute(request(&bundle,
             "mutation { createSecureRecord(input: {value: \"allowed\", projectId: \"project-1\"}) { success } }")).await;
         assert!(control.errors.is_empty(), "{:?}", control.errors);
-        assert_eq!(control.data.into_json().unwrap()["createSecureRecord"]["success"], true);
-        let released = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+        assert_eq!(
+            control.data.into_json().unwrap()["createSecureRecord"]["success"],
+            true
+        );
+        let released = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(released.errors.is_empty(), "{:?}", released.errors);
-        assert_eq!(released.data.into_json().unwrap()["secureRecordChanged"]["secureRecord"]["value"], "allowed");
+        assert_eq!(
+            released.data.into_json().unwrap()["secureRecordChanged"]["secureRecord"]["value"],
+            "allowed"
+        );
         let published = schema.execute(request(&bundle,
             "mutation { createSecureRecord(input: {value: \"queued\", projectId: \"project-1\"}) { success } }")).await;
         assert!(published.errors.is_empty(), "{:?}", published.errors);
-        assert_eq!(published.data.into_json().unwrap()["createSecureRecord"]["success"], true);
+        assert_eq!(
+            published.data.into_json().unwrap()["createSecureRecord"]["success"],
+            true
+        );
         let before_release = host.checks.load(Ordering::SeqCst);
         if revoke {
             host.revoked.store(true, Ordering::SeqCst);
         } else {
             let mut current = host.current.lock().unwrap();
-            let AuthPrincipal::User(user) = &mut *current else { unreachable!() };
+            let AuthPrincipal::User(user) = &mut *current else {
+                unreachable!()
+            };
             user.scopes.clear();
         }
-        assert!(timeout(Duration::from_millis(100), stream.next()).await.is_err(),
-            "event admitted before authority changed escaped the per-event check");
-        assert!(host.checks.load(Ordering::SeqCst) > before_release,
-            "subscription reused its admission status decision");
+        assert!(
+            timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "event admitted before authority changed escaped the per-event check"
+        );
+        assert!(
+            host.checks.load(Ordering::SeqCst) > before_release,
+            "subscription reused its admission status decision"
+        );
     }
 }
 
@@ -901,54 +930,96 @@ async fn subscription_event_rechecks_expiry_after_async_binding() {
     use std::task::Poll;
     use tokio::time::{Duration, timeout};
     let (schema, host, bundle) = fixture().await;
-    let mut stream = Box::pin(schema.execute_stream(request(&bundle,
-        "subscription { secureRecordChanged { id secureRecord { value } } }")));
+    let mut stream = Box::pin(schema.execute_stream(request(
+        &bundle,
+        "subscription { secureRecordChanged { id secureRecord { value } } }",
+    )));
     poll_fn(|cx| match stream.as_mut().poll_next_unpin(cx) {
         Poll::Pending => Poll::Ready(()),
         other => panic!("subscription did not wait for an event: {other:?}"),
-    }).await;
+    })
+    .await;
     let published = schema.execute(request(&bundle,
         "mutation { createSecureRecord(input: {value: \"queued\", projectId: \"project-1\"}) { success } }")).await;
     assert!(published.errors.is_empty(), "{:?}", published.errors);
-    assert_eq!(published.data.into_json().unwrap()["createSecureRecord"]["success"], true);
+    assert_eq!(
+        published.data.into_json().unwrap()["createSecureRecord"]["success"],
+        true
+    );
     let before_release = host.checks.load(Ordering::SeqCst);
     host.binding_advance.store(101, Ordering::SeqCst);
-    assert!(timeout(Duration::from_millis(100), stream.next()).await.is_err(),
-        "credential expired during event binding checks but an event escaped");
+    assert!(
+        timeout(Duration::from_millis(100), stream.next())
+            .await
+            .is_err(),
+        "credential expired during event binding checks but an event escaped"
+    );
     assert!(host.checks.load(Ordering::SeqCst) > before_release);
 }
 
 // Explicit deleted-preimage ownership is separate from ordinary row visibility.
-struct DeletedRows { allowed: bool }
+struct DeletedRows {
+    allowed: bool,
+}
 impl RowPolicy for DeletedRows {
-    fn read_visibility<'a>(&'a self, _: Option<&'a Context<'_>>, _: &'a Database,
-        _: &'static str, _: Option<&'static str>, _: EntityAccessSurface,
+    fn read_visibility<'a>(
+        &'a self,
+        _: Option<&'a Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
     ) -> BoxFuture<'a, graphql_orm::async_graphql::Result<ReadVisibility>> {
         Box::pin(async { Ok(ReadVisibility::Unrestricted) })
     }
-    fn can_read_row<'a>(&'a self, ctx: Option<&'a Context<'_>>, _: &'a Database,
-        _: &'static str, _: Option<&'static str>, _: EntityAccessSurface,
+    fn can_read_row<'a>(
+        &'a self,
+        ctx: Option<&'a Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
         Box::pin(async move {
-            Ok(ctx.and_then(|ctx| ctx.data_opt::<AuthSubject>()).is_some_and(|user| user.id == "user-1")
-                && row.downcast_ref::<SecureRecord>().is_some_and(|record| record.project_id == "project-1"))
+            Ok(ctx
+                .and_then(|ctx| ctx.data_opt::<AuthSubject>())
+                .is_some_and(|user| user.id == "user-1")
+                && row
+                    .downcast_ref::<SecureRecord>()
+                    .is_some_and(|record| record.project_id == "project-1"))
         })
     }
-    fn can_read_deleted_preimage<'a>(&'a self, ctx: Option<&'a Context<'_>>, _: &'a Database,
-        entity: &'static str, _: Option<&'static str>, surface: EntityAccessSurface,
+    fn can_read_deleted_preimage<'a>(
+        &'a self,
+        ctx: Option<&'a Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
         Box::pin(async move {
             // The fixture's trusted ownership map grants user-1 this one record.
             // Unrestricted/ordinary reads alone deliberately do not grant it.
-            Ok(self.allowed && entity == "SecureRecord" && surface == EntityAccessSurface::GraphqlSubscription
-                && ctx.and_then(|ctx| ctx.data_opt::<AuthSubject>()).is_some_and(|user| user.id == "user-1")
-                && row.downcast_ref::<SecureRecord>().is_some_and(|record| record.id == "record-1" && record.project_id == "project-1"))
+            Ok(self.allowed
+                && entity == "SecureRecord"
+                && surface == EntityAccessSurface::GraphqlSubscription
+                && ctx
+                    .and_then(|ctx| ctx.data_opt::<AuthSubject>())
+                    .is_some_and(|user| user.id == "user-1")
+                && row.downcast_ref::<SecureRecord>().is_some_and(|record| {
+                    record.id == "record-1" && record.project_id == "project-1"
+                }))
         })
     }
-    fn can_write_row<'a>(&'a self, ctx: Option<&'a Context<'_>>, db: &'a Database,
-        entity: &'static str, key: Option<&'static str>, surface: EntityAccessSurface,
+    fn can_write_row<'a>(
+        &'a self,
+        ctx: Option<&'a Context<'_>>,
+        db: &'a Database,
+        entity: &'static str,
+        key: Option<&'static str>,
+        surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
         self.can_read_row(ctx, db, entity, key, surface, row)
@@ -961,37 +1032,56 @@ async fn deleted_preimage_opt_in_still_requires_immediate_current_authority() {
     use std::task::Poll;
     use tokio::time::{Duration, timeout};
     for mode in 0..5 {
-        let (schema, host, bundle) = fixture_config(principal(), None, false,
-            (mode != 4).then_some(mode != 3)).await;
-        let mut stream = Box::pin(schema.execute_stream(request(&bundle,
-            "subscription { secureRecordChanged { id secureRecord { value } } }")));
+        let (schema, host, bundle) =
+            fixture_config(principal(), None, false, (mode != 4).then_some(mode != 3)).await;
+        let mut stream = Box::pin(schema.execute_stream(request(
+            &bundle,
+            "subscription { secureRecordChanged { id secureRecord { value } } }",
+        )));
         poll_fn(|cx| match stream.as_mut().poll_next_unpin(cx) {
             Poll::Pending => Poll::Ready(()),
             other => panic!("subscription did not wait for an event: {other:?}"),
-        }).await;
-        let deleted = schema.execute(request(&bundle,
-            "mutation { deleteSecureRecord(id: \"record-1\") { success } }")).await;
+        })
+        .await;
+        let deleted = schema
+            .execute(request(
+                &bundle,
+                "mutation { deleteSecureRecord(id: \"record-1\") { success } }",
+            ))
+            .await;
         assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
-        assert_eq!(deleted.data.into_json().unwrap()["deleteSecureRecord"]["success"], true);
+        assert_eq!(
+            deleted.data.into_json().unwrap()["deleteSecureRecord"]["success"],
+            true
+        );
         let before_release = host.checks.load(Ordering::SeqCst);
         match mode {
             1 => host.revoked.store(true, Ordering::SeqCst),
             2 => {
                 let mut current = host.current.lock().unwrap();
-                let AuthPrincipal::User(user) = &mut *current else { unreachable!() };
+                let AuthPrincipal::User(user) = &mut *current else {
+                    unreachable!()
+                };
                 user.scopes.clear();
             }
             _ => {}
         }
         if mode == 0 {
-            let event = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+            let event = timeout(Duration::from_secs(2), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
             assert!(event.errors.is_empty(), "{:?}", event.errors);
             let data = event.data.into_json().unwrap();
             assert_eq!(data["secureRecordChanged"]["id"], "record-1");
             assert_eq!(data["secureRecordChanged"]["secureRecord"]["value"], "safe");
         } else {
-            assert!(timeout(Duration::from_millis(100), stream.next()).await.is_err(),
-                "deleted preimage escaped authority/default-deny check in mode {mode}");
+            assert!(
+                timeout(Duration::from_millis(100), stream.next())
+                    .await
+                    .is_err(),
+                "deleted preimage escaped authority/default-deny check in mode {mode}"
+            );
         }
         assert!(host.checks.load(Ordering::SeqCst) > before_release);
     }
@@ -1004,23 +1094,76 @@ struct LoginStore {
 }
 #[async_trait::async_trait]
 impl agql_auth::UserStore for LoginStore {
-    async fn find_user_by_principal(&self, principal: &str) -> AuthResult<Option<agql_auth::StoredUser>> {
-        Ok(self.user.lock().unwrap().as_ref().filter(|user| user.principal == principal).cloned())
+    async fn find_user_by_principal(
+        &self,
+        principal: &str,
+    ) -> AuthResult<Option<agql_auth::StoredUser>> {
+        Ok(self
+            .user
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|user| user.principal == principal)
+            .cloned())
     }
     async fn find_user_by_id(&self, id: &str) -> AuthResult<Option<agql_auth::StoredUser>> {
-        Ok(self.user.lock().unwrap().as_ref().filter(|user| user.id == id).cloned())
+        Ok(self
+            .user
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|user| user.id == id)
+            .cloned())
     }
 }
 #[async_trait::async_trait]
 impl agql_auth::RefreshTokenStore for LoginStore {
     async fn insert_refresh_token(&self, record: agql_auth::StoredRefreshToken) -> AuthResult<()> {
-        self.refresh.lock().unwrap().push(record); Ok(())
+        self.refresh.lock().unwrap().push(record);
+        Ok(())
     }
-    async fn find_refresh_token_by_hash(&self, _: &str) -> AuthResult<Option<agql_auth::StoredRefreshToken>> { Err(AuthError::AuthServiceUnavailable) }
-    async fn revoke_refresh_token(&self, _: uuid::Uuid, _: OffsetDateTime, _: Option<uuid::Uuid>, _: agql_auth::RefreshTokenRevocationReason) -> AuthResult<()> { Err(AuthError::AuthServiceUnavailable) }
-    async fn revoke_refresh_token_family(&self, _: uuid::Uuid, _: OffsetDateTime, _: agql_auth::RefreshTokenRevocationReason) -> AuthResult<()> { Err(AuthError::AuthServiceUnavailable) }
-    async fn touch_refresh_token(&self, _: uuid::Uuid, _: OffsetDateTime, _: Option<String>, _: Option<String>) -> AuthResult<()> { Err(AuthError::AuthServiceUnavailable) }
-    async fn rotate_refresh_token(&self, _: uuid::Uuid, _: agql_auth::StoredRefreshToken, _: OffsetDateTime, _: Option<String>, _: Option<String>) -> AuthResult<bool> { Err(AuthError::AuthServiceUnavailable) }
+    async fn find_refresh_token_by_hash(
+        &self,
+        _: &str,
+    ) -> AuthResult<Option<agql_auth::StoredRefreshToken>> {
+        Err(AuthError::AuthServiceUnavailable)
+    }
+    async fn revoke_refresh_token(
+        &self,
+        _: uuid::Uuid,
+        _: OffsetDateTime,
+        _: Option<uuid::Uuid>,
+        _: agql_auth::RefreshTokenRevocationReason,
+    ) -> AuthResult<()> {
+        Err(AuthError::AuthServiceUnavailable)
+    }
+    async fn revoke_refresh_token_family(
+        &self,
+        _: uuid::Uuid,
+        _: OffsetDateTime,
+        _: agql_auth::RefreshTokenRevocationReason,
+    ) -> AuthResult<()> {
+        Err(AuthError::AuthServiceUnavailable)
+    }
+    async fn touch_refresh_token(
+        &self,
+        _: uuid::Uuid,
+        _: OffsetDateTime,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> AuthResult<()> {
+        Err(AuthError::AuthServiceUnavailable)
+    }
+    async fn rotate_refresh_token(
+        &self,
+        _: uuid::Uuid,
+        _: agql_auth::StoredRefreshToken,
+        _: OffsetDateTime,
+        _: Option<String>,
+        _: Option<String>,
+    ) -> AuthResult<bool> {
+        Err(AuthError::AuthServiceUnavailable)
+    }
 }
 
 #[tokio::test]
@@ -1028,32 +1171,76 @@ async fn password_login_signed_jwt_and_orm_share_current_user_authority() {
     let store = Arc::new(LoginStore::default());
     let auth = agql_auth::AuthService::new(
         agql_auth::AuthConfig::new("synthetic-local-signing-secret-at-least-32-bytes"),
-        store.clone(), store.clone(),
-    ).unwrap();
+        store.clone(),
+        store.clone(),
+    )
+    .unwrap();
     *store.user.lock().unwrap() = Some(agql_auth::StoredUser {
-        id: "user-1".into(), principal: "synthetic@example.invalid".into(),
+        id: "user-1".into(),
+        principal: "synthetic@example.invalid".into(),
         password_hash: auth.hash_password("synthetic-local-password").unwrap(),
-        roles: vec!["reader".into()], scopes: vec!["records.read".into(), "records.write".into()], disabled: false,
+        roles: vec!["reader".into()],
+        scopes: vec!["records.read".into(), "records.write".into()],
+        disabled: false,
     });
-    let payload = auth.login("synthetic@example.invalid", "synthetic-local-password",
-        agql_auth::ClientMetadata::default()).await.unwrap();
-    let accepted = auth.authenticate_access_token(&payload.access_token).unwrap();
+    let payload = auth
+        .login(
+            "synthetic@example.invalid",
+            "synthetic-local-password",
+            agql_auth::ClientMetadata::default(),
+        )
+        .await
+        .unwrap();
+    let accepted = auth
+        .authenticate_access_token(&payload.access_token)
+        .unwrap();
     let (schema, host, bundle) = fixture_for(AuthPrincipal::User(accepted), None, false).await;
     host.clock.set(OffsetDateTime::now_utc());
     *host.live_users.lock().unwrap() = Some(store.clone());
-    assert!(schema.execute(request(&bundle, READ)).await.errors.is_empty());
+    assert!(
+        schema
+            .execute(request(&bundle, READ))
+            .await
+            .errors
+            .is_empty()
+    );
     store.user.lock().unwrap().as_mut().unwrap().disabled = true;
     // Signature validation still succeeds; the online operation must not.
-    assert!(auth.authenticate_access_token(&payload.access_token).is_ok());
-    assert!(!schema.execute(request(&bundle, READ)).await.errors.is_empty());
+    assert!(
+        auth.authenticate_access_token(&payload.access_token)
+            .is_ok()
+    );
+    assert!(
+        !schema
+            .execute(request(&bundle, READ))
+            .await
+            .errors
+            .is_empty()
+    );
     {
         let mut user = store.user.lock().unwrap();
         let user = user.as_mut().unwrap();
-        user.disabled = false; user.scopes.clear();
+        user.disabled = false;
+        user.scopes.clear();
     }
-    assert!(!schema.execute(request(&bundle, READ)).await.errors.is_empty());
-    assert!(bundle.subject().has_scope("records.read"), "shared context must remain immutable");
+    assert!(
+        !schema
+            .execute(request(&bundle, READ))
+            .await
+            .errors
+            .is_empty()
+    );
+    assert!(
+        bundle.subject().has_scope("records.read"),
+        "shared context must remain immutable"
+    );
     *store.user.lock().unwrap() = None;
-    assert!(!schema.execute(request(&bundle, READ)).await.errors.is_empty());
+    assert!(
+        !schema
+            .execute(request(&bundle, READ))
+            .await
+            .errors
+            .is_empty()
+    );
     assert_eq!(store.refresh.lock().unwrap().len(), 1);
 }

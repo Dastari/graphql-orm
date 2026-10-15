@@ -74,7 +74,8 @@ fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
         .expect("canonical workspace auth dependency");
     let field = |name: &str| {
         let prefix = format!("{name} = \"");
-        dependency.split_once(prefix.as_str())
+        dependency
+            .split_once(prefix.as_str())
             .and_then(|(_, rest)| rest.split_once('"'))
             .map(|(value, _)| value)
             .expect("reviewed auth dependency field")
