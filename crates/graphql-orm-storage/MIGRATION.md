@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.7.0 to 0.7.1: local temporary-file sweep
+
+The local sweep skips symbolic links, linked roots, directory cycles and
+non-file/non-directory entries. If you intentionally used links to arrange
+cleanup, schedule cleanup against each real trusted target root instead.
+Ordinary local reads/writes still follow links. This patch does not introduce
+race-resistant filesystem confinement: all local and mounted-share roots need
+trusted exclusive management and restrictive permissions, as described in the
+[storage reference](docs/blob-store.md#local-filesystem-trust-boundary).
+
+No public API, provider configuration, object key or persisted data changes.
+No data migration is required. Update the reviewed workspace revision and
+regenerate `Cargo.lock`.
+
 ## 0.6.2 to 0.7.0: atomic conditional creation
 
 This is a breaking pre-1.0 release. Custom `BlobStore` providers must override

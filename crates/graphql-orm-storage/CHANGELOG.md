@@ -10,6 +10,16 @@ supersedes: []
 
 # Changelog
 
+## 0.7.1 - 2026-10-14
+
+- Hardened local temporary-file sweeping to skip symbolic links, directory
+  cycles and non-file/non-directory entries (R-004).
+- Documented the required trusted, exclusively managed filesystem tree and
+  restrictive permissions, including mounted shares. Ordinary path operations
+  do not provide confinement against hostile local filesystem writers.
+- Added an owned-directory regression covering linked files, outside-root
+  directories, broken links, cycles and a linked sweep root.
+
 ## 0.7.0 - 2026-10-14
 
 - Fixed the S-005 custom-provider path: inherited conditional creation now
