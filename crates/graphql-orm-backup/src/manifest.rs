@@ -107,7 +107,7 @@ pub struct ObjectBackupEntry {
     pub content_key: String,
     /// SHA-256 checksum of the object bytes.
     pub sha256_hex: String,
-    /// Object size in bytes.
+    /// Observed object size for new entries; historical values remain advisory.
     pub size_bytes: u64,
     /// Optional MIME type.
     pub mime_type: Option<String>,
@@ -177,7 +177,11 @@ pub async fn load_manifest(
     snapshot_id: Uuid,
 ) -> Result<BackupSnapshotManifest, BackupError> {
     let key = manifest_key(snapshot_id);
-    let bytes = repository.get_blob(&key).await?;
+    let bytes = crate::collect_backup_stream(
+        repository.get_blob_stream(&key).await?,
+        repository.capacity_limits().buffered_bytes,
+    )
+    .await?;
     let manifest: BackupSnapshotManifest = serde_json::from_slice(&bytes)?;
     verify_manifest_checksum(&manifest)?;
     Ok(manifest)
@@ -306,13 +310,17 @@ pub fn compress_payload(bytes: &[u8]) -> Result<Vec<u8>, BackupError> {
     zstd::stream::encode_all(bytes, 0).map_err(BackupError::compression)
 }
 
-/// Decompresses a zstd payload.
+/// Decompresses a zstd payload with the default 256 MiB output limit.
 ///
 /// # Errors
 ///
-/// Returns [`BackupError::Compression`] if zstd decoding fails.
+/// Returns [`BackupError::Compression`] if zstd decoding fails, or
+/// [`BackupError::CapacityExceeded`] if the default output limit is exceeded.
 pub fn decompress_payload(bytes: &[u8]) -> Result<Vec<u8>, BackupError> {
-    zstd::stream::decode_all(bytes).map_err(BackupError::compression)
+    decompress_payload_with_limit(
+        bytes,
+        crate::BackupCapacityLimits::default().decompressed_bytes,
+    )
 }
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
@@ -362,4 +370,43 @@ impl<'a> From<&'a BackupSnapshotManifest> for ChecksumManifestView<'a> {
             checksum: "",
         }
     }
+}
+
+/// Decodes zstd with an explicit output limit, checked before extending the buffer.
+/// Finite limits also cap the decoder history window before reading frame input:
+/// round down to a power of two, with a 1 KiB minimum and portable 1 GiB maximum.
+/// This bounds the window, not all decoder overhead or process memory. Unbounded
+/// leaves the zstd library's default window policy in effect.
+///
+/// # Errors
+/// Returns a compression error or [`BackupError::CapacityExceeded`].
+pub fn decompress_payload_with_limit(
+    bytes: &[u8],
+    limit: crate::BackupByteLimit,
+) -> Result<Vec<u8>, BackupError> {
+    use std::io::Read;
+    let mut decoder =
+        zstd::stream::read::Decoder::with_buffer(bytes).map_err(BackupError::compression)?;
+    if let crate::BackupByteLimit::Bytes(limit_bytes) = limit {
+        let window_log = (63 - limit_bytes.max(1).leading_zeros()).clamp(10, 30);
+        decoder
+            .window_log_max(window_log)
+            .map_err(BackupError::compression)?;
+    }
+    let mut result = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let count = decoder.read(&mut chunk).map_err(BackupError::compression)?;
+        if count == 0 {
+            break;
+        }
+        let size = (result.len() as u64).checked_add(count as u64).ok_or(
+            BackupError::CapacityExceeded {
+                limit_bytes: u64::MAX,
+            },
+        )?;
+        limit.check(size)?;
+        result.extend_from_slice(&chunk[..count]);
+    }
+    Ok(result)
 }

@@ -4,11 +4,15 @@ use uuid::Uuid;
 
 use graphql_orm_storage::StorageByteStream;
 
-use crate::BackupError;
+use crate::{BackupByteLimit, BackupError};
 
 #[async_trait]
 /// Application object lookup contract used by backup operations.
 pub trait BackupObjectIndex: Send + Sync {
+    /// Limit checked after the buffered loader returns; provider allocation already exists.
+    fn buffered_byte_limit(&self) -> BackupByteLimit {
+        BackupByteLimit::default()
+    }
     /// Lists all objects referenced by a full backup.
     ///
     /// # Errors
@@ -38,14 +42,16 @@ pub trait BackupObjectIndex: Send + Sync {
     ///
     /// Existing indexes remain compatible through the buffered default.
     /// Implementations backed by a streaming object store should override this
-    /// method so large objects remain bounded in memory.
+    /// method to avoid compatibility buffering. The default checks declared size
+    /// before loading and actual size afterward; it cannot undo provider allocation.
     async fn load_object_stream(
         &self,
         object: &BackupObjectRef,
     ) -> Result<StorageByteStream, BackupError> {
-        Ok(StorageByteStream::from_bytes(
-            self.load_object(object).await?,
-        ))
+        self.buffered_byte_limit().check(object.size_bytes)?;
+        let bytes = self.load_object(object).await?;
+        self.buffered_byte_limit().check(bytes.len() as u64)?;
+        Ok(StorageByteStream::from_bytes(bytes))
     }
 }
 

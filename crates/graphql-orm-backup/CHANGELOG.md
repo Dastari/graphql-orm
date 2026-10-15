@@ -10,6 +10,22 @@ supersedes: []
 
 # Changelog
 
+## 0.10.0 - 2026-10-15
+
+- Breaking: compatibility stream buffering and buffered repository reads default
+  to 64 MiB per body; database decoding defaults to 256 MiB per payload and
+  512 MiB aggregate decoded bytes per manifest stage. Large legitimate inputs
+  require reviewed finite overrides or an explicit unbounded opt-in.
+- Added typed capacity failures, bounded incremental zstd decoding and native
+  local stream delegation. These byte limits do not guarantee bounded RSS for
+  buffered providers, parsed data or accumulated application state.
+- Optional ORM object-index metadata backfill now hashes/counts native streams
+  without whole-blob collection. Its direct buffered loader has a configurable
+  finite cap; native object streaming remains supported beyond that cap.
+- New/deduplicated and compacted object entries use observed verified byte sizes.
+  Historical sizes remain advisory; restore streams a checksum/count preflight
+  and normalizes sink metadata without rewriting existing manifests.
+
 ## 0.9.0 - 2026-10-15
 
 - Added typed snapshot-restore failure progress for validation, preparation and

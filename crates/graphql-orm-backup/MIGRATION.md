@@ -10,6 +10,62 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.0 to 0.10.0: explicit buffer and decompression limits
+
+This is a breaking pre-1.0 capacity-policy change. Previously accepted large
+buffered payloads can now fail with `BackupError::CapacityExceeded`; snapshot
+format and stored data are unchanged. Update exhaustive error matches.
+
+Defaults are 64 MiB for each buffered repository body or compatibility stream
+fallback, 256 MiB for each decoded database payload, and 512 MiB of decoded
+payloads across one full/incremental manifest stage. Limits are inclusive.
+Stored payloads are limited before decoding; compressed expansion is checked
+incrementally before appending output. Before reading frame input, a finite
+output cap also sets zstd's maximum history-window size: round down to the next
+power of two, with a 1 KiB minimum and a portable 1 GiB maximum. This may reject
+otherwise small output encoded with a larger window; the error is `Compression`.
+An unbounded override retains the zstd library's default window policy. Decoder
+metadata and other overhead still require a separate resource budget.
+
+Each payload's output limit is further clamped to the remaining stage budget,
+and aggregate decoded limits are checked before parsing each next payload. They do not limit the whole chain or row count.
+
+For legitimate larger backups, set reviewed finite `BackupCapacityLimits` via
+`LocalBackupRepository::with_capacity_limits` or
+`BlobStoreBackupRepository::with_capacity_limits`; custom repositories override
+`BackupRepository::capacity_limits`. Indexes and sinks override
+`buffered_byte_limit` for their buffered compatibility defaults. The built-in
+optional `OrmBackupObjectIndex` also defaults its direct buffered
+`load_object` to 64 MiB; configure it with `with_buffered_byte_limit`. Missing or
+invalid checksum/size metadata is backfilled by incremental hashing and checked
+byte counting, without collecting the object or reserving a provider size hint.
+Its native `load_object_stream` bypasses that buffered cap so large object streams
+remain supported. Recorded sizes cannot constrain buffered allocation; actual
+buffered byte checks apply regardless of recorded size. New and deduplicated
+backup entries record the byte count observed alongside SHA-256 verification;
+compaction normalizes output sizes from verified stored content as well.
+Historical manifest `size_bytes` remains advisory for compatibility: valid
+content is not rejected solely for a stale size. Object restore performs a
+streaming checksum/count preflight and supplies the observed verified size to
+the sink, then streams again with the existing checksum guard. This adds a read
+pass without whole-object buffering or a transaction guarantee. Existing
+historical manifests are not rewritten. Changes between preflight and sink
+streaming remain subject to final checksum verification; use staging namespaces
+and the existing partial-object recovery rules.
+Direct zstd callers use `decompress_payload_with_limit`. `BackupByteLimit::Unbounded` is an
+explicit opt-in accepting the associated allocation risk; it is not recommended
+for untrusted input. Do not retry capacity errors without changing the relevant
+limit or input. Restore errors retain the Q003 stage/progress boundary.
+
+Native streaming implementations bypass compatibility collection. Local repository
+stream methods now delegate directly to the storage stream API. This is not a
+bounded-RSS guarantee: a custom buffered provider or index may allocate before
+returning; a stream's current chunk already exists; parsed JSON, manifests,
+adapter exports, accumulated restored/compacted rows and application state may
+use additional memory. Streaming source metadata is only an early rejection
+hint; actual collected bytes are checked independently. Audit native provider
+and adapter behavior and apply process resource limits for hostile input.
+
 ## 0.8.0 to 0.9.0: restore failure progress
 
 This is a breaking pre-1.0 error-contract change. `restore_snapshot` returns
