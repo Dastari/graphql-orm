@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-12
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,10 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## 0.43.1 (unreleased)
+
+- Pin external CI/release actions to full revisions and restrict workflow tokens
+  to read-only contents outside the publication job. No library API or migration
+  change; all backend/provider validation lanes remain enabled.
 
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse
   typed key binding for bare-pool readback and related single-key lookups/updates,
