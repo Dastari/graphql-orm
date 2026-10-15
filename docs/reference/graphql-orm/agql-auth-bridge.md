@@ -3,7 +3,7 @@ title: "agql-auth Bridge Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,35 +13,104 @@ supersedes: []
 `graphql-orm` never depends on `agql-auth` by default. Enable the optional
 `auth-agql` feature for a one-way adapter.
 
-## Dependency
+## Accepted request and current authority
 
-```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.26.0", features = ["sqlite", "auth-agql"] }
-# Host applications may depend on agql-auth directly as well. The optional
-# graphql-orm auth-agql feature pins the exact upstream release:
-# git = "https://github.com/Dastari/agql-auth.git"
-# rev = "3bc38cd94794f1e868a9cc3a5551047b95a32105"
-# version = "0.16.0"
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "3bc38cd94794f1e868a9cc3a5551047b95a32105", version = "0.16.0" }
-```
+Enable `auth-agql` and use the exact reviewed `agql-auth` revision in the
+workspace manifest. Host dependencies must resolve to the same revision so the
+principal types agree. Both projects are distributed from GitHub; preserve the
+full locked revision in the release manifest.
 
-Both projects are intentionally Git-only. Cargo's crates.io packaging flow cannot package
-`graphql-orm` because the optional `agql-auth` dependency is Git-sourced; this is expected and is
-not a supported release path.
-
-## Conversion
+Authenticate the credential before constructing a bundle. Signature/secret,
+issuer, audience and transport proof validation belong to the trusted host
+transport. Construction and conversion alone do not authenticate anything.
 
 ```rust
-use graphql_orm::graphql::auth_agql::{
-    auth_bundle_from_principal, auth_subject_from_principal, db_auth_context_from_principal,
-};
+use graphql_orm::prelude::*;
 use agql_auth::AuthPrincipal;
 
-fn inject(request: async_graphql::Request, principal: AuthPrincipal) -> async_graphql::Request {
-    let (subject, db_auth) = auth_bundle_from_principal(&principal);
-    request.data(subject).data(db_auth)
+fn inject(request: async_graphql::Request, authenticated: AuthPrincipal)
+    -> async_graphql::Result<async_graphql::Request>
+{
+    AgqlAcceptedRequest::new(authenticated).inject(request)
 }
 ```
+
+The immutable bundle retains the complete accepted principal, alongside coherent
+`AuthPrincipal`, matching `AuthUser` or `ApiTokenPrincipal`, `AuthSubject` and
+`DbAuthContext` copies. Install it per request or authenticated connection-init,
+never on a globally shared schema. `from_context` denies missing, mismatched,
+shadowed conflicting, opposite actor-kind or schema-only identity. Do not add a
+second independently constructed identity copy. Injection returns an error
+before mutation when preexisting copies conflict. For reauthentication, create
+fresh request/connection data and install the entire new bundle; do not replace
+individual copies or mutate in-flight operations. Existing streams retain their
+accepted credential and must reauthenticate/reconnect when it changes. Safe database projections omit
+token bindings; the original principal remains separately available.
+
+For selected sensitive entities, wrap the business policy:
+
+```rust
+let enforcement = std::sync::Arc::new(AgqlCurrentAuthorityEnforcement::new(
+    current_principal_resolver, token_status_checker, clock, binding_authorizer,
+));
+database.set_entity_policy(AgqlCurrentAuthorityPolicy::new(
+    enforcement.clone(), business_policy,
+));
+let schema = schema_builder(database).data(enforcement).finish();
+```
+
+All four dependencies are required trusted host implementations. A checker that
+always returns active does not implement immediate revocation. The resolver must
+read authoritative enabled/deleted, session, membership and grant state on every
+invocation, and fail closed when that state is unavailable. The wrapper calls
+`revalidate_sensitive_principal` for every operation; it does not cache a decision
+across aliases, fields, requests or subscription events. If current authority
+narrows any accepted grants (including typed authorization roles), or its safe
+projection changes, permission is denied. Obtain a fresh accepted credential;
+parallel GraphQL fields never mutate their shared identity.
+
+The mandatory `AgqlBindingAuthorizer` receives the complete accepted principal,
+actual context, entity, policy key, operation kind and execution surface. It must
+explicitly authorize purpose, audience, issuer contract, resource, exact operation,
+tenant/business scope and sender confirmation wherever applicable. Unsupported
+restrictions must deny. User JWT issuer/audience are validated by the transport
+and are not retained in `AuthUser`; supply trusted request evidence when the
+callback needs those facts. API token audience is retained. Never substitute
+client arguments for verified sender proof or transport evidence. Coarse entity
+checks cannot establish row/resource fencing for list results: install host row
+policies or deny such bound credentials on unsupported routes.
+
+The wrapper checks expiry with its trusted clock after asynchronous status and
+resolver calls, after binding authorization and after the inner business policy.
+A delegated credential also retains the authoritative parent expiry deadline.
+Each decision observes authoritative state at evaluation. Revocation racing a
+later committed write cannot be atomically undone by this adapter; hosts requiring
+that guarantee must fence the database write using their authoritative session
+version/transaction policy.
+
+Generated roots, relationship loads and Federation lookups call the entity policy.
+Subscriptions repeat this entity policy for each event using the original accepted
+request. Deleted snapshots additionally require an explicit host
+`RowPolicy::can_read_deleted_preimage` grant; wrapping an entity policy does not
+install or replace that row policy. Repository
+convenience calls with `ctx=None` deny under this wrapper. Custom resolvers can use
+`AgqlCurrentAuthorityGuard::new(entity, policy_key, kind, surface)` with the shared
+enforcement installed as trusted schema configuration, or call `enforce` directly.
+These checks do not replace business, row or field authorization. Custom SQL,
+raw pools, direct loaders and `EntityQuery` are trusted host boundaries and must
+perform both immediate checks and business authorization explicitly.
+
+`DeclaredPoliciesRequired` is the database default. It requires providers for
+marked policy keys; it does not protect unmarked operations or create tenant
+isolation. Sensitive applications should select
+`ExplicitPolicyForAllExposedOperations` and install appropriate entity, row and
+field policies. See [strict authorization](strict-authorization.md).
+
+## Safe projection
+
+The lower-level conversion functions remain useful for trusted non-sensitive
+integrations. Supplying only their two projected values does not satisfy the
+accepted-request/current-authority contract above.
 
 Mapped fields:
 
@@ -94,7 +163,7 @@ missing, or inconsistent assurance is omitted rather than repaired.
 
 ## Migrating from 0.7
 
-Update any direct `agql-auth` dependency to the exact 0.16 revision above. `AuthSubject` and
+Update any direct `agql-auth` dependency to the exact reviewed revision in the workspace manifest. `AuthSubject` and
 `DbAuthContext` gained organization, correlation, and assurance fields; applications constructing
 either with struct literals must add the fields or use their builders/`Default` update syntax.
 The bridge preserves valid 0.8+ session assurance, active scope, correlation,
@@ -103,7 +172,7 @@ of retaining only the older role/scope/tenant subset.
 
 ## Migrating from an Earlier Bridge Release
 
-Update any direct `agql-auth` dependency to the exact 0.16.0 revision above at
+Update any direct `agql-auth` dependency to the exact reviewed revision in the workspace manifest at
 the same time as `graphql-orm`. This prevents Cargo from resolving separate
 package/type universes. Version 0.22.0 keeps the identity, role, scope, tenant,
 organization, actor, correlation, token-reference, and policy-version mappings,
@@ -112,7 +181,7 @@ copied, and malformed or token/session-inconsistent assurance is omitted. If a
 host consumed arbitrary `AuthSubject.claims.additional` values, move that data
 through an explicit application-owned request type instead of the ORM bridge.
 
-Direct users of `agql-auth` must also review its migration through 0.16. Version
+Direct users of `agql-auth` must also review its migration through the pinned version. Version
 0.11 replaces split durable rate-limit writes with the versioned atomic
 `AuthRateLimitStore` contract. `graphql-orm` does not implement that store and
 does not add a split or synthetic ORM-backed implementation. Version 0.12 adds

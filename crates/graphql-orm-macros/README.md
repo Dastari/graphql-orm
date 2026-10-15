@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.46.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.47.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.46.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.47.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -212,3 +212,11 @@ for host cache and manually constructed key changes.
 Version 0.44.1 sanitizes generated backend failures and legacy mutation error
 payloads. Match stable GraphQL public error codes rather than SQL/driver text;
 see the [public error migration](../../MIGRATION.md#0440-to-0441-generated-resolver-public-errors).
+
+Database authorization defaults to `DeclaredPoliciesRequired` in 0.47.0. Install
+providers for marked policies; sensitive applications should select
+`ExplicitPolicyForAllExposedOperations` and enforce tenant/business boundaries.
+With `auth-agql`, retain a coherent full accepted principal and wrap sensitive
+entity policies with immediate current-authority checks. See the
+[current-authority bridge](../../docs/reference/graphql-orm/agql-auth-bridge.md)
+and [upgrade guide](../../MIGRATION.md#0460-to-0470-current-authority-and-coherent-accepted-requests).

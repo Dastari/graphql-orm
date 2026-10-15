@@ -13,6 +13,42 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.46.0 to 0.47.0: current authority and coherent accepted requests
+
+Upgrade ORM/macros together. `Database` now defaults to
+`DeclaredPoliciesRequired`. Install the required entity, field and row providers
+for declared policy keys before deployment. Missing providers now return
+`AUTHORIZATION_MISCONFIGURED`; an explicit `LegacyPermissive` opt-in retains the
+compatibility behavior. This default protects marked policy requirements only;
+it does not authorize unmarked operations or create tenant isolation. Sensitive
+applications should use `ExplicitPolicyForAllExposedOperations` with host policies.
+
+For immediate revocation with `auth-agql`, replace independently injected
+`AuthSubject`/`DbAuthContext` values with
+`AgqlAcceptedRequest::new(authenticated_principal).inject(request)?`. Authenticate
+first using the trusted host transport. The fallible injector rejects existing
+conflicting copies before mutation; checks also reject missing, mixed actor-kind,
+shadowed conflicting or schema-only identities. The complete principal retains
+bindings omitted from safe database projections. Never put per-user identity on
+shared schema configuration or client-controlled claims into transport evidence.
+
+Wrap the business entity policy in `AgqlCurrentAuthorityPolicy`, providing a
+mandatory current resolver, token-status checker, trusted clock and binding
+authorizer through `AgqlCurrentAuthorityEnforcement`. Revalidate each selected
+sensitive entity operation, including nested relations and Federation lookups.
+The binding callback must authorize every applicable restriction or deny. A
+narrowed current grant requires fresh authentication/refresh, rather than mutation
+of shared GraphQL context. Context-free repository convenience calls deny; custom
+resolvers/raw pools/direct loaders must enforce current authority and business
+policy explicitly. The custom guard performs immediate checks, not business policy.
+
+The decision observes authoritative status at evaluation. For atomic fencing of a
+write racing revocation, use a host transaction/session-version boundary. Read the
+[bridge guide](docs/reference/graphql-orm/agql-auth-bridge.md) for transport evidence,
+parent expiry, asynchronous expiry checks and unsupported resource restrictions.
+No physical database schema or GraphQL SDL migration is required.
+
+
 ## 0.45.0 to 0.46.0: bounded protected offset and search reads
 
 Upgrade runtime/macros together. Generated ordinary and append-only offset lists

@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,15 +14,22 @@ supersedes: []
 
 | Mode | Behavior when a policy provider is missing |
 | --- | --- |
-| `LegacyPermissive` (current default) | Allow |
-| `DeclaredPoliciesRequired` (recommended) | Deny / misconfiguration error when a policy key is declared |
+| `LegacyPermissive` (explicit compatibility opt-in) | Allow |
+| `DeclaredPoliciesRequired` (default) | Deny / misconfiguration error when a policy key is declared |
 | `ExplicitPolicyForAllExposedOperations` | Deny all entity operations without a provider |
+
+These modes are policy-provider requirements, not complete application policy.
+Authentication presence, supplied scopes and typed query builders do not establish
+resource/tenant authorization or current session status. `LegacyPermissive` is an
+explicit compatibility escape hatch: missing providers allow. Sensitive applications
+must configure business/row/field policy and immediate authority checks; see the
+[complete accepted-request integration](agql-auth-bridge.md#accepted-request-and-current-authority).
 
 ## Defaults And Migration
 
 | Flag | Current default | Secure recommended | Planned future default | Removal timeline |
 | --- | --- | --- | --- | --- |
-| `AuthorizationMode` | `LegacyPermissive` | `DeclaredPoliciesRequired` | `DeclaredPoliciesRequired` | Permissive default removed in the next major after one diagnostics release |
+| `AuthorizationMode` | `DeclaredPoliciesRequired` | `ExplicitPolicyForAllExposedOperations` for sensitive applications | unchanged | `LegacyPermissive` remains explicit compatibility opt-in |
 | Generated resolver `auth` | `required` | `required` for private schemas | unchanged | `none` remains explicit for public schemas |
 
 ```rust
@@ -41,7 +48,11 @@ When `DeclaredPoliciesRequired` is active:
 - A row policy key requires a row policy provider.
 - Missing providers return `AUTHORIZATION_MISCONFIGURED` with a safe public message.
 
-They never silently allow.
+They never silently allow. Unmarked operations still require explicit host policy
+for protection; this default does not establish tenant isolation. For sensitive
+applications select `ExplicitPolicyForAllExposedOperations`. Immediate revocation
+requires the [current-authority bridge](agql-auth-bridge.md) or equivalent host
+enforcement, not merely projected roles/scopes.
 
 ## Repository / System Access
 

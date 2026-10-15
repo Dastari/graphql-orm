@@ -66,13 +66,30 @@ fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
         .filter(|package| package["name"] == "agql-auth")
         .collect::<Vec<_>>();
     assert_eq!(agql_auth.len(), 1, "resolved metadata:\n{metadata}");
-    assert_eq!(agql_auth[0]["version"], "0.19.1");
+    // The standalone host must adopt the same reviewed identity as the
+    // canonical workspace dependency, rather than defining another type universe.
+    let dependency = include_str!("../../../Cargo.toml")
+        .lines()
+        .find(|line| line.starts_with("agql-auth = "))
+        .expect("canonical workspace auth dependency");
+    let field = |name: &str| {
+        let prefix = format!("{name} = \"");
+        dependency
+            .split_once(prefix.as_str())
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(value, _)| value)
+            .expect("reviewed auth dependency field")
+    };
+    let revision = field("rev");
+    assert_eq!(revision.len(), 40, "auth must use a reviewed full revision");
+    assert!(revision.bytes().all(|value| value.is_ascii_hexdigit()));
+    assert_eq!(agql_auth[0]["version"], field("version"));
     let source = agql_auth[0]["source"]
         .as_str()
         .expect("agql-auth source must be present");
-    assert!(
-        source.contains("?tag=v0.19.1")
-            && source.ends_with("#96bafbf21adbc7ad963729e1e981feaba5debe90"),
-        "unexpected agql-auth source: {source}",
+    assert_eq!(
+        source,
+        format!("git+{}?rev={revision}#{revision}", field("git")),
+        "unexpected agql-auth source",
     );
 }

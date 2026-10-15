@@ -43,9 +43,11 @@ or managed RLS. See [Microsoft SQL Server](mssql.md).
 
 Optional non-backend features:
 
-- `auth-agql` - optional one-way bridge from upstream `agql-auth` 0.16
-  (`git` rev `3bc38cd94794f1e868a9cc3a5551047b95a32105`) into `AuthSubject` /
-  `DbAuthContext` and declared assurance evaluation.
+- `auth-agql` - optional bridge for accepted principals, safe `AuthSubject` /
+  `DbAuthContext` projections, declared assurance and host-configured current
+  authority checks. Use the reviewed revision in the workspace manifest; see the
+  [generated dependency inventory](../workspace-packages.md) and
+  [accepted-request workflow](agql-auth-bridge.md#accepted-request-and-current-authority).
 
 The `mssql` feature activates optional `tiberius`, `tokio-util`, and Tokio TCP support. Projects that
 do not select `mssql` do not build the SQL Server driver path.

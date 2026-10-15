@@ -270,21 +270,20 @@ impl AuthSubjectBuilder {
 ///
 /// # Defaults
 ///
-/// - **Current default:** [`AuthorizationMode::LegacyPermissive`]
-/// - **Secure recommended:** [`AuthorizationMode::DeclaredPoliciesRequired`]
-/// - **Planned future default (next major):** [`AuthorizationMode::DeclaredPoliciesRequired`]
-/// - **Removal timeline for permissive default:** next major after one release of diagnostics
+/// The default requires providers for declared policy keys. Unmarked operations
+/// and tenant membership still need deliberate host policies. Sensitive apps
+/// should select [`AuthorizationMode::ExplicitPolicyForAllExposedOperations`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum AuthorizationMode {
     /// Missing providers allow access when no policy decision is available.
     ///
     /// Schema diagnostics still report declared policies without providers so
     /// applications can migrate safely.
-    #[default]
     LegacyPermissive,
     /// Entities/fields that declare a policy key require a registered provider.
     ///
     /// Missing providers fail closed for those declared policy keys.
+    #[default]
     DeclaredPoliciesRequired,
     /// Every exposed operation requires a registered entity policy decision.
     ///

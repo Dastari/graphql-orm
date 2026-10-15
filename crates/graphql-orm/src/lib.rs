@@ -184,8 +184,8 @@
 //!
 //! Authorization policy enforcement is controlled by
 //! [`graphql::auth::AuthorizationMode`]. The current default is
-//! `LegacyPermissive` (missing providers allow). Production services should set
-//! `DeclaredPoliciesRequired` so declared policy keys never fail open.
+//! `DeclaredPoliciesRequired` (marked policies require providers). Sensitive services should set
+//! `ExplicitPolicyForAllExposedOperations` with appropriate policy providers.
 //!
 //! Public GraphQL errors use [`graphql::errors::OrmPublicError`] so SQL and
 //! configuration details stay server-side.

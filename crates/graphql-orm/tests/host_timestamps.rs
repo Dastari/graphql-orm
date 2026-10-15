@@ -144,6 +144,47 @@ impl EntityPolicy<Backend> for AllowEntities {
         Box::pin(async { Ok(true) })
     }
 }
+// Explicit fixture grants keep timestamp/field/rollback assertions independent
+// of the strict default's required provider for NullableClock's write policy.
+struct ClockRows;
+impl RowPolicy<Backend> for ClockRows {
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<Backend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<Backend>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(match (entity_name, policy_key) {
+                ("NullableClock", Some("clock.write")) => row.is::<NullableClock>(),
+                ("ClockedRecord", None) => row.is::<ClockedRecord>(),
+                ("LegacyClockedRecord", None) => row.is::<LegacyClockedRecord>(),
+                ("MixedClock", None) => row.is::<MixedClock>(),
+                ("ImplicitClock", None) => row.is::<ImplicitClock>(),
+                ("LegacyImplicitClock", None) => row.is::<LegacyImplicitClock>(),
+                ("ClockJournal", None) => row.is::<ClockJournal>(),
+                ("LegacyPublicClock", None) => row.is::<LegacyPublicClock>(),
+                _ => false,
+            })
+        })
+    }
+}
+
 #[derive(Clone)]
 struct Fields(bool);
 impl FieldPolicy<Backend> for Fields {
@@ -211,6 +252,7 @@ impl TestDatabase {
             owned,
         };
         fixture.db.set_entity_policy(AllowEntities);
+        fixture.db.set_row_policy(ClockRows);
         fixture.db.set_field_policy(Fields(true));
         let plan = fixture
             .db
