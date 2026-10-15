@@ -24,6 +24,7 @@ cleanup() {
   if [[ -d "${baseline_root}" ]]; then
     git -C "${repository_root}" worktree remove --force "${baseline_root}" >/dev/null
   fi
+  rm -f "${temporary_root}"/*.log
   rmdir "${temporary_root}" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -45,6 +46,7 @@ packages=(
 # matrix, so this runner checks only packages with a Rust library target.
 
 checked=0
+version_permitted=0
 for package in "${packages[@]}"; do
   crate_prefix="crates/${package}"
   if [[ ! -f "${baseline_root}/${crate_prefix}/Cargo.toml" ]]; then
@@ -54,14 +56,46 @@ for package in "${packages[@]}"; do
   if ! git -C "${repository_root}" diff --quiet "${base}"...HEAD -- \
     "${crate_prefix}/Cargo.toml" "${crate_prefix}/src"; then
     echo "semver: checking ${package}"
-    cargo semver-checks \
+    native_log="${temporary_root}/${package}.log"
+    CARGO_TERM_COLOR=never cargo semver-checks \
+      --package "${package}" \
+      --verbose \
       --manifest-path "${repository_root}/${crate_prefix}/Cargo.toml" \
       --baseline-root "${baseline_root}/${crate_prefix}" \
-      --default-features
-    checked=$((checked + 1))
+      --default-features 2>&1 | tee "${native_log}"
+    # An empty successful report is possible for implicitly selected private
+    # workspace packages. Require native per-package execution evidence before
+    # assigning any result; fail closed if the tool changes its output format.
+    counts=$(python3 - "${native_log}" "${package}" <<'PYCOUNTS'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text()
+package = re.escape(sys.argv[2])
+checking = re.findall(r"^\s*Checking " + package + r" v\S+ -> v\S+ \([^\n]+\)$", text, re.M)
+started = re.findall(r"^\s*Starting (\d+) checks, (\d+) unnecessary", text, re.M)
+finished = re.findall(r"^\s*Checked \[\s*[0-9.]+s\] (\d+) checks:", text, re.M)
+if len(checking) != 1 or len(started) != 1 or [started[0][0]] != finished:
+    sys.exit("semver: missing or inconsistent native package/check-count evidence")
+if int(started[0][0]) == 0:
+    if int(started[0][1]) == 0 or not re.search(
+        r"\((?:assume )?major change\)$", checking[0]
+    ):
+        sys.exit("semver: zero checks without native major-version policy evidence")
+print(started[0][0])
+PYCOUNTS
+)
+    if [[ ${counts} -gt 0 ]]; then
+      checked=$((checked + 1))
+      echo "semver: ${package}: ${counts} native compatibility checks completed"
+    else
+      version_permitted=$((version_permitted + 1))
+      echo "semver: ${package}: version policy permits changes; zero compatibility checks (not API compatibility proof)"
+    fi
   else
     echo "semver: ${package} has no public/runtime changes"
   fi
 done
 
-echo "semver: ${checked} changed package lane(s) passed"
+echo "semver: ${checked} changed package lane(s) checked; ${version_permitted} version-permitted zero-check lane(s)"
