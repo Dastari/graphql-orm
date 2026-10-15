@@ -416,9 +416,21 @@ async fn samba_rejects_invalid_password() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the managed Samba container harness"]
 async fn samba_reconnects_after_server_restart() {
-    let Ok(container) = env::var("SMB_TEST_CONTAINER_NAME") else {
-        return;
-    };
+    let container = env::var("SMB_TEST_CONTAINER_NAME")
+        .expect("managed reconnect requires an owned immutable container ID");
+    let fixture_run = env::var("SMB_TEST_FIXTURE_RUN")
+        .expect("managed reconnect requires an explicit fixture run ID");
+    assert!(container.len() == 64 && container.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "managed reconnect refuses a container name or invalid immutable ID");
+    assert!(fixture_run.len() == 32 && fixture_run.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "managed reconnect requires a valid fixture run ID");
+    let ownership = std::process::Command::new("docker")
+        .args(["inspect", "--format", "{{index .Config.Labels \"graphql-orm.samba-fixture-run\"}}", &container])
+        .output()
+        .expect("inspect managed fixture ownership");
+    assert!(ownership.status.success(), "cannot verify managed fixture ownership");
+    assert_eq!(String::from_utf8(ownership.stdout).expect("fixture ownership text").trim(),
+        fixture_run, "managed reconnect refuses an unowned container");
     let root = format!("graphql-orm-storage-reconnect/{}", Uuid::new_v4());
     let config = test_config(root);
     assert_eq!(

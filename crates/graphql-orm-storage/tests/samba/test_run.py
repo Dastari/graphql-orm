@@ -68,7 +68,8 @@ import json, os, sys
 from pathlib import Path
 with (Path(os.environ['FAKE_ROOT']) / 'cargo-calls.jsonl').open('a') as log:
     log.write(json.dumps({'args': sys.argv[1:], 'port': os.environ.get('SMB_TEST_PORT'),
-                         'container': os.environ.get('SMB_TEST_CONTAINER_NAME')}) + '\n')
+                         'container': os.environ.get('SMB_TEST_CONTAINER_NAME'),
+                         'fixture_run': os.environ.get('SMB_TEST_FIXTURE_RUN')}) + '\n')
 '''
 
 
@@ -119,6 +120,10 @@ class FixtureOwnershipTests(unittest.TestCase):
                             and mapping.split(":")[1].isdigit() for mapping in mappings))
         self.assertEqual(len(set(mappings)), 3)
         self.assertTrue(all("--pull=never" in args for args in runs))
+        expected_run = runs[0][runs[0].index("--label") + 1].split("=", 1)[1]
+        self.assertEqual(cargo[-1]["fixture_run"], expected_run)
+        self.assertEqual(len(expected_run), 32)
+        self.assertTrue(all(item["fixture_run"] is None for item in cargo[:-1]))
         normal_port = mappings[0].split(":")[1]
         self.assertEqual(cargo[-1]["port"], normal_port)
         self.assertEqual(state, {"containers": {}, "volume": None})

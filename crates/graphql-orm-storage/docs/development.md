@@ -72,6 +72,9 @@ random run label, rechecks ownership and removes exact container IDs plus its
 owned volume; failures and interrupts use the same cleanup path. The runner
 selects unused OS ports and publishes each port explicitly so restarts preserve
 the mapping; a competing bind fails startup instead of reusing another service.
+The restart test requires a full immutable container ID and explicit run ID from
+the harness, and verifies the container's run label before any mutation. Missing
+or mismatched ownership fails closed, including manually invoked ignored tests.
 After restart the test verifies the original mapping and waits at most 30 seconds
 for TCP readiness before exercising the same existing backend's reconnect path.
 
