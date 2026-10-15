@@ -999,7 +999,11 @@ impl<B: OrmBackend> Database<B> {
         row: &(dyn Any + Send + Sync),
     ) -> async_graphql::Result<bool> {
         match &self.row_policy {
-            Some(policy) => policy.can_read_deleted_preimage(ctx, self, entity_name, policy_key, surface, row).await,
+            Some(policy) => {
+                policy
+                    .can_read_deleted_preimage(ctx, self, entity_name, policy_key, surface, row)
+                    .await
+            }
             None => Ok(false),
         }
     }

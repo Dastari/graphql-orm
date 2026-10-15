@@ -47,13 +47,18 @@ struct PortableRow {
     owner: String,
     label: String,
 }
-static PRIVATE_SNAPSHOT_CLONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PRIVATE_SNAPSHOT_CLONES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 impl Clone for PortableRow {
     fn clone(&self) -> Self {
         if self.id == "clone-probe-only" {
             PRIVATE_SNAPSHOT_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
-        Self { id: self.id.clone(), owner: self.owner.clone(), label: self.label.clone() }
+        Self {
+            id: self.id.clone(),
+            owner: self.owner.clone(),
+            label: self.label.clone(),
+        }
     }
 }
 #[derive(Clone)]
@@ -219,21 +224,40 @@ async fn current_typed_keys_and_authorized_payloads_are_portable()
 struct PermissiveRlsBackedPolicy;
 #[cfg(feature = "postgres")]
 impl RowPolicy for PermissiveRlsBackedPolicy {
-    fn can_read_row<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database,
-        _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync),
-    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
-    fn can_write_row<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database,
-        _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync),
-    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
 }
 #[cfg(feature = "postgres")]
 fn rls_request(query: impl Into<String>, actor: &str) -> Request {
     let subject = AuthSubject::new(actor);
-    Request::new(query).data(DbAuthContext::from_subject(&subject)).data(subject)
+    Request::new(query)
+        .data(DbAuthContext::from_subject(&subject))
+        .data(subject)
 }
 #[cfg(feature = "postgres")]
 #[tokio::test]
-async fn rls_only_visibility_never_authorizes_another_owners_deleted_preimage() -> Result<(), Box<dyn std::error::Error>> {
+async fn rls_only_visibility_never_authorizes_another_owners_deleted_preimage()
+-> Result<(), Box<dyn std::error::Error>> {
     let (admin, mut owner) = fixture().await?;
     for sql in [
         "CREATE ROLE subscription_rls_reader NOLOGIN NOSUPERUSER NOBYPASSRLS",
@@ -243,37 +267,80 @@ async fn rls_only_visibility_never_authorizes_another_owners_deleted_preimage() 
         "CREATE POLICY owner_access ON portable_subscription_rows FOR ALL USING (owner = current_setting('app.user_id', true)) WITH CHECK (owner = current_setting('app.user_id', true))",
         "GRANT USAGE ON SCHEMA public TO subscription_rls_reader",
         "GRANT SELECT, INSERT, UPDATE, DELETE ON portable_subscription_rows TO subscription_rls_reader",
-    ] { execute(&admin, sql).await?; }
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2).after_connect(|connection, _| {
-        Box::pin(async move {
-            sqlx::query("SET ROLE subscription_rls_reader").execute(connection).await?;
-            Ok(())
+    ] {
+        execute(&admin, sql).await?;
+    }
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET ROLE subscription_rls_reader")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
         })
-    }).connect(&owner.url).await?;
+        .connect(&owner.url)
+        .await?;
     for permissive_callback in [false, true] {
-        let private_id = if permissive_callback { "private-bob-callback" } else { "private-bob-no-provider" };
-        let public_id = if permissive_callback { "public-alice-callback" } else { "public-alice-no-provider" };
+        let private_id = if permissive_callback {
+            "private-bob-callback"
+        } else {
+            "private-bob-no-provider"
+        };
+        let public_id = if permissive_callback {
+            "public-alice-callback"
+        } else {
+            "public-alice-no-provider"
+        };
         execute(&admin, &format!("INSERT INTO portable_subscription_rows VALUES ('{private_id}', 'bob', 'synthetic-private-label')")).await?;
         let auth = DbAuthContext::from_subject(&AuthSubject::new("alice"));
-        let rows = PostgresBackend::fetch_rows_with_auth(&pool, "SELECT id FROM portable_subscription_rows WHERE owner = 'bob'", &[], Some(&auth)).await?;
+        let rows = PostgresBackend::fetch_rows_with_auth(
+            &pool,
+            "SELECT id FROM portable_subscription_rows WHERE owner = 'bob'",
+            &[],
+            Some(&auth),
+        )
+        .await?;
         assert!(rows.is_empty(), "test actor bypassed RLS");
         let mut db = Database::new(pool.clone());
-        if permissive_callback { db.set_row_policy(PermissiveRlsBackedPolicy); }
+        if permissive_callback {
+            db.set_row_policy(PermissiveRlsBackedPolicy);
+        }
         let schema = schema_builder(db).finish();
         let mut stream = Box::pin(schema.execute_stream(rls_request(
-            "subscription { portableRowChanged { id portableRow { owner label } } }", "alice"
+            "subscription { portableRowChanged { id portableRow { owner label } } }",
+            "alice",
         )));
         registered(&mut stream).await;
-        let deleted = schema.execute(rls_request(format!("mutation {{ deletePortableRow(id: \"{private_id}\") {{ success error }} }}"), "bob")).await;
+        let deleted = schema
+            .execute(rls_request(
+                format!(
+                    "mutation {{ deletePortableRow(id: \"{private_id}\") {{ success error }} }}"
+                ),
+                "bob",
+            ))
+            .await;
         assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
-        assert_eq!(deleted.data.into_json()?["deletePortableRow"]["success"], true);
+        assert_eq!(
+            deleted.data.into_json()?["deletePortableRow"]["success"],
+            true
+        );
         let created = schema.execute(rls_request(format!("mutation {{ createPortableRow(input: {{id: \"{public_id}\", owner: \"alice\", label: \"public-label\"}}) {{success error}} }}"), "alice")).await;
         assert!(created.errors.is_empty(), "{:?}", created.errors);
-        assert_eq!(created.data.into_json()?["createPortableRow"]["success"], true);
-        let response = timeout(Duration::from_secs(3), stream.next()).await?.unwrap();
+        assert_eq!(
+            created.data.into_json()?["createPortableRow"]["success"],
+            true
+        );
+        let response = timeout(Duration::from_secs(3), stream.next())
+            .await?
+            .unwrap();
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let data = response.data.into_json()?;
-        assert_eq!(data["portableRowChanged"]["id"], public_id, "permissive_callback={permissive_callback}");
+        assert_eq!(
+            data["portableRowChanged"]["id"], public_id,
+            "permissive_callback={permissive_callback}"
+        );
         assert!(!data.to_string().contains("private-bob"));
         assert!(!data.to_string().contains("synthetic-private-label"));
     }
@@ -284,31 +351,54 @@ async fn rls_only_visibility_never_authorizes_another_owners_deleted_preimage() 
 }
 
 #[tokio::test]
-async fn rejected_subscribers_do_not_clone_private_queued_snapshots() -> Result<(), Box<dyn std::error::Error>> {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+async fn rejected_subscribers_do_not_clone_private_queued_snapshots()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     let (mut db, mut owner) = fixture().await?;
     execute(&db, "CREATE TABLE portable_subscription_rows (id VARCHAR(80) PRIMARY KEY, owner VARCHAR(80) NOT NULL, label VARCHAR(100) NOT NULL)").await?;
     db.set_row_policy(OwnedRowPolicy);
     let reads = Arc::new(AtomicUsize::new(0));
     let db = db.with_read_query_observer(ReadCounter(reads.clone()));
-    let mut raw_observer = db.ensure_event_sender::<PortableRowChangedEvent>().subscribe();
-    let mut witness_observer = db.ensure_event_sender::<graphql_orm::graphql::subscriptions::SubscriptionEvent<PortableRowChangedEvent, DefaultBackend>>().subscribe();
+    let mut raw_observer = db
+        .ensure_event_sender::<PortableRowChangedEvent>()
+        .subscribe();
+    let mut witness_observer = db
+        .ensure_event_sender::<graphql_orm::graphql::subscriptions::SubscriptionEvent<
+            PortableRowChangedEvent,
+            DefaultBackend,
+        >>()
+        .subscribe();
     let schema = schema_builder(db).finish();
-    let mut stream = Box::pin(schema.execute_stream(Request::new(
-        "subscription { portableRowChanged { id } }"
-    ).data(AuthSubject::new("alice"))));
+    let mut stream = Box::pin(schema.execute_stream(
+        Request::new("subscription { portableRowChanged { id } }").data(AuthSubject::new("alice")),
+    ));
     registered(&mut stream).await;
     publish(&schema, "clone-probe-only", "bob").await;
     let raw = timeout(Duration::from_secs(1), raw_observer.recv()).await??;
-    assert_eq!(raw.entity.as_ref().unwrap().owner, "bob", "raw observer contract changed");
+    assert_eq!(
+        raw.entity.as_ref().unwrap().owner,
+        "bob",
+        "raw observer contract changed"
+    );
     let witness = timeout(Duration::from_secs(1), witness_observer.recv()).await??;
-    assert!(witness.event.entity.is_none(), "live witness retained a sensitive snapshot");
+    assert!(
+        witness.event.entity.is_none(),
+        "live witness retained a sensitive snapshot"
+    );
     PRIVATE_SNAPSHOT_CLONES.store(0, Ordering::Relaxed);
     reads.store(0, Ordering::Relaxed);
-    assert!(timeout(Duration::from_secs(1), stream.next()).await.is_err());
+    assert!(
+        timeout(Duration::from_secs(1), stream.next())
+            .await
+            .is_err()
+    );
     assert!(reads.load(Ordering::Relaxed) > 0, "event was not processed");
     assert_eq!(PRIVATE_SNAPSHOT_CLONES.load(Ordering::Relaxed), 0);
-    drop(stream); drop(schema);
+    drop(stream);
+    drop(schema);
     owner.cleanup()?;
     Ok(())
 }

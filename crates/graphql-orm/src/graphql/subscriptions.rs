@@ -222,11 +222,23 @@ where
         ReadVisibility::CallbackOnly | ReadVisibility::Unrestricted
     ) {
         if let Some(preimage) = deleted_preimage {
-            if db.can_read_deleted_preimage(Some(ctx), T::entity_name(),
-                T::metadata().read_policy, EntityAccessSurface::GraphqlSubscription, preimage).await? {
+            if db
+                .can_read_deleted_preimage(
+                    Some(ctx),
+                    T::entity_name(),
+                    T::metadata().read_policy,
+                    EntityAccessSurface::GraphqlSubscription,
+                    preimage,
+                )
+                .await?
+            {
                 Some(preimage.clone())
-            } else { None }
-        } else { None }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -339,11 +351,16 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
     {
         if selected.node.name.node.as_str().eq_ignore_ascii_case("id") {
             for key in T::PRIMARY_KEYS {
-                let available = T::columns().iter().find(|column|
-                    column.name == *key || B::DIALECT.quote_identifier_path(column.name) == *key
-                ).and_then(|column| T::subscription_field_policy(column.api_name))
+                let available = T::columns()
+                    .iter()
+                    .find(|column| {
+                        column.name == *key || B::DIALECT.quote_identifier_path(column.name) == *key
+                    })
+                    .and_then(|column| T::subscription_field_policy(column.api_name))
                     .is_some_and(|(_, available, _)| available);
-                if !available { return Err(unsupported_subscription_selection()); }
+                if !available {
+                    return Err(unsupported_subscription_selection());
+                }
             }
         }
         if selected.node.name.node.as_str() != entity_field {
@@ -398,8 +415,8 @@ where
                 // has been written. Only persisted scalar snapshots are proved here.
                 if !scalar.node.selection_set.node.items.is_empty()
                     || !T::columns()
-                    .iter()
-                    .any(|column| column.api_name == scalar.node.name.node.as_str())
+                        .iter()
+                        .any(|column| column.api_name == scalar.node.name.node.as_str())
                 {
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
