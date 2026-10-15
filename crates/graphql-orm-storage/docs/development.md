@@ -61,6 +61,24 @@ cargo test -p graphql-orm-storage --features s3 --no-default-features --test s3_
 Use a dedicated throwaway bucket or prefix. The test writes and deletes objects
 under a generated prefix.
 
+## Managed SMB fixture ownership
+
+`tests/samba/run.sh` runs the seven managed protocol, cancellation, encryption,
+constrained-write, backup-lifecycle and reconnect cases. It creates fresh randomly
+named containers and a fresh labelled volume, binds dynamic ports only on
+`127.0.0.1`, and passes the exact normal container ID to the restart test. It never
+reuses or deletes a pre-existing fixed-name fixture. Cleanup selects only its
+random run label, rechecks ownership and removes exact container IDs plus its
+owned volume; failures and interrupts use the same cleanup path.
+
+Local execution defaults to `SMB_TEST_PULL_POLICY=never`: provision and review a
+cached image beforehand. `SMB_TEST_IMAGE` selects the reviewed image reference.
+Disposable hosted CI explicitly uses `SMB_TEST_PULL_POLICY=missing`. The script
+does not change Docker daemon or application resources. Under a host resource
+wrapper, keep setup, all tests and cleanup in one admitted invocation; its Docker
+shim remains responsible for resource limits and may require cached images even
+when the harness permits pulling missing images.
+
 ## Documentation
 
 The root `README.md` should stay short. Long-form material belongs in `docs/`
