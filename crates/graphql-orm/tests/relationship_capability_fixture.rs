@@ -16,6 +16,7 @@ fn pascal_relationship_semantics_compile_as_a_complete_query_capability() {
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
             "test",
+            "--locked",
             "--manifest-path",
             manifest,
             "--no-default-features",
