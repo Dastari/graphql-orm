@@ -421,12 +421,22 @@ async fn samba_reconnects_after_server_restart() {
         env::var("SMB_TEST_FIXTURE_RUN").ok(),
         |container| {
             let ownership = std::process::Command::new("docker")
-                .args(["inspect", "--format", "{{index .Config.Labels \"graphql-orm.samba-fixture-run\"}}", container])
-                .output().map_err(|_| "cannot inspect managed fixture".to_string())?;
-            if !ownership.status.success() { return Err("cannot verify managed fixture ownership".to_string()); }
-            String::from_utf8(ownership.stdout).map_err(|_| "invalid ownership response".to_string())
+                .args([
+                    "inspect",
+                    "--format",
+                    "{{index .Config.Labels \"graphql-orm.samba-fixture-run\"}}",
+                    container,
+                ])
+                .output()
+                .map_err(|_| "cannot inspect managed fixture".to_string())?;
+            if !ownership.status.success() {
+                return Err("cannot verify managed fixture ownership".to_string());
+            }
+            String::from_utf8(ownership.stdout)
+                .map_err(|_| "invalid ownership response".to_string())
         },
-    ).expect("managed reconnect requires verified fixture ownership");
+    )
+    .expect("managed reconnect requires verified fixture ownership");
     let container = &fixture.container;
     let root = format!("graphql-orm-storage-reconnect/{}", Uuid::new_v4());
     let config = test_config(root);
@@ -448,11 +458,19 @@ async fn samba_reconnects_after_server_restart() {
         .await
         .expect("write before restart");
 
-    fixture.restart_with(|container| {
-        let status = std::process::Command::new("docker").args(["restart", container])
-            .status().map_err(|_| "cannot restart owned fixture".to_string())?;
-        if status.success() { Ok(()) } else { Err("owned fixture restart failed".to_string()) }
-    }).expect("restart verified owned fixture");
+    fixture
+        .restart_with(|container| {
+            let status = std::process::Command::new("docker")
+                .args(["restart", container])
+                .status()
+                .map_err(|_| "cannot restart owned fixture".to_string())?;
+            if status.success() {
+                Ok(())
+            } else {
+                Err("owned fixture restart failed".to_string())
+            }
+        })
+        .expect("restart verified owned fixture");
     let published = std::process::Command::new("docker")
         .args(["port", container.as_str(), "445/tcp"])
         .output()
@@ -503,7 +521,9 @@ async fn samba_reconnects_after_server_restart() {
 }
 
 // A restart capability is constructed only after a successful ownership read.
-struct VerifiedSambaFixture { container: String }
+struct VerifiedSambaFixture {
+    container: String,
+}
 impl VerifiedSambaFixture {
     fn restart_with(&self, restart: impl FnOnce(&str) -> Result<(), String>) -> Result<(), String> {
         restart(&self.container)
@@ -536,23 +556,49 @@ fn restart_guard_denies_missing_failed_and_mismatched_ownership_without_mutation
     for (container, expected_run, inspected_owner) in [
         (None, Some(run.clone()), Ok(run.clone())),
         (Some(id.clone()), None, Ok(run.clone())),
-        (Some("ambient-container-name".to_string()), Some(run.clone()), Ok(run.clone())),
-        (Some(id.clone()), Some(run.clone()), Err("failed inspect".to_string())),
+        (
+            Some("ambient-container-name".to_string()),
+            Some(run.clone()),
+            Ok(run.clone()),
+        ),
+        (
+            Some(id.clone()),
+            Some(run.clone()),
+            Err("failed inspect".to_string()),
+        ),
         (Some(id.clone()), Some(run.clone()), Ok(String::new())),
-        (Some(id.clone()), Some(run.clone()), Ok("foreign-run".to_string())),
+        (
+            Some(id.clone()),
+            Some(run.clone()),
+            Ok("foreign-run".to_string()),
+        ),
     ] {
         let mutations = Cell::new(0);
         let outcome = verified_samba_fixture(container, expected_run, |_| inspected_owner)
-            .and_then(|fixture| fixture.restart_with(|_| { mutations.set(mutations.get() + 1); Ok(()) }));
+            .and_then(|fixture| {
+                fixture.restart_with(|_| {
+                    mutations.set(mutations.get() + 1);
+                    Ok(())
+                })
+            });
         assert!(outcome.is_err());
-        assert_eq!(mutations.get(), 0, "an unverified fixture must never reach mutation");
+        assert_eq!(
+            mutations.get(),
+            0,
+            "an unverified fixture must never reach mutation"
+        );
     }
     let mutations = Cell::new(0);
     verified_samba_fixture(Some(id.clone()), Some(run.clone()), |inspected| {
         assert_eq!(inspected, id);
         Ok(format!("{run}\n"))
-    }).expect("matching inspect grants capability")
-        .restart_with(|restarted| { assert_eq!(restarted, id); mutations.set(1); Ok(()) })
-        .expect("verified restart callback");
+    })
+    .expect("matching inspect grants capability")
+    .restart_with(|restarted| {
+        assert_eq!(restarted, id);
+        mutations.set(1);
+        Ok(())
+    })
+    .expect("verified restart callback");
     assert_eq!(mutations.get(), 1);
 }
