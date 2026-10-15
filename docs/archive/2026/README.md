@@ -17,6 +17,7 @@ the [documentation index](../../README.md) links authoritative material.
 
 - [Consumer monorepo migration prompt](consumer-monorepo-migration-agent-prompt.md)
 - [Documentation disposition inventory](documentation-disposition-inventory.md)
+- [Frozen dependency review evidence, 2026-10-15](dependency-review-2026-10-15/README.md)
 - [Native SMB host-integration brief](native-smb-integration-brief.md)
 - [`graphql-orm-ai` completion ledger](graphql-orm-ai-completion-ledger.md)
 - [`graphql-orm-ai` implementation ledger](graphql-orm-ai-implementation-ledger.md)

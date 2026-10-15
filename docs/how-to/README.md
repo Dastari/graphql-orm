@@ -15,6 +15,7 @@ Use these focused routes after completing the
 
 ## Core ORM
 
+- [Coordinate a security-remediation upgrade](upgrade-security-remediation.md)
 - [Select backend features and work safely in a multi-backend workspace](../reference/graphql-orm/backends.md)
 - [Model entities, keys, columns, naming, and relations](../reference/graphql-orm/entities-and-relations.md)
 - [Validate, plan, and apply a schema change](../reference/graphql-orm/schema-management.md)

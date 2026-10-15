@@ -11,6 +11,7 @@ supersedes: []
 # Reference
 
 - [Current workspace packages](workspace-packages.md)
+- [Dependency security disposition](dependency-security-disposition.md)
 - [`graphql-orm` mechanics](graphql-orm/README.md)
 
 Component-specific references are linked from the central

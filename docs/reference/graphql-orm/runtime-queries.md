@@ -125,7 +125,8 @@ Do not authorize a filter solely from `referenced_fields`: folded predicates do
 not retain complete original intent. The [host-neutral example](../../../crates/graphql-orm/examples/runtime_key_read.rs)
 accepts no optional caller filter and denies absent authority before protected
 I/O. Hosts adding filters must authorize original intent before constructing
-predicates. Checked reusable filter intent/matching remains separately unapproved.
+predicates. For reusable caller filters, follow the separately checked
+[original intent and offline matching contract](#checked-original-intent-and-offline-matching).
 
 ## Operator and logical semantics
 

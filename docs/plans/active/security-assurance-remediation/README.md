@@ -47,6 +47,7 @@ use bounded scans instead of exact unbounded visible offsets and totals.
 | S-004 / Q-006 | Bounded abuse-state lifecycle and credential-verification work | Clock/CAS semantics and explicit host work admission |
 | S-005 | Exclusive backup lock lifetime and atomic conditional creation | Provider-independent fail-closed behavior and offline recovery procedure |
 | S-006 | Safe public errors across generated resolver paths | Existing stable error mapping and internal diagnostics |
+| S-007 | Current target-row, selected-field and bounded provenance authorization before each subscription release | Fresh policy/current-authority checks, explicit deleted-preimage opt-in and fail-closed unsupported selections |
 | R-001 | Bounded protected collection scans and honest pagination metadata | Existing authorized scan contract; migration from exact legacy semantics |
 | R-002 / R-003 / Q-009 | Current authority, token bindings and consistent request context | Auth change before ORM bridge and sensitive-operation enforcement |
 | R-004 | Local filesystem root confinement or explicit trusted-root contract | Local provider path semantics and synthetic link tests |
@@ -85,13 +86,17 @@ and repository work.
 
 ## Current checkpoint
 
-Revalidation and the first implementation wave are in progress on isolated
-branches based on current main. The existing disabled-login prerequisite
-[authentication PR 11](https://github.com/Dastari/agql-auth/pull/11) is merged.
-Relationship-policy changes already present upstream are being challenged;
-authorization-key, refresh/current-authority and backup-lock corrections are
-being implemented separately. Remaining rows are pending current-source
-validation and focused changes. No final production-readiness claim is made.
+Focused security remediations and the reviewed correctness/capability follow-ups
+are implemented with independently retained source and regression evidence.
+The external authentication revision is reviewed and pinned; consuming-host
+migration and authority responsibilities remain explicit. Individual execution
+results retain their actual source revisions and scope, including owned backend,
+provider and platform limitations.
+
+Final coherent feature/backend/companion evidence reconciliation and release-wide
+acceptance remain in progress. Completion of a focused test or implementation
+is not a whole-workspace production-readiness claim. Existing publication,
+Actions and merge holds remain in effect; this plan grants no release authority.
 
 Temporary coordination and command logs remain outside the authoritative docs
 namespace. Replace this checkpoint as work advances; archive the completed plan

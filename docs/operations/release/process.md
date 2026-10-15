@@ -129,6 +129,11 @@ the documented package support contracts.
    hosted workflow success alone is insufficient.
 9. Review the complete diff, dependency trees, generated schema/manifest
    changes, documentation links, and migration statements.
+   Reconcile unsuppressed dependency scans with the
+   [dependency security disposition](../../reference/dependency-security-disposition.md)
+   for the exact release source, unified features and advisory snapshot. Preserve
+   nonzero findings and changed applicability conditions; an earlier frozen scan
+   or excluded call path does not establish a clean graph or runtime acceptance.
 10. In the pull request, select exactly one documentation-impact option from
     the repository template. Release changes normally select
     `Documentation updated`; CI rejects missing or ambiguous declarations.
