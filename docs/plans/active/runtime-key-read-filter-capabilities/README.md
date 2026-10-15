@@ -11,9 +11,9 @@ supersedes: []
 # Runtime key reads and filter matching interface review
 
 Requirement A received explicit implementation approval on 2026-10-15. Its
-implementation and scoped validation are complete; final stack integration and
-release acceptance remain pending. Requirement B remains an interface proposal
-under review and has no implementation approval. This plan addresses only A and B in the [immutable consumer
+implementation and scoped validation are complete; final release acceptance
+remains pending. Requirement B received explicit implementation approval on
+2026-10-15; its separate implementation is pending and is not part of this preview. This plan addresses only A and B in the [immutable consumer
 request](https://github.com/Dastari/digibase/blob/0d26ab1af68b80985cafa4a621fa850eda5afee4/docs/coordination/prompts/0020-graphql-orm-runtime-key-reads-and-record-filter-matching.md).
 The reviewed ORM baseline is `4059d10026b9b8d1e9a2be0f4f556df807f77794`,
 version0.48.0. Remote main was independently resolved to that commit.
@@ -367,8 +367,13 @@ before pool I/O. A package build without any backend remains unsupported by the
 unchanged macro guard. The explicit package-selected native API comparison
 passed under a minor-release override to check additive compatibility.
 
-ORM/macros 0.49.0, all seven existing locks and the generated inventory are
-reconciled on this proposal-based stack. Before release, integrate the reviewed
-0.48.x correctness fixes and validate the coherent final stack. No merge,
-Actions or publication follows from these implementation gates. B remains
-unapproved, including its duplicate-wire/coercion and matching-semantics decisions.
+ORM/macros remain paired at 0.49.0 in an unpublished isolated local preview
+that integrates the reviewed 0.48.1–0.48.3 corrections, explicit SemVer gates
+and fixture lock/import correction while preserving their separate histories.
+This is source assembly only; no final-stack build, test or acceptance is
+claimed. The seven locks retain the reviewed local version and derive changes;
+the generated inventory is inherited from A and awaits regeneration/checks.
+Prior results above retain their actual input source identities. B has owner
+implementation approval but remains pending separately; final release freeze
+awaits its integration and affected validation. Main and existing PR branches
+are unchanged. No Actions, remote merge or publication is authorized here.
