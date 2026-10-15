@@ -2014,6 +2014,25 @@ pub(crate) fn generate_graphql_operations(
             vec![#subscription_pk_bind]
         }
     };
+    // Repository-only observers keep their existing redacted event contract;
+    // these entities have no generated GraphQL subscription channel.
+    let subscription_witness_emission = |publish: proc_macro2::TokenStream| {
+        if crate::entity::has_repository_entity_attribute(&input.attrs) {
+            quote! {}
+        } else {
+            quote! {
+                let mut event = event;
+                if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
+                if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
+                    event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
+                ) { #publish }
+            }
+        }
+    };
+    let queue_subscription_witness =
+        subscription_witness_emission(quote! { hook_ctx.queue_event(witness); });
+    let emit_subscription_witness =
+        subscription_witness_emission(quote! { db.emit_event(witness); });
     let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations
         .iter()
         .map(|relation| -> syn::Result<proc_macro2::TokenStream> {
@@ -5072,17 +5091,14 @@ pub(crate) fn generate_graphql_operations(
                 ) -> ::graphql_orm::Result<()> {
                     #search_write_maintenance
                     let source_id = #pk_id_for_entity;
-                    let mut event = #changed_event {
+                    let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
                         source_entity: None, source_id: None, path: Vec::new(), entity: Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
-                    if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
-                    if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
-                        event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
-                    ) { hook_ctx.queue_event(witness); }
+                    #queue_subscription_witness
                     let mut visited = ::std::collections::HashSet::from([format!(
                         "{}:{}:{}:{}", #entity_name_lit, source_id, #entity_name_lit, source_id
                     )]);
@@ -7834,7 +7850,7 @@ pub(crate) fn generate_graphql_operations(
                 entity: Option<&Self>,
             ) {
                 if let Some(entity) = entity {
-                    let mut event = #changed_event {
+                    let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
@@ -7844,10 +7860,7 @@ pub(crate) fn generate_graphql_operations(
                         entity: Some(entity.clone()),
                     };
                     db.emit_event(event.clone());
-                    if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
-                    if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
-                        event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
-                    ) { db.emit_event(witness); }
+                    #emit_subscription_witness
                 }
             }
 
@@ -7882,7 +7895,7 @@ pub(crate) fn generate_graphql_operations(
                 if let Some(entity) = entity {
                     #search_write_maintenance
                     let source_id = #pk_id_for_entity;
-                    let mut event = #changed_event {
+                    let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
@@ -7892,10 +7905,7 @@ pub(crate) fn generate_graphql_operations(
                         entity: Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
-                    if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
-                    if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
-                        event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
-                    ) { hook_ctx.queue_event(witness); }
+                    #queue_subscription_witness
                     let mut visited = ::std::collections::HashSet::from([format!(
                         "{}:{}:{}:{}",
                         #entity_name_lit,
