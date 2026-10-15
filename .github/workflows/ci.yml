@@ -7,6 +7,11 @@ on:
       - main
   workflow_dispatch:
 
+# Superseded PR heads share a group; main and manual runs are never canceled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The companions job relinks every graphql-orm-ai test binary once per provider
 # feature combination. With full debug info that exhausted the runner disk and
 # the linker died with SIGBUS mid-link. `line-tables-only` keeps file and line
