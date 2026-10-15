@@ -51,6 +51,13 @@ compatibility behavior. This default protects marked policy requirements only;
 it does not authorize unmarked operations or create tenant isolation. Sensitive
 applications should use `ExplicitPolicyForAllExposedOperations` with host policies.
 
+Federation subgraphs with a declared entity `read_policy` must also register a
+`RowPolicy`: generated entity-key resolvers check each fetched row with that
+key after entity access succeeds. Authorize the typed row from current request
+authority; an entity provider alone does not satisfy this route's row check.
+Collection/relation paths retaining unrestricted entity-only visibility have a
+separate contract. See the [strict authorization guide](docs/reference/graphql-orm/strict-authorization.md).
+
 For immediate revocation with `auth-agql`, replace independently injected
 `AuthSubject`/`DbAuthContext` values with
 `AgqlAcceptedRequest::new(authenticated_principal).inject(request)?`. Authenticate

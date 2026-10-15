@@ -843,7 +843,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let (pool, mut owner) = fixture_pool().await?;
         let allowed = Arc::new(AtomicBool::new(true));
-        let db =
+        let mut db =
             Database::<DefaultBackend>::with_entity_policy(pool, TargetPolicy(allowed.clone()));
         let plan = db
             .schema()
@@ -867,6 +867,9 @@ mod tests {
             )
             .await?;
         }
+        // Endpoint.name declares a field policy even in this batching fixture.
+        // Keep entity-only visibility unrestricted; no row callback is needed.
+        db.set_field_policy(CurrentFieldPolicy);
         let db_pool = db.pool().clone();
         let schema = Schema::build(
             Query {
@@ -888,6 +891,7 @@ mod tests {
         )
         .data(db.clone())
         .data("fixture-user".to_owned())
+        .data(identity("fixture-user"))
         .data(DataLoader::new(
             RelationLoader::<Endpoint, DefaultBackend>::new(db),
             tokio::spawn,

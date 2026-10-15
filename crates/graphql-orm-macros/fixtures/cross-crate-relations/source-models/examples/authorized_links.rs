@@ -1,5 +1,8 @@
 //! Disposable, SQL-free host example: cached snapshots grant no target access.
 #[cfg(feature = "sqlite")]
+mod support;
+
+#[cfg(feature = "sqlite")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use async_graphql::{
@@ -51,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(1)
         .connect("sqlite::memory:")
         .await?;
-    let db = Database::<SqliteBackend>::with_entity_policy(pool, Policy(allowed.clone()));
+    let mut db = Database::<SqliteBackend>::with_entity_policy(pool, Policy(allowed.clone()));
     let plan = db
         .schema()
         .plan_migration_to_entities("example", "owned fixture", &[Endpoint::metadata()])
@@ -68,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
+    db.set_field_policy(support::EndpointFixturePolicy);
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
         .data(db.clone())
         .data("example-user".to_owned())

@@ -613,10 +613,15 @@ async fn unsupported_binding_restrictions_fail_closed() {
 }
 #[tokio::test]
 async fn federation_rechecks_current_authority() {
-    let (schema, host, bundle) = fixture().await;
+    // Federation checks declared row policies even when collections retain
+    // entity-only visibility. Keep deleted-preimage release denied here.
+    let (schema, host, bundle) = fixture_config(principal(), None, false, Some(false)).await;
     let query = "{ _entities(representations: [{__typename: \"SecureRecord\", id: \"record-1\"}]) { ... on SecureRecord { id value } } }";
     let accepted = schema.execute(request(&bundle, query)).await;
     assert!(accepted.errors.is_empty(), "{:?}", accepted.errors);
+    let data = accepted.data.into_json().unwrap();
+    assert_eq!(data["_entities"][0]["id"], "record-1");
+    assert_eq!(data["_entities"][0]["value"], "safe");
     assert_eq!(host.checks.load(Ordering::SeqCst), 1);
     host.revoked.store(true, Ordering::SeqCst);
     assert!(

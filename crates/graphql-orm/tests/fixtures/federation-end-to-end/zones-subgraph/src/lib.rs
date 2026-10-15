@@ -78,6 +78,42 @@ impl graphql_orm::graphql::orm::EntityPolicy for ScopedEntityPolicy {
     }
 }
 
+/// Federation entity-key resolution also checks the loaded row's current scope.
+struct ScopedRowPolicy;
+
+impl RowPolicy for ScopedRowPolicy {
+    fn can_read_row<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a graphql_orm::db::Database,
+        entity: &'static str,
+        policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity == "Zone"
+                && policy_key == Some("zone.read")
+                && row.is::<Zone>()
+                && ctx
+                    .and_then(|ctx| ctx.data_opt::<CallerScopes>())
+                    .is_some_and(|scopes| scopes.0.iter().any(|scope| scope == READ_SCOPE)))
+        })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a graphql_orm::db::Database,
+        _entity: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
 /// Resets the ORM's process-global statement counter.
 pub fn reset_statement_count() {
     graphql_orm::graphql::orm::reset_query_count();
@@ -113,7 +149,10 @@ async fn seeded_database() -> graphql_orm::db::Database {
             .await
             .expect("seed a zone");
     }
-    graphql_orm::db::Database::with_entity_policy(pool.clone(), ScopedEntityPolicy)
+    let mut database =
+        graphql_orm::db::Database::with_entity_policy(pool.clone(), ScopedEntityPolicy);
+    database.set_row_policy(ScopedRowPolicy);
+    database
 }
 
 /// Starts the zones subgraph on loopback and returns its bound address.
