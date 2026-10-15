@@ -4982,7 +4982,7 @@ pub(crate) fn generate_graphql_operations(
                     if _filter.as_ref().is_some_and(|filter| filter.dummy.is_some()) {
                         return Err(::graphql_orm::graphql::errors::OrmPublicError::new(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
                     }
-                    ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<#struct_name>(ctx, #entity_result_field_name)?;
+                    ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<#struct_name, #backend_marker>(ctx, #entity_result_field_name)?;
                     let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
@@ -7749,7 +7749,7 @@ pub(crate) fn generate_graphql_operations(
                     if _filter.as_ref().is_some_and(|filter| filter.dummy.is_some()) {
                         return Err(::graphql_orm::graphql::errors::OrmPublicError::new(::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
                     }
-                    ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<#struct_name>(ctx, #entity_result_field_name)?;
+                    ::graphql_orm::graphql::subscriptions::validate_subscription_selection::<#struct_name, #backend_marker>(ctx, #entity_result_field_name)?;
                 let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();

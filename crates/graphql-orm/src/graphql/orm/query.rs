@@ -1161,7 +1161,10 @@ pub enum ChangeKind {
 #[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
 #[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
 pub struct SubscriptionFilterInput {
+    /// Restrict delivered actions; an empty list matches no events.
     pub actions: Option<Vec<ChangeAction>>,
+    /// Unsupported compatibility placeholder. Supplying any value is rejected
+    /// with INVALID_INPUT at generated subscription admission.
     pub dummy: Option<bool>,
 }
 

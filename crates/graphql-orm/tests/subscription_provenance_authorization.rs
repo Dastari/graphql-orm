@@ -61,13 +61,24 @@ impl BatchLoadEntity for ProofParent {
         SqliteBackend::try_get_string(row, "id")
     }
 }
+#[derive(GraphQLEntity, GraphQLOperations, async_graphql::SimpleObject, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "guarded_key_rows", plural = "GuardedKeyRows")]
+struct GuardedKeyRow {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[graphql(guard = "NeverRelease")]
+    #[filterable(type = "string")]
+    #[sortable]
+    id: String,
+    value: String,
+}
 struct NeverRelease;
 impl async_graphql::Guard for NeverRelease {
     async fn check(&self, _: &async_graphql::Context<'_>) -> async_graphql::Result<()> {
         Err(async_graphql::Error::new("synthetic-private-field-guard"))
     }
 }
-schema_roots! { query_custom_ops: [], entities: [ProofParent, ProofChild], }
+schema_roots! { query_custom_ops: [], entities: [ProofParent, ProofChild, GuardedKeyRow], }
 #[derive(Clone)]
 struct Policy {
     source_allowed: Arc<AtomicBool>,
@@ -369,4 +380,20 @@ async fn arbitrary_graphql_scalar_guards_are_rejected_before_outer_metadata() {
             .contains("synthetic-private-field-guard")
     );
     assert_eq!(response.data, async_graphql::Value::Null);
+}
+
+#[tokio::test]
+async fn unsupported_primary_key_guard_is_rejected_for_outer_identifier_aliases() {
+    let (schema, _, _) = setup().await;
+    for query in [
+        "subscription { guardedKeyRowChanged { outward: id } }",
+        "subscription { guardedKeyRowChanged { ...Identity } } fragment Identity on GuardedKeyRowChangedEvent { hidden: id }",
+    ] {
+        let mut stream = Box::pin(schema.execute_stream(Request::new(query).data(AuthSubject::new("alice"))));
+        let response = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert_eq!(response.errors[0].extensions.as_ref().unwrap().get("code"), Some(&async_graphql::Value::from("INVALID_INPUT")));
+        assert!(!serde_json::to_string(&response).unwrap().contains("synthetic-private-field-guard"));
+        assert_eq!(response.data, async_graphql::Value::Null);
+    }
 }

@@ -23,14 +23,15 @@ Host revocation policies must consult current authority on each invocation.
 Unauthorized events and policy/query failures are silently dropped before any
 identifier, provenance or selected payload is released. Selected protected fields
 (including aliases/fragments) and event identifiers require field authority;
-requesting a forbidden field drops the whole event rather than releasing outer
-metadata alongside a GraphQL field error.
+outer event identifiers also require a subscribable primary key; arbitrary PK
+guards are rejected at admission even through aliases/fragments. Requesting a
+forbidden dynamic field-policy decision drops the whole event rather than
+releasing outer metadata alongside a GraphQL field error.
 
 Selected entity payloads support persisted scalars only. Subscriptions requesting
 nested relations, computed/custom resolver fields, or fields with arbitrary
 GraphQL `guard`/dynamic `visible` behavior are rejected at admission
-with `INVALID_INPUT`: their
-late resolver decisions cannot prove release of outer metadata. Subscribe to
+with `INVALID_INPUT`: their late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
 
 Live payloads now contain the freshly loaded authorized current row. They are

@@ -62,8 +62,12 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
     }
 }
 
-/// In-process emission witness. Raw/deserialized public events cannot create it.
-/// GraphQL subscribes to this channel; the original event channel remains internal.
+/// Trusted host emission envelope used by generated code.
+///
+/// The public constructor supports external macro expansions; it does not
+/// authenticate untrusted events. Host code constructing witnesses is a trusted
+/// server boundary. Raw/deserialized public events on the ordinary observer
+/// channel cannot enter generated GraphQL delivery.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SubscriptionEvent<E: Clone, B: OrmBackend = DefaultBackend> {
@@ -312,15 +316,29 @@ where
     })
 }
 
+fn unsupported_subscription_selection() -> async_graphql::Error {
+    OrmPublicError::with_message(crate::graphql::errors::OrmErrorCode::InvalidInput,
+        "Subscription payloads support persisted subscribable scalar fields only; refresh authorized queries for relations or computed fields").into_graphql_error()
+}
+
 /// Reject unsupported nested/computed payload shapes before registration.
 #[doc(hidden)]
-pub fn validate_subscription_selection<T: Entity>(
+pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
     ctx: &Context<'_>,
     entity_field: &str,
 ) -> async_graphql::Result<()> {
     for selected in
         crate::graphql::loaders::relation_selected_fields(ctx, &ctx.item.node.selection_set.node)
     {
+        if selected.node.name.node.as_str().eq_ignore_ascii_case("id") {
+            for key in T::PRIMARY_KEYS {
+                let available = T::columns().iter().find(|column|
+                    column.name == *key || B::DIALECT.quote_identifier_path(column.name) == *key
+                ).and_then(|column| T::subscription_field_policy(column.api_name))
+                    .is_some_and(|(_, available, _)| available);
+                if !available { return Err(unsupported_subscription_selection()); }
+            }
+        }
         if selected.node.name.node.as_str() != entity_field {
             continue;
         }
@@ -335,8 +353,7 @@ pub fn validate_subscription_selection<T: Entity>(
             if !T::columns().iter().any(|column| column.api_name == name)
                 || !T::subscription_field_policy(name).is_some_and(|(_, available, _)| available)
             {
-                return Err(OrmPublicError::with_message(crate::graphql::errors::OrmErrorCode::InvalidInput,
-                    "Subscription payloads support persisted subscribable scalar fields only; refresh authorized queries for relations or computed fields").into_graphql_error());
+                return Err(unsupported_subscription_selection());
             }
         }
     }
