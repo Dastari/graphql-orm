@@ -145,3 +145,17 @@ multi-gigabyte object, interrupt one transfer, and race two lock acquisitions:
 
 Record dialect, security mode, filesystem, reconnect behavior, and flush/rename
 limitations without recording usernames or secrets.
+
+## Lock release
+
+Backup lock release uses `BlobStore::delete_blob_once`: the handle is opened,
+disposition is attempted and the same handle is closed, without reopening the
+path after either mutation step may have succeeded. Ordinary blob deletion
+retains its reconnect/retry behavior. A timeout or lost response during lock
+release leaves its outcome unknown; do not retry deletion by key. Offline lock
+recovery requires quiescing all writers, handles and in-flight requests.
+
+Conditional-create cleanup is handle-only too. Its guard retains no shared key
+for fallback deletion after closing the original handle, including failure and
+Drop paths. An ambiguous arm/disarm or close can leave an orphan lock for offline
+recovery. Unique temporary-upload cleanup retains its ordinary by-key behavior.

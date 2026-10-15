@@ -43,6 +43,10 @@ impl LocalBackupRepository {
 
 #[async_trait]
 impl BackupRepository for LocalBackupRepository {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob_once(key).await
+    }
+
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.inner.put_blob(key, body).await
     }

@@ -8,7 +8,8 @@ const REPOSITORY_LOCK_KEY: &str = "locks/repository.lock";
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// Advisory repository lock settings.
 pub struct RepositoryLockOptions {
-    /// Age in seconds after which a lock blob is considered stale.
+    /// Legacy age setting, retained for source compatibility and ignored.
+    /// Existing locks require offline recovery; elapsed time never grants ownership.
     pub stale_after_seconds: i64,
 }
 
@@ -20,81 +21,71 @@ impl Default for RepositoryLockOptions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
 /// Acquired advisory repository lock.
-pub struct RepositoryLock {
-    key: String,
+///
+/// This handle cannot be cloned: release consumes the sole ownership handle.
+/// It borrows its acquisition repository, so it cannot release another repository.
+/// Dropping or cancelling a holder leaves the lock in place. Recovery requires
+/// stopping all writers and ensuring no handles remain before removing the blob.
+/// No automatic expiry or fencing is provided.
+///
+/// ```compile_fail
+/// # use graphql_orm_backup::RepositoryLock;
+/// fn duplicate(lock: RepositoryLock<'_>) {
+///     let _second = lock.clone();
+/// }
+/// ```
+pub struct RepositoryLock<'a> {
+    repository: &'a dyn BackupRepository,
 }
 
-impl RepositoryLock {
+impl std::fmt::Debug for RepositoryLock<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RepositoryLock")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> RepositoryLock<'a> {
     /// Acquires the repository writer lock.
     ///
     /// # Errors
     ///
-    /// Returns [`BackupError::RepositoryLocked`] if a non-stale lock exists, or
+    /// Returns [`BackupError::RepositoryLocked`] if any lock exists, or
     /// another [`BackupError`] if the repository cannot be read or written.
     pub async fn acquire(
-        repository: &dyn BackupRepository,
-        options: &RepositoryLockOptions,
+        repository: &'a dyn BackupRepository,
+        _options: &RepositoryLockOptions,
     ) -> Result<Self, BackupError> {
         let now = unix_seconds();
         let body = Bytes::from(now.to_string());
         if repository
-            .put_blob_if_absent(REPOSITORY_LOCK_KEY, body.clone())
-            .await?
-        {
-            return Ok(Self {
-                key: REPOSITORY_LOCK_KEY.to_string(),
-            });
-        }
-
-        // A provider may report the failed conditional create before the
-        // winning writer has finished publishing a readable lock object. SMB,
-        // for example, can briefly return STATUS_DELETE_PENDING while the
-        // winner still owns its delete-on-close safety handle. Once atomic
-        // creation has reported a collision, an unreadable winner must remain
-        // locked: its age cannot be proved and deleting it would violate
-        // mutual exclusion.
-        let existing = match repository.get_blob(REPOSITORY_LOCK_KEY).await {
-            Ok(existing) => existing,
-            Err(_) => {
-                return Err(BackupError::RepositoryLocked {
-                    lock_key: REPOSITORY_LOCK_KEY.to_string(),
-                });
-            }
-        };
-        let locked_at = std::str::from_utf8(&existing)
-            .ok()
-            .and_then(|value| value.parse::<i64>().ok())
-            .unwrap_or(now);
-        if now.saturating_sub(locked_at) <= options.stale_after_seconds {
-            return Err(BackupError::RepositoryLocked {
-                lock_key: REPOSITORY_LOCK_KEY.to_string(),
-            });
-        }
-
-        repository.delete_blob(REPOSITORY_LOCK_KEY).await?;
-        if repository
             .put_blob_if_absent(REPOSITORY_LOCK_KEY, body)
             .await?
         {
-            Ok(Self {
-                key: REPOSITORY_LOCK_KEY.to_string(),
-            })
-        } else {
-            Err(BackupError::RepositoryLocked {
-                lock_key: REPOSITORY_LOCK_KEY.to_string(),
-            })
+            return Ok(Self { repository });
         }
+
+        // No provider-independent atomic compare/delete or fencing primitive is
+        // available. Never remove an existing lock, regardless of its age or
+        // readability: its writer may still be running.
+        Err(BackupError::RepositoryLocked {
+            lock_key: REPOSITORY_LOCK_KEY.to_string(),
+        })
     }
 
-    /// Releases the repository writer lock.
+    /// Releases the repository writer lock through single-attempt deletion.
+    ///
+    /// A failed or cancelled release leaves its outcome unknown. Do not retry
+    /// deletion by key or reclaim the lock while writers or requests can remain
+    /// active. The handle is consumed even when release fails.
     ///
     /// # Errors
     ///
     /// Returns [`BackupError`] if the repository cannot delete the lock blob.
-    pub async fn release(self, repository: &dyn BackupRepository) -> Result<(), BackupError> {
-        repository.delete_blob(&self.key).await
+    pub async fn release(self) -> Result<(), BackupError> {
+        self.repository.delete_blob_once(REPOSITORY_LOCK_KEY).await
     }
 }
 

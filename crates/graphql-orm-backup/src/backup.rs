@@ -170,7 +170,7 @@ pub async fn create_full_backup_with_options(
 ) -> Result<FullBackupResult, BackupError> {
     let lock = RepositoryLock::acquire(repository, &options.lock).await?;
     let result = create_full_backup_inner(repository, database, objects, request, options).await;
-    release_lock(repository, lock, result).await
+    release_lock(lock, result).await
 }
 
 async fn create_full_backup_inner(
@@ -279,7 +279,7 @@ pub async fn create_incremental_backup_with_options(
     let lock = RepositoryLock::acquire(repository, &options.lock).await?;
     let result =
         create_incremental_backup_inner(repository, database, objects, request, options).await;
-    release_lock(repository, lock, result).await
+    release_lock(lock, result).await
 }
 
 async fn create_incremental_backup_inner(
@@ -383,7 +383,7 @@ pub async fn compact_chain_with_options(
 ) -> Result<CompactChainResult, BackupError> {
     let lock = RepositoryLock::acquire(repository, &options.lock).await?;
     let result = compact_chain_inner(repository, request).await;
-    release_lock(repository, lock, result).await
+    release_lock(lock, result).await
 }
 
 async fn compact_chain_inner(
@@ -601,11 +601,10 @@ async fn hash_object_source(source: StorageByteStream) -> Result<String, BackupE
 }
 
 async fn release_lock<T>(
-    repository: &dyn BackupRepository,
-    lock: RepositoryLock,
+    lock: RepositoryLock<'_>,
     result: Result<T, BackupError>,
 ) -> Result<T, BackupError> {
-    let release_result = lock.release(repository).await;
+    let release_result = lock.release().await;
     match (result, release_result) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(err), _) => Err(err),
