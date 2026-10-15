@@ -291,12 +291,18 @@ async fn rejected_subscribers_do_not_clone_private_queued_snapshots() -> Result<
     db.set_row_policy(OwnedRowPolicy);
     let reads = Arc::new(AtomicUsize::new(0));
     let db = db.with_read_query_observer(ReadCounter(reads.clone()));
+    let mut raw_observer = db.ensure_event_sender::<PortableRowChangedEvent>().subscribe();
+    let mut witness_observer = db.ensure_event_sender::<graphql_orm::graphql::subscriptions::SubscriptionEvent<PortableRowChangedEvent, DefaultBackend>>().subscribe();
     let schema = schema_builder(db).finish();
     let mut stream = Box::pin(schema.execute_stream(Request::new(
         "subscription { portableRowChanged { id } }"
     ).data(AuthSubject::new("alice"))));
     registered(&mut stream).await;
     publish(&schema, "clone-probe-only", "bob").await;
+    let raw = timeout(Duration::from_secs(1), raw_observer.recv()).await??;
+    assert_eq!(raw.entity.as_ref().unwrap().owner, "bob", "raw observer contract changed");
+    let witness = timeout(Duration::from_secs(1), witness_observer.recv()).await??;
+    assert!(witness.event.entity.is_none(), "live witness retained a sensitive snapshot");
     PRIVATE_SNAPSHOT_CLONES.store(0, Ordering::Relaxed);
     reads.store(0, Ordering::Relaxed);
     assert!(timeout(Duration::from_secs(1), stream.next()).await.is_err());
