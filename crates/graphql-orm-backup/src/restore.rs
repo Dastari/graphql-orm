@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -32,6 +32,70 @@ pub struct RestoreContext {
     pub disable_policies: bool,
     /// Whether change journaling should be disabled during restore.
     pub disable_change_journal: bool,
+}
+
+/// Phase in which a database snapshot-chain restore failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RestoreFailurePhase {
+    /// Chain, integrity, schema or target validation failed before apply calls.
+    Validation,
+    /// Downloading, decompressing or parsing a stage failed without applying it.
+    Preparation,
+    /// An adapter apply call failed and may have partially changed its target.
+    Apply,
+}
+
+/// Progress reported when a database snapshot-chain restore fails.
+///
+/// Completed stages are calls that the adapter reported as successful. They are
+/// not a safe resume checkpoint: the failing apply stage may be partially applied,
+/// and orchestration does not roll back earlier stages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreFailureProgress {
+    /// Snapshot requested by the caller.
+    pub requested_snapshot_id: Uuid,
+    /// Manifest being processed, when it was available at the failure boundary.
+    pub failed_manifest_id: Option<Uuid>,
+    /// Failure boundary; only apply can modify the failing stage's target.
+    pub phase: RestoreFailurePhase,
+    /// Manifests whose apply calls returned success, in execution order.
+    /// This remains empty during dry run.
+    pub completed_manifest_ids: Vec<Uuid>,
+}
+
+impl RestoreFailureProgress {
+    /// Whether this restore attempt may have changed the target.
+    ///
+    /// Preparation never applies its failing stage, but prior completed stages
+    /// may remain. An apply failure has an unknown outcome even with no completed
+    /// stages. This says nothing about data that existed before the attempt.
+    #[must_use]
+    pub fn target_may_have_changed(&self) -> bool {
+        self.phase == RestoreFailurePhase::Apply || !self.completed_manifest_ids.is_empty()
+    }
+}
+
+impl fmt::Display for RestoreFailureProgress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.phase {
+            RestoreFailurePhase::Validation => {
+                formatter.write_str("restore validation failed before any writes were attempted")
+            }
+            RestoreFailurePhase::Preparation if self.completed_manifest_ids.is_empty() => {
+                formatter.write_str("restore preparation failed before any writes were attempted")
+            }
+            RestoreFailurePhase::Preparation => write!(
+                formatter,
+                "restore preparation failed after {} completed stages; target may contain earlier restored stages",
+                self.completed_manifest_ids.len()
+            ),
+            RestoreFailurePhase::Apply => write!(
+                formatter,
+                "restore apply failed after {} completed stages; failing stage may be partially applied",
+                self.completed_manifest_ids.len()
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -197,56 +261,162 @@ async fn verify_restore_schema(
 /// In [`RestoreMode::DryRun`] this validates, verifies, downloads, decompresses,
 /// and parses all database payloads without calling adapter restore methods.
 ///
+/// Applying stages is not a whole-chain transaction. Earlier successful stages
+/// may remain when a later stage fails, and an adapter apply failure can itself
+/// be partial. Use a disposable staging database and publish it only after all
+/// required database and object restore work succeeds. A progress report is not
+/// permission to resume or retry in place; reconcile with the adapter or discard
+/// the failed staging target and restart from an empty one. Cancellation or
+/// dropping this future cannot return progress or roll back an active adapter
+/// call; treat cancellation during apply as an unknown target outcome.
+///
 /// # Errors
 ///
-/// Returns [`BackupError`] if the manifest chain is invalid, checksum
-/// verification fails, target safety checks fail, payload parsing fails, or the
-/// adapter restore call fails.
+/// Returns [`BackupError::RestoreStageFailed`] with phase/progress metadata and
+/// the original cause when validation, payload preparation or adapter apply fails.
+/// Validation and preparation never apply their failing stage. Earlier completed
+/// stages may remain after later preparation failure; failed apply may be partial.
+/// The primary display does not interpolate adapter/provider error details.
 pub async fn restore_snapshot(
     repository: &dyn BackupRepository,
     database: &dyn GraphqlOrmBackupAdapter,
     snapshot_id: Uuid,
     context: RestoreContext,
 ) -> Result<RestoreResult, BackupError> {
-    let chain = load_manifest_chain(repository, snapshot_id).await?;
+    let chain = load_manifest_chain(repository, snapshot_id)
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                None,
+                RestoreFailurePhase::Validation,
+                &[],
+                source,
+            )
+        })?;
     for manifest in &chain {
-        verify_manifest_and_objects(repository, manifest).await?;
+        verify_manifest_and_objects(repository, manifest)
+            .await
+            .map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(manifest.snapshot_id),
+                    RestoreFailurePhase::Validation,
+                    &[],
+                    source,
+                )
+            })?;
     }
 
-    let full_manifest = chain
-        .first()
-        .ok_or_else(|| BackupError::InvalidManifestChain {
-            reason: "manifest chain is empty".to_string(),
+    let full_manifest = chain.first().ok_or_else(|| {
+        restore_stage_error(
+            snapshot_id,
+            None,
+            RestoreFailurePhase::Validation,
+            &[],
+            BackupError::InvalidManifestChain {
+                reason: "manifest chain is empty".to_string(),
+            },
+        )
+    })?;
+    let full_id = full_manifest.snapshot_id;
+    let backup_schema = verify_restore_schema(database, full_manifest)
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                Some(full_id),
+                RestoreFailurePhase::Validation,
+                &[],
+                source,
+            )
         })?;
-    let backup_schema = verify_restore_schema(database, full_manifest).await?;
 
     let target_is_empty = match context.mode {
         RestoreMode::DryRun => true,
-        RestoreMode::EmptyDatabase => database.restore_target_is_empty().await?,
+        RestoreMode::EmptyDatabase => {
+            database.restore_target_is_empty().await.map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(full_id),
+                    RestoreFailurePhase::Validation,
+                    &[],
+                    source,
+                )
+            })?
+        }
     };
-    ensure_empty_restore_target(target_is_empty, &context)?;
+    ensure_empty_restore_target(target_is_empty, &context).map_err(|source| {
+        restore_stage_error(
+            snapshot_id,
+            Some(full_id),
+            RestoreFailurePhase::Validation,
+            &[],
+            source,
+        )
+    })?;
 
-    let full_export = load_table_exports(repository, full_manifest).await?;
+    let full_export = load_table_exports(repository, full_manifest)
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                Some(full_id),
+                RestoreFailurePhase::Preparation,
+                &[],
+                source,
+            )
+        })?;
     let full_table_count = full_export.len() as u64;
     let full_row_count = full_export
         .iter()
         .map(|table| table.rows.len() as u64)
         .sum::<u64>();
-
+    let mut completed = Vec::new();
     if !matches!(context.mode, RestoreMode::DryRun) {
         database
             .restore_full(backup_schema, full_export, context.clone())
-            .await?;
+            .await
+            .map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(full_id),
+                    RestoreFailurePhase::Apply,
+                    &completed,
+                    source,
+                )
+            })?;
+        completed.push(full_id);
     }
 
     let mut incremental_change_count = 0_u64;
     for manifest in chain.iter().skip(1) {
-        let changes = load_change_exports(repository, manifest).await?;
+        let changes = load_change_exports(repository, manifest)
+            .await
+            .map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(manifest.snapshot_id),
+                    RestoreFailurePhase::Preparation,
+                    &completed,
+                    source,
+                )
+            })?;
         incremental_change_count += changes.len() as u64;
         if !matches!(context.mode, RestoreMode::DryRun) {
             database
                 .restore_incremental(changes, context.clone())
-                .await?;
+                .await
+                .map_err(|source| {
+                    restore_stage_error(
+                        snapshot_id,
+                        Some(manifest.snapshot_id),
+                        RestoreFailurePhase::Apply,
+                        &completed,
+                        source,
+                    )
+                })?;
+            completed.push(manifest.snapshot_id);
         }
     }
 
@@ -258,7 +428,31 @@ pub async fn restore_snapshot(
     })
 }
 
+fn restore_stage_error(
+    requested_snapshot_id: Uuid,
+    failed_manifest_id: Option<Uuid>,
+    phase: RestoreFailurePhase,
+    completed_manifest_ids: &[Uuid],
+    source: BackupError,
+) -> BackupError {
+    BackupError::RestoreStageFailed {
+        progress: RestoreFailureProgress {
+            requested_snapshot_id,
+            failed_manifest_id,
+            phase,
+            completed_manifest_ids: completed_manifest_ids.to_vec(),
+        },
+        source: Box::new(source),
+    }
+}
+
 /// Restores object blobs from a manifest through a caller-supplied sink.
+///
+/// This is a separate boundary from database restore. Earlier objects may remain
+/// after a later failure, and the failing object can be partially written by a
+/// custom sink. Checksum errors can be reported after sink writes. Use an owned
+/// staging object namespace and publish only after all required verification and
+/// database/object work succeeds; no cross-store rollback is provided.
 ///
 /// # Errors
 ///

@@ -2,6 +2,16 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
+    /// A snapshot-chain restore failed; progress describes possible target effects.
+    #[error("{progress}")]
+    RestoreStageFailed {
+        /// Reported completed stages and the boundary that failed.
+        progress: crate::restore::RestoreFailureProgress,
+        /// Original failure, retained as an error source without public display.
+        #[source]
+        source: Box<BackupError>,
+    },
+
     #[error("unsupported backup provider: {provider}")]
     UnsupportedProvider { provider: String },
 
