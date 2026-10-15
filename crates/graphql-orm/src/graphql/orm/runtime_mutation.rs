@@ -185,6 +185,18 @@ macro_rules! redacted_debug {
 }
 redacted_debug!(RuntimeKey, RuntimeMutationRequest);
 impl RuntimeKey {
+    pub(super) fn schema(&self) -> &ValidatedRuntimeSchema {
+        &self.schema
+    }
+
+    pub(super) fn validate(&self) -> Result<(), RuntimeMutationError> {
+        let ordered = checked_key_fields(&self.schema, &self.collection, &self.fields)?;
+        if ordered != self.fields {
+            return Err(err(RuntimeMutationErrorCode::InvalidInput));
+        }
+        Ok(())
+    }
+
     /// Complete key members in declared primary-key order; trusted host use only.
     pub fn fields(&self) -> &[(RuntimeFieldHandle, RuntimeValue)] {
         &self.fields
@@ -391,6 +403,31 @@ pub(super) fn check_value(
     }
     Ok(())
 }
+fn checked_key_fields(
+    schema: &ValidatedRuntimeSchema,
+    handle: &RuntimeCollectionHandle,
+    fields: &[(RuntimeFieldHandle, RuntimeValue)],
+) -> Result<Vec<(RuntimeFieldHandle, RuntimeValue)>, RuntimeMutationError> {
+    let c = collection(schema, handle)?;
+    if fields.len() != c.primary_key.len() {
+        return Err(err(RuntimeMutationErrorCode::InvalidInput));
+    }
+    let mut ordered = Vec::with_capacity(fields.len());
+    for id in &c.primary_key {
+        let expected = schema.resolve_field(handle, id)?;
+        let matches = fields
+            .iter()
+            .filter(|(f, _)| f == &expected)
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(err(RuntimeMutationErrorCode::InvalidInput));
+        }
+        check_value(&expected, &matches[0].1, RuntimeMutationLimits::default())?;
+        ordered.push(matches[0].clone());
+    }
+    Ok(ordered)
+}
+
 impl ValidatedRuntimeSchema {
     /// Validate all primary-key members, preserving declared order.
     pub fn runtime_key(
@@ -398,23 +435,7 @@ impl ValidatedRuntimeSchema {
         handle: &RuntimeCollectionHandle,
         fields: &[(RuntimeFieldHandle, RuntimeValue)],
     ) -> Result<RuntimeKey, RuntimeMutationError> {
-        let c = collection(self, handle)?;
-        if fields.len() != c.primary_key.len() {
-            return Err(err(RuntimeMutationErrorCode::InvalidInput));
-        }
-        let mut ordered = Vec::with_capacity(fields.len());
-        for id in &c.primary_key {
-            let expected = self.resolve_field(handle, id)?;
-            let matches = fields
-                .iter()
-                .filter(|(f, _)| f == &expected)
-                .collect::<Vec<_>>();
-            if matches.len() != 1 {
-                return Err(err(RuntimeMutationErrorCode::InvalidInput));
-            }
-            check_value(&expected, &matches[0].1, RuntimeMutationLimits::default())?;
-            ordered.push(matches[0].clone());
-        }
+        let ordered = checked_key_fields(self, handle, fields)?;
         Ok(RuntimeKey {
             schema: Arc::new(self.clone()),
             collection: handle.clone(),
@@ -592,7 +613,7 @@ fn bind_value(
         "NULL".into()
     }
 }
-fn key_sql(
+pub(super) fn key_sql(
     backend: DatabaseBackend,
     fields: &[(RuntimeFieldHandle, RuntimeValue)],
     values: &mut Vec<SqlValue>,

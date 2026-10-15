@@ -230,6 +230,35 @@ impl fmt::Debug for RuntimePredicate {
 }
 
 impl RuntimePredicate {
+    // The point-read request can apply stricter limits than the constructors
+    // that produced its predicates. This does not reconstruct folded intent.
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(super) fn key_read_budget(
+        &self,
+        limits: RuntimeQueryLimits,
+    ) -> Option<(usize, usize, usize)> {
+        if self.nodes > limits.max_predicate_nodes
+            || self.depth > limits.max_predicate_depth
+            || self.binds > limits.max_bind_parameters
+        {
+            return None;
+        }
+        let mut pending = vec![&self.expr];
+        while let Some(expr) = pending.pop() {
+            match expr {
+                PredicateExpr::List { values, .. } if values.len() > limits.max_values_per_list => {
+                    return None;
+                }
+                PredicateExpr::And(children) | PredicateExpr::Or(children) => {
+                    pending.extend(children)
+                }
+                PredicateExpr::Not(child) => pending.push(child),
+                _ => {}
+            }
+        }
+        Some((self.nodes, self.depth, self.binds))
+    }
+
     /// Fields whose values affect this predicate, for independent host authorization.
     pub fn referenced_fields(&self) -> Vec<&RuntimeFieldHandle> {
         fn visit<'a>(expr: &'a PredicateExpr, fields: &mut Vec<&'a RuntimeFieldHandle>) {

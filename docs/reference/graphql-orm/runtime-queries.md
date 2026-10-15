@@ -3,7 +3,7 @@ title: "Runtime select, filter, order, and keyset reads"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-06
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -79,6 +79,53 @@ let total = connection.total_count;
 The same calls work with SQLite and PostgreSQL. MSSQL returns
 `unsupported_backend` before I/O because its exact runtime row decoder remains
 unsupported; static MSSQL reads are unchanged.
+
+## Checked complete-key reads
+
+Version 0.49 adds `ValidatedRuntimeSchema::runtime_key_read_request` and
+`Database::execute_runtime_key_read` for an owned schema with complete identity.
+Select `sqlite` or `postgres`; `runtime-graphql` and a direct async-graphql
+consumer dependency are not required. Construct `RuntimeKey` using `runtime_key`,
+resolve an exact nonempty projection, and supply an explicit required
+`RuntimePredicate`. An optional additional filter intersects the key and required
+restriction in SQL. Keys may be nonfilterable and nonsortable; identity does not
+grant public Filter permission. Required/optional predicates keep ordinary
+filterability checks.
+
+The constructor checks complete non-null typed keys, declared member ordering,
+schema/collection coherence, projection handles and the supplied query budgets.
+Predicates built under looser limits are rechecked, including list size. Node,
+depth and bind bounds include internal identity/conjunctions. Hosts retain
+input byte-budget responsibility; `RuntimeQueryLimits` adds no byte-limit field.
+Projection is exact: key/tenant columns are not silently returned. One SELECT
+combines every key member and restriction, fetching at most two rows; duplicate
+physical identities return `unexpected_multiplicity` before any record release.
+Paging/cursor knobs are unused and cannot reduce detection to one row. Missing
+and policy-hidden records both return `Ok(None)`.
+
+The immutable Send+Sync request owns checked values and its key's retained schema
+reference, with no principal or GraphQL-context borrow. Fingerprints reject
+mixed/stale handles at construction. They cannot reveal the host's later active
+catalog revision: before each sensitive call, reauthorize and rebuild against
+the current trusted schema. The executor uses existing backend auth-context/native
+RLS and row decoding. SQLite/PostgreSQL are supported; MSSQL returns
+`unsupported_backend` before I/O. No write, journal, retry or stronger transactional
+snapshot is added. Cancellation inherits existing read/connection cleanup.
+
+The new nonexhaustive `RuntimeKeyReadErrorCode` has `invalid_handle`, `invalid_key`,
+`invalid_predicate`, `invalid_projection`, `limit_exceeded`, `unsupported_backend`,
+`unexpected_multiplicity` and `backend_failure`. Public Debug/Display redact SQL,
+values and backend detail; standard error sources are for trusted logs only.
+Existing error enums and record codecs are unchanged.
+
+This is a low-level structural read, not a static entity/field/row-policy wrapper.
+Authenticate and validate current authority, exact projected fields and key-read
+intent first, then supply a required row restriction and coherent database auth.
+Do not authorize a filter solely from `referenced_fields`: folded predicates do
+not retain complete original intent. The [host-neutral example](../../../crates/graphql-orm/examples/runtime_key_read.rs)
+accepts no optional caller filter and denies absent authority before protected
+I/O. Hosts adding filters must authorize original intent before constructing
+predicates. Checked reusable filter intent/matching remains separately unapproved.
 
 ## Operator and logical semantics
 

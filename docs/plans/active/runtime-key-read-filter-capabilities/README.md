@@ -10,19 +10,21 @@ supersedes: []
 
 # Runtime key reads and filter matching interface review
 
-This is an interface proposal, not an implemented capability or implementation
-approval. It addresses only requirements A and B in the [immutable consumer
+Requirement A received explicit implementation approval on 2026-10-15. Its
+source implementation is in progress; validation and release acceptance remain
+pending. Requirement B remains an interface proposal under review and has no
+implementation approval. This plan addresses only A and B in the [immutable consumer
 request](https://github.com/Dastari/digibase/blob/0d26ab1af68b80985cafa4a621fa850eda5afee4/docs/coordination/prompts/0020-graphql-orm-runtime-key-reads-and-record-filter-matching.md).
 The reviewed ORM baseline is `4059d10026b9b8d1e9a2be0f4f556df807f77794`,
 version0.48.0. Remote main was independently resolved to that commit.
 
 ## Outcome and current boundary
 
-First establish whether public APIs already satisfy each requirement, using
+The completed first checkpoint established whether public APIs satisfy each requirement, using
 compiled external consumer controls and narrowly scoped expected compile
-failures. No new API implementation is authorized by this plan. The proposed
-interfaces below remain subject to owner review; A may proceed independently
-of B only after explicit approval.
+failures. The separate A approval authorizes only the checked point-read
+implementation below. B's proposed interfaces and semantics remain subject to
+owner review; no filter-lowering/matching API is included in A.
 
 Existing owned APIs provide checked complete mutation keys, projection/row
 codecs, bounded SQL reads, relation anchor capture, backend auth context and
@@ -335,11 +337,29 @@ only one backend and one GAP per negative check. The example manifest changes
 only source layout/path from the actual external probe; the Rust files are the
 same reviewed public consumer sources.
 
+The A-only [consumer manifest](probes/Cargo.key-read.example) and
+[construction/exhaustive-enum controls](probes/key_read.rs) are separate prepared
+sources for the new implementation. They use only a core ORM dependency with
+one explicit backend and no `runtime-graphql` or direct GraphQL dependency. Copy
+to a scratch consumer, adjust the path to the reviewed source, then reconcile a
+reviewed lock in an assigned lane before running its two tests. They have not
+yet compiled or executed; the historical gap probes remain unchanged.
+
 ## Current checkpoint
 
-SQLite and PostgreSQL controls and expected diagnostics passed. A and B have
-separate current public-surface gaps; no new API implementation was made.
-Documentation validation (197 governed files), workspace formatting, inventory
-check and exact compiled-probe source comparisons passed. Pause for owner
-interface review after the documentation-only PR is prepared. A may be approved
-independently; B's duplicate-wire/coercion boundary remains an explicit decision.
+The historical SQLite/PostgreSQL current-boundary controls and expected
+diagnostics passed at 4059d1; documentation validation (197 governed files),
+formatting, inventory and compiled-probe source comparisons belong to that
+proposal checkpoint. They are not validation of the new implementation.
+
+A-only source work is based on approved PR143 full head
+`a52b6224750298d3b9d7ad5f03edc4f02aacec51` (production source 4059d1).
+The private core implementation reuses the key's retained schema, complete-key
+validation, predicate rendering, exact projection decoder and native read/auth
+path; a new bounded error wrapper leaves existing exhaustive enums unchanged.
+New SQLite/owned PostgreSQL tests, host example, feature/legacy compatibility and
+quality gates are prepared but have not run. ORM/macros 0.49.0 is reserved;
+lock/version reconciliation with pending 0.48.x fixes and generated inventory
+remain deferred to the root-assigned lane/stack review. No merge, Actions or
+publication follows from source completion. B remains unapproved, including its
+duplicate-wire/coercion and matching-semantics decisions.
