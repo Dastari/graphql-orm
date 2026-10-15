@@ -821,8 +821,8 @@ impl AuthenticationProvider for JwksAuthenticationProvider {
         AuthenticatedPrincipal::new(claims.sub, scopes, Some(expires_at))
     }
 
-    fn current_time(&self) -> SystemTime {
-        self.config.clock.now()
+    fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
+        Ok(self.config.clock.now())
     }
 
     fn refresh_interval(&self) -> Option<Duration> {

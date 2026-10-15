@@ -165,9 +165,16 @@ pub trait AuthenticationProvider: Send + Sync + fmt::Debug + 'static {
     ///
     /// Long-lived transports use the same clock as credential validation so a
     /// connection closes at the validated token expiry without accepting an
-    /// in-place refresh.
-    fn current_time(&self) -> SystemTime {
-        SystemTime::now()
+    /// in-place refresh. Clock failures or timestamps that the platform cannot
+    /// represent must return an unavailable error, never a fallback clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthenticationErrorKind::Unavailable`] when the authentication
+    /// clock cannot be read or its timestamp cannot be represented by this
+    /// platform. Long-lived transports reject initialization on this error.
+    fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
+        Ok(SystemTime::now())
     }
 
     /// Periodic refresh interval for remote verification state.

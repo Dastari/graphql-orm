@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-router"
-version = "0.5.4"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Federated GraphQL router for graphql-orm and project-neutral subgraphs"
@@ -40,3 +40,4 @@ signal-hook = { workspace = true }
 base64 = { workspace = true }
 ntex = "=3.12.3"
 sha1 = { workspace = true }
+time = "0.3"
