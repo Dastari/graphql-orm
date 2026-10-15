@@ -334,6 +334,9 @@ jobs:
       - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm/Cargo.toml
+          package: graphql-orm
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm
           feature-group: default-features
       # graphql-orm-macros is deliberately absent. It is a proc-macro crate, so
@@ -346,41 +349,62 @@ jobs:
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-operation-catalog/Cargo.toml
+          package: graphql-orm-operation-catalog
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-operation-catalog
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-ai-tool-profiles/Cargo.toml
+          package: graphql-orm-ai-tool-profiles
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai-tool-profiles
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-storage/Cargo.toml
+          package: graphql-orm-storage
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-storage
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-backup/Cargo.toml
+          package: graphql-orm-backup
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-backup
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-ai/Cargo.toml
+          package: graphql-orm-ai
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai
           feature-group: default-features
       - if: steps.router-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-router-protocol/Cargo.toml
+          package: graphql-orm-router-protocol
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-router-protocol
           feature-group: default-features
       - if: steps.router-baseline.outputs.exists == 'true'
         uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-router/Cargo.toml
+          package: graphql-orm-router
+          verbose: true
+          rust-toolchain: 1.97.1
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-router
           feature-group: default-features

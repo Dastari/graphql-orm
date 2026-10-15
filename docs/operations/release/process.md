@@ -3,7 +3,7 @@ title: Workspace release process
 kind: runbook
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-10-15
 review_by: 2026-11-11
 supersedes: []
 ---
@@ -105,6 +105,20 @@ the documented package support contracts.
    python3 scripts/test-router-notices.py
    cargo fmt --all -- --check
    ```
+
+   The SemVer runner explicitly selects private packages and retains native
+   per-package check counts. A successful tool exit without those records is
+   not accepted. It preserves the tool's inferred release type: an intentionally
+   breaking version increment can permit every lint and produce zero checks.
+   Such a lane is reported separately as version-policy permission, never as
+   API compatibility proof. For an independently approved additive-only gate,
+   run an explicit package check with `--release-type minor --verbose` and
+   require positive native check counts. Default features remain enabled;
+   backend and provider compatibility still require their separate lanes. The
+   hosted SemVer steps likewise explicitly select each package, enable verbose
+   output and use Rust1.97.1. The pinned action still downloads the latest native
+   tool unless one is already installed; retain its actual tool identity and
+   native check output when assessing a hosted result.
 
 8. Run every package, backend, provider, Clippy, Rustdoc, SemVer, migration,
    restore, and release-policy lane required by the root and package-local
