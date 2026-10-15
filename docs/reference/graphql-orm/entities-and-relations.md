@@ -324,6 +324,8 @@ with `INVALID_INPUT`: their
 late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
 
+Repository-only entities cannot authorize GraphQL subscription provenance, so any such source suppresses the event even for a public target. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
+
 Direct generated deleted preimages default to suppression. They require an
 explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or
 unrestricted ORM visibility, plus current entity/row/selected-field policies.

@@ -37,7 +37,7 @@ invalidation metadata and refresh separately authorized queries for richer data.
 
 Live payloads now contain the freshly loaded authorized current row. The
 GraphQL witness channel retains metadata/typed keys for live and propagated
-events; denied subscribers do not clone queued snapshots. Only explicit deleted
+events; live delivery does not clone historical snapshots for rejected subscribers. Only explicit deleted
 preimages retain a snapshot for the default-deny authorization hook. Events are
 invalidation notifications, not an immutable change journal: queued historical
 payloads, including a previous owner's data after ownership transfer, are not
@@ -58,6 +58,7 @@ hop, including source primary keys, foreign keys and relation field. Missing,
 deleted, denied or unresolvable sources suppress the event. Propagation stops at
 16 relationship hops or 256 examined targets per original change; consumers must
 refresh their own authorized queries instead of assuming complete graph history.
+Repository-only entities have no public subscription field authority: a propagation chain containing such a source is suppressed in GraphQL, including when its target is public. Target-owned generated emission preserves repository event payload/identity redaction and never creates a repository GraphQL witness. Trusted Rust observers retain their existing event channel.
 Only typed keys are retained for source proofs; no recursive sensitive source
 snapshots are queued. Public raw/deserialized `ChangedEvent` values sent through
 `Database::emit_event` remain available to Rust event observers but no longer

@@ -3287,7 +3287,8 @@ fn generate_entity_impl(
             graphql_rename_fields,
             serde_rename_all,
         );
-        let subscription_allowed = field_meta.read
+        let subscription_allowed = !has_repository_entity_attribute(&input.attrs)
+            && field_meta.read
             && !field_meta.is_private
             && !field_meta.input_only
             && (!field_meta.graphql_skip || field_meta.is_relation)

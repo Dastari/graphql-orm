@@ -2033,6 +2033,47 @@ pub(crate) fn generate_graphql_operations(
         subscription_witness_emission(quote! { hook_ctx.queue_event(witness); });
     let emit_subscription_witness =
         subscription_witness_emission(quote! { db.emit_event(witness); });
+    let propagated_witness_emission = if crate::entity::has_repository_entity_attribute(
+        &input.attrs,
+    ) {
+        quote! {}
+    } else {
+        quote! {
+            if let Some(parent_entity) = parent_entity {
+                let mut event = event;
+                event.entity = None;
+                if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
+                    event, Self::__gom_subscription_key_values(parent_entity), false, provenance,
+                ) { hook_ctx.queue_event(witness); }
+            }
+        }
+    };
+    let propagated_subscription_emitter = quote! {
+        #[doc(hidden)]
+        #[allow(clippy::too_many_arguments, unused_variables)]
+        pub(crate) fn __gom_queue_propagated_changed_event(
+            hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+            action: ::graphql_orm::graphql::orm::ChangeAction,
+            id: &#pk_type,
+            parent_entity: Option<&Self>,
+            source_entity: &str,
+            source_id: &str,
+            path: Vec<String>,
+            provenance: Vec<::graphql_orm::graphql::subscriptions::SubscriptionEventSource<#backend_marker>>,
+        ) {
+            let event = #changed_event {
+                action,
+                change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
+                id: id.clone(),
+                source_entity: Some(source_entity.to_string()),
+                source_id: Some(source_id.to_string()),
+                path,
+                entity: parent_entity.cloned(),
+            };
+            hook_ctx.queue_event(event.clone());
+            #propagated_witness_emission
+        }
+    };
     let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations
         .iter()
         .map(|relation| -> syn::Result<proc_macro2::TokenStream> {
@@ -2040,8 +2081,6 @@ pub(crate) fn generate_graphql_operations(
             let source_field = &relation.source_field;
             let source_field_name = source_field.to_string();
             let target_type = &relation.target_type;
-            let target_changed_event =
-                syn::Ident::new(&format!("{}ChangedEvent", target_type), struct_name.span());
             let (kind, is_option) = classify_propagation_value_type(&relation.source_ty).ok_or_else(
                 || {
                     syn::Error::new_spanned(
@@ -2095,21 +2134,11 @@ pub(crate) fn generate_graphql_operations(
                     );
                     if visited.insert(dedupe_key) {
                         #fetch_parent
-                        let mut event = #target_changed_event {
-                            action,
-                            change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
-                            id: parent_id.clone(),
-                            source_entity: Some(source_entity.to_string()),
-                            source_id: Some(source_id.to_string()),
-                            path: next_path.clone(),
-                            entity: parent_entity.clone(),
-                        };
-                        hook_ctx.queue_event(event.clone());
+                        <#target_type>::__gom_queue_propagated_changed_event(
+                            hook_ctx, action, parent_id, parent_entity.as_ref(), source_entity,
+                            source_id, next_path.clone(), next_provenance.clone(),
+                        );
                         if let Some(parent_entity) = parent_entity.as_ref() {
-                            event.entity = None;
-                            if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#target_changed_event, #backend_marker>::new(
-                                event, <#target_type>::__gom_subscription_key_values(parent_entity), false, next_provenance.clone(),
-                            ) { hook_ctx.queue_event(witness); }
                             <#target_type>::__gom_propagate_changed_event(
                                 hook_ctx,
                                 action,
@@ -5063,6 +5092,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 #subscription_key_method
+                #propagated_subscription_emitter
 
                 #[doc(hidden)]
                 #[allow(clippy::too_many_arguments)]
@@ -7865,6 +7895,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             #subscription_key_method
+            #propagated_subscription_emitter
 
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
