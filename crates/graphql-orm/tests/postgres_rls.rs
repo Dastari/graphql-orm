@@ -296,9 +296,11 @@ async fn generated_queries_and_relation_preload_obey_live_rls()
     ))
     .execute(&pool)
     .await?;
-    sqlx::query(&format!("GRANT USAGE ON SCHEMA public, graphql_orm TO {role}"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA public, graphql_orm TO {role}"
+    ))
+    .execute(&pool)
+    .await?;
     sqlx::query(&format!(
         "GRANT SELECT ON rls_accounts, rls_notes TO {role}"
     ))
