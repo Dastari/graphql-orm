@@ -19,6 +19,9 @@ supersedes: []
 - Added typed capacity failures, bounded incremental zstd decoding and native
   local stream delegation. These byte limits do not guarantee bounded RSS for
   buffered providers, parsed data or accumulated application state.
+- Optional ORM object-index metadata backfill now hashes/counts native streams
+  without whole-blob collection. Its direct buffered loader has a configurable
+  finite cap; native object streaming remains supported beyond that cap.
 
 ## 0.9.0 - 2026-10-15
 

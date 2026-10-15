@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use graphql_orm_backup::{
-    BackupByteLimit, BackupError, collect_backup_stream, compress_payload,
+    BackupByteLimit, BackupError, collect_backup_stream,
     decompress_payload_with_limit,
 };
 use graphql_orm_storage::StorageByteStream;
@@ -48,7 +48,11 @@ async fn collector_checks_actual_chunks_and_aggregate_without_trusting_size_hint
 #[test]
 fn decompression_rejects_expansion_and_allows_reviewed_larger_limits() {
     let plain = vec![b'x'; 32 * 1024];
-    let compressed = compress_payload(&plain).expect("compress owned fixture");
+    use std::io::Write;
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 0).expect("owned encoder");
+    encoder.window_log(10).expect("1 KiB history window isolates output cap");
+    encoder.write_all(&plain).expect("compress owned fixture");
+    let compressed = encoder.finish().expect("finish owned fixture");
     assert!(compressed.len() < 1024);
     assert!(matches!(
         decompress_payload_with_limit(&compressed, BackupByteLimit::Bytes(1024)),
