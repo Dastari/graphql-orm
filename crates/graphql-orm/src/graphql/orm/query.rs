@@ -81,6 +81,18 @@ pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSe
         &[]
     }
 
+    /// Subscription availability and read policy for one public field identity.
+    /// Unknown fields fail closed during event preflight. Derives also include
+    /// relation availability and subscription-specific scalar restrictions.
+    fn subscription_field_policy(
+        field: &str,
+    ) -> Option<(&'static str, bool, Option<&'static str>)> {
+        Self::repository_field_policies()
+            .iter()
+            .find(|definition| definition.api_name == field)
+            .map(|definition| (definition.api_name, true, definition.read_policy))
+    }
+
     /// Type-erased record used by repository row/field policy callbacks.
     ///
     /// The source-compatible default supplies no record. Generated

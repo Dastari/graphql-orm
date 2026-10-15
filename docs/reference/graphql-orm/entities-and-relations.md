@@ -304,6 +304,33 @@ The first implementation records relation search metadata and keeps local search
 through generated writes. For relation-heavy documents, run an explicit search rebuild after large
 related-data changes until deeper propagation is enabled.
 
+## Subscription release authorization
+
+Generated ordinary and append-only subscriptions recheck current request,
+entity, row and selected-field authority before every event. Live payloads are
+fresh authorized rows, not historical snapshots. Errors or denials suppress the
+whole event, including its outer identifier and provenance. Propagated events
+also require current authorization of each source primary key, foreign key and
+relationship; absent/deleted sources suppress invalidations. Source proofs hold
+only typed keys and are limited to 16 hops; propagation examines at most 256
+targets per originating change. Consumers should refresh authorized queries.
+
+Selected entity payloads support persisted scalars only. Subscriptions requesting
+nested relations, computed/custom resolver fields, or fields with arbitrary
+GraphQL `guard`/dynamic `visible` behavior are rejected at admission
+with `INVALID_INPUT`: their
+late resolver decisions cannot prove release of outer metadata. Subscribe to
+invalidation metadata and refresh separately authorized queries for richer data.
+
+Direct generated deleted preimages are usable only with callback-only or
+explicitly unrestricted visibility and current policies. SQL predicates cannot
+prove authorization of missing rows, so complete/prefilter SQL visibility drops
+deletes. Raw public event-channel emissions remain Rust observer notifications
+and cannot inject generated GraphQL delivery. Action filters are enforced; the
+unsupported `dummy` filter is rejected. See the
+[0.45 migration](../../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
+for host policy and prior-owner snapshot responsibilities.
+
 ## Composite Relation Keys
 
 Composite relation keys use array syntax. The `from` entries are Rust fields on the source entity;

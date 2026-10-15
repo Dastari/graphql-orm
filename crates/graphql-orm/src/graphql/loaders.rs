@@ -341,7 +341,7 @@ where
     Ok(())
 }
 
-fn relation_selected_fields<'a>(
+pub(crate) fn relation_selected_fields<'a>(
     ctx: &'a async_graphql::Context<'_>,
     selection: &'a async_graphql::parser::types::SelectionSet,
 ) -> Vec<&'a async_graphql::Positioned<async_graphql::parser::types::Field>> {

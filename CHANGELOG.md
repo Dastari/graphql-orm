@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.45.0 (unreleased)
+
+- Reauthorize generated ordinary and append-only subscriptions for every event
+  using the original request context, current entity/row/selected-field policy,
+  scopes and assurance. Release current authorized live rows instead of queued
+  snapshots; deny/error events release no identifiers or other metadata.
+- Require bounded typed provenance for propagated invalidations, authorizing
+  every source row, identifier and relationship field. Suppress missing proofs,
+  missing sources and SQL-protected deleted preimages. Bound propagation to
+  16 hops and 256 examined targets per originating change.
+- Separate generated GraphQL emissions from raw in-process event observers.
+  Honor action filters and reject the unsupported legacy dummy filter.
+- Align ORM/macros at 0.45.0; document subscription migration and delete semantics.
+
 ## 0.44.1 (unreleased)
 
 - Route generated query, search, keyset, mutation and Federation backend failures

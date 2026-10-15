@@ -21,6 +21,12 @@ system, or a promise that a generated field is safe to expose. Applications
 own connection lifecycle, schema-application decisions, request identity,
 field/row policy, and HTTP transport.
 
+Version 0.45.0 rechecks generated subscription authorization for each event,
+releases current authorized live rows and requires bounded source provenance.
+Denied fields/rows and missing proofs suppress the whole event, including
+metadata. See the [subscription migration](../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
+for deleted preimages, raw event observers, propagation limits and action filters.
+
 ## Install from Git
 
 Packages are distributed from this repository at reviewed full revisions. Pin
@@ -29,7 +35,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.45.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

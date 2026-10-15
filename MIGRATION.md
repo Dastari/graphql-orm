@@ -13,6 +13,55 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.44.1 to 0.45.0: subscriptions authorize each release
+
+Upgrade runtime/macros together. Existing subscription SDL and public changed
+structs are preserved, but delivery is narrower. Every generated ordinary and
+append-only event rechecks request auth, subscription scopes/assurance, current
+entity policy and current read visibility using the original request Context.
+Host revocation policies must consult current authority on each invocation.
+Unauthorized events and policy/query failures are silently dropped before any
+identifier, provenance or selected payload is released. Selected protected fields
+(including aliases/fragments) and event identifiers require field authority;
+requesting a forbidden field drops the whole event rather than releasing outer
+metadata alongside a GraphQL field error.
+
+Selected entity payloads support persisted scalars only. Subscriptions requesting
+nested relations, computed/custom resolver fields, or fields with arbitrary
+GraphQL `guard`/dynamic `visible` behavior are rejected at admission
+with `INVALID_INPUT`: their
+late resolver decisions cannot prove release of outer metadata. Subscribe to
+invalidation metadata and refresh separately authorized queries for richer data.
+
+Live payloads now contain the freshly loaded authorized current row. They are
+invalidation notifications, not an immutable change journal: queued historical
+payloads, including a previous owner's data after ownership transfer, are not
+released. Direct generated deletes may use their trusted final preimage under
+callback-only or explicitly unrestricted read visibility, subject to current
+entity, row and selected-field policies. This is prior-owner snapshot semantics;
+a callback must deliberately authorize that preimage. Complete/prefilter SQL
+visibility cannot authorize a missing row, so deleted events are suppressed.
+Use a separate explicitly authorized audit/history service if deleted-row or
+historical delivery is required.
+
+Propagated events require current authorization of the target and every source
+hop, including source primary keys, foreign keys and relation field. Missing,
+deleted, denied or unresolvable sources suppress the event. Propagation stops at
+16 relationship hops or 256 examined targets per original change; consumers must
+refresh their own authorized queries instead of assuming complete graph history.
+Only typed keys are retained for source proofs; no recursive sensitive source
+snapshots are queued. Public raw/deserialized `ChangedEvent` values sent through
+`Database::emit_event` remain available to Rust event observers but no longer
+enter generated GraphQL subscriptions. Use generated writes for GraphQL
+notifications; a host-owned emitter must implement its own reviewed authorization
+boundary rather than injecting raw events. The internal generated witness types
+are trusted server mechanisms, not cryptographic authority for untrusted inputs.
+
+`filter.actions` is now honored, including an empty list matching no actions.
+Remove `filter.dummy`: supplying it is rejected as `INVALID_INPUT`. No schema or
+data migration is needed. AI consumers of generated operations inherit the same
+current authorization; this change does not add subscriptions to AI tool APIs.
+
 ## 0.44.0 to 0.44.1: generated resolver public errors
 
 Upgrade runtime/macros together. Generated SQL and Federation failures now use
