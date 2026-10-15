@@ -94,3 +94,7 @@ trybuild = "1"
 [[example]]
 name = "router_descriptor"
 required-features = ["sqlite", "router-protocol"]
+
+[[example]]
+name = "sqlite_quickstart"
+required-features = ["sqlite"]

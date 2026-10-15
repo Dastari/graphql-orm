@@ -16,6 +16,9 @@ for historical context.
 
 ## 0.47.0 (unreleased)
 
+- Declare the SQLite quickstart example's required backend feature so alternative
+  backend target checks select supported examples.
+
 - Default database authorization to `DeclaredPoliciesRequired`; missing marked
   policy providers fail closed. Sensitive applications should select
   `ExplicitPolicyForAllExposedOperations` and install tenant/business policies.
