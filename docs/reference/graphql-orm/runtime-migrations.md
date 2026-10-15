@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -91,6 +91,29 @@ equivalent, including required/nullable fields with no default or
 spellings. Timezone-free timestamps and precision changes remain distinct.
 This comparison does not reinterpret storage or relax legacy DateTime default
 conversion checks.
+
+## PostgreSQL default alteration boundary
+
+In 0.48.2, shared static/owned PostgreSQL plans execute supported real default
+changes on existing columns: SET, replacement and DROP DEFAULT. A default-only
+change does not reissue unchanged TYPE or nullability DDL. Actual type conversion
+first detaches an attached old default and restores the desired expression
+afterward. Equivalent built-in type aliases and reviewed TEXT literal deparse
+spellings do not trigger default rewrites during a nullability-only alteration.
+Existing rendering/quoting and physical/hash formats remain unchanged.
+
+This changes future omitted-value inserts, not existing row values. Failed DDL
+rolls back with history; successful supported changes should produce empty fresh
+replans and permit explicit owned mutation certification. This is not a new
+generic automatic postapply certification contract or support for every metadata
+transition. Constraint-backed uniqueness/primary-key flags and spatial-only
+metadata require separately supported operations; do not infer they are repaired
+by default rendering.
+
+Previously recorded ineffective default changes are not silently repaired or
+history-rewritten. A recorded version with remaining planned work fails closed.
+Use a fresh reviewed repair version, retain history and confirm physical default,
+omitted-value behavior and replan. See [the migration guide](../../../MIGRATION.md#0481-to-0482-postgresql-default-alterations).
 
 ## Ownership, composition and dependencies
 

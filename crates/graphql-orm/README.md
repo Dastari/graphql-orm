@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+PostgreSQL migration default alterations are corrected in the paired 0.48.2
+runtime/macros release: future omitted-value inserts use the changed default;
+existing rows and recorded migration history are not rewritten. See the root
+migration guide for guarded repair of previously incomplete applications.
+
+
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD
 resolver types. It supports managed SQLite and PostgreSQL schemas plus
