@@ -54,12 +54,14 @@ each fetched entity, using its declared entity `read_policy` key. Subgraphs
 with that key must install a row provider in addition to the entity provider.
 The row decision must authorize the typed row using current request authority.
 The [disposable zones subgraph](../../../crates/graphql-orm/tests/fixtures/federation-end-to-end/zones-subgraph/src/lib.rs)
-demonstrates both providers with the same required scope and denies row writes.
+uses a synthetic forwarded-scope header as test input for both providers and
+denies row writes. Production providers must derive decisions from authenticated
+current authority; an arbitrary forwarded header does not establish that authority.
 Collection/relation paths that obtain `Unrestricted` visibility without a row
 provider retain their entity-policy-only contract. That visibility behavior
 does not bypass the Federation resolver's independent per-row check.
 
-They never silently allow. Unmarked operations still require explicit host policy
+Unmarked operations still require explicit host policy
 for protection; this default does not establish tenant isolation. For sensitive
 applications select `ExplicitPolicyForAllExposedOperations`. Immediate revocation
 requires the [current-authority bridge](agql-auth-bridge.md) or equivalent host
