@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.45.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.1", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.45.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -31,6 +31,15 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 Version 0.39.1 aligns with the runtime string/binding correction; generated
 static fragment rebasing, inputs, GraphQL SDL and timestamp behavior are unchanged.
+
+Version 0.45.0 rechecks generated subscription authorization for each event,
+releases current authorized live rows and requires bounded source provenance.
+Denied fields/rows and missing proofs suppress the whole event, including
+metadata. Deleted snapshots additionally require explicit default-deny
+`RowPolicy::can_read_deleted_preimage` opt-in. A missing provider or ordinary read
+permission alone does not authorize them, including under database RLS.
+See the [subscription migration](../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
+for deleted preimages, raw event observers, propagation limits and action filters.
 
 ## Public macros
 

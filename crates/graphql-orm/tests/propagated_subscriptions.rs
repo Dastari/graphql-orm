@@ -851,7 +851,7 @@ async fn multi_parent_propagation_reaches_both_parents_and_deduplicates_same_par
     feature = "postgres",
     ignore = "requires test-owned PostgreSQL container"
 )]
-async fn delete_propagation_uses_pre_delete_state() -> Result<(), Box<dyn std::error::Error>> {
+async fn delete_propagation_requires_a_current_source() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::new(pool);
@@ -915,21 +915,11 @@ async fn delete_propagation_uses_pre_delete_state() -> Result<(), Box<dyn std::e
         .await;
     assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
 
-    let json = next_json(&mut stream).await;
-    assert_eq!(json["recordChanged"]["action"].as_str(), Some("DELETED"));
-    assert_eq!(
-        json["recordChanged"]["changeKind"].as_str(),
-        Some("PROPAGATED")
-    );
-    assert_eq!(json["recordChanged"]["sourceEntity"].as_str(), Some("Note"));
-    assert_eq!(
-        json["recordChanged"]["sourceId"].as_str(),
-        Some(graphql_uuid(note.id).as_str())
-    );
-    assert_eq!(json["recordChanged"]["path"], serde_json::json!(["record"]));
-    assert_eq!(
-        json["recordChanged"]["record"]["id"].as_str(),
-        Some(graphql_uuid(record.id).as_str())
+    assert!(
+        timeout(Duration::from_millis(250), stream.next())
+            .await
+            .is_err(),
+        "deleted source cannot prove current provenance authority"
     );
 
     Ok(())
@@ -978,7 +968,7 @@ async fn propagation_cycles_do_not_reemit_source_indefinitely()
         .execute(
             Request::new(format!(
                 "mutation {{
-                    deleteNode(id: \"{}\") {{
+                    updateNode(id: \"{}\", input: {{ name: \"Updated\" }}) {{
                         success
                     }}
                 }}",
@@ -991,7 +981,7 @@ async fn propagation_cycles_do_not_reemit_source_indefinitely()
 
     let direct = next_json(&mut stream).await;
     let propagated = next_json(&mut stream).await;
-    assert_eq!(direct["nodeChanged"]["action"].as_str(), Some("DELETED"));
+    assert_eq!(direct["nodeChanged"]["action"].as_str(), Some("UPDATED"));
     assert_eq!(direct["nodeChanged"]["changeKind"].as_str(), Some("DIRECT"));
     assert_eq!(
         direct["nodeChanged"]["node"]["id"].as_str(),
@@ -1016,5 +1006,45 @@ async fn propagation_cycles_do_not_reemit_source_indefinitely()
         "cycle propagation emitted an extra event after the direct and parent events"
     );
 
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn propagation_stops_at_sixteen_authorized_hops() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = test_mutex().lock().await;
+    let pool = setup_pool().await?;
+    for index in 0..40 {
+        let id = format!("bounded-node-{index}");
+        let parent = (index > 0).then(|| format!("bounded-node-{}", index - 1));
+        insert_node(&pool, &id, "Bounded", parent.as_deref()).await?;
+    }
+    let database = graphql_orm::db::Database::new(pool);
+    let schema = schema(database);
+    let mut stream = Box::pin(schema.execute_stream(
+        Request::new("subscription { nodeChanged { id path } }").data("test-user".to_string()),
+    ));
+    wait_until_pending(&mut stream).await;
+    let updated = schema.execute(Request::new(
+        "mutation { updateNode(id: \"bounded-node-39\", input: {name: \"Updated\"}) { success } }"
+    ).data("test-user".to_string())).await;
+    assert!(updated.errors.is_empty(), "{:?}", updated.errors);
+    for depth in 0..=16 {
+        let event = next_json(&mut stream).await;
+        assert_eq!(
+            event["nodeChanged"]["path"].as_array().unwrap().len(),
+            depth
+        );
+        assert_eq!(
+            event["nodeChanged"]["id"],
+            format!("bounded-node-{}", 39 - depth)
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(100), stream.next())
+            .await
+            .is_err(),
+        "unbounded ancestor notification escaped"
+    );
     Ok(())
 }

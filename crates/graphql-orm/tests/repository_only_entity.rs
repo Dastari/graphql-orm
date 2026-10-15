@@ -423,6 +423,12 @@ async fn repository_only_crud_projection_transaction_cas_and_policy_are_shared()
     let mut changed = database
         .ensure_event_sender::<RepositoryCredentialChangedEvent>()
         .subscribe();
+    let mut graphql_witnesses = database
+        .ensure_event_sender::<graphql_orm::graphql::subscriptions::SubscriptionEvent<
+            RepositoryCredentialChangedEvent,
+            SqliteBackend,
+        >>()
+        .subscribe();
     let created = RepositoryCredential::insert(
         &database,
         CreateRepositoryCredentialInput {
@@ -435,6 +441,13 @@ async fn repository_only_crud_projection_transaction_cas_and_policy_are_shared()
     assert_eq!(created.version, 0);
     let changed = changed.recv().await.expect("post-commit event");
     assert_eq!(changed.id, created.id);
+    assert!(
+        matches!(
+            graphql_witnesses.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ),
+        "repository-only events must not create GraphQL witnesses containing typed keys"
+    );
     let hook_events = hook.events.lock().expect("hook lock").clone();
     let after = hook_events
         .iter()

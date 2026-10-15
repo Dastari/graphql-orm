@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,65 @@ supersedes: []
 
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
+
+## 0.44.1 to 0.45.0: subscriptions authorize each release
+
+Upgrade runtime/macros together. Existing subscription SDL and public changed
+structs are preserved, but delivery is narrower. Every generated ordinary and
+append-only event rechecks request auth, subscription scopes/assurance, current
+entity policy and current read visibility using the original request Context.
+Host revocation policies must consult current authority on each invocation.
+Unauthorized events and policy/query failures are silently dropped before any
+identifier, provenance or selected payload is released. Selected protected fields
+(including aliases/fragments) and event identifiers require field authority;
+outer event identifiers also require a subscribable primary key; arbitrary PK
+guards are rejected at admission even through aliases/fragments. Requesting a
+forbidden dynamic field-policy decision drops the whole event rather than
+releasing outer metadata alongside a GraphQL field error.
+
+Selected entity payloads support persisted scalars only. Subscriptions requesting
+nested relations, object-valued persisted JSON/custom columns, computed/custom
+resolver fields, or fields with arbitrary
+GraphQL `guard`/dynamic `visible` behavior are rejected at admission
+with `INVALID_INPUT`: their late resolver decisions cannot prove release of outer metadata. Subscribe to
+invalidation metadata and refresh separately authorized queries for richer data.
+
+Live payloads now contain the freshly loaded authorized current row. The
+GraphQL witness channel retains metadata/typed keys for live and propagated
+events; live delivery does not clone historical snapshots for rejected subscribers. Only explicit deleted
+preimages retain a snapshot for the default-deny authorization hook. Events are
+invalidation notifications, not an immutable change journal: queued historical
+payloads, including a previous owner's data after ownership transfer, are not
+released. Direct generated deletes suppress their trusted final preimages by default.
+To opt in, implement `RowPolicy::can_read_deleted_preimage` with full current
+request authorization for the prior-owner snapshot, in addition to ordinary
+entity/row/selected-field policies. The new method defaults to deny; no RowPolicy
+provider or a permissive `can_read_row` alone never authorizes a deleted snapshot.
+`Unrestricted` means no ORM SQL predicate, not visibility under database RLS.
+The opt-in callback must independently enforce every tenant/owner and database-
+session condition that RLS or another SQL-only policy would have enforced.
+Complete/prefilter SQL visibility still suppresses deleted preimages because its
+predicate cannot be evaluated against a missing row. Use a separate explicitly
+authorized audit/history service if the host cannot prove snapshot access.
+
+Propagated events require current authorization of the target and every source
+hop, including source primary keys, foreign keys and relation field. Missing,
+deleted, denied or unresolvable sources suppress the event. Propagation stops at
+16 relationship hops or 256 examined targets per original change; consumers must
+refresh their own authorized queries instead of assuming complete graph history.
+Repository-only entities have no public subscription field authority: a propagation chain containing such a source is suppressed in GraphQL, including when its target is public. Target-owned generated emission preserves repository event payload/identity redaction and never creates a repository GraphQL witness. Trusted Rust observers retain their existing event channel.
+Only typed keys are retained for source proofs; no recursive sensitive source
+snapshots are queued. Public raw/deserialized `ChangedEvent` values sent through
+`Database::emit_event` remain available to Rust event observers but no longer
+enter generated GraphQL subscriptions. Use generated writes for GraphQL
+notifications; a host-owned emitter must implement its own reviewed authorization
+boundary rather than injecting raw events. The internal generated witness types
+are trusted server mechanisms, not cryptographic authority for untrusted inputs.
+
+`filter.actions` is now honored, including an empty list matching no actions.
+Remove `filter.dummy`: supplying it is rejected as `INVALID_INPUT`. No schema or
+data migration is needed. AI consumers of generated operations inherit the same
+current authorization; this change does not add subscriptions to AI tool APIs.
 
 ## Test runner migration: owned database fixtures
 

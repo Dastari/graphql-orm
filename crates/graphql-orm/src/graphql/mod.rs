@@ -9,6 +9,7 @@ pub mod loaders;
 pub mod orm;
 pub mod pagination;
 pub mod structural_auth;
+pub mod subscriptions;
 
 #[cfg(feature = "runtime-graphql")]
 pub mod runtime;

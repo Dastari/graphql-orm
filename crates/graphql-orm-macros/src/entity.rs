@@ -1275,6 +1275,8 @@ pub(crate) struct FieldMetadata {
     /// If true, include in Create/Update inputs even if #[graphql(skip)] is set.
     /// Useful for fields that should be writable but never exposed in queries.
     pub(crate) input_only: bool,
+    pub(crate) graphql_skip: bool,
+    pub(crate) subscription_custom_resolver: bool,
     pub(crate) read: bool,
     pub(crate) write: bool,
     pub(crate) filter: bool,
@@ -1439,6 +1441,8 @@ impl Default for FieldMetadata {
             auto_generated: None,
             backup_policy: None,
             input_only: false,
+            graphql_skip: false,
+            subscription_custom_resolver: false,
             read: true,
             write: true,
             filter: true,
@@ -1816,6 +1820,15 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
         if let Some(ident) = attr.path().get_ident() {
             match ident.to_string().as_str() {
                 "graphql" => {
+                    if let Ok(options) = attr.parse_args_with(
+                        syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                    ) {
+                        meta.subscription_custom_resolver |= options.iter().any(|option| {
+                            ["guard", "visible", "skip_output", "flatten", "derived"]
+                                .iter()
+                                .any(|name| option.path().is_ident(name))
+                        });
+                    }
                     let _ = attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("name") {
                             let value = nested.value()?;
@@ -1823,6 +1836,7 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             meta.graphql_name = Some(lit.value());
                         } else if nested.path.is_ident("skip") {
                             meta.skip_input = true;
+                            meta.graphql_skip = true;
                         }
                         Ok(())
                     });
@@ -3232,6 +3246,7 @@ fn generate_entity_impl(
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
     let mut repository_field_policy_defs = Vec::new();
+    let mut subscription_field_policy_arms = Vec::new();
     let mut semantic_field_defs = Vec::new();
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
@@ -3265,6 +3280,28 @@ fn generate_entity_impl(
                 "graphql_orm(search_json(...)) requires a persisted JSON field",
             ));
         }
+
+        let subscription_api_name = graphql_field_name(
+            &field_meta,
+            &field_name.to_string(),
+            graphql_rename_fields,
+            serde_rename_all,
+        );
+        let subscription_allowed = !has_repository_entity_attribute(&input.attrs)
+            && field_meta.read
+            && !field_meta.is_private
+            && !field_meta.input_only
+            && (!field_meta.graphql_skip || field_meta.is_relation)
+            && field_meta.subscribe
+            && !field_meta.subscription_custom_resolver;
+        let subscription_read_policy = field_meta
+            .read_policy
+            .as_ref()
+            .map(|policy| quote! { Some(#policy) })
+            .unwrap_or_else(|| quote! { None });
+        subscription_field_policy_arms.push(quote! {
+            #subscription_api_name => Some((#subscription_api_name, #subscription_allowed, #subscription_read_policy)),
+        });
 
         // Skip relation fields for column list
         if field_meta.is_relation || field_meta.skip_db {
@@ -4832,6 +4869,10 @@ fn generate_entity_impl(
                     }))
                 }
 
+                fn subscription_field_policy(field: &str) -> Option<(&'static str, bool, Option<&'static str>)> {
+                    match field { #(#subscription_field_policy_arms)* _ => None }
+                }
+
                 fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
                     static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[
                         #(#repository_field_policy_defs),*
@@ -5333,6 +5374,10 @@ fn generate_entity_impl(
                 }))
             }
 
+
+            fn subscription_field_policy(field: &str) -> Option<(&'static str, bool, Option<&'static str>)> {
+                match field { #(#subscription_field_policy_arms)* _ => None }
+            }
 
             fn repository_field_policies() -> &'static [::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] {
                 static FIELDS: &[::graphql_orm::graphql::orm::RepositoryFieldPolicyDef] = &[

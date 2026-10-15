@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -303,6 +303,40 @@ pub city: Option<Box<City>>;
 The first implementation records relation search metadata and keeps local searchable fields current
 through generated writes. For relation-heavy documents, run an explicit search rebuild after large
 related-data changes until deeper propagation is enabled.
+
+## Subscription release authorization
+
+Generated ordinary and append-only subscriptions recheck current request,
+entity, row and selected-field authority before every event. Live payloads are
+fresh authorized rows, not historical snapshots. Errors or denials suppress the
+whole event, including its outer identifier and provenance. Propagated events
+also require current authorization of each source primary key, foreign key and
+relationship; absent/deleted sources suppress invalidations. Source proofs hold
+only typed keys and are limited to 16 hops; live/propagated GraphQL witnesses
+retain no row snapshot and denied subscribers do not clone one. Propagation
+examines at most 256
+targets per originating change. Consumers should refresh authorized queries.
+
+Selected entity payloads support persisted scalars only. Subscriptions requesting
+nested relations, computed/custom resolver fields, or fields with arbitrary
+GraphQL `guard`/dynamic `visible` behavior are rejected at admission
+with `INVALID_INPUT`: their
+late resolver decisions cannot prove release of outer metadata. Subscribe to
+invalidation metadata and refresh separately authorized queries for richer data.
+
+Repository-only entities cannot authorize GraphQL subscription provenance, so any such source suppresses the event even for a public target. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
+
+Direct generated deleted preimages default to suppression. They require an
+explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or
+unrestricted ORM visibility, plus current entity/row/selected-field policies.
+The callback must independently enforce tenant/owner and database-session rules;
+ordinary read permission, no RowPolicy, or `Unrestricted` cannot prove deleted
+snapshot visibility under RLS. Complete/prefilter SQL visibility drops deletes
+regardless because its predicate cannot authorize a missing row. Raw public event-channel emissions remain Rust observer notifications
+and cannot inject generated GraphQL delivery. Action filters are enforced; the
+unsupported `dummy` filter is rejected. See the
+[0.45 migration](../../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
+for host policy and prior-owner snapshot responsibilities.
 
 ## Composite Relation Keys
 

@@ -2569,6 +2569,26 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
 
+    /// Explicitly authorize release of a trusted generated deleted preimage.
+    ///
+    /// The default denies. Ordinary `can_read_row` or `Unrestricted` visibility
+    /// does not prove visibility under database RLS after a row disappears.
+    /// Implementations must independently enforce every applicable tenant/owner
+    /// and database-session condition using the current request context. Entity
+    /// and selected-field checks remain independent. Generated subscriptions
+    /// suppress preimages under Complete/Prefilter SQL visibility regardless.
+    fn can_read_deleted_preimage<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a crate::db::Database<B>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+
     fn can_write_row<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
