@@ -184,13 +184,22 @@ fn router_child_entrypoint() {
                         | "auth"
                         | "auth-subscriptions"
                         | "auth-subscriptions-polling"
+                        | "auth-subscriptions-clock-past"
+                        | "auth-subscriptions-clock-ahead"
+                        | "auth-subscriptions-clock-error"
                 )
             ) {
                 let authenticated =
                     !matches!(mode.to_str(), Some("static" | "polling" | "graceful"));
                 let subscriptions = matches!(
                     mode.to_str(),
-                    Some("auth-subscriptions" | "auth-subscriptions-polling")
+                    Some(
+                        "auth-subscriptions"
+                            | "auth-subscriptions-polling"
+                            | "auth-subscriptions-clock-past"
+                            | "auth-subscriptions-clock-ahead"
+                            | "auth-subscriptions-clock-error"
+                    )
                 );
                 let polling = matches!(
                     mode.to_str(),
@@ -238,6 +247,18 @@ fn router_child_entrypoint() {
                 } else {
                     config.allow_anonymous_development(true)
                 };
+                let clock_seconds = match mode.to_str() {
+                    Some("auth-subscriptions-clock-past") => Some(Some(1_600_000_000)),
+                    Some("auth-subscriptions-clock-ahead") => Some(Some(4_102_444_800)),
+                    Some("auth-subscriptions-clock-error") => Some(None),
+                    _ => None,
+                };
+                if let Some(seconds) = clock_seconds {
+                    config = config.with_authentication_provider(Arc::new(TestClockProvider {
+                        now: seconds
+                            .map(|seconds| UNIX_EPOCH + Duration::new(seconds, 123_456_789)),
+                    }));
+                }
                 if subscriptions {
                     config = config.with_subscriptions(
                         SubscriptionConfig::new()
@@ -319,6 +340,33 @@ impl AuthenticationProvider for TestAuthenticationProvider {
             scopes,
             SystemTime::now().checked_add(Duration::from_secs(lifetime)),
         )
+    }
+}
+
+// The real agql adapter's signed-token/clock mapping is tested in agql.rs.
+// This wire provider isolates the gateway's handling of that same clock contract.
+#[derive(Debug)]
+struct TestClockProvider {
+    now: Option<SystemTime>,
+}
+impl AuthenticationProvider for TestClockProvider {
+    fn authenticate_bearer(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, AuthenticationError> {
+        let principal = TestAuthenticationProvider.authenticate_bearer(token)?;
+        AuthenticatedPrincipal::new(
+            principal.subject(),
+            principal.scopes().iter().cloned(),
+            self.now
+                .unwrap_or_else(SystemTime::now)
+                .checked_add(Duration::from_secs(8)),
+        )
+    }
+
+    fn current_time(&self) -> Result<SystemTime, AuthenticationError> {
+        self.now
+            .ok_or_else(|| AuthenticationError::unavailable("synthetic clock failure"))
     }
 }
 
@@ -1288,6 +1336,72 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
 }
 
 #[test]
+fn authenticated_websocket_uses_provider_clock_and_rejects_clock_failure() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    for mode in [
+        "auth-subscriptions-clock-past",
+        "auth-subscriptions-clock-ahead",
+        "auth-subscriptions-clock-error",
+    ] {
+        let mut router = TestRouter::spawn_authenticated_mode(
+            mode,
+            reserve_port(),
+            products.endpoint(),
+            reviews.endpoint(),
+            products_sdl.endpoint(),
+            reviews_sdl.endpoint(),
+            products_protocol.endpoint(),
+            reviews_protocol.endpoint(),
+        );
+        router.wait_until_ready();
+        let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+        if mode == "auth-subscriptions-clock-error" {
+            let opens_before = products.opens();
+            socket.send_json(&json!({
+                "type": "connection_init",
+                "payload": {"authorization": "Bearer product-events"}
+            }));
+            assert_eq!(
+                socket.wait_for_close_before(Instant::now() + TEST_TIMEOUT),
+                1011
+            );
+            assert_eq!(products.opens(), opens_before);
+        } else {
+            socket.connection_init_bearer("product-events");
+            socket.subscribe(
+                "clock",
+                r#"subscription { productChanged(id: "p1") { id } }"#,
+            );
+            assert_eq!(
+                socket.wait_for_operation_message("clock", "next")["payload"]["data"]["productChanged"]
+                    ["id"],
+                "p1"
+            );
+            assert_eq!(
+                socket.wait_for_close_before(Instant::now() + TEST_TIMEOUT),
+                4401
+            );
+        }
+        router.stop();
+    }
+}
+
+#[test]
 fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websocket() {
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
@@ -2107,6 +2221,29 @@ impl TestWebSocket {
         loop {
             let (opcode, payload) = read_websocket_frame(&mut self.stream)
                 .expect("router should send a WebSocket close frame");
+            match opcode {
+                0x8 if payload.len() >= 2 => {
+                    return u16::from_be_bytes([payload[0], payload[1]]);
+                }
+                0x9 => write_websocket_frame(&mut self.stream, 0xA, &payload)
+                    .expect("WebSocket pong should be written"),
+                _ => {}
+            }
+        }
+    }
+
+    // Absolute deadline for the new clock controls: repeated upstream frames
+    // must not keep resetting a socket timeout when the expiry timer is broken.
+    fn wait_for_close_before(&mut self, deadline: Instant) -> u16 {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "router did not close before the deadline"
+            );
+            self.stream.set_read_timeout(Some(remaining)).unwrap();
+            let (opcode, payload) = read_websocket_frame(&mut self.stream)
+                .expect("router should close within the bounded expiry window");
             match opcode {
                 0x8 if payload.len() >= 2 => {
                     return u16::from_be_bytes([payload[0], payload[1]]);
