@@ -66,7 +66,8 @@ under a generated prefix.
 ## Managed SMB fixture ownership
 
 `tests/samba/run.sh` runs the seven managed protocol, cancellation, encryption,
-constrained-write, backup-lifecycle and reconnect cases. It creates fresh randomly
+constrained-write, backup-lifecycle and reconnect cases, followed by two SDK
+directory-stream regressions. It creates fresh randomly
 named containers and a fresh labelled volume, binds dynamic ports only on
 `127.0.0.1`, and passes the exact normal container ID to the restart test. It never
 reuses or deletes a pre-existing fixed-name fixture. Cleanup selects only its
@@ -79,6 +80,18 @@ the harness, and verifies the container's run label before any mutation. Missing
 or mismatched ownership fails closed, including manually invoked ignored tests.
 After restart the test verifies the original mapping and waits at most 30 seconds
 for TCP readiness before exercising the same existing backend's reconnect path.
+
+The additional `smb_directory_stream` tests use the actual SDK's
+`Directory::query_with_options` on that same owned normal share. A small response
+buffer and exact long filenames establish multibatch enumeration through EOF,
+with no duplicates. A separate test observes a real entry, drops the stream and
+caller ownership, and bounds eventual release of the directory `Arc` through a
+`Weak` reference polled every 10 ms. This is drop-liveness coverage: the public SDK
+does not expose producer idle state, so the test does not claim deterministic
+reproduction of the lost-wake schedule or immediate server-side close. Both use
+a current-thread runtime and attempt task-owned path cleanup before reporting
+Result errors; unexpected panic or process termination uses the runner's owned
+container and volume cleanup fallback.
 
 The daemon-free ownership regression suite substitutes private fake Docker/Cargo
 executables and checks startup collisions, exact-ID cleanup, ownership changes,

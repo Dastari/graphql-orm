@@ -49,7 +49,11 @@ for package in "${packages[@]}"; do
     echo "package-release-policy: ${package} has no committed changes"
     continue
   fi
-  if ! grep -Eq '^(src/.*\.rs|Cargo\.toml)$' <<<"${changed}"; then
+  runtime_paths='^(src/.*\.rs|Cargo\.toml)$'
+  if [[ "${package}" == graphql-orm-storage ]]; then
+    runtime_paths='^(src/.*\.rs|Cargo\.toml|vendor/smb/(src/.*\.rs|Cargo\.toml))$'
+  fi
+  if ! grep -Eq "${runtime_paths}" <<<"${changed}"; then
     echo "package-release-policy: ${package} has no public/runtime changes"
     continue
   fi
