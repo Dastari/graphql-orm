@@ -261,10 +261,31 @@ impl OrmPublicError {
 /// diagnostics, identifiers, and protected values are deliberately discarded.
 #[doc(hidden)]
 pub fn sqlx_error_from_public(error: OrmPublicError) -> sqlx::Error {
+    sqlx::Error::Protocol(public_error_transport(error))
+}
+
+fn public_error_transport(error: OrmPublicError) -> String {
     if let Some(internal) = &error.internal {
         tracing_log_internal(&error.code, internal);
     }
-    sqlx::Error::Protocol(format!("graphql-orm-public:{}", error.code.as_str()))
+    format!("graphql-orm-public:{}", error.code.as_str())
+}
+
+/// Preserve only the safe public category through a generated loader's String error.
+/// Internal diagnostics follow the same server-only path as GraphQL errors.
+#[doc(hidden)]
+pub fn loader_error_from_sqlx(error: sqlx::Error) -> String {
+    public_error_transport(OrmPublicError::from(error))
+}
+
+/// Decode a generated loader's safe category, sanitizing unknown host failures.
+#[doc(hidden)]
+pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
+    if error.starts_with("graphql-orm-public:") {
+        graphql_error_from_sqlx(sqlx::Error::Protocol(error))
+    } else {
+        graphql_internal_error(error)
+    }
 }
 
 /// Preserve a safe public category emitted by an internal policy callback.

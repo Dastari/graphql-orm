@@ -150,32 +150,40 @@ impl AuthSubject {
         scopes.iter().all(|scope| self.has_scope(scope))
     }
 
-    /// Stable partition key for caches and batch loaders.
+    /// Structural identity for authorization-aware batching and caching.
     ///
-    /// Does not include raw claim JSON. Claims contribute only a short
-    /// fingerprint so equivalent principals share cache entries without
-    /// retaining sensitive claim bodies as key material.
-    pub fn canonical_key(&self) -> String {
+    /// Role and scope order is normalized. Every optional field and complete
+    /// claim value participates; delimiters in user-provided strings are data.
+    pub fn partition_key(&self) -> AuthPartitionKey {
         let mut roles = self.roles.clone();
         roles.sort();
+        roles.dedup();
         let mut scopes = self.scopes.clone();
         scopes.sort();
-        let claims_fp = self.claims.as_ref().map(fingerprint_json);
-        format!(
-            "id={}|user={}|tenant={}|organization={}|roles={}|scopes={}|token={}|session={}|actor={}|correlation={}|assurance={:?}|claims_fp={}",
+        scopes.dedup();
+        AuthPartitionKey(serde_json::json!([
+            "subject-v2",
             self.id,
-            self.user_id.as_deref().unwrap_or(""),
-            self.tenant_id.as_deref().unwrap_or(""),
-            self.organization_id.as_deref().unwrap_or(""),
-            roles.join(","),
-            scopes.join(","),
-            self.token_id.as_deref().unwrap_or(""),
-            self.session_id.as_deref().unwrap_or(""),
-            self.actor_id.as_deref().unwrap_or(""),
-            self.correlation_id.as_deref().unwrap_or(""),
+            self.user_id,
+            self.tenant_id,
+            self.organization_id,
+            roles,
+            scopes,
+            self.token_id,
+            self.session_id,
+            self.actor_id,
+            self.correlation_id,
             self.assurance,
-            claims_fp.unwrap_or_default(),
-        )
+            [self.claims.is_some(), self.claims]
+        ]))
+    }
+
+    /// Versioned SHA-256 digest of the complete structural authorization key.
+    ///
+    /// Invalidate older external cache keys on upgrade. This opaque identifier
+    /// contains no raw claims, but must still be treated as request metadata.
+    pub fn canonical_key(&self) -> String {
+        self.partition_key().canonical_key()
     }
 }
 
@@ -547,15 +555,45 @@ fn dedupe_sorted(mut values: Vec<String>) -> Vec<String> {
     values
 }
 
-fn fingerprint_json(value: &serde_json::Value) -> String {
-    // Stable, non-cryptographic fingerprint for cache partitioning only.
-    let encoded = value.to_string();
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for byte in encoded.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+/// Opaque structural authorization partition used by loaders and host caches.
+///
+/// Equality and hashing retain complete typed claim values rather than relying
+/// on a digest. Debug output deliberately redacts the retained key material.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct AuthPartitionKey(pub(crate) serde_json::Value);
+
+impl fmt::Debug for AuthPartitionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AuthPartitionKey([redacted])")
     }
-    format!("{hash:016x}")
+}
+
+impl AuthPartitionKey {
+    /// Return an opaque, versioned digest suitable for external cache keys.
+    pub fn canonical_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        // Explicitly sort objects even when a consumer enables serde_json's
+        // preserve_order feature through Cargo feature unification.
+        fn sorted(value: &serde_json::Value) -> serde_json::Value {
+            match value {
+                serde_json::Value::Array(values) => {
+                    serde_json::Value::Array(values.iter().map(sorted).collect())
+                }
+                serde_json::Value::Object(values) => {
+                    let ordered: std::collections::BTreeMap<_, _> = values
+                        .iter()
+                        .map(|(key, value)| (key.clone(), sorted(value)))
+                        .collect();
+                    serde_json::Value::Object(ordered.into_iter().collect())
+                }
+                other => other.clone(),
+            }
+        }
+        format!(
+            "auth-v2:{:x}",
+            Sha256::digest(sorted(&self.0).to_string().as_bytes())
+        )
+    }
 }
 
 #[cfg(test)]

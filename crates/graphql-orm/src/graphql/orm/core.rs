@@ -336,7 +336,7 @@ pub struct DbAuthContext {
     /// Optional JSON claims serialized to `app.claims`.
     ///
     /// Never store raw tokens here. Claim bodies are redacted in [`Debug`] and
-    /// contribute only a fingerprint to cache partition keys.
+    /// participate structurally in loader partitions; external keys use SHA-256.
     pub claims_json: Option<serde_json::Value>,
     /// Optional token reference (`jti` / token id), never a raw secret.
     pub token_id: Option<String>,
@@ -459,45 +459,38 @@ impl DbAuthContext {
         self
     }
 
-    /// Return a stable key for batching and cache partitioning.
-    ///
-    /// Roles and scopes are sorted so equivalent contexts do not batch
-    /// separately due only to caller ordering. Claim JSON is fingerprinted
-    /// rather than embedded so cache keys do not retain sensitive claim bodies.
-    pub fn canonical_key(&self) -> String {
+    /// Complete structural identity for authorization-aware batching and caching.
+    pub fn partition_key(&self) -> crate::graphql::auth::AuthPartitionKey {
         let mut roles = self.roles.clone();
         roles.sort();
+        roles.dedup();
         let mut scopes = self.scopes.clone();
         scopes.sort();
-        let claims_fp = self
-            .claims_json
-            .as_ref()
-            .map(|value| {
-                let encoded = value.to_string();
-                let mut hash: u64 = 0xcbf29ce484222325;
-                for byte in encoded.as_bytes() {
-                    hash ^= u64::from(*byte);
-                    hash = hash.wrapping_mul(0x100000001b3);
-                }
-                format!("{hash:016x}")
-            })
-            .unwrap_or_default();
-        format!(
-            "user={}|subject={}|tenant={}|organization={}|roles={}|scopes={}|token={}|session={}|actor={}|correlation={}|assurance={:?}|policy={}|claims_fp={}",
-            self.user_id.as_deref().unwrap_or(""),
-            self.subject.as_deref().unwrap_or(""),
-            self.tenant_id.as_deref().unwrap_or(""),
-            self.organization_id.as_deref().unwrap_or(""),
-            roles.join(","),
-            scopes.join(","),
-            self.token_id.as_deref().unwrap_or(""),
-            self.session_id.as_deref().unwrap_or(""),
-            self.actor_id.as_deref().unwrap_or(""),
-            self.correlation_id.as_deref().unwrap_or(""),
+        scopes.dedup();
+        crate::graphql::auth::AuthPartitionKey(serde_json::json!([
+            "database-v2",
+            self.user_id,
+            self.subject,
+            self.tenant_id,
+            self.organization_id,
+            roles,
+            scopes,
+            self.token_id,
+            self.session_id,
+            self.actor_id,
+            self.correlation_id,
             self.assurance,
-            self.policy_version.as_deref().unwrap_or(""),
-            claims_fp,
-        )
+            self.policy_version,
+            [self.claims_json.is_some(), self.claims_json]
+        ]))
+    }
+
+    /// Versioned SHA-256 digest of the complete structural authorization key.
+    ///
+    /// Invalidate older external cache keys on upgrade. Raw claims are never
+    /// embedded in this external representation.
+    pub fn canonical_key(&self) -> String {
+        self.partition_key().canonical_key()
     }
 
     /// Render PostgreSQL setting names and values for transaction-local auth.
