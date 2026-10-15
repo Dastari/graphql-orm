@@ -470,3 +470,128 @@ async fn object_sizes_are_observed_for_new_deduplicated_and_historical_restores(
     assert_eq!(compacted.manifest.objects[0].size_bytes, actual_size);
     assert_eq!(load_manifest(&repository, historical.snapshot_id).await.expect("original manifest unchanged").objects[0].size_bytes, u64::MAX);
 }
+
+struct VersionedObjectRepository {
+    key: String,
+    preflight_bytes: Bytes,
+    restore_bytes: Bytes,
+    reads: AtomicUsize,
+}
+
+#[async_trait]
+impl BackupRepository for VersionedObjectRepository {
+    async fn get_blob_stream(
+        &self,
+        key: &str,
+    ) -> Result<graphql_orm_storage::StorageByteStream, BackupError> {
+        assert_eq!(key, self.key);
+        let bytes = if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.preflight_bytes.clone()
+        } else {
+            self.restore_bytes.clone()
+        };
+        Ok(graphql_orm_storage::StorageByteStream::from_bytes(bytes))
+    }
+
+    async fn get_blob(&self, _: &str) -> Result<Bytes, BackupError> {
+        panic!("restore must use the native stream")
+    }
+    async fn put_blob(&self, _: &str, _: Bytes) -> Result<(), BackupError> {
+        panic!("read-only fixture")
+    }
+    async fn blob_exists(&self, _: &str) -> Result<bool, BackupError> {
+        panic!("read-only fixture")
+    }
+    async fn list_blobs(&self, _: &str) -> Result<Vec<String>, BackupError> {
+        panic!("read-only fixture")
+    }
+    async fn delete_blob(&self, _: &str) -> Result<(), BackupError> {
+        panic!("read-only fixture")
+    }
+}
+
+async fn manifest_for_object_restore(
+    repository: &LocalBackupRepository,
+    bytes: Bytes,
+) -> graphql_orm_backup::BackupSnapshotManifest {
+    let objects = MockObjectIndex {
+        objects: vec![BackupObjectRef {
+            object_id: object_id(),
+            storage_key: "objects/owned".to_string(),
+            sha256_hex: bytes_sha256_hex(&bytes),
+            size_bytes: bytes.len() as u64,
+            mime_type: None,
+        }],
+        bytes: vec![bytes],
+    };
+    create_full_backup(
+        repository,
+        &MockDatabase::with_tables(Vec::new()),
+        &objects,
+        backup_request(),
+    )
+    .await
+    .expect("owned object manifest")
+    .manifest
+}
+
+#[tokio::test]
+async fn changed_content_after_size_preflight_fails_after_sink_receives_second_version() {
+    let temp = TempDir::new().expect("owned repository");
+    let original = Bytes::from_static(b"original");
+    let replacement = Bytes::from_static(b"replacement is longer");
+    let manifest = manifest_for_object_restore(
+        &LocalBackupRepository::new(temp.path()),
+        original.clone(),
+    )
+    .await;
+    let repository = VersionedObjectRepository {
+        key: manifest.objects[0].content_key.clone(),
+        preflight_bytes: original.clone(),
+        restore_bytes: replacement.clone(),
+        reads: AtomicUsize::new(0),
+    };
+    let sink = RecordingObjectSink::default();
+
+    let error = restore_objects(&repository, &manifest, &sink)
+        .await
+        .expect_err("second read must retain checksum verification");
+
+    assert!(matches!(error, BackupError::ChecksumMismatch { expected, actual, .. }
+        if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&replacement)));
+    assert_eq!(repository.reads.load(Ordering::SeqCst), 2);
+    let received = sink.restored();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].0.size_bytes, original.len() as u64);
+    assert_eq!(received[0].1, replacement);
+    // Preflight size describes the first read. A failed second read may already
+    // have changed the sink, which must remain an unpublished staging target.
+}
+
+#[tokio::test]
+async fn corrupt_object_preflight_rejects_before_invoking_sink() {
+    let temp = TempDir::new().expect("owned repository");
+    let original = Bytes::from_static(b"original");
+    let manifest = manifest_for_object_restore(
+        &LocalBackupRepository::new(temp.path()),
+        original.clone(),
+    )
+    .await;
+    let corrupt = Bytes::from_static(b"corrupt");
+    let repository = VersionedObjectRepository {
+        key: manifest.objects[0].content_key.clone(),
+        preflight_bytes: corrupt.clone(),
+        restore_bytes: original.clone(),
+        reads: AtomicUsize::new(0),
+    };
+    let sink = RecordingObjectSink::default();
+
+    let error = restore_objects(&repository, &manifest, &sink)
+        .await
+        .expect_err("preflight content must verify before any sink write");
+
+    assert!(matches!(error, BackupError::ChecksumMismatch { expected, actual, .. }
+        if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&corrupt)));
+    assert_eq!(repository.reads.load(Ordering::SeqCst), 1);
+    assert!(sink.restored().is_empty());
+}
