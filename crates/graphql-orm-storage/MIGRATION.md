@@ -3,12 +3,27 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.7.3 to 0.7.4: narrow SMB directory-stream backport
+
+Update the reviewed workspace Git revision and regenerate the consuming
+application's lockfile. The `smb` dependency is now a direct owner-local path
+inside this package's Git source tree, retaining version 0.10.2 and its existing
+protocol/authentication companions, crypto dependencies and feature selection.
+Do not replace it with the unpatched registry package or a consumer-only patch.
+
+The backport retains a pending directory notification and lets an idle producer
+exit when its stream receiver is dropped. It does not promise immediate
+cancellation of a network query already in flight. No public API, provider
+configuration, object key, schema or persisted-data migration is required.
+Exercise the owned Samba suite against your resolved dependency graph before
+deployment. See [client provenance and maintenance](docs/native-smb.md#client-selection).
 
 ## 0.7.2 to 0.7.3: corrected S3 credential cache dependency
 

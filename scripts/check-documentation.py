@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 from datetime import date
 import re
 from pathlib import Path
@@ -45,6 +47,40 @@ IMMUTABLE_HISTORICAL_EXCEPTIONS = {
 }
 
 
+SMB_VENDOR = Path("crates/graphql-orm-storage/vendor/smb")
+SMB_VENDOR_MARKDOWN_SHA256 = {
+    'README.md': '43fd7750363ee3485ed58d50c2a06542a91b7a85488edb21f361fb0a7a8a4c37',
+    'docs/index.md': '7b3fa19e8e6b4ad1af4b53cf5cb3cf1f58fb75c490bf4c0cf11427c520c13594',
+    'docs/parallelize.md': '3c1ee4091ec89713f1c42cbf352a9f91f1f1e361ade0aa87fe4017992308896a',
+    'docs/threading_models.md': 'dff7137e32efaf65cbcfabf7aef391ede927862913b21c310809676f248fdbf0',
+    'src/connection/README.md': '25bca086cc23f2812b628d5eb8ec2cf164a0fbd769b894f5b39584b0e777cf81',
+    'tests/README.md': 'f73d0052681dfc4084795d7fa765d2ed7b98338033db076bfb2ed7b82f583ca9',
+}
+
+def reviewed_smb_vendor_markdown() -> set[Path]:
+    """Exempt only exact upstream documents from the one reviewed backport."""
+    provenance = ROOT / SMB_VENDOR / "PROVENANCE.json"
+    try:
+        paths = [SMB_VENDOR / name for name in SMB_VENDOR_MARKDOWN_SHA256]
+        for path in [SMB_VENDOR / "PROVENANCE.json", *paths]:
+            if any((ROOT / parent).is_symlink() for parent in [path, *path.parents]):
+                return set()
+        data = json.loads(provenance.read_text(encoding="utf-8"))
+        if (data["owner"] != "graphql-orm-storage"
+            or data["upstream"]["crate"] != "smb"
+            or data["upstream"]["version"] != "0.10.2"
+            or data["upstream"]["archive_sha256"] != "f1315ec423faffdc9715f518c5cab5660b26484df42adaa87a3325f70c73417b"
+            or data["backport"]["commit"] != "f4524d032c8951cc288e1c8231ad68588583abda"
+            or data["documentation_sha256"] != SMB_VENDOR_MARKDOWN_SHA256):
+            return set()
+        if not all(hashlib.sha256((ROOT / SMB_VENDOR / name).read_bytes()).hexdigest() == expected
+                   for name, expected in SMB_VENDOR_MARKDOWN_SHA256.items()):
+            return set()
+        return set(paths)
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+
+
 def markdown_files() -> list[Path]:
     result = subprocess.run(
         [
@@ -61,9 +97,12 @@ def markdown_files() -> list[Path]:
         text=True,
     )
     paths = []
+    vendor_markdown = reviewed_smb_vendor_markdown()
     for raw in result.stdout.splitlines():
         path = Path(raw)
         if ".agents" in path.parts or path.as_posix() == ".github/PULL_REQUEST_TEMPLATE.md":
+            continue
+        if path in vendor_markdown:
             continue
         if not (ROOT / path).is_file():
             continue

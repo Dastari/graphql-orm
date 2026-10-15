@@ -3,12 +3,20 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.7.4 - 2026-10-15
+
+- Backport the upstream SMB directory-stream notification and idle-drop fixes
+  to an owner-local copy of SMB 0.10.2. Preserve the existing protocol,
+  authentication and cryptographic dependency family and feature selection.
+- Retain archive, patch and MIT-license provenance with the dependency. No
+  public API, provider configuration, storage key or persisted-data changes.
 
 ## 0.7.3 - 2026-10-15
 

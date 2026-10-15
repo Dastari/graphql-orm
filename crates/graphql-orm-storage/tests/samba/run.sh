@@ -182,3 +182,17 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
   run_test samba_reconnects_after_server_restart cargo test --locked --features smb --test smb_integration \
   samba_reconnects_after_server_restart -- --ignored --exact --nocapture
+
+
+# Actual SDK directory-stream regressions; the original seven cases above stay intact.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test sdk_directory_multibatch_eof_exact_names cargo test --locked --features smb --test smb_directory_stream \
+  sdk_directory_multibatch_eof_exact_names -- --ignored --exact --nocapture
+
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test sdk_directory_drop_releases_directory_arc cargo test --locked --features smb --test smb_directory_stream \
+  sdk_directory_drop_releases_directory_arc -- --ignored --exact --nocapture
