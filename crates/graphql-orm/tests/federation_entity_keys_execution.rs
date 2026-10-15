@@ -130,16 +130,18 @@ impl graphql_orm::graphql::orm::RowPolicy for HideNamedZone {
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,
         _db: &'a graphql_orm::db::Database,
-        _entity_name: &'static str,
-        _policy_key: Option<&'static str>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
         _surface: graphql_orm::graphql::orm::EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
             let Some(zone) = row.downcast_ref::<Zone>() else {
-                return Ok(true);
+                return Ok(false);
             };
-            Ok(zone.name != "restricted")
+            Ok(entity_name == "Zone"
+                && policy_key == Some("zone.read")
+                && zone.name != "restricted")
         })
     }
 
@@ -152,7 +154,7 @@ impl graphql_orm::graphql::orm::RowPolicy for HideNamedZone {
         _surface: graphql_orm::graphql::orm::EntityAccessSurface,
         _row: &'a (dyn std::any::Any + Send + Sync),
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
-        Box::pin(async move { Ok(true) })
+        Box::pin(async move { Ok(false) })
     }
 }
 
@@ -241,8 +243,9 @@ fn allowing_policy() -> AllowListEntityPolicy {
 
 #[tokio::test]
 async fn representation_hit_resolves_the_owned_entity() {
-    let database =
+    let mut database =
         graphql_orm::db::Database::with_entity_policy(zone_pool().await, allowing_policy());
+    database.set_row_policy(HideNamedZone);
     let schema = zone_schema(database);
 
     let response = schema.execute(entities_query(&["zone-1"], "id name")).await;
@@ -253,8 +256,9 @@ async fn representation_hit_resolves_the_owned_entity() {
 
 #[tokio::test]
 async fn missing_row_yields_null_for_that_representation() {
-    let database =
+    let mut database =
         graphql_orm::db::Database::with_entity_policy(zone_pool().await, allowing_policy());
+    database.set_row_policy(HideNamedZone);
     let schema = zone_schema(database);
 
     let response = schema
@@ -307,6 +311,7 @@ async fn entity_policy_denial_fails_the_whole_fetch() {
 async fn field_policy_denial_on_a_selected_key_neighbour_errors() {
     let mut database =
         graphql_orm::db::Database::with_entity_policy(zone_pool().await, allowing_policy());
+    database.set_row_policy(HideNamedZone);
     database.set_field_policy(DenyNoteField);
     let schema = zone_schema(database);
 
@@ -315,6 +320,7 @@ async fn field_policy_denial_on_a_selected_key_neighbour_errors() {
         !denied.errors.is_empty(),
         "a field-level policy still runs inside the entity's own field resolvers"
     );
+    assert_eq!(denied.errors[0].message, "forbidden");
 
     let allowed = schema.execute(entities_query(&["zone-1"], "id name")).await;
     assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
