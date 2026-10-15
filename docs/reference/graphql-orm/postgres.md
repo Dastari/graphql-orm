@@ -3,7 +3,7 @@ title: "PostgreSQL RLS"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -97,6 +97,29 @@ Policy behavior:
 
 The table-only APIs, including `SchemaModel`, `TableModel`, `plan_migration_to_entities`, and
 `apply_migration`, remain unchanged.
+
+Use a separate runtime database role without superuser, `BYPASSRLS`, or inherited
+table-owner privileges. The schema owner applies the plan; the runtime role needs
+only its intended table privileges, `USAGE` on the table and `graphql_orm` schemas,
+and `EXECUTE` on the helper functions used by its policies. If default function
+execution grants have been revoked, grant those functions explicitly. A new helper
+schema does not automatically grant `USAGE` to another role. Do not solve missing
+privileges by giving the runtime role ownership or RLS bypass.
+
+For a scope-and-tenant read policy, an administrator can provision a dedicated
+role with grants such as:
+
+```sql
+GRANT USAGE ON SCHEMA public, graphql_orm TO application_reader;
+GRANT SELECT ON public.users TO application_reader;
+GRANT EXECUTE ON FUNCTION graphql_orm.has_scope(text),
+    graphql_orm.current_scopes(), graphql_orm.current_tenant_id()
+    TO application_reader;
+```
+
+Adjust the role, tables and helpers to the application's actual policy. Verify
+visible and hidden rows using that restricted role, including relationship
+queries; tests run as a superuser cannot establish RLS enforcement.
 
 ## Generated SQL
 

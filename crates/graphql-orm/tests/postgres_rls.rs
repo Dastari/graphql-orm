@@ -296,7 +296,7 @@ async fn generated_queries_and_relation_preload_obey_live_rls()
     ))
     .execute(&pool)
     .await?;
-    sqlx::query(&format!("GRANT USAGE ON SCHEMA public TO {role}"))
+    sqlx::query(&format!("GRANT USAGE ON SCHEMA public, graphql_orm TO {role}"))
         .execute(&pool)
         .await?;
     sqlx::query(&format!(
@@ -323,6 +323,24 @@ async fn generated_queries_and_relation_preload_obey_live_rls()
         !can_bypass,
         "RLS assertions must execute as a restricted reader"
     );
+    // Exercise the real restricted SQL path before GraphQL's safe error mapper,
+    // so a fixture privilege problem reports its database cause locally.
+    let visible_rows = fetch_rows_with_auth::<PostgresBackend>(
+        &reader,
+        "SELECT id FROM rls_notes",
+        &[],
+        Some(&auth_context("tenant-a", &["notes.read"])),
+    )
+    .await?;
+    assert_eq!(visible_rows.len(), 1);
+    let hidden_rows = fetch_rows_with_auth::<PostgresBackend>(
+        &reader,
+        "SELECT id FROM rls_notes",
+        &[],
+        Some(&auth_context("tenant-b", &["notes.read"])),
+    )
+    .await?;
+    assert!(hidden_rows.is_empty());
 
     let schema: RlsSchema = schema_builder(graphql_orm::db::Database::new(reader))
         .data("test-user".to_string())
