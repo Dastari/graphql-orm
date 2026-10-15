@@ -398,7 +398,11 @@ pub struct EntitySearchQuery<'a, T, W, B: OrmBackend> {
     _where: PhantomData<W>,
 }
 
-/// A bounded, policy-aware full-text search builder for repository entities.
+/// A policy-aware full-text search builder for repository entities.
+///
+/// Limit/offset bound returned hits. This explicit `fetch_all` boundary can
+/// materialize fallback candidates before authorization; it is not the bounded
+/// generated GraphQL search executor.
 ///
 /// This wrapper keeps the raw backend pool out of the generated repository
 /// surface and applies entity, row, and field authorization to every returned
@@ -416,7 +420,7 @@ where
     T: super::Entity + SearchableEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     W: DatabaseFilter + Clone + Send + Sync + 'static,
 {
-    /// Create a bounded repository search associated with `db`.
+    /// Create a repository search associated with `db`.
     pub fn new(db: &'a crate::db::Database<B>, search: SearchInput) -> Self {
         Self {
             db,
@@ -628,6 +632,14 @@ where
         &self,
         auth: Option<&DbAuthContext>,
     ) -> Option<crate::Result<Vec<SearchHit<T>>>> {
+        self.try_fetch_native_observed(auth, None).await
+    }
+
+    async fn try_fetch_native_observed(
+        &self,
+        auth: Option<&DbAuthContext>,
+        observer: Option<&crate::db::Database<B>>,
+    ) -> Option<crate::Result<Vec<SearchHit<T>>>> {
         let index = T::search_index()?;
         if !index.enabled || self.query.requires_in_memory_filtering() {
             return None;
@@ -647,6 +659,9 @@ where
             Err(error) => return Some(Err(error)),
         };
 
+        if let Some(db) = observer {
+            db.observe_read(&rendered.0, rows.len());
+        }
         Some(
             rows.iter()
                 .map(|row| {
@@ -759,7 +774,7 @@ where
             B::DIALECT.count_projection().to_string()
         } else {
             format!(
-                "{}, ts_rank_cd(s.document_vector, q.query) AS __gom_search_score",
+                "{}, CAST(ts_rank_cd(s.document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score",
                 T::column_names().join(", ")
             )
         };
@@ -783,6 +798,11 @@ where
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
+            }
+            for column in T::PRIMARY_KEYS {
+                if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
+                    sql.push_str(&format!(", {column} ASC"));
+                }
             }
             let page = self
                 .pagination_config
@@ -832,6 +852,11 @@ where
             if !T::DEFAULT_SORT.trim().is_empty() {
                 sql.push_str(", ");
                 sql.push_str(T::DEFAULT_SORT);
+            }
+            for column in T::PRIMARY_KEYS {
+                if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
+                    sql.push_str(&format!(", {column} ASC"));
+                }
             }
             let page = self
                 .pagination_config
@@ -912,6 +937,164 @@ where
             },
             edges,
         }
+    }
+
+    /// Execute a protected generated search using finite candidate batches.
+    /// Exact visible totals are returned only after exhaustion within the host
+    /// AuthorizedScanConfig. Native ranking is retained; fallback ranking keeps
+    /// only the requested score window while scanning bounded raw candidates.
+    #[doc(hidden)]
+    pub async fn fetch_authorized_connection(
+        mut self,
+        db: &crate::db::Database<B>,
+        ctx: &async_graphql::Context<'_>,
+        auth: Option<&DbAuthContext>,
+        page: Option<PageInput>,
+    ) -> async_graphql::Result<SearchConnection<T>>
+    where
+        T: super::Entity,
+    {
+        use super::{EntityAccessSurface, ReadVisibility};
+        use crate::graphql::errors::{OrmErrorCode, OrmPublicError, graphql_error_from_sqlx};
+        let invalid =
+            || OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured).into_graphql_error();
+        let visibility = db
+            .read_visibility::<T>(Some(ctx), EntityAccessSurface::GraphqlQuery)
+            .await?;
+        self.query = self.query.with_read_visibility(&visibility)?;
+        if self.query.requires_in_memory_filtering() {
+            return Err(invalid());
+        }
+        self.query.page = page.clone();
+        if matches!(
+            visibility,
+            ReadVisibility::Complete(_) | ReadVisibility::Unrestricted
+        ) && let Some(result) = self.try_fetch_native_connection(auth).await
+        {
+            return result.map_err(graphql_error_from_sqlx);
+        }
+        let config = db.authorized_scan_config().ok_or_else(invalid)?;
+        if config.batch_size == 0 || config.max_scanned_rows == 0 {
+            return Err(invalid());
+        }
+        let resolved = db.pagination_config().resolve_page(page.as_ref(), true);
+        let offset = resolved.offset.max(0) as usize;
+        let limit = resolved.limit.ok_or_else(invalid)?.max(0) as usize;
+        let window = offset
+            .saturating_add(limit)
+            .min(config.max_scanned_rows as usize);
+        self.pagination_config = PaginationConfig::unbounded();
+        let mut native = None;
+        let mut scanned = 0_u32;
+        let mut total = 0_i64;
+        let mut retained: Vec<SearchHit<T>> = Vec::new();
+        loop {
+            let size = config.batch_size.min(config.max_scanned_rows - scanned);
+            if size == 0 {
+                return Err(invalid());
+            }
+            let candidate_page = PageInput {
+                limit: Some(i64::from(size)),
+                offset: Some(i64::from(scanned)),
+            };
+            self.query.page = Some(candidate_page.clone());
+            let (hits, fetched) = if native != Some(false) {
+                match self.try_fetch_native_observed(auth, Some(db)).await {
+                    Some(result) => {
+                        native = Some(true);
+                        let hits = result.map_err(graphql_error_from_sqlx)?;
+                        let fetched = hits.len();
+                        (hits, fetched)
+                    }
+                    None if native == Some(true) => return Err(invalid()),
+                    None => {
+                        native = Some(false);
+                        let rows = self
+                            .query
+                            .clone()
+                            .paginate(&candidate_page)
+                            .fetch_all_with_auth_and_pagination(
+                                db,
+                                auth,
+                                PaginationConfig::unbounded(),
+                            )
+                            .await
+                            .map_err(graphql_error_from_sqlx)?;
+                        let fetched = rows.len();
+                        (self.score_entities(rows), fetched)
+                    }
+                }
+            } else {
+                let rows = self
+                    .query
+                    .clone()
+                    .paginate(&candidate_page)
+                    .fetch_all_with_auth_and_pagination(db, auth, PaginationConfig::unbounded())
+                    .await
+                    .map_err(graphql_error_from_sqlx)?;
+                let fetched = rows.len();
+                (self.score_entities(rows), fetched)
+            };
+            scanned += fetched as u32;
+            for hit in hits {
+                if visibility.requires_residual_checks()
+                    && !db
+                        .can_read_row(
+                            Some(ctx),
+                            T::entity_name(),
+                            T::metadata().read_policy,
+                            EntityAccessSurface::GraphqlQuery,
+                            &hit.entity,
+                        )
+                        .await
+                        .map_err(crate::graphql::loaders::relation_authorization_error)?
+                {
+                    continue;
+                }
+                if native == Some(true) {
+                    if total >= offset as i64 && retained.len() < limit {
+                        retained.push(hit);
+                    }
+                } else if window > 0 {
+                    // Preserve stable candidate order for tied fallback scores.
+                    let position = retained.partition_point(|item| item.score >= hit.score);
+                    if position < window {
+                        retained.insert(position, hit);
+                        if retained.len() > window {
+                            retained.pop();
+                        }
+                    }
+                }
+                total += 1;
+            }
+            if fetched < size as usize {
+                break;
+            }
+        }
+        let hits = if native == Some(true) {
+            retained
+        } else {
+            retained.into_iter().skip(offset).take(limit).collect()
+        };
+        let edges = hits
+            .into_iter()
+            .enumerate()
+            .map(|(index, hit)| SearchConnectionEdge {
+                cursor: encode_cursor((offset + index) as i64),
+                score: hit.score,
+                node: hit.entity,
+            })
+            .collect::<Vec<_>>();
+        Ok(SearchConnection {
+            page_info: PageInfo {
+                has_next_page: (offset as i64).saturating_add(edges.len() as i64) < total,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|edge| edge.cursor.clone()),
+                end_cursor: edges.last().map(|edge| edge.cursor.clone()),
+                total_count: Some(total),
+            },
+            edges,
+        })
     }
 
     /// Execute the search and return matching hits.

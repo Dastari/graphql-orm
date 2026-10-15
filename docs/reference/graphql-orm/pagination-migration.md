@@ -3,12 +3,16 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-20
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Pagination Migration Guide
+
+Generated search fallback always requires the host scan configuration, including
+when no `RowPolicy` is registered, because database RLS is not discoverable from
+that registry. Native Complete/Unrestricted search keeps SQL count/page execution.
 
 ## What Changed In 0.3.0
 
@@ -134,19 +138,30 @@ Self-relations are supported; arbitrary join expressions are not.
 Entity access, resolver authentication, exact operation scopes, assurance,
 GraphQL field policies, database session authorization, and repository field
 policies remain independent checks. A complete row decision grants none of
-these. Single-record, mutation, relation-loader, search, aggregate, and legacy
-transaction APIs retain their existing authorization contracts; their row
-callbacks must still be implemented.
+these. Single-record, mutation, aggregate and legacy transaction APIs retain their
+separate authorization contracts. Generated protected search now consumes the
+same SQL visibility contract; residual callbacks still require implementation.
 
 ### Exact offsets remain compatible
 
 Generated ordinary list resolvers use database pagination and authorized SQL
 counts for `Complete` and `Unrestricted`. Their `totalCount`, visible offsets,
 and existing offset cursor contract remain unchanged. With `CallbackOnly` or
-`Prefilter`, the exact visible offset and exact total still require loading and
-checking all candidates. Partial predicates reduce that candidate set but do
-not eliminate this cost. SQLite spatial caller filters that require decoded
-entity matching also retain their scan-dependent behavior.
+`Prefilter`, exact visible offsets and totals require examining all candidates,
+but 0.46 performs that work in finite SQL batches using an explicitly installed
+`AuthorizedScanConfig`. Only the requested visible window is retained. Missing
+bounds, a filter requiring whole-result in-memory matching, or failure to prove
+exhaustion within the row budget returns `AUTHORIZATION_MISCONFIGURED` without
+partial nodes/counts. An empty denied batch is not end-of-data. Partial SQL
+predicates reduce the candidate set; they do not remove the need for a budget.
+
+Generated protected search preserves native SQLite/PostgreSQL ranking with
+bounded candidate batches, or scores bounded raw fallback batches while
+retaining only the requested highest-score window. Fallback budgets count
+nonmatching raw candidates too. Complete native SQL count/page reads remain
+available; protected fallback still requires a budget. See the
+[0.46 migration](../../../MIGRATION.md#0450-to-0460-bounded-protected-offset-and-search-reads)
+for host configuration and AI/tool consumer failure handling.
 
 A bounded SQL result limits transferred/decoded rows; it does not guarantee a
 bounded execution time. Exact COUNT, sorting, predicate selectivity, and query

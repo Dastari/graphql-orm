@@ -308,12 +308,15 @@ async fn cursors_reauthorize_changes_and_cross_user_reuse_and_reject_tampering()
 }
 
 #[tokio::test]
-async fn legacy_offsets_stay_exact_and_provider_errors_fail_before_querying() {
+async fn bounded_offsets_stay_exact_and_provider_errors_fail_before_querying() {
     for mode in [Mode::Callback, Mode::Partial] {
-        let (db, _, _) = setup(mode, 40, 19).await;
+        let (db, _, capture) = setup(mode, 40, 128).await;
         let result = data(&db, "a", "{ visibilityItems(page: {limit: 3, offset: 4}, orderBy: [{rank: ASC}]) { edges { node { rank } } pageInfo { totalCount } } }".into()).await;
         assert_eq!(result["visibilityItems"]["pageInfo"]["totalCount"], 20);
         assert_eq!(result["visibilityItems"]["edges"][0]["node"]["rank"], 44);
+        let rows = capture.take();
+        assert!(rows.iter().all(|(_, count)| *count <= 7));
+
         assert!(!execute(&db, Some("a"), "{ visibilityItemsScan(page: {limit: 3, includeTotalCount: true}) { nodes { id } } }".into()).await.errors.is_empty());
     }
     let (db, _, capture) = setup(Mode::Error, 0, 19).await;
@@ -666,4 +669,25 @@ async fn empty_keyset_page_probes_include_authorized_cursor_boundary() {
     .await
     .unwrap();
     assert!(!revoked.page_info.has_previous_page);
+}
+
+#[tokio::test]
+async fn callback_offset_budget_exhaustion_never_releases_partial_totals_or_nodes() {
+    let (db, policy, capture) = setup(Mode::Callback, 0, 19).await;
+    let response = execute(
+        &db,
+        Some("a"),
+        "{ visibilityItems(page: {limit: 1}) { edges {node {id}} pageInfo {totalCount} } }".into(),
+    )
+    .await;
+    assert_eq!(response.errors.len(), 1);
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from("AUTHORIZATION_MISCONFIGURED"))
+    );
+    assert_eq!(response.data, async_graphql::Value::Null);
+    let reads = capture.take();
+    assert_eq!(reads.iter().map(|(_, count)| *count).sum::<usize>(), 19);
+    assert!(reads.iter().all(|(_, count)| *count <= 7));
+    assert_eq!(policy.evaluations.load(Ordering::Relaxed), 19);
 }

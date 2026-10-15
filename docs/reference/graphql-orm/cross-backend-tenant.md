@@ -3,7 +3,7 @@ title: "Cross-Backend Tenant Isolation Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -43,7 +43,11 @@ into SQL text.
 ## Requirements
 
 - Apply constraints inside SQL before pagination.
-- Never fetch all rows and filter authorization only in memory.
+- Use SQL predicates for tenant boundaries; never load an unbounded result set
+  and apply tenant isolation only afterward. Residual business callbacks use
+  explicit finite `AuthorizedScanConfig` budgets in generated offset/search
+  paths; exhaustion fails closed without partial records or totals. Prefer
+  complete reviewed SQL visibility predicates for large sensitive sets.
 - Missing tenant under `StructuralAuthorization::Required` denies before query execution.
 - Relation loaders should carry `DbAuthContext` so cache partitions cannot cross tenants.
 
@@ -59,3 +63,8 @@ let request = request
 
 RLS policies and structural predicates should encode the same tenant/owner
 rules. Prefer parity tests on every backend your service enables.
+
+Protected offset/search work and bounded cursor-scan status have different
+contracts. See the [pagination reference](pagination-migration.md#exact-offsets-remain-compatible)
+and [0.46 migration](../../../MIGRATION.md#0450-to-0460-bounded-protected-offset-and-search-reads)
+for finite host budgets and safe failure handling.

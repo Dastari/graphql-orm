@@ -4686,68 +4686,9 @@ pub(crate) fn generate_graphql_operations(
                 }
                 query = query.default_order();
 
-                if db.row_policy().is_some() {
-                    let requested_page = page.clone();
-                    let hits = query
-                        .fetch_all_with_auth(auth_context.as_ref())
-                        .await
-                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-                    let mut visible_hits = Vec::new();
-                    for hit in hits {
-                        if db.can_read_row(
-                            Some(ctx),
-                            #entity_name_lit,
-                            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                            &hit.entity as &(dyn ::std::any::Any + Send + Sync),
-                        ).await? {
-                            visible_hits.push(hit);
-                        }
-                    }
-                    let resolved_page = db.pagination_config().resolve_page(requested_page.as_ref(), true);
-                    let total = visible_hits.len() as i64;
-                    let offset = resolved_page.offset.max(0) as usize;
-                    let limit = resolved_page.limit.map(|limit| limit.max(0) as usize);
-                    let paged_hits = if offset >= visible_hits.len() {
-                        Vec::new()
-                    } else if let Some(limit) = limit {
-                        visible_hits.into_iter().skip(offset).take(limit).collect::<Vec<_>>()
-                    } else {
-                        visible_hits.into_iter().skip(offset).collect::<Vec<_>>()
-                    };
-                    let paged_len = paged_hits.len();
-                    let mut generic_conn = ::graphql_orm::graphql::orm::SearchConnection {
-                        edges: paged_hits.into_iter().enumerate().map(|(index, hit)| {
-                            ::graphql_orm::graphql::orm::SearchConnectionEdge {
-                                cursor: ::graphql_orm::graphql::pagination::encode_cursor((offset + index) as i64),
-                                score: hit.score,
-                                node: hit.entity,
-                            }
-                        }).collect::<Vec<_>>(),
-                        page_info: ::graphql_orm::graphql::pagination::PageInfo {
-                            has_next_page: (offset as i64 + paged_len as i64) < total,
-                            has_previous_page: offset > 0,
-                            start_cursor: None,
-                            end_cursor: None,
-                            total_count: Some(total),
-                        },
-                    };
-                    generic_conn.page_info.start_cursor = generic_conn.edges.first().map(|edge| edge.cursor.clone());
-                    generic_conn.page_info.end_cursor = generic_conn.edges.last().map(|edge| edge.cursor.clone());
-
-                    #relation_preload_search_list
-
-                    return Ok(#search_connection_type::from_generic(generic_conn));
-                }
-
-                if let Some(page) = page {
-                    query = query.paginate(page);
-                }
-
                 let mut generic_conn = query
-                    .fetch_connection_with_auth(auth_context.as_ref())
-                    .await
-                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                    .fetch_authorized_connection(db, ctx, auth_context.as_ref(), page)
+                    .await?;
 
                 #relation_preload_search_list
 
@@ -6761,41 +6702,15 @@ pub(crate) fn generate_graphql_operations(
                     let visibility = db.read_visibility::<#struct_name>(
                         Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await?;
-                    query = query.with_read_visibility(&visibility)?;
                     if visibility.requires_residual_checks() {
-                        let base_query = query.clone();
-                        let requested_page = page.clone();
-
-                        let mut all_rows = base_query
-                            .fetch_all_with_auth(db, auth_context.as_ref())
-                            .await
-                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                        let mut visible_rows = Vec::new();
-                        for row in all_rows.drain(..) {
-                            if db.can_read_row(
-                                Some(ctx),
-                                #entity_name_lit,
-                                <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                                &row as &(dyn ::std::any::Any + Send + Sync),
-                            ).await? {
-                                visible_rows.push(row);
-                            }
-                        }
-
-                        let resolved_page = db.pagination_config().resolve_page(requested_page.as_ref(), true);
-                        let total = visible_rows.len() as i64;
-                        let offset = resolved_page.offset.max(0) as usize;
-                        let limit = resolved_page.limit.map(|limit| limit as usize);
-
-                        let paged_rows: Vec<#struct_name> = if offset >= visible_rows.len() {
-                            Vec::new()
-                        } else if let Some(limit) = limit {
-                            visible_rows.into_iter().skip(offset).take(limit).collect()
-                        } else {
-                            visible_rows.into_iter().skip(offset).collect()
-                        };
+                        let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
+                        let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
+                            db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
+                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                        ).await?;
+                        let total = authorized_page.total_count;
+                        let offset = authorized_page.offset.max(0) as usize;
+                        let paged_rows = authorized_page.entities;
 
                         let has_next_page = (offset as i64 + paged_rows.len() as i64) < total;
                         let has_previous_page = offset > 0;
@@ -6824,6 +6739,7 @@ pub(crate) fn generate_graphql_operations(
                         return Ok(#connection_type::from_generic(generic_conn));
                     }
 
+                    query = query.with_read_visibility(&visibility)?;
                     if let Some(ref p) = page {
                         query = query.paginate(p);
                     }
@@ -7160,41 +7076,15 @@ pub(crate) fn generate_graphql_operations(
                 let visibility = db.read_visibility::<#struct_name>(
                     Some(ctx), ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await?;
-                query = query.with_read_visibility(&visibility)?;
                 if visibility.requires_residual_checks() {
-                    let base_query = query.clone();
-                    let requested_page = page.clone();
-
-                    let mut all_rows = base_query
-                        .fetch_all_with_auth(db, auth_context.as_ref())
-                        .await
-                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                    let mut visible_rows = Vec::new();
-                    for row in all_rows.drain(..) {
-                        if db.can_read_row(
-                            Some(ctx),
-                            #entity_name_lit,
-                            <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                            ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
-                            &row as &(dyn ::std::any::Any + Send + Sync),
-                        ).await? {
-                            visible_rows.push(row);
-                        }
-                    }
-
-                    let resolved_page = db.pagination_config().resolve_page(requested_page.as_ref(), true);
-                    let total = visible_rows.len() as i64;
-                    let offset = resolved_page.offset.max(0) as usize;
-                    let limit = resolved_page.limit.map(|limit| limit as usize);
-
-                    let paged_rows: Vec<#struct_name> = if offset >= visible_rows.len() {
-                        Vec::new()
-                    } else if let Some(limit) = limit {
-                        visible_rows.into_iter().skip(offset).take(limit).collect()
-                    } else {
-                        visible_rows.into_iter().skip(offset).collect()
-                    };
+                    let resolved_page = db.pagination_config().resolve_page(page.as_ref(), true);
+                    let authorized_page = ::graphql_orm::graphql::loaders::scan_authorized_query(
+                        db, ctx, query, auth_context.as_ref(), &visibility, resolved_page,
+                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                    ).await?;
+                    let total = authorized_page.total_count;
+                    let offset = authorized_page.offset.max(0) as usize;
+                    let paged_rows = authorized_page.entities;
 
                     let has_next_page = (offset as i64 + paged_rows.len() as i64) < total;
                     let has_previous_page = offset > 0;
@@ -7223,6 +7113,7 @@ pub(crate) fn generate_graphql_operations(
                     return Ok(#connection_type::from_generic(generic_conn));
                 }
 
+                query = query.with_read_visibility(&visibility)?;
                 if let Some(ref p) = page {
                     query = query.paginate(p);
                 }

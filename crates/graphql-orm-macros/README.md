@@ -16,13 +16,13 @@ macro/runtime versions aligned:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.45.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.46.0", default-features = false, features = ["sqlite"] }
 ```
 
 Direct use is supported for tooling that needs the macro package:
 
 ```toml
-graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.45.0", default-features = false, features = ["sqlite"] }
+graphql-orm-macros = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.46.0", default-features = false, features = ["sqlite"] }
 ```
 
 The direct dependency still requires a compatible `graphql-orm` runtime in the
@@ -31,6 +31,13 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 Version 0.39.1 aligns with the runtime string/binding correction; generated
 static fragment rebasing, inputs, GraphQL SDL and timestamp behavior are unchanged.
+
+Version 0.46.0 requires explicit finite scan budgets for generated residual-policy
+offset lists and all generated fallback search, including database-RLS-only
+deployments without a RowPolicy. Exact counts are returned only when
+scanning completes; missing/exhausted budgets fail closed without partial data.
+See the [bounded read migration](../../MIGRATION.md#0450-to-0460-bounded-protected-offset-and-search-reads)
+for configuration and AI/tool consumer error handling.
 
 Version 0.45.0 rechecks generated subscription authorization for each event,
 releases current authorized live rows and requires bounded source provenance.
