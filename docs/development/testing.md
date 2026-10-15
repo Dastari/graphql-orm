@@ -3,7 +3,7 @@ title: "Testing and verification"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -138,6 +138,42 @@ authenticated HTTP and WebSocket execution, downstream timeout/recovery,
 signal drain, and listener-release checks. The bounded hardening campaign also
 covers repeated reload, JWKS outage/rotation, WebSocket churn, and subscription
 lag. They must not contact a deployed subgraph or application database.
+
+## Required S3 transport regressions
+
+The CI and release `s3-security` jobs execute the reviewed SDK graph's owned
+HTTP lost-response/replacement and HTTPS trusted-CA/untrusted-CA regressions.
+The HTTP fixture requires ambiguous single-attempt deletion to preserve a
+replacement lock. The HTTPS parent creates a loopback Python server and
+temporary CA/server certificates, then runs isolated child clients with private
+trust configuration. It requires `openssl` and `python3`; no Docker, cloud
+account, application endpoint or service credentials are used.
+
+Run the same selected tests locally through the applicable resource-controlled
+runner:
+
+```sh
+bash scripts/run-owned-s3-security-tests.sh
+```
+
+The script uses the S3 feature without provider defaults and selects the exact
+`single_attempt_delete_does_not_replay_after_lost_response_and_replacement`
+test in `s3_integration`, then the ignored `owned_https_transport_fixture`
+parent in `s3_https_transport`. It never runs the environment-configured
+real-service round trip or invokes the HTTPS child entry point on its own.
+Proxy and real-service test environment settings are cleared within the script.
+Each Cargo process must succeed and its final parent summary must report a
+nonzero passing-test count; nested HTTPS child summaries cannot satisfy an
+empty parent invocation. Tests run with one thread.
+
+Each job has one Cargo build worker and a finite timeout. It also runs storage
+all-targets Clippy with explicit `local,s3,azure` features, warnings-denied
+Rustdoc with `local,s3`, and backup compilation with the dependency feature
+`graphql-orm-storage/s3`. Local examples and Azure placeholder helpers require
+that explicit Clippy profile; the backup package has no feature named `s3`.
+The release job depends on the protected `guard`, and aggregate `validate`
+requires its success before publication. These gates establish required
+execution; passing results must still be recorded for the exact candidate.
 
 ## External-service tests
 
