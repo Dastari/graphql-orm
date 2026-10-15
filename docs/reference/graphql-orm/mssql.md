@@ -3,7 +3,7 @@ title: "Microsoft SQL Server Backend"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -23,7 +23,7 @@ not provide an MSSQL driver.
 For a service that only uses SQL Server, select the `mssql` backend feature:
 
 ```toml
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.43.1", default-features = false, features = ["mssql"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.48.0", default-features = false, features = ["mssql"] }
 ```
 
 When exactly one of `sqlite`, `postgres`, or `mssql` is enabled, the legacy implicit backend remains
@@ -95,17 +95,38 @@ hooks, policies, change events, and subscriptions. This mode still cannot manage
 schema, search structures, RLS, or backups. Unsupported entity features continue to fail during
 macro expansion rather than silently degrading.
 
+CI and release validation execute the TLS, writable-transaction and query-notification
+regressions on test-owned loopback SQL Server containers. The TLS fixture checks
+an untrusted private CA, an explicitly trusted CA, and a mismatched hostname.
+
 ## Connections
+
+SQL Server uses the platform native TLS transport. Linux builds need OpenSSL
+headers and `pkg-config`; runtime images need OpenSSL and CA certificates.
+Windows uses Schannel and macOS uses Security Framework. Cross-compilation and
+static images need an appropriate target OpenSSL configuration. See the
+[0.48 migration](../../../MIGRATION.md#0470-to-0480-sql-server-platform-tls).
+
+During TLS negotiation, certificate-chain and hostname verification are enabled
+by default. Use the real server DNS name and `Encrypt=true` to require TLS for the
+full session. Omitting `Encrypt` from an ADO connection string allows login-only
+encryption when the server does not require encrypted sessions. Install private
+roots in the platform store, or add `TrustServerCertificateCA=/absolute/path/ca.pem`
+to the connection string;
+PEM/CRT/DER are supported and hostname validation remains enabled. This adds to
+platform trust rather than pinning an exclusive root. `TrustServerCertificate=true`
+explicitly disables both chain and hostname verification; reserve it for isolated
+test infrastructure. Never recommend it as a production connection-error workaround.
 
 Create a read-only MSSQL database handle from a Tiberius ADO.NET-style connection string:
 
 ```rust
 let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>::connect_ado(
-    "server=tcp:127.0.0.1,1433;\
+    "server=tcp:sql.internal.example,1433;\
      database=LegacyDb;\
-     user id=sa;\
-     password=Your_strong_password123;\
-     TrustServerCertificate=true",
+     user id=application_reader;\
+     password=<secret>;\
+     Encrypt=true",
 )
 .await?
     .with_schema_policy(graphql_orm::graphql::orm::SchemaPolicy::ExternalReadOnly);
@@ -124,11 +145,11 @@ contract:
 ```rust
 let database = graphql_orm::db::Database::<graphql_orm::MssqlBackend>
     ::connect_ado_external_writable(
-        "server=tcp:127.0.0.1,1433;\
+        "server=tcp:sql.internal.example,1433;\
          database=ApplicationDb;\
          user id=application_writer;\
          password=<secret>;\
-         TrustServerCertificate=true",
+         Encrypt=true",
     )
     .await?;
 ```
@@ -458,6 +479,14 @@ SQL Server-specific types such as `xml`, `hierarchyid`,
 ORM scalar types in this phase.
 
 ## Tests
+
+The certificate regression creates a private test CA and an owned SQL Server,
+then verifies encryption, trusted private-CA access, untrusted-chain rejection and
+hostname rejection. It needs the cached pinned Docker image and OpenSSL:
+
+```bash
+cargo test -p graphql-orm --no-default-features --features mssql --locked --test mssql_tls -- --ignored --test-threads=1
+```
 
 Pure SQL rendering tests run with the default test suite:
 
