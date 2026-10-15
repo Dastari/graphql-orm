@@ -20,6 +20,8 @@ for historical context.
   existing explicit AuthorizedScanConfig. Fetch finite candidate batches, retain
   only the requested visible window and publish exact totals only on exhaustion.
   Missing/exhausted budgets fail closed without partial nodes or totals.
+- Decode PostgreSQL native relevance scores as double precision, matching the
+  public f64 score contract; exercise real ranked SQL alongside SQLite FTS5.
 - Bound protected search with native ranked SQL batches or finite raw fallback
   batches and bounded score-window retention. Require explicit budgets for every
   generated fallback, including hosts using only database RLS without RowPolicy.

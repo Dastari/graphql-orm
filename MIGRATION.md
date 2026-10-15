@@ -46,7 +46,7 @@ Fallback scoring (including MSSQL) scans bounded raw candidates and retains
 only the requested highest-score window; its budget includes nonmatching and
 unauthorized raw candidates. A complete SQL visibility predicate bypasses row
 callbacks as specified by that contract. Complete native search continues using
-SQL count/page queries under Complete/Unrestricted visibility. Generated fallback always requires a scan budget, including when no `RowPolicy` is registered: database RLS is not discoverable through that registry. The
+SQL count/page queries under Complete/Unrestricted visibility. Native PostgreSQL relevance is explicitly widened from SQL real to double precision to match the public f64 score decoder; ordering is unchanged. Generated fallback always requires a scan budget, including when no `RowPolicy` is registered: database RLS is not discoverable through that registry. The
 bounds constrain rows fetched/decoded and policy calls, not database planner or
 COUNT work; host statement deadlines and indexes remain separate controls.
 

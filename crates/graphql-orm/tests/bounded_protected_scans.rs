@@ -47,14 +47,25 @@ struct BoundedRow {
     #[graphql_orm(searchable(weight = "A"))]
     title: String,
 }
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[derive(
     GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
 )]
-#[graphql_entity(
-    backend = "sqlite",
-    table = "native_bounded_rows",
-    plural = "NativeBoundedRows"
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "native_bounded_rows",
+        plural = "NativeBoundedRows"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "native_bounded_rows",
+        plural = "NativeBoundedRows"
+    )
 )]
 #[graphql_orm(search(index = true))]
 struct NativeBoundedRow {
@@ -63,6 +74,7 @@ struct NativeBoundedRow {
     #[filterable(type = "string")]
     #[sortable]
     id: String,
+    #[filterable(type = "string")]
     owner: String,
     #[graphql_orm(searchable(weight = "A"))]
     title: String,
@@ -70,7 +82,7 @@ struct NativeBoundedRow {
 #[cfg(feature = "sqlite")]
 schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [BoundedRow, NativeBoundedRow], }
 #[cfg(feature = "postgres")]
-schema_roots! { backend: "postgres", query_custom_ops: [], entities: [BoundedRow], }
+schema_roots! { backend: "postgres", query_custom_ops: [], entities: [BoundedRow, NativeBoundedRow], }
 #[cfg(feature = "mssql")]
 schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [BoundedRow], }
 #[cfg(feature = "sqlite")]
@@ -165,12 +177,28 @@ impl RowPolicy for OwnedRowPolicy {
         &'a self,
         _: Option<&'a async_graphql::Context<'_>>,
         _: &'a Database,
-        _: &'static str,
+        entity: &'static str,
         _: Option<&'static str>,
         _: EntityAccessSurface,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
         Box::pin(async move {
             if self.complete {
+                #[cfg(any(feature = "sqlite", feature = "postgres"))]
+                if entity == "NativeBoundedRow" {
+                    return Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<
+                        DefaultBackend,
+                        _,
+                    >(
+                        &NativeBoundedRowWhereInput {
+                            owner: Some(StringFilter {
+                                eq: Some("alice".into()),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    )?));
+                }
+                let _ = entity;
                 Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<
                     DefaultBackend,
                     _,
@@ -205,7 +233,7 @@ impl RowPolicy for OwnedRowPolicy {
                     let owner = row
                         .downcast_ref::<BoundedRow>()
                         .map(|row| row.owner.as_str());
-                    #[cfg(feature = "sqlite")]
+                    #[cfg(any(feature = "sqlite", feature = "postgres"))]
                     let owner = owner.or_else(|| {
                         row.downcast_ref::<NativeBoundedRow>()
                             .map(|row| row.owner.as_str())
@@ -368,13 +396,35 @@ async fn protected_list_and_fallback_search_enforce_actual_candidate_budgets()
     Ok(())
 }
 
-#[cfg(feature = "sqlite")]
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+async fn set_native_rank(db: &Database, repeated: bool) -> graphql_orm::Result<()> {
+    let text = if repeated {
+        "needle needle needle needle"
+    } else {
+        "needle"
+    };
+    execute(
+        db,
+        &format!("UPDATE native_bounded_rows SET title = '{text}' WHERE id = '039'"),
+    )
+    .await?;
+    #[cfg(feature = "sqlite")]
+    execute(db, &format!("UPDATE __graphql_orm_fts_native_bounded_rows SET weight_a = '{text}', document_text = '{text}' WHERE entity_pk = '039'")).await?;
+    #[cfg(feature = "postgres")]
+    execute(db, &format!("UPDATE __graphql_orm_search_native_bounded_rows SET document_vector = to_tsvector('english', '{text}') WHERE entity_pk = '039'")).await?;
+    Ok(())
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 #[tokio::test]
 async fn native_ranked_search_is_batched_without_changing_strategy_or_tie_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let (mut db, mut owner) = fixture().await?;
     execute(&db, "CREATE TABLE native_bounded_rows (id TEXT PRIMARY KEY, owner TEXT NOT NULL, title TEXT NOT NULL)").await?;
+    #[cfg(feature = "sqlite")]
     execute(&db, "CREATE VIRTUAL TABLE __graphql_orm_fts_native_bounded_rows USING fts5(entity_pk UNINDEXED, weight_a, weight_b, weight_c, weight_d, document_text)").await?;
+    #[cfg(feature = "postgres")]
+    execute(&db, "CREATE TABLE __graphql_orm_search_native_bounded_rows (entity_pk TEXT PRIMARY KEY, document_vector TSVECTOR NOT NULL)").await?;
     for index in 0..40 {
         execute(
             &db,
@@ -384,18 +434,59 @@ async fn native_ranked_search_is_batched_without_changing_strategy_or_tie_order(
             ),
         )
         .await?;
+        #[cfg(feature = "sqlite")]
         execute(&db, &format!("INSERT INTO __graphql_orm_fts_native_bounded_rows VALUES ('{index:03}', 'needle', '', '', '', 'needle')")).await?;
+        #[cfg(feature = "postgres")]
+        execute(&db, &format!("INSERT INTO __graphql_orm_search_native_bounded_rows VALUES ('{index:03}', to_tsvector('english', 'needle'))")).await?;
     }
+    set_native_rank(&db, true).await?;
+    let assert_ranked_control = |response: async_graphql::Response, total: i64| {
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        assert_eq!(
+            data["nativeBoundedRowsSearch"]["pageInfo"]["totalCount"],
+            total
+        );
+        assert_eq!(
+            data["nativeBoundedRowsSearch"]["edges"][0]["node"]["id"],
+            "039"
+        );
+        let score = data["nativeBoundedRowsSearch"]["edges"][0]["score"]
+            .as_f64()
+            .unwrap();
+        assert!(score.is_finite() && score > 0.0);
+    };
+    let native_hits = NativeBoundedRow::search(
+        db.pool(),
+        graphql_orm::graphql::filters::SearchInput {
+            query: "needle".into(),
+            mode: None,
+            min_score: None,
+        },
+    )
+    .limit(1)
+    .fetch_all()
+    .await?;
+    assert_eq!(native_hits.len(), 1);
+    assert_eq!(native_hits[0].entity.id, "039");
+    assert!(native_hits[0].score.is_finite() && native_hits[0].score > 0.0);
     let native_without_callback = request(&db, "{ nativeBoundedRowsSearch(search: {query: \"needle\"}, page: {limit: 1}) { edges {node {id} score} pageInfo {totalCount} } }").await;
-    assert!(
-        native_without_callback.errors.is_empty(),
-        "{:?}",
-        native_without_callback.errors
-    );
-    assert_eq!(
-        native_without_callback.data.into_json()?["nativeBoundedRowsSearch"]["pageInfo"]["totalCount"],
-        40
-    );
+    assert_ranked_control(native_without_callback, 40);
+    let complete_calls = Arc::new(AtomicUsize::new(0));
+    let mut complete = db.clone();
+    complete.set_row_policy(OwnedRowPolicy {
+        complete: true,
+        calls: complete_calls.clone(),
+    });
+    let complete_response = request(&complete, "{ nativeBoundedRowsSearch(search: {query: \"needle\"}, page: {limit: 1}) { edges {node {id} score} pageInfo {totalCount} } }").await;
+    assert_ranked_control(complete_response, 10);
+    assert_eq!(complete_calls.load(Ordering::Relaxed), 0);
+    set_native_rank(&db, false).await?;
+    let native_marker = if cfg!(feature = "sqlite") {
+        " MATCH "
+    } else {
+        "ts_rank_cd"
+    };
     let calls = Arc::new(AtomicUsize::new(0));
     db.set_row_policy(OwnedRowPolicy {
         complete: false,
@@ -413,7 +504,7 @@ async fn native_ranked_search_is_batched_without_changing_strategy_or_tie_order(
     assert!(
         reads
             .iter()
-            .all(|(sql, rows)| sql.contains(" MATCH ") && *rows <= 4)
+            .all(|(sql, rows)| sql.contains(native_marker) && *rows <= 4)
     );
     let bounded = db.with_authorized_scan_config(AuthorizedScanConfig::new([11; 32], 7, 64));
     calls.store(0, Ordering::Relaxed);
@@ -439,7 +530,7 @@ async fn native_ranked_search_is_batched_without_changing_strategy_or_tie_order(
     assert!(
         reads
             .iter()
-            .all(|(sql, rows)| sql.contains(" MATCH ") && *rows <= 7)
+            .all(|(sql, rows)| sql.contains(native_marker) && *rows <= 7)
     );
     assert_eq!(calls.load(Ordering::Relaxed), 40);
     owner.cleanup()?;

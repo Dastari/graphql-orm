@@ -774,7 +774,7 @@ where
             B::DIALECT.count_projection().to_string()
         } else {
             format!(
-                "{}, ts_rank_cd(s.document_vector, q.query) AS __gom_search_score",
+                "{}, CAST(ts_rank_cd(s.document_vector, q.query) AS DOUBLE PRECISION) AS __gom_search_score",
                 T::column_names().join(", ")
             )
         };
