@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 
 #[derive(
@@ -89,17 +94,18 @@ async fn database() -> Result<graphql_orm::db::Database, Box<dyn std::error::Err
     }
     #[cfg(feature = "postgres")]
     {
-        let url = std::env::var("TEST_DATABASE_URL")?;
-        Ok(graphql_orm::db::Database::connect_postgres(&url).await?)
+        let pool = owned_postgres::OwnedPostgres::pool("composite-mutations", 5).await?;
+        Ok(graphql_orm::db::Database::new(pool))
     }
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn composite_repository_and_transaction_crud_is_typed()
 -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(feature = "postgres") && std::env::var("TEST_DATABASE_URL").is_err() {
-        return Ok(());
-    }
     let mut database = database().await?;
     database.set_entity_policy(AllowEntityPolicy);
     #[cfg(feature = "sqlite")]
@@ -365,6 +371,10 @@ async fn composite_repository_and_transaction_crud_is_typed()
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn composite_repository_opt_in_adds_no_graphql_mutations_and_strict_auth_fails_closed()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema_database = database().await?;
@@ -437,13 +447,16 @@ async fn composite_repository_opt_in_adds_no_graphql_mutations_and_strict_auth_f
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn postgres_composite_mutations_honor_transaction_auth_and_rls()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::str::FromStr;
 
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        return Ok(());
-    };
+    let owned = owned_postgres::OwnedPostgres::start("composite-mutations")?;
+    let url = owned.url.clone();
     let owner = graphql_orm::sqlx::PgPool::connect(&url).await?;
     graphql_orm::sqlx::query("DROP TABLE IF EXISTS typed_grants CASCADE")
         .execute(&owner)

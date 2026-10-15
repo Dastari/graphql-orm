@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use async_graphql::{Request, Schema};
 use graphql_orm::prelude::*;
 use std::sync::{Arc, Mutex};
@@ -197,10 +202,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("generated-upserts", 5).await?;
     sqlx::query("DROP TABLE IF EXISTS discovered_devices")
         .execute(&pool)
         .await?;
@@ -220,6 +222,10 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_upserts_work_for_graphql_and_repository_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
@@ -393,6 +399,10 @@ async fn generated_upserts_work_for_graphql_and_repository_paths()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn caller_owned_upsert_requires_state_machine_isolation()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;

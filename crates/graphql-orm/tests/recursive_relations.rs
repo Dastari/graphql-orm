@@ -1,5 +1,10 @@
 #![allow(clippy::vec_box, clippy::question_mark)]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
 use sqlx::Row;
@@ -67,10 +72,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("recursive-relations", 5).await?;
     sqlx::query("DROP TABLE IF EXISTS places")
         .execute(&pool)
         .await?;
@@ -129,6 +131,10 @@ fn nested_parent_query(id: &str, levels: usize) -> String {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn self_referential_relations_work_with_boxed_parent_fields()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
@@ -181,6 +187,10 @@ async fn self_referential_relations_work_with_boxed_parent_fields()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_schema_builder_rejects_deep_relation_cycles_by_default()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
@@ -202,6 +212,10 @@ async fn generated_schema_builder_rejects_deep_relation_cycles_by_default()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_relation_lists_have_complexity_cost() -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::new(pool);

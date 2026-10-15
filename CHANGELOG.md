@@ -16,6 +16,12 @@ for historical context.
 
 ## 0.43.1 (unreleased)
 
+- Require test-owned disposable PostgreSQL/PostGIS/SQL Server infrastructure in
+  legacy integration fixtures. Remove ambient URL/default-port access and silent
+  no-URL passes; add explicit container opt-in and pool-lifetime cleanup checks.
+  Make the operation-catalog example use the selected backend. Library APIs and
+  package versions are unchanged by these development-only changes.
+
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse
   typed key binding for bare-pool readback and related single-key lookups/updates,
   preserving supplied keys and String/UUID/binary/composite key behavior.

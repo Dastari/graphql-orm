@@ -1,23 +1,27 @@
 #![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
 use std::sync::Arc;
 
-async fn database() -> Option<Database<PostgresBackend>> {
-    let url = std::env::var("TEST_DATABASE_URL").ok()?;
-    Database::<PostgresBackend>::connect_postgres(url)
-        .await
-        .ok()
+async fn database() -> Result<Database<PostgresBackend>, Box<dyn std::error::Error>> {
+    let pool = owned_postgres::OwnedPostgres::pool("transactions", 5).await?;
+    Ok(Database::<PostgresBackend>::new(pool))
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn state_machine_is_serializable_auth_local_and_conflicts_are_retryable()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Some(database) = database().await else {
-        eprintln!("skipping live transaction test: TEST_DATABASE_URL is not set");
-        return Ok(());
-    };
+    let database = database().await?;
     graphql_orm::sqlx::query("DROP TABLE IF EXISTS graphql_orm_transaction_state")
         .execute(database.pool())
         .await?;

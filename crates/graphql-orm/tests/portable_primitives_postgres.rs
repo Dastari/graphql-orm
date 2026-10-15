@@ -1,5 +1,10 @@
 #![cfg(all(feature = "postgres", not(feature = "sqlite")))]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -76,12 +81,14 @@ fn postgres_rendering_covers_append_only_and_portable_checks() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn postgres_live_portable_primitives_enforce_and_introspect()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        eprintln!("skipping disposable PostgreSQL primitive test: TEST_DATABASE_URL is unset");
-        return Ok(());
-    };
+    let owned = owned_postgres::OwnedPostgres::start("portable-primitives-postgres")?;
+    let url = owned.url.clone();
     let database = Database::<PostgresBackend>::connect_postgres(url).await?;
     for table in ["pg_state_rows", "pg_events", "pg_constrained"] {
         graphql_orm::sqlx::query(&format!("DROP TABLE IF EXISTS {table} CASCADE"))

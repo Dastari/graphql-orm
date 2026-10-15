@@ -11,6 +11,21 @@ pub(crate) struct OwnedPostgres {
 
 impl OwnedPostgres {
     pub(crate) fn start(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_image(label, POSTGRES_IMAGE)
+    }
+
+    fn start_image(label: &str, image: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        for variable in [
+            "DATABASE_URL",
+            "TEST_DATABASE_URL",
+            "MSSQL_TEST_DATABASE_URL",
+        ] {
+            if std::env::var_os(variable).is_some_and(|value| !value.is_empty()) {
+                return Err(
+                    format!("refusing ambient {variable}; this test owns its database").into(),
+                );
+            }
+        }
         let owner_token = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
         let name = format!("graphql-orm-{label}-{owner_token}");
         let password = format!("pg_{owner_token}");
@@ -32,7 +47,7 @@ impl OwnedPostgres {
                 &format!("POSTGRES_PASSWORD={password}"),
                 "--env",
                 &format!("POSTGRES_DB={database}"),
-                POSTGRES_IMAGE,
+                image,
             ])
             .output()?;
         if !output.status.success() {
@@ -83,6 +98,44 @@ impl OwnedPostgres {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         Err("owned PostgreSQL did not become ready".into())
+    }
+
+    /// Keep the exact owned container alive as long as any pool clone exists.
+    /// Pool options retain the callback and its guard; there is no pool/guard cycle.
+    #[allow(dead_code)] // Shared by integration binaries that also use explicit guards.
+    pub(crate) async fn pool(
+        label: &str,
+        max_connections: u32,
+    ) -> Result<graphql_orm::sqlx::PgPool, Box<dyn std::error::Error>> {
+        Self::pool_image(label, max_connections, POSTGRES_IMAGE).await
+    }
+
+    #[allow(dead_code)]
+    pub(crate) async fn postgis_pool(
+        label: &str,
+    ) -> Result<graphql_orm::sqlx::PgPool, Box<dyn std::error::Error>> {
+        Self::pool_image(label, 5, "postgis/postgis:17-3.5").await
+    }
+
+    async fn pool_image(
+        label: &str,
+        max_connections: u32,
+        image: &str,
+    ) -> Result<graphql_orm::sqlx::PgPool, Box<dyn std::error::Error>> {
+        let owned = std::sync::Arc::new(Self::start_image(label, image)?);
+        let url = owned.url.clone();
+        let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+            .max_connections(max_connections)
+            .after_connect(move |_, _| {
+                let guard = owned.clone();
+                Box::pin(async move {
+                    drop(guard);
+                    Ok(())
+                })
+            })
+            .connect(&url)
+            .await?;
+        Ok(pool)
     }
 
     pub(crate) fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {

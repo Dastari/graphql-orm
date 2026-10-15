@@ -1,5 +1,10 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 
 #[derive(
@@ -157,8 +162,8 @@ async fn database() -> Result<Database<Backend>, Box<dyn std::error::Error>> {
     let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
     #[cfg(feature = "postgres")]
     let database = {
-        let url = std::env::var("TEST_DATABASE_URL")?;
-        let database = Database::<PostgresBackend>::connect_postgres(url).await?;
+        let pool = owned_postgres::OwnedPostgres::pool("read-projections", 5).await?;
+        let database = Database::<PostgresBackend>::new(pool);
         graphql_orm::sqlx::query("DROP VIEW IF EXISTS projection_probe CASCADE")
             .execute(database.pool())
             .await?;
@@ -189,11 +194,12 @@ fn create_input(serial: &str, issued_at: i64) -> CreateProjectionCertificateInpu
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn projections_are_typed_bounded_transaction_visible_and_authorized()
 -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(feature = "postgres") && std::env::var("TEST_DATABASE_URL").is_err() {
-        return Ok(());
-    }
     let mut database = database().await?;
     database.set_entity_policy(AllowEntityReads);
     database.set_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
@@ -330,11 +336,12 @@ async fn projections_are_typed_bounded_transaction_visible_and_authorized()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn backend_observable_probe_proves_excluded_column_is_not_selected()
 -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(feature = "postgres") && std::env::var("TEST_DATABASE_URL").is_err() {
-        return Ok(());
-    }
     let database = database().await?;
     #[cfg(feature = "sqlite")]
     {
@@ -391,6 +398,10 @@ async fn backend_observable_probe_proves_excluded_column_is_not_selected()
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn sqlite_undecodable_excluded_value_is_never_decoded()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut database = database().await?;
@@ -428,13 +439,16 @@ async fn sqlite_undecodable_excluded_value_is_never_decoded()
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn postgres_transaction_auth_and_rls_filter_projection_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     use std::str::FromStr;
 
-    let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
-        return Ok(());
-    };
+    let owned = owned_postgres::OwnedPostgres::start("read-projections")?;
+    let url = owned.url.clone();
     let owner = graphql_orm::sqlx::PgPool::connect(&url).await?;
     // Keep this fixture in the schema granted to the reader. Some disposable
     // PostGIS images also create a schema matching the owner role, which makes

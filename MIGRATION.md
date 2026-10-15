@@ -13,6 +13,15 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## Test runner migration: owned database fixtures
+
+For repository contributors, unset `DATABASE_URL`, `TEST_DATABASE_URL`, and
+`MSSQL_TEST_DATABASE_URL`; legacy tests no longer connect to supplied endpoints.
+Install local Docker and run `scripts/run-owned-database-lanes.sh postgres-legacy`
+or `mssql` to explicitly execute container-backed cases. Ordinary unit runs
+report those cases as ignored rather than silently passing. Application data,
+public library APIs, and persisted formats are unaffected.
+
 ## 0.43.0 to 0.43.1: host-supplied integer primary-key binding
 
 No data migration, public signature, feature or GraphQL SDL change. Fields declared

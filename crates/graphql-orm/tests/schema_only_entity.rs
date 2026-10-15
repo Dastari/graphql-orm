@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 
 #[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
@@ -87,10 +92,7 @@ async fn setup_pool() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("schema-only-entity", 5).await?;
     for table in ["schema_only_children", "schema_only_parents"] {
         sqlx::query(&format!("DROP TABLE IF EXISTS {table} CASCADE"))
             .execute(&pool)
@@ -180,6 +182,10 @@ async fn child_exists(pool: &sqlx::PgPool, id: &str) -> Result<bool, sqlx::Error
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn schema_only_entities_drive_staged_relation_delete_policy_migrations()
 -> Result<(), Box<dyn std::error::Error>> {
     use graphql_orm::graphql::orm::{
