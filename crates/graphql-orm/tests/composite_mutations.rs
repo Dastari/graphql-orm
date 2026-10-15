@@ -56,6 +56,39 @@ impl EntityPolicy for AllowEntityPolicy {
     }
 }
 
+// Successful typed CRUD declares a row-write policy independently of the
+// entity provider. Keep the strict missing/denied-provider cases below intact.
+struct TypedGrantRows;
+impl RowPolicy for TypedGrantRows {
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity_name == "TypedGrant"
+                && policy_key == Some("grants.write")
+                && row.is::<TypedGrant>())
+        })
+    }
+}
+
 #[derive(Clone)]
 #[cfg(feature = "sqlite")]
 struct DenyRows;
@@ -108,6 +141,7 @@ async fn composite_repository_and_transaction_crud_is_typed()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut database = database().await?;
     database.set_entity_policy(AllowEntityPolicy);
+    database.set_row_policy(TypedGrantRows);
     #[cfg(feature = "sqlite")]
     {
         let entities = [TypedGrant::metadata()];
@@ -514,6 +548,7 @@ async fn postgres_composite_mutations_honor_transaction_auth_and_rls()
         .await?;
     let mut database = Database::<PostgresBackend>::new(pool.clone());
     database.set_entity_policy(AllowEntityPolicy);
+    database.set_row_policy(TypedGrantRows);
     let auth = DbAuthContext {
         user_id: Some("writer".to_string()),
         subject: Some("writer".to_string()),

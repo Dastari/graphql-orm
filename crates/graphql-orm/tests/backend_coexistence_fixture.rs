@@ -14,6 +14,7 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
             "test",
+            "--locked",
             "--manifest-path",
             manifest,
             "-p",

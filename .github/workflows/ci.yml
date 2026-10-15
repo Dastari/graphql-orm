@@ -129,6 +129,45 @@ jobs:
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
+  orm-security-sqlite:
+    name: Current authority and subscription privacy (SQLite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Require current authority, strict policies, pagination, and private event delivery
+        run: |
+          bash scripts/run-security-test-targets.sh sqlite,auth-agql \
+            current_authority authorization_mode authorized_pagination \
+            subscription_release_authorization subscription_provenance_authorization \
+            subscription_repository_provenance
+
+  orm-security-portable:
+    name: Portable authorization and scan bounds (${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        backend: [sqlite, postgres, mssql]
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Execute portable security regressions on an owned backend
+        run: bash scripts/run-security-test-targets.sh "${{ matrix.backend }}" subscription_portable_authorization bounded_protected_scans
+      - name: Compile and lint current-authority policy on the selected backend
+        run: cargo clippy -p graphql-orm --locked --no-default-features --features "${{ matrix.backend }},auth-agql" --lib -- -D warnings
+
   sqlserver-security:
     name: Owned SQL Server transport and transaction checks
     runs-on: ubuntu-latest

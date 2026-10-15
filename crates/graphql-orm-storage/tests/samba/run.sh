@@ -118,17 +118,17 @@ PYREADY
 cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --features smb --test smb_integration \
+  cargo test --locked --features smb --test smb_integration \
   samba_rejects_invalid_password -- --ignored --nocapture
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --features smb --test smb_integration \
+  cargo test --locked --features smb --test smb_integration \
   samba_round_trip_streaming_listing_and_atomic_create -- --ignored --nocapture
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --features smb --test smb_integration \
+  cargo test --locked --features smb --test smb_integration \
   samba_oversized_chunk_cancellation_and_concurrency_matrix -- --ignored --nocapture
 
 if docker exec "$NORMAL_ID" sh -c 'find /share -path /share/.deleted -prune -o -type f -name "*.uploading" -print -quit | grep -q .'; then
@@ -138,23 +138,23 @@ fi
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$ENCRYPTED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_REQUIRE_ENCRYPTION=1 \
-  cargo test --features smb --test smb_integration \
+  cargo test --locked --features smb --test smb_integration \
   samba_round_trip_streaming_listing_and_atomic_create -- --ignored --nocapture
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_EXPECT_MAX_WRITE=65536 \
-  cargo test --features smb --test smb_integration \
+  cargo test --locked --features smb --test smb_integration \
   samba_constrained_max_write_handles_oversized_input_chunk -- --ignored --nocapture
 
 cd "$WORKSPACE_ROOT/crates/graphql-orm-backup"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --no-default-features --features smb --test smb_repository -- --ignored --nocapture
+  cargo test --locked --no-default-features --features smb --test smb_repository -- --ignored --nocapture
 
 cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  cargo test --features smb --test smb_integration \
+  cargo test --locked --features smb --test smb_integration \
   samba_reconnects_after_server_restart -- --ignored --nocapture

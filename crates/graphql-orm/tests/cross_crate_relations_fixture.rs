@@ -13,7 +13,6 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
         "sqlite"
     };
     let status = std::process::Command::new(cargo)
-        .env("CARGO_BUILD_JOBS", "2")
         .env("CARGO_INCREMENTAL", "0")
         .args([
             "test",
