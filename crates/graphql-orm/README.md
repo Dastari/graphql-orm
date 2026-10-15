@@ -3,7 +3,7 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -24,7 +24,10 @@ field/row policy, and HTTP transport.
 Version 0.45.0 rechecks generated subscription authorization for each event,
 releases current authorized live rows and requires bounded source provenance.
 Denied fields/rows and missing proofs suppress the whole event, including
-metadata. See the [subscription migration](../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
+metadata. Deleted snapshots additionally require explicit default-deny
+`RowPolicy::can_read_deleted_preimage` opt-in. A missing provider or ordinary read
+permission alone does not authorize them, including under database RLS.
+See the [subscription migration](../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)
 for deleted preimages, raw event observers, propagation limits and action filters.
 
 ## Install from Git

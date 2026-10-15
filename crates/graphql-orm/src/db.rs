@@ -990,6 +990,20 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    pub(crate) async fn can_read_deleted_preimage(
+        &self,
+        ctx: Option<&async_graphql::Context<'_>>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        surface: crate::graphql::orm::EntityAccessSurface,
+        row: &(dyn Any + Send + Sync),
+    ) -> async_graphql::Result<bool> {
+        match &self.row_policy {
+            Some(policy) => policy.can_read_deleted_preimage(ctx, self, entity_name, policy_key, surface, row).await,
+            None => Ok(false),
+        }
+    }
+
     /// Resolve and validate request-local read visibility. This does not grant
     /// entity, operation, scope, or field access.
     pub async fn read_visibility<T: crate::graphql::orm::Entity + 'static>(

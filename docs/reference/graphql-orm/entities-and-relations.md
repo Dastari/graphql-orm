@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -322,10 +322,13 @@ with `INVALID_INPUT`: their
 late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
 
-Direct generated deleted preimages are usable only with callback-only or
-explicitly unrestricted visibility and current policies. SQL predicates cannot
-prove authorization of missing rows, so complete/prefilter SQL visibility drops
-deletes. Raw public event-channel emissions remain Rust observer notifications
+Direct generated deleted preimages default to suppression. They require an
+explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or
+unrestricted ORM visibility, plus current entity/row/selected-field policies.
+The callback must independently enforce tenant/owner and database-session rules;
+ordinary read permission, no RowPolicy, or `Unrestricted` cannot prove deleted
+snapshot visibility under RLS. Complete/prefilter SQL visibility drops deletes
+regardless because its predicate cannot authorize a missing row. Raw public event-channel emissions remain Rust observer notifications
 and cannot inject generated GraphQL delivery. Action filters are enforced; the
 unsupported `dummy` filter is rejected. See the
 [0.45 migration](../../../MIGRATION.md#0441-to-0450-subscriptions-authorize-each-release)

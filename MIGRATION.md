@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -38,13 +38,17 @@ invalidation metadata and refresh separately authorized queries for richer data.
 Live payloads now contain the freshly loaded authorized current row. They are
 invalidation notifications, not an immutable change journal: queued historical
 payloads, including a previous owner's data after ownership transfer, are not
-released. Direct generated deletes may use their trusted final preimage under
-callback-only or explicitly unrestricted read visibility, subject to current
-entity, row and selected-field policies. This is prior-owner snapshot semantics;
-a callback must deliberately authorize that preimage. Complete/prefilter SQL
-visibility cannot authorize a missing row, so deleted events are suppressed.
-Use a separate explicitly authorized audit/history service if deleted-row or
-historical delivery is required.
+released. Direct generated deletes suppress their trusted final preimages by default.
+To opt in, implement `RowPolicy::can_read_deleted_preimage` with full current
+request authorization for the prior-owner snapshot, in addition to ordinary
+entity/row/selected-field policies. The new method defaults to deny; no RowPolicy
+provider or a permissive `can_read_row` alone never authorizes a deleted snapshot.
+`Unrestricted` means no ORM SQL predicate, not visibility under database RLS.
+The opt-in callback must independently enforce every tenant/owner and database-
+session condition that RLS or another SQL-only policy would have enforced.
+Complete/prefilter SQL visibility still suppresses deleted preimages because its
+predicate cannot be evaluated against a missing row. Use a separate explicitly
+authorized audit/history service if the host cannot prove snapshot access.
 
 Propagated events require current authorization of the target and every source
 hop, including source primary keys, foreign keys and relation field. Missing,

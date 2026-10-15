@@ -168,6 +168,13 @@ impl RowPolicy for Authority {
                 .is_some_and(|subject| Some(subject.id.as_str()) == owner))
         })
     }
+    fn can_read_deleted_preimage<'a>(
+        &'a self, ctx: Option<&'a async_graphql::Context<'_>>, db: &'a Database,
+        entity: &'static str, policy: Option<&'static str>, surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        self.can_read_row(ctx, db, entity, policy, surface, row)
+    }
     fn can_write_row<'a>(
         &'a self,
         _: Option<&'a async_graphql::Context<'_>>,
@@ -532,4 +539,37 @@ async fn skipped_protected_scalar_does_not_block_authorized_identifier() {
         response.data.into_json().unwrap()["secureRecordChanged"]["id"],
         "selected-id"
     );
+}
+
+struct PermissiveOrdinaryReadPolicy;
+impl RowPolicy for PermissiveOrdinaryReadPolicy {
+    fn can_read_row<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database,
+        _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+    fn can_write_row<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database,
+        _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+}
+#[tokio::test]
+async fn deleted_preimage_requires_explicit_opt_in_even_when_ordinary_reads_allow() {
+    for permissive_callback in [false, true] {
+        let (_, _, seed) = setup_db().await;
+        let mut db = Database::new(seed.pool().clone());
+        if permissive_callback { db.set_row_policy(PermissiveOrdinaryReadPolicy); }
+        let schema = schema_builder(db).finish();
+        publish(&schema, "SecureRecord", "deleted-without-opt-in", "alice").await;
+        let mut stream = Box::pin(schema.execute_stream(Request::new(
+            "subscription { secureRecordChanged { id action } }"
+        ).data(AuthSubject::new("alice"))));
+        registered(&mut stream).await;
+        let deleted = schema.execute(Request::new("mutation { deleteSecureRecord(id: \"deleted-without-opt-in\") { success } }").data(AuthSubject::new("alice"))).await;
+        assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
+        assert_eq!(deleted.data.into_json().unwrap()["deleteSecureRecord"]["success"], true);
+        publish(&schema, "SecureRecord", "live-proof", "alice").await;
+        let response = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        assert_eq!(data["secureRecordChanged"]["id"], "live-proof", "permissive_callback={permissive_callback}");
+        assert_eq!(data["secureRecordChanged"]["action"], "CREATED");
+    }
 }

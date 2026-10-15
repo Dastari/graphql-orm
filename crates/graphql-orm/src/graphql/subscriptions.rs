@@ -148,8 +148,10 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
 }
 
 /// Resolve and authorize one current target, allowing only explicitly witnessed
-/// deleted preimages under callback/unrestricted visibility. SQL-only decisions
-/// cannot be evaluated against a missing row and therefore suppress that event.
+/// deleted preimages only through an explicit default-deny preimage policy under
+/// callback/unrestricted visibility. SQL-only decisions cannot be evaluated
+/// against a missing row and therefore suppress that event. Unrestricted does
+/// not imply RLS authority for a deleted snapshot.
 #[doc(hidden)]
 pub async fn authorize_subscription_row<T, B>(
     db: &Database<B>,
@@ -219,7 +221,12 @@ where
         visibility,
         ReadVisibility::CallbackOnly | ReadVisibility::Unrestricted
     ) {
-        deleted_preimage.cloned()
+        if let Some(preimage) = deleted_preimage {
+            if db.can_read_deleted_preimage(Some(ctx), T::entity_name(),
+                T::metadata().read_policy, EntityAccessSurface::GraphqlSubscription, preimage).await? {
+                Some(preimage.clone())
+            } else { None }
+        } else { None }
     } else {
         None
     };
