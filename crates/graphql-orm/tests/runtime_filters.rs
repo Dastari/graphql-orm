@@ -179,8 +179,10 @@ fn schema_bounds_foreign_nodes_and_actual_sqlite_suffix_binds_are_checked() {
         .is_null(&field(&other, "text"), true)
         .unwrap();
     assert!(b.and(vec![foreign]).is_err());
-    let mut limits = RuntimeQueryLimits::default();
-    limits.max_bind_parameters = 1;
+    let mut limits = RuntimeQueryLimits {
+        max_bind_parameters: 1,
+        ..Default::default()
+    };
     let b = s.runtime_filter_builder(&collection(&s), limits).unwrap();
     assert_eq!(
         b.compare(

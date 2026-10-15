@@ -797,9 +797,14 @@ mod checked_compatibility_tests {
     // unfilterable wire fields pass GraphQL schema validation.
     fn legacy_null_skip_and_empty_operator_costs_remain_unchanged() {
         let s = schema();
-        let mut limits = RuntimeGraphqlLimits::default();
-        limits.query.max_predicate_nodes = 1;
-        limits.query.max_predicate_depth = 1;
+        let limits = RuntimeGraphqlLimits {
+            query: RuntimeQueryLimits {
+                max_predicate_nodes: 1,
+                max_predicate_depth: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         for value in [
             async_graphql::value!({"text":{"eq":null}}),
             async_graphql::value!({"and":null}),
@@ -840,8 +845,10 @@ mod checked_compatibility_tests {
         );
         limits.query.max_bind_parameters = 1;
         assert!(legacy(&s, async_graphql::value!({"text":{"endsWith":"x"}}), limits).is_ok());
-        let mut small = RuntimeGraphqlLimits::default();
-        small.max_variable_bytes = 256;
+        let small = RuntimeGraphqlLimits {
+            max_variable_bytes: 256,
+            ..Default::default()
+        };
         let input =
             async_graphql::value!({"score":{"in":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.1]}});
         let variables = Variables::from_json(
