@@ -1459,6 +1459,9 @@ fn render_request(
             &mut values,
         ));
     }
+    if values.len() > request.limits.max_bind_parameters {
+        return Err(limit_error(request.collection.id()));
+    }
     let columns = request
         .decode_projection
         .fields()
@@ -1532,6 +1535,9 @@ fn render_request(
         if let Some(predicate) = &request.predicate {
             count_sql.push_str(" WHERE ");
             count_sql.push_str(&render_expr(backend, &predicate.expr, &mut count_values));
+        }
+        if count_values.len() > request.limits.max_bind_parameters {
+            return Err(limit_error(request.collection.id()));
         }
         Some((count_sql, count_values))
     } else {
@@ -1807,6 +1813,190 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ordinary_read_rendered_bind_boundaries_preserve_cursor_and_count_semantics() {
+        let schema = schema();
+        let collection = schema.resolve_collection(&collection_id("items")).unwrap();
+        let name = schema
+            .resolve_field(&collection, &field_id("name"))
+            .unwrap();
+        let note = schema
+            .resolve_field(&collection, &field_id("note"))
+            .unwrap();
+        let projection = schema
+            .resolve_projection(&collection, &[name.clone()])
+            .unwrap();
+        let limits = RuntimeQueryLimits::default();
+        let suffix = schema
+            .runtime_compare(
+                &collection,
+                &name,
+                RuntimeScalarOperator::EndsWith,
+                RuntimeValue::String("雪".into()),
+                limits,
+            )
+            .unwrap();
+        let order = schema
+            .runtime_order(
+                &collection,
+                Some(vec![RuntimeOrderInput {
+                    field: note,
+                    direction: RuntimeOrderDirection::Asc,
+                    nulls: RuntimeNullPlacement::Last,
+                }]),
+                limits,
+            )
+            .unwrap();
+        assert_eq!(order.terms.len(), 2); // requested nullable term plus unique PK tie-breaker
+        let mut request = schema
+            .runtime_read_request(
+                &collection,
+                &projection,
+                Some(suffix),
+                order,
+                RuntimePageRequest::first(2, None),
+                true,
+                limits,
+            )
+            .unwrap();
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+            request.limits.max_bind_parameters = 1;
+            let result = render_request(&request, backend);
+            if backend == DatabaseBackend::Sqlite {
+                assert_eq!(
+                    result.unwrap_err().code(),
+                    RuntimeQueryErrorCode::ResourceLimit
+                );
+            } else {
+                let (_, values, count, _) = result.unwrap();
+                assert_eq!(values.len(), 1);
+                assert_eq!(count.unwrap().1.len(), 1);
+            }
+            request.limits.max_bind_parameters = 2;
+            let (_, values, count, _) = render_request(&request, backend).unwrap();
+            assert_eq!(count.unwrap().1.len(), values.len());
+        }
+        request.predicate = None;
+        for nullable in [false, true] {
+            let cursor = encode_cursor(
+                &request,
+                vec![
+                    if nullable {
+                        RuntimeValue::Null
+                    } else {
+                        RuntimeValue::String("mid".into())
+                    },
+                    RuntimeValue::Integer(2),
+                ],
+            )
+            .unwrap();
+            for backward in [false, true] {
+                request.page = if backward {
+                    RuntimePageRequest::last(2, Some(cursor.clone()))
+                } else {
+                    RuntimePageRequest::first(2, Some(cursor.clone()))
+                };
+                for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+                    request.limits.max_bind_parameters = 2;
+                    let result = render_request(&request, backend);
+                    if nullable {
+                        assert_eq!(result.unwrap().1.len(), 1);
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().code(),
+                            RuntimeQueryErrorCode::ResourceLimit
+                        );
+                    }
+                    request.limits.max_bind_parameters = 3;
+                    let (_, values, count, reversed) = render_request(&request, backend).unwrap();
+                    assert_eq!(values.len(), if nullable { 1 } else { 3 });
+                    assert!(count.unwrap().1.is_empty()); // count excludes pagination, unchanged
+                    assert_eq!(reversed, backward);
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn expanded_cursor_budget_rejects_before_lazy_pool_connection() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let schema = schema();
+        let collection = schema.resolve_collection(&collection_id("items")).unwrap();
+        let name = schema
+            .resolve_field(&collection, &field_id("name"))
+            .unwrap();
+        let limits = RuntimeQueryLimits {
+            max_bind_parameters: 2,
+            ..Default::default()
+        };
+        let order = schema
+            .runtime_order(
+                &collection,
+                Some(vec![RuntimeOrderInput {
+                    field: name.clone(),
+                    direction: RuntimeOrderDirection::Asc,
+                    nulls: RuntimeNullPlacement::Last,
+                }]),
+                limits,
+            )
+            .unwrap();
+        let mut request = schema
+            .runtime_read_request(
+                &collection,
+                &schema.resolve_projection(&collection, &[name]).unwrap(),
+                None,
+                order,
+                RuntimePageRequest::first(2, None),
+                true,
+                limits,
+            )
+            .unwrap();
+        let cursor = encode_cursor(
+            &request,
+            vec![RuntimeValue::String("mid".into()), RuntimeValue::Integer(2)],
+        )
+        .unwrap();
+        request.page = RuntimePageRequest::first(2, Some(cursor));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let observed = connections.clone();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |_, _| {
+                let observed = observed.clone();
+                Box::pin(async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+            .connect_lazy("sqlite::memory:")
+            .unwrap();
+        let database = crate::db::Database::<super::super::SqliteBackend>::new(pool);
+        assert_eq!(
+            database
+                .execute_runtime_read(&request, None)
+                .await
+                .unwrap_err()
+                .code(),
+            RuntimeQueryErrorCode::ResourceLimit
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 0);
+        request.limits.max_bind_parameters = 3;
+        assert_eq!(
+            database
+                .execute_runtime_read(&request, None)
+                .await
+                .unwrap_err()
+                .code(),
+            RuntimeQueryErrorCode::BackendExecution
+        );
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        database.pool().close().await;
     }
 
     #[test]
