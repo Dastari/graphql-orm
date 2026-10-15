@@ -375,7 +375,7 @@ impl<B: OrmBackend, P: EntityPolicy<B>> EntityPolicy<B> for AgqlCurrentAuthority
 }
 
 /// Custom resolver guard for immediate identity/status/binding enforcement.
-/// Install Arc<AgqlCurrentAuthorityEnforcement> in trusted schema configuration.
+/// Install `Arc<AgqlCurrentAuthorityEnforcement>` in trusted schema configuration.
 /// Custom business/row/field authorization remains a separate host requirement.
 #[derive(Clone, Copy, Debug)]
 pub struct AgqlCurrentAuthorityGuard {

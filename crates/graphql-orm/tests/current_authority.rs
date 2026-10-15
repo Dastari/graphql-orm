@@ -1049,7 +1049,31 @@ async fn deleted_preimage_opt_in_still_requires_immediate_current_authority() {
                 "mutation { deleteSecureRecord(id: \"record-1\") { success } }",
             ))
             .await;
-        assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
+        if mode == 4 {
+            // The strict database also requires a row-write provider for this
+            // marked mutation. Provider absence must deny before deleting or
+            // emitting; the ordinary-read-only mode above exercises a real
+            // delete whose event is suppressed by the missing preimage grant.
+            assert_eq!(deleted.errors.len(), 1);
+            assert_eq!(deleted.errors[0].message, "forbidden");
+            let remaining: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM secure_records WHERE id = 'record-1'")
+                    .fetch_one(schema.data::<Database>().unwrap().pool())
+                    .await
+                    .unwrap();
+            assert_eq!(remaining, 1, "missing provider must deny before deleting");
+            assert!(
+                timeout(Duration::from_millis(100), stream.next())
+                    .await
+                    .is_err()
+            );
+            continue;
+        }
+        assert!(
+            deleted.errors.is_empty(),
+            "mode {mode}: {:?}",
+            deleted.errors
+        );
         assert_eq!(
             deleted.data.into_json().unwrap()["deleteSecureRecord"]["success"],
             true
