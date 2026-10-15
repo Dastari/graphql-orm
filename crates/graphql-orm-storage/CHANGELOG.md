@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## 0.7.2 - 2026-10-15
+
+- Select the S3 SDK's modern HTTPS client explicitly without its legacy
+  `rustls` feature, removing Hyper 0.14/H2 0.3 and the obsolete TLS branch
+  from this package's S3 feature graph. Signing, Tokio and HTTPS remain enabled.
+- Added a disposable HTTPS transport fixture with trusted-CA success and
+  untrusted-CA rejection; retained the owned HTTP release-replay regression.
+- No public API, provider configuration, storage key or data format changes.
+
 ## 0.7.1 - 2026-10-14
 
 - Hardened local temporary-file sweeping to skip symbolic links, directory
