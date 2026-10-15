@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## 0.7.3 - 2026-10-15
+
+- Require the S3 SDK release that adopts the corrected S3 Express credential
+  cache dependency. Preserve the modern HTTPS transport and explicit signing
+  features introduced in 0.7.2.
+- No public API, object format or provider configuration changes. Other packages'
+  independent transitive advisories still require separate reachability review.
+
 ## 0.7.2 - 2026-10-15
 
 - Select the S3 SDK's modern HTTPS client explicitly without its legacy

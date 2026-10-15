@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-storage"
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
@@ -29,7 +29,7 @@ azure = []
 [dependencies]
 async-trait = "0.1"
 aws-credential-types = { version = "1.2.14", optional = true }
-aws-sdk-s3 = { version = "1.137.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
+aws-sdk-s3 = { version = "1.144.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
 bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
