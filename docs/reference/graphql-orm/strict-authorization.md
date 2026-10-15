@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -33,10 +33,11 @@ must configure business/row/field policy and immediate authority checks; see the
 | Generated resolver `auth` | `required` | `required` for private schemas | unchanged | `none` remains explicit for public schemas |
 
 ```rust
-let database = Database::new(pool)
+let mut database = Database::new(pool)
     .with_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
 database.set_entity_policy(MyEntityPolicy);
 database.set_field_policy(MyFieldPolicy);
+database.set_row_policy(MyRowPolicy);
 ```
 
 ## Declared Policy Requirements
@@ -47,6 +48,16 @@ When `DeclaredPoliciesRequired` is active:
 - A field declaring `read_policy` / `write_policy` requires a field policy provider.
 - A row policy key requires a row policy provider.
 - Missing providers return `AUTHORIZATION_MISCONFIGURED` with a safe public message.
+
+Generated Federation entity-key resolvers check `RowPolicy::can_read_row` on
+each fetched entity, using its declared entity `read_policy` key. Subgraphs
+with that key must install a row provider in addition to the entity provider.
+The row decision must authorize the typed row using current request authority.
+The [disposable zones subgraph](../../../crates/graphql-orm/tests/fixtures/federation-end-to-end/zones-subgraph/src/lib.rs)
+demonstrates both providers with the same required scope and denies row writes.
+Collection/relation paths that obtain `Unrestricted` visibility without a row
+provider retain their entity-policy-only contract. That visibility behavior
+does not bypass the Federation resolver's independent per-row check.
 
 They never silently allow. Unmarked operations still require explicit host policy
 for protection; this default does not establish tenant isolation. For sensitive
