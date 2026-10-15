@@ -43,7 +43,7 @@ if args[:2] == ['volume', 'rm']:
 if args[0] == 'run':
     ident = 'immutable-fixture-id-' + str(len(state['containers']) + 1)
     owner = value('--label').split('=', 1)[1]
-    state['containers'][ident] = {'name': value('--name'), 'owner': owner}
+    state['containers'][ident] = {'name': value('--name'), 'owner': owner, 'port': value('-p').split(':')[1]}
     save()
     if mode == 'lost_create_response' and len(state['containers']) == 2: sys.exit(1)
     print(ident); sys.exit(0)
@@ -59,7 +59,7 @@ if args[0] == 'rm':
     save(); sys.exit(0)
 if args[0] == 'port':
     assert args[1] in state['containers']
-    print('127.0.0.1:31445'); sys.exit(0)
+    print('127.0.0.1:' + state['containers'][args[1]]['port']); sys.exit(0)
 if args[0] == 'exec': sys.exit(1)  # no leftover upload file
 raise AssertionError('Unexpected Docker invocation: ' + repr(args))
 '''
@@ -110,11 +110,17 @@ class FixtureOwnershipTests(unittest.TestCase):
         result, calls, state, cargo = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(cargo), 7)
-        self.assertTrue(all(item["port"] == "31445" for item in cargo))
+        self.assertTrue(all(item["port"].isdigit() for item in cargo))
         self.assertEqual(cargo[-1]["container"], "immutable-fixture-id-1")
         runs = [args for args in calls if args[0] == "run"]
         self.assertEqual(len(runs), 3)
-        self.assertTrue(all("127.0.0.1::445" in args and "--pull=never" in args for args in runs))
+        mappings = [args[args.index("-p") + 1] for args in runs]
+        self.assertTrue(all(mapping.startswith("127.0.0.1:") and mapping.endswith(":445")
+                            and mapping.split(":")[1].isdigit() for mapping in mappings))
+        self.assertEqual(len(set(mappings)), 3)
+        self.assertTrue(all("--pull=never" in args for args in runs))
+        normal_port = mappings[0].split(":")[1]
+        self.assertEqual(cargo[-1]["port"], normal_port)
         self.assertEqual(state, {"containers": {}, "volume": None})
         removals = [args[-1] for args in calls if args[0] == "rm"]
         self.assertEqual(set(removals), {"immutable-fixture-id-1", "immutable-fixture-id-2", "immutable-fixture-id-3"})

@@ -420,7 +420,14 @@ async fn samba_reconnects_after_server_restart() {
         return;
     };
     let root = format!("graphql-orm-storage-reconnect/{}", Uuid::new_v4());
-    let store = SmbStorageBackend::connect(test_config(root))
+    let config = test_config(root);
+    assert_eq!(
+        config.server, "127.0.0.1",
+        "managed reconnect fixture must be loopback-owned"
+    );
+    let endpoint = (std::net::Ipv4Addr::LOCALHOST, config.port);
+    let expected_mapping = format!("127.0.0.1:{}", config.port);
+    let store = SmbStorageBackend::connect(config)
         .await
         .expect("connect before restart");
     store
@@ -437,6 +444,30 @@ async fn samba_reconnects_after_server_restart() {
         .status()
         .expect("run docker restart");
     assert!(status.success(), "docker restart failed");
+    let published = std::process::Command::new("docker")
+        .args(["port", &container, "445/tcp"])
+        .output()
+        .expect("inspect owned restarted fixture port");
+    assert!(published.status.success(), "inspect restarted port failed");
+    assert!(
+        String::from_utf8(published.stdout)
+            .expect("published port text")
+            .lines()
+            .any(|line| line == expected_mapping),
+        "owned endpoint changed after restart"
+    );
+    // Docker restart returns before smbd necessarily listens. Wait on the exact
+    // original endpoint, then exercise the existing backend's reconnect behavior.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if tokio::net::TcpStream::connect(endpoint).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("owned Samba did not become ready after restart");
 
     assert!(
         store

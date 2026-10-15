@@ -69,7 +69,11 @@ named containers and a fresh labelled volume, binds dynamic ports only on
 `127.0.0.1`, and passes the exact normal container ID to the restart test. It never
 reuses or deletes a pre-existing fixed-name fixture. Cleanup selects only its
 random run label, rechecks ownership and removes exact container IDs plus its
-owned volume; failures and interrupts use the same cleanup path.
+owned volume; failures and interrupts use the same cleanup path. The runner
+selects unused OS ports and publishes each port explicitly so restarts preserve
+the mapping; a competing bind fails startup instead of reusing another service.
+After restart the test verifies the original mapping and waits at most 30 seconds
+for TCP readiness before exercising the same existing backend's reconnect path.
 
 The daemon-free ownership regression suite substitutes private fake Docker/Cargo
 executables and checks startup collisions, exact-ID cleanup, ownership changes

@@ -67,27 +67,38 @@ CLEANUP_READY=true
 # Default local execution requires a reviewed cached image; disposable hosted CI
 # explicitly opts into pulling a missing image.
 if [[ $PULL_POLICY == never ]]; then docker inspect --type image "$IMAGE" >/dev/null; fi
+# Select explicit ports so Docker restart cannot assign a new ephemeral mapping.
+# Sockets are released before Docker binds; a competing bind fails startup closed.
+read -r NORMAL_PORT ENCRYPTED_PORT CONSTRAINED_PORT < <(python3 -c '
+import socket
+sockets = [socket.socket() for _ in range(3)]
+for sock in sockets:
+    sock.bind(("127.0.0.1", 0))
+print(*(sock.getsockname()[1] for sock in sockets))
+for sock in sockets:
+    sock.close()
+')
 docker volume create --label "$LABEL=$RUN_ID" "$VOLUME" >/dev/null
 NORMAL_ID=$(docker run -d --name "$NORMAL" --label "$LABEL=$RUN_ID" --pull="$PULL_POLICY" \
-  -p 127.0.0.1::445 -v "$VOLUME:/share" "$IMAGE" \
+  -p "127.0.0.1:$NORMAL_PORT:445" -v "$VOLUME:/share" "$IMAGE" \
   -p -w WORKGROUP -u "backup;$PASSWORD" \
   -s 'backups;/share;yes;no;no;backup' -g 'server signing = mandatory')
 ENCRYPTED_ID=$(docker run -d --name "$ENCRYPTED" --label "$LABEL=$RUN_ID" --pull="$PULL_POLICY" \
-  -p 127.0.0.1::445 "$IMAGE" \
+  -p "127.0.0.1:$ENCRYPTED_PORT:445" "$IMAGE" \
   -p -w WORKGROUP -u "backup;$PASSWORD" \
   -s 'backups;/share;yes;no;no;backup' \
   -g 'server signing = mandatory' -g 'smb encrypt = required')
 CONSTRAINED_ID=$(docker run -d --name "$CONSTRAINED" --label "$LABEL=$RUN_ID" --pull="$PULL_POLICY" \
-  -p 127.0.0.1::445 "$IMAGE" \
+  -p "127.0.0.1:$CONSTRAINED_PORT:445" "$IMAGE" \
   -p -w WORKGROUP -u "backup;$PASSWORD" \
   -s 'backups;/share;yes;no;no;backup' \
   -g 'server signing = mandatory' -g 'smb2 max write = 65536')
 port_for() {
   docker port "$1" 445/tcp | python3 -c 'import sys; print(sys.stdin.read().strip().rsplit(":", 1)[1])'
 }
-NORMAL_PORT=$(port_for "$NORMAL_ID")
-ENCRYPTED_PORT=$(port_for "$ENCRYPTED_ID")
-CONSTRAINED_PORT=$(port_for "$CONSTRAINED_ID")
+[[ $(port_for "$NORMAL_ID") == "$NORMAL_PORT" ]]
+[[ $(port_for "$ENCRYPTED_ID") == "$ENCRYPTED_PORT" ]]
+[[ $(port_for "$CONSTRAINED_ID") == "$CONSTRAINED_PORT" ]]
 printf 'Owned Samba run=%s containers=%s,%s,%s volume=%s ports=%s,%s,%s\n' \
   "$RUN_ID" "$NORMAL_ID" "$ENCRYPTED_ID" "$CONSTRAINED_ID" "$VOLUME" \
   "$NORMAL_PORT" "$ENCRYPTED_PORT" "$CONSTRAINED_PORT"
