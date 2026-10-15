@@ -141,6 +141,45 @@ impl EntityPolicy<TestBackend> for AllowSentinelPolicies {
     }
 }
 
+// This fixture declares a write policy: the strict default requires both an
+// entity provider and an explicit row provider, independently of mutation bounds.
+impl RowPolicy<TestBackend> for AllowSentinelPolicies {
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<TestBackend>,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        _row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<TestBackend>,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(match (entity_name, policy_key) {
+                ("BoundedSentinelSingle", None) => row.is::<BoundedSentinelSingle>(),
+                ("BoundedSentinelComposite", Some("bounded-sentinel.write")) => {
+                    row.is::<BoundedSentinelComposite>()
+                }
+                ("BoundedSentinelRetained", None | Some("bounded-sentinel.purge")) => {
+                    row.is::<BoundedSentinelRetained>()
+                }
+                _ => false,
+            })
+        })
+    }
+}
+
 struct CardinalityChangeHook {
     target: graphql_orm::uuid::Uuid,
     fired: std::sync::atomic::AtomicBool,
@@ -803,6 +842,7 @@ async fn run_cardinality_change_rollback(
 
 async fn run_matrix(mut database: Database<TestBackend>) -> Result<(), Box<dyn std::error::Error>> {
     database.set_entity_policy(AllowSentinelPolicies);
+    database.set_row_policy(AllowSentinelPolicies);
     let hook = CountingHook::default();
     database.set_mutation_hook(hook.clone());
     let plan = database
