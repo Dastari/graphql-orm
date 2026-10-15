@@ -49,7 +49,9 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
     ///
     /// `backup_schema` is the schema identity recorded by the source manifest.
     /// Implementations must reject an incompatible target before importing
-    /// rows.
+    /// rows. Full and incremental restore calls are separate stages; orchestration
+    /// does not promise a transaction across them. Document whether a failed call
+    /// rolls back its own work, and require a fresh staging target otherwise.
     ///
     /// # Errors
     ///
@@ -63,6 +65,10 @@ pub trait GraphqlOrmBackupAdapter: Send + Sync {
     ) -> Result<(), BackupError>;
 
     /// Restores incremental changes.
+    ///
+    /// An error may follow partial application unless the adapter explicitly
+    /// provides rollback. Orchestration reports this uncertainty and never
+    /// automatically retries or rolls back earlier successful stages.
     ///
     /// # Errors
     ///

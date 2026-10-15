@@ -29,15 +29,16 @@ This crate is a reusable storage companion for applications that use `graphql-or
 - S3 and Azure Blob support should be explicit feature-gated work; Azure placeholder paths must return clear unsupported errors until implemented.
 - Add tests for path safety, checksums, key generation, and provider round trips.
 
-## Current Agent Handoff
+## Integration contracts
 
-- Current crate version is `0.6.2`.
-- The workspace resolves `graphql-orm` 0.29.0 and `graphql-orm-backup` 0.7.2
-  through workspace path dependencies and one root `Cargo.lock`. Keep
-  downstream companion packages on one reviewed monorepo revision.
-- `graphql-orm` owns the optional `agql-auth` integration, pinned at
-  `agql-auth` 0.19.0 revision
-  `1d2e9fe2e1576105212a7b340a11abf8cad0382d`; this crate does not depend on
+- Package versions and workspace dependency identities belong to the generated
+  [workspace inventory](../../docs/reference/workspace-packages.md).
+- Internal packages resolve through workspace path dependencies and the root
+  `Cargo.lock`. Keep downstream companion packages on one reviewed monorepo
+  revision so public types share one canonical source.
+- `graphql-orm` owns the optional `agql-auth` integration. The root
+  [Cargo.lock](../../Cargo.lock) and published workspace release manifest own
+  the external authorization revision; this crate does not depend on
   application authorization.
 - The storage provider boundary is now the streaming `BlobStore` trait.
 - `ObjectStorage` extends `BlobStore`; custom providers must implement `BlobStore` first.
@@ -63,3 +64,8 @@ This crate is a reusable storage companion for applications that use `graphql-or
   `docs/native-smb.md`, and `MIGRATION.md` before making provider or
   backup-facing changes. Historical agent handoffs are archived outside this
   crate and are not current guidance.
+
+- Lock release requires explicit single-attempt deletion through
+  `delete_blob_once`; never fall back to retrying ordinary deletion after a
+  mutation may have reached the server. Ambiguous outcomes require quiescing
+  all writers, handles and in-flight requests before offline recovery.

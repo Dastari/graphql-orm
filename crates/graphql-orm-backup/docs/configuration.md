@@ -32,7 +32,7 @@ configuration of its own; adapt a configured `graphql-orm-storage::BlobStore`.
 | Type | Use | Defaults and limits |
 | --- | --- | --- |
 | [`BackupExecutionOptions`](../src/backup.rs) | `object_concurrency` and `lock` for full, incremental, and compaction writes. | Default concurrency 8 and default lock options. |
-| [`RepositoryLockOptions`](../src/lock.rs) | `stale_after_seconds` for advisory writer locks. | Defaults to 3,600 seconds. Atomic conditional create remains mandatory. |
+| [`RepositoryLockOptions`](../src/lock.rs) | `stale_after_seconds` is a legacy ignored setting. | Existing locks never expire automatically; offline recovery requires quiescing all writers and handles. Atomic conditional create remains mandatory. |
 | [`FullBackupRequest`](../src/backup.rs) | `snapshot_id`, UTC `created_at`, stable `app_id`, and `app_version`. | No default. |
 | [`IncrementalBackupRequest`](../src/backup.rs) | Full-request fields plus `parent_snapshot_id`. | No default; parent must be a valid chain member. |
 | [`CompactChainRequest`](../src/backup.rs) | New `snapshot_id`, `source_snapshot_id`, time, app ID, and version. | No default; source chain is validated before publication. |

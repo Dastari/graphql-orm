@@ -266,6 +266,36 @@ async fn restore_object_store(
 }
 ```
 
+## Restore failures and recovery
+
+`restore_snapshot` reports `BackupError::RestoreStageFailed` with typed
+`RestoreFailureProgress` and the original error source:
+
+- `Validation`: no adapter apply call was attempted.
+- `Preparation`: the failing payload was not applied; previously completed
+  manifest stages can remain in the target.
+- `Apply`: the failing adapter call may have partially changed the target.
+
+`completed_manifest_ids` records calls that the adapter reported as successful.
+It is not a resume checkpoint. `target_may_have_changed()` includes prior stages
+and an uncertain failed apply; it describes this attempt, not pre-existing data.
+Dry run performs validation/parsing without recording applied stages.
+
+Use an empty disposable staging database. After a partial/unknown outcome,
+retain the failure progress, stop using that staging target and discard or
+reconcile it through the target owner. Restart from a fresh empty target after
+fixing the failure. Do not automatically continue with the next manifest or
+retry into a partially populated database. Per-stage adapter transactions do not
+create a whole-chain transaction. Cancellation or dropping the restore future
+does not return progress or roll back an active adapter call. Treat cancellation
+during apply as an unknown outcome and use the same staging-target recovery.
+
+Object restore is a separate boundary: earlier objects and a custom sink's
+partially written failing object can remain, including after checksum failure.
+Use an isolated staging object namespace and publish only after all required
+restore, verification and application consistency checks succeed. The library
+does not roll back database/object stores together.
+
 ## Compaction And Retention
 
 `compact_chain` folds a full-plus-incremental chain into a synthetic full

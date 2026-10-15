@@ -24,6 +24,14 @@ public library APIs, and persisted formats are unaffected.
 
 ## 0.44.0 to 0.44.1: generated resolver public errors
 
+The workspace also raises its compatible `rust_decimal` minimum to 1.43.0,
+which removes the upstream optional rkyv 0.7 bridge. ORM SQL/JSON decimal values
+and public ORM signatures are unchanged. Applications separately enabling that
+Decimal archival feature must migrate their archive integration using the
+[upstream 1.43 migration notes](https://github.com/paupino/rust-decimal/releases/tag/1.43.0); do not assume persisted rkyv bytes can be read using another format
+version. The ORM does not persist Decimal through rkyv. TLS/QUIC and yanked
+dependency patch refreshes require no ORM data migration.
+
 Upgrade runtime/macros together. Generated SQL and Federation failures now use
 stable safe GraphQL messages and `extensions.code` instead of backend diagnostic
 text. Match public codes such as `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE` and

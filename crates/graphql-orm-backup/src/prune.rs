@@ -48,7 +48,7 @@ pub async fn prune(
 ) -> Result<PruneResult, BackupError> {
     let lock = RepositoryLock::acquire(repository, &keep_policy.lock).await?;
     let result = prune_inner(repository, keep_policy).await;
-    let release_result = lock.release(repository).await;
+    let release_result = lock.release().await;
     match (result, release_result) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(err), _) => Err(err),
@@ -143,7 +143,7 @@ pub async fn delete_snapshot(
 ) -> Result<DeleteSnapshotResult, BackupError> {
     let lock = RepositoryLock::acquire(repository, lock_options).await?;
     let result = delete_snapshot_inner(repository, snapshot_id).await;
-    let release_result = lock.release(repository).await;
+    let release_result = lock.release().await;
     match (result, release_result) {
         (Ok(result), Ok(())) => Ok(result),
         (Err(err), _) => Err(err),
