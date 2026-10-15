@@ -40,6 +40,24 @@ S3 SDK's Rust minimum, and the [SQL Server guide](graphql-orm/mssql.md) for nati
 TLS dependencies, trust and full-session encryption configuration. A lockfile
 update alone does not validate a deployment image.
 
+## Owner-local SMB dependency
+
+Storage 0.7.4 carries the reviewed SMB 0.10.2 directory-stream backport as an
+optional owner-local dependency. Its [provenance](../../crates/graphql-orm-storage/vendor/smb/PROVENANCE.json)
+identifies the original registry archive, exact upstream patch and retained MIT
+license. The [supplemental evidence](../archive/2026/dependency-review-2026-10-15/smb-addendum.md)
+records actual 5d155ba source/lock mappings and complete-with-findings collection;
+the earlier frozen scan remains evidence for its original source.
+
+cargo-audit 0.22.2 [skips non-default-registry sources](https://github.com/RustSec/rustsec/blob/cargo-audit/v0.22.2/rustsec/src/database.rs#L133-L143),
+including source-less workspace paths and downstream Git dependencies. Ordinary
+root/fixture scans therefore do not assess the backported package. The
+supplemental original-registry SMB identity/checksum lookup uses the same frozen
+advisory database and requires individual applicability review against patched
+files and selected features; it does not establish absence of vulnerabilities.
+Registry companions retain ordinary audit coverage. Reassess upstream advisories
+and the backport whenever its code, features or source changes.
+
 ## Retained findings and conditions
 
 Maintenance roles and the **2026-11-15** review date below are recommended
@@ -130,11 +148,17 @@ review; no blanket exclusion for all VRL/configuration paths is established.
 Unmaintained status alone does not establish an exploit.
 
 The scan uses a fixed advisory revision and then-available local registry/index
-data. It certifies neither future advisories nor registry freshness. Every raw
-audit exits nonzero; there is no broad ignore list. Fresh final-candidate owned
-S3/Samba service gates and remaining local AI/package acceptance are pending.
-Runner controls, compilation and selected graphs are distinct from runtime
-passes. Preserve the actual tested revision when reusing scoped prior evidence.
+data. It certifies neither future advisories nor registry freshness. The original
+eight reports and the two supplemental changed-lock reports retain nonzero
+findings exits; there is no broad ignore list. The supplemental identity-only
+lookup exits zero within the scope above; the aggregate remains with findings.
+
+This dependency review records graph/source dispositions separately from
+feature, provider and owned-service runtime acceptance. Follow the release
+process for final validation; individual scoped passes do not certify the
+complete workspace or a consuming application's unified graph. Runner controls,
+compilation and selected graphs are distinct from runtime passes. Preserve the
+actual tested revision when reusing scoped prior evidence.
 
 Applications must review their own unified feature graph, current configuration,
 custom caches, policies and crypto APIs. Dependency or configuration changes

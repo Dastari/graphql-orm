@@ -129,3 +129,9 @@ reviewed source/lock/selected-graph applicability proof.
 User holds on Actions, remote merges and publication remain. No approval URL or
 published tag is established by this archive. Follow the release runbook and
 the current acceptance record before any future authorized release.
+
+## Later owner-local SMB addendum
+
+The [SMB addendum](smb-addendum.md) records the later 5d155ba source and
+supplemental collection. This original snapshot and all eight raw reports remain
+unchanged evidence for their original revisions.

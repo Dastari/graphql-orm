@@ -41,6 +41,23 @@ issues tokens, refreshes sessions, or decrypts credentials.
 Upgrade deliberately by reviewing the router [migration guide](MIGRATION.md),
 then validate the full graph with `--check` before deploying the new pin.
 
+## Build prerequisites
+
+The pinned Hive Router 0.2.19 dependency generates Laboratory HTML during its
+default build. In a fresh Cargo output directory it runs
+`npm install --include=dev` using its supplied `package.json` and
+`package-lock.json`, then embeds the prebuilt Laboratory assets. Node.js and npm
+must be available to the build; Hive declares npm 11.16.0 in `packageManager`.
+
+Cargo's offline mode does not constrain npm network access or lifecycle scripts.
+For controlled offline builds, prepare the locked npm dependencies in the cache,
+configure npm itself for offline operation with scripts, audit and update checks
+disabled, and verify that its lockfile remains unchanged. The upstream install
+command alone does not enforce those restrictions.
+
+Hive's separate `graphiql` feature selects static GraphiQL instead, skipping
+Laboratory generation and ignoring Laboratory seed configuration.
+
 ## Minimal programmatic start
 
 For trusted local development, anonymous mode is explicit. Production must
