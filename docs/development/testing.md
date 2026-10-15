@@ -97,7 +97,8 @@ bash scripts/run-security-test-targets.sh mssql subscription_portable_authorizat
 Nested fixture Cargo commands inherit the caller's `CARGO_BUILD_JOBS` budget.
 The cross-crate, backend-coexistence and federation fixture drivers use locked
 dependency resolution; a stale fixture lockfile fails validation instead of
-being silently rewritten during a test.
+being silently rewritten during a test. Managed Samba storage and backup tests
+also require the reviewed workspace lockfile.
 
 The existing `sqlserver-security` job separately executes the ignored owned TLS,
 writable-transaction and query-notification tests. Release security jobs depend
