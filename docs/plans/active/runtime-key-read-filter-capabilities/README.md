@@ -376,6 +376,8 @@ initializer-only descendant 008764bd. These are scoped prior results, not
 acceptance of this assembly. The optional raw JSON parser remains excluded;
 wire duplicate erasure remains a host integration prerequisite.
 
-The paired version and inventory await final assembly reconciliation and
+The preview uses paired ORM/macros 0.50.1 and includes Q019 emitted-bind
+budget enforcement. Its inventory is mechanically merged and awaits constrained
+regeneration. Source assembly awaits final review and
 constrained checks. No final-stack build, test, merge, Actions or publication is
 claimed. Existing owner branches and their evidence remain unchanged.

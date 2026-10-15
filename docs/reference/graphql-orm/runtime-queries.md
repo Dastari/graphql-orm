@@ -287,3 +287,12 @@ Offline matching proves no provenance, current principal/tenant policy or native
 RLS. It cannot establish current SELECT visibility for a deleted image. Existing
 deleted-preimage policy remains default-deny. The host-neutral example explicitly
 authorizes all intent and requires host snapshot/profile premises.
+
+## Emitted bind budgets
+
+Since 0.50.1, ordinary row reads and optional total counts independently enforce
+`RuntimeQueryLimits::max_bind_parameters` against emitted slots before database
+I/O. Logical constructor bounds remain an early check. SQLite suffix comparisons
+emit two slots; lexicographic cursor branches repeat prior equality values on
+SQLite and PostgreSQL. Exceeding the cap returns existing `resource_limit` before
+either query is submitted. SQL and cursor wire forms are unchanged.

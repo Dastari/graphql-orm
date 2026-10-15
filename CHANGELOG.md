@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.50.1 (unreleased)
+
+- Enforce ordinary runtime read/count bind budgets against actual emitted slots
+  before database I/O, including SQLite suffix duplication and lexicographic
+  cursor expansion on SQLite/PostgreSQL. Preserve SQL and cursor semantics;
+  over-budget reads now return the existing `resource_limit` error.
+- Align ORM/macros at 0.50.1; no public API or stored-data/schema change.
+
 ## 0.50.0 (unreleased)
 
 - Add owned checked filter construction, complete value-free original Boolean and
