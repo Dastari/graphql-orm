@@ -1,4 +1,7 @@
 #[cfg(feature = "sqlite")]
+mod support;
+
+#[cfg(feature = "sqlite")]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use async_graphql::{EmptyMutation, EmptySubscription, Object, Schema, dataloader::DataLoader};
@@ -31,7 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_connections(1)
         .connect("sqlite::memory:")
         .await?;
-    let db = Database::<SqliteBackend>::new(pool);
+    let mut db =
+        Database::<SqliteBackend>::with_entity_policy(pool, support::EndpointFixturePolicy);
     let plan = db
         .schema()
         .plan_migration_to_entities("example", "disposable target", &[Endpoint::metadata()])
@@ -48,6 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
+    db.set_field_policy(support::EndpointFixturePolicy);
     let schema = Schema::build(Query, EmptyMutation, EmptySubscription)
         .data(db.clone())
         .data("example-user".to_owned())
