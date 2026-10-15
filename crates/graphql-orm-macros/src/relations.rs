@@ -814,7 +814,7 @@ pub(crate) fn generate_graphql_relations(
                                 #relation_query_key, &visibility,
                             )?)
                             .await
-                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {
                                 entities: Vec::new(),
                                 total_count: 0,
@@ -863,14 +863,14 @@ pub(crate) fn generate_graphql_relations(
                         let total = query
                             .count_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?;
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         let offset = resolved_page.offset.max(0) as usize;
 
                         let entities = query
                             .fetch_all_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?;
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
                         ::graphql_orm::graphql::loaders::RelationLoadResult {
                             has_next_page: (offset as i64 + entities.len() as i64) < total,
@@ -946,7 +946,7 @@ pub(crate) fn generate_graphql_relations(
                                 #single_relation_query_key, &visibility,
                             )?)
                             .await
-                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .and_then(|mut result| result.entities.drain(..).next())
                     } else {
                         let mut relation_sql_values = relation_sql_values.clone();
@@ -958,7 +958,7 @@ pub(crate) fn generate_graphql_relations(
                             .with_read_visibility(&visibility)?
                             .fetch_one_with_auth(db, auth_context.as_ref())
                             .await
-                            .map_err(|e| ::graphql_orm::graphql::errors::OrmPublicError::internal(e.to_string()).into_graphql_error())?
+                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     };
 
                     if visibility.requires_residual_checks() {

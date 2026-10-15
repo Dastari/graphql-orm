@@ -14,6 +14,18 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.44.1 (unreleased)
+
+- Route generated query, search, keyset, mutation and Federation backend failures
+  through the public error sanitizer. Relationship/Federation loaders retain
+  safe public categories in a code-only String transport; SQL/schema/record diagnostics stay private.
+- Sanitize legacy update/delete/bulk mutation error payloads without changing
+  their GraphQL shape. Preserve established safe SQLx public categories and
+  log internal detail only through the existing opt-in server diagnostic path.
+- Align ORM/macros at 0.44.1. Add portable generated-resolver leak regressions
+  covering missing tables, constraints, preloaded/loader relations, Federation,
+  pool failure and decode diagnostics with test-owned databases.
+
 ## 0.44.0 (unreleased)
 
 - Add opaque structural authorization partitions retaining all identity, policy,

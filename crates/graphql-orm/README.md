@@ -29,7 +29,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.44.1", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -149,8 +149,15 @@ README remains project-neutral.
 
 ## Errors and security boundaries
 
-Public GraphQL errors use stable codes; database errors are converted through
-the runtime rather than exposing backend details. Do not treat entity
+Generated queries, mutations, relations and Federation lookups use the shared
+public error sanitizer. Top-level GraphQL errors expose a safe message and
+`extensions.code`; existing mutation payload `error` strings contain only the
+safe message. Backend SQL, schema and record diagnostics are not client fields.
+Handwritten resolvers exposing low-level repository/loader failures must use
+`graphql_error_from_sqlx`, `graphql_error_from_loader`, or `graphql_internal_error`
+from `graphql::errors`.
+
+Do not treat entity
 descriptions, generated operation metadata, `auth = "required"`, or a tool
 manifest as authorization. Install an `AuthSubject`/policy integration and
 enforce row/field/database limits appropriate to the application.
@@ -216,3 +223,7 @@ External authorization keys use the versioned `auth-v2:` digest; invalidate old
 cache identities when upgrading. SQL-value relation keys preserve binary bytes
 and SQL types. See the [0.44.0 migration guide](../../MIGRATION.md#0431-to-0440-authorization-and-relation-partition-identities)
 for host cache and manually constructed key changes.
+
+Version 0.44.1 sanitizes generated backend failures and legacy mutation error
+payloads. Match stable GraphQL public error codes rather than SQL/driver text;
+see the [public error migration](../../MIGRATION.md#0440-to-0441-generated-resolver-public-errors).

@@ -13,6 +13,27 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.44.0 to 0.44.1: generated resolver public errors
+
+Upgrade runtime/macros together. Generated SQL and Federation failures now use
+stable safe GraphQL messages and `extensions.code` instead of backend diagnostic
+text. Match public codes such as `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE` and
+`CONSTRAINT_VIOLATION`; stop matching SQL text, table names or driver strings.
+Existing legacy mutation result objects retain their `success`/`error` shape,
+with a safe message in `error` rather than raw backend details. They do not gain
+an error-code field in this patch. Typed SQLx constraint categories are retained;
+SQL Server errors currently represented as SQLx Protocol retain the sanitizer's
+safe `INTERNAL_ERROR` classification.
+
+No data/schema/SDL migration is required. Internal details continue through the
+existing opt-in `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` server diagnostic path and are
+excluded from client extensions. Host-defined errors and deliberately mapped
+extensions remain host-owned. Low-level repository errors remain internal values. Loader String failures now
+carry only a public category; handwritten loader consumers should use
+`graphql_error_from_loader`. Applications exposing repository errors through
+handwritten resolvers must use the public mapping instead of forwarding Display
+text. Unknown host loader failures are sanitized as `INTERNAL_ERROR`.
+
 ## 0.43.1 to 0.44.0: authorization and relation partition identities
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together. No database schema or
