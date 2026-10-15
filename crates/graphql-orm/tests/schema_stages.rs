@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 #[cfg(feature = "sqlite")]
 use graphql_orm::graphql::orm::{
     ColumnModel, DeletePolicy, ForeignKeyModel, IndexDef, SchemaModel, SchemaStage, TableModel,
@@ -98,10 +103,7 @@ async fn setup_pool() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("schema-stages", 5).await?;
     sqlx::query("DROP TABLE IF EXISTS staged_records")
         .execute(&pool)
         .await?;
@@ -147,6 +149,10 @@ async fn applied_stage_count(
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn schema_stages_apply_incrementally_and_rerun_cleanly()
 -> Result<(), Box<dyn std::error::Error>> {
     use graphql_orm::graphql::orm::{SchemaStageRunner, introspect_schema};
@@ -316,6 +322,10 @@ fn sqlite_vocabulary_terms_v2() -> TableModel {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
 -> Result<(), Box<dyn std::error::Error>> {
     use graphql_orm::graphql::orm::{SchemaStageRunner, introspect_schema};

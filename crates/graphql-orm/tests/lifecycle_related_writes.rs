@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -135,10 +140,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("lifecycle-related-writes", 5).await?;
     sqlx::query("DROP TABLE IF EXISTS record_versions")
         .execute(&pool)
         .await?;
@@ -170,6 +172,10 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn hook_related_writes_are_transactional_for_app_and_graphql_paths()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;

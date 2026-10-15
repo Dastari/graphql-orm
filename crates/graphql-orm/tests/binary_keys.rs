@@ -1,5 +1,10 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 
 #[derive(
@@ -73,9 +78,10 @@ async fn database() -> graphql_orm::Result<Database<SqliteBackend>> {
 
 #[cfg(feature = "postgres")]
 async fn database() -> graphql_orm::Result<Database<PostgresBackend>> {
-    let url = std::env::var("TEST_DATABASE_URL")
+    let pool = owned_postgres::OwnedPostgres::pool("binary-keys", 5)
+        .await
         .map_err(|error| graphql_orm::Error::Configuration(error.to_string().into()))?;
-    let database = Database::<PostgresBackend>::connect_postgres(url).await?;
+    let database = Database::<PostgresBackend>::new(pool);
     graphql_orm::sqlx::query("DROP TABLE IF EXISTS binary_key_records CASCADE")
         .execute(database.pool())
         .await?;
@@ -83,11 +89,12 @@ async fn database() -> graphql_orm::Result<Database<PostgresBackend>> {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn binary_keys_remain_bytes_across_repository_transaction_cas_and_keysets()
 -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(feature = "postgres") && std::env::var("TEST_DATABASE_URL").is_err() {
-        return Ok(());
-    }
     let mut database = database().await?;
     database.set_row_policy(BinaryRowPolicy);
     let entities = [BinaryKeyRecord::metadata()];
@@ -200,6 +207,10 @@ async fn binary_keys_remain_bytes_across_repository_transaction_cas_and_keysets(
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn private_binary_key_and_unsafe_graphql_upsert_are_not_exposed() {
     let schema = schema_builder(Database::new(
         #[cfg(feature = "sqlite")]

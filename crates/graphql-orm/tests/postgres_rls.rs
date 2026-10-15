@@ -1,5 +1,10 @@
 #![cfg(feature = "postgres")]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use async_graphql::{Request, Schema, SimpleObject};
 use graphql_orm::graphql::orm::{
     DatabaseBackend, DbAuthContext, PostgresBackend, SchemaPolicy,
@@ -100,16 +105,8 @@ fn auth_context(tenant_id: &str, scopes: &[&str]) -> DbAuthContext {
     }
 }
 
-async fn test_pool() -> Option<sqlx::PgPool> {
-    let Ok(database_url) = std::env::var("TEST_DATABASE_URL") else {
-        eprintln!("skipping live Postgres RLS test: TEST_DATABASE_URL is not set");
-        return None;
-    };
-    Some(
-        sqlx::PgPool::connect(&database_url)
-            .await
-            .expect("connect postgres"),
-    )
+async fn test_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+    owned_postgres::OwnedPostgres::pool("postgres-rls", 5).await
 }
 
 async fn install_rls_helpers(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
@@ -153,11 +150,13 @@ fn db_auth_context_serializes_deterministically() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn missing_auth_context_preserves_plain_postgres_fetch()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Some(pool) = test_pool().await else {
-        return Ok(());
-    };
+    let pool = test_pool().await?;
 
     let rows =
         fetch_rows_with_auth::<PostgresBackend>(&pool, "SELECT 42::BIGINT AS value", &[], None)
@@ -168,11 +167,13 @@ async fn missing_auth_context_preserves_plain_postgres_fetch()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn transaction_local_settings_are_visible_and_do_not_leak()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Some(pool) = test_pool().await else {
-        return Ok(());
-    };
+    let pool = test_pool().await?;
     install_rls_helpers(&pool).await?;
 
     let mut conn = pool.acquire().await?;
@@ -204,11 +205,13 @@ async fn transaction_local_settings_are_visible_and_do_not_leak()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn concurrent_auth_contexts_do_not_cross_contaminate()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Some(pool) = test_pool().await else {
-        return Ok(());
-    };
+    let pool = test_pool().await?;
     install_rls_helpers(&pool).await?;
 
     async fn read_tenant(
@@ -236,20 +239,13 @@ async fn concurrent_auth_contexts_do_not_cross_contaminate()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_queries_and_relation_preload_obey_live_rls()
 -> Result<(), Box<dyn std::error::Error>> {
-    let Some(pool) = test_pool().await else {
-        return Ok(());
-    };
-
-    let superuser: bool =
-        sqlx::query_scalar("SELECT usesuper FROM pg_user WHERE usename = current_user")
-            .fetch_one(&pool)
-            .await?;
-    if superuser {
-        eprintln!("skipping live Postgres RLS enforcement test: current_user is a superuser");
-        return Ok(());
-    }
+    let pool = test_pool().await?;
 
     sqlx::query("DROP TABLE IF EXISTS rls_notes")
         .execute(&pool)
@@ -290,7 +286,65 @@ async fn generated_queries_and_relation_preload_obey_live_rls()
         sqlx::query(&statement).execute(&pool).await?;
     }
 
-    let schema: RlsSchema = schema_builder(graphql_orm::db::Database::new(pool))
+    // The container owner provisions the fixture; actual reads must use a
+    // different role that cannot bypass RLS or inherit table-owner privileges.
+    let token = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
+    let role = format!("rls_reader_{token}");
+    let password = format!("synthetic_{token}");
+    sqlx::query(&format!(
+        "CREATE ROLE {role} LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD '{password}'"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT USAGE ON SCHEMA public, graphql_orm TO {role}"
+    ))
+    .execute(&pool)
+    .await?;
+    sqlx::query(&format!(
+        "GRANT SELECT ON rls_accounts, rls_notes TO {role}"
+    ))
+    .execute(&pool)
+    .await?;
+    let options = pool
+        .connect_options()
+        .as_ref()
+        .clone()
+        .username(&role)
+        .password(&password);
+    let reader = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?;
+    let can_bypass: bool = sqlx::query_scalar(
+        "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+    )
+    .fetch_one(&reader)
+    .await?;
+    assert!(
+        !can_bypass,
+        "RLS assertions must execute as a restricted reader"
+    );
+    // Exercise the real restricted SQL path before GraphQL's safe error mapper,
+    // so a fixture privilege problem reports its database cause locally.
+    let visible_rows = fetch_rows_with_auth::<PostgresBackend>(
+        &reader,
+        "SELECT id FROM rls_notes",
+        &[],
+        Some(&auth_context("tenant-a", &["notes.read"])),
+    )
+    .await?;
+    assert_eq!(visible_rows.len(), 1);
+    let hidden_rows = fetch_rows_with_auth::<PostgresBackend>(
+        &reader,
+        "SELECT id FROM rls_notes",
+        &[],
+        Some(&auth_context("tenant-b", &["notes.read"])),
+    )
+    .await?;
+    assert!(hidden_rows.is_empty());
+
+    let schema: RlsSchema = schema_builder(graphql_orm::db::Database::new(reader))
         .data("test-user".to_string())
         .finish();
 

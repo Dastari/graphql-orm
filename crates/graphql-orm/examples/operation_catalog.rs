@@ -4,7 +4,6 @@ use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[graphql_entity(
-    backend = "sqlite",
     table = "operation_catalog_accounts",
     plural = "OperationCatalogAccounts",
     schema_policy = "managed"
@@ -19,7 +18,6 @@ struct OperationCatalogAccount {
 }
 
 schema_roots! {
-    backend: "sqlite",
     schema_policy: "managed",
     auth: "none",
     entities: [OperationCatalogAccount],

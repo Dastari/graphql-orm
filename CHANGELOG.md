@@ -46,6 +46,12 @@ for historical context.
 
 ## 0.43.1 (unreleased)
 
+- Require test-owned disposable PostgreSQL/PostGIS/SQL Server infrastructure in
+  legacy integration fixtures. Remove ambient URL/default-port access and silent
+  no-URL passes; add explicit container opt-in and pool-lifetime cleanup checks.
+  Make the operation-catalog example use the selected backend. Library APIs and
+  package versions are unchanged by these development-only changes.
+
 - Refresh compatible TLS/QUIC lockfile dependencies to address published
   advisories. Dependency review remains required for unresolved transitive
   packages; this maintenance changes no library API or data format.

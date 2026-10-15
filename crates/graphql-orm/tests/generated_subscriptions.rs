@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::async_graphql::{Request, Schema};
 use graphql_orm::futures::{Stream, StreamExt};
 use graphql_orm::prelude::*;
@@ -84,10 +89,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("generated-subscriptions", 5).await?;
     sqlx::query("DROP TABLE IF EXISTS subscription_records")
         .execute(&pool)
         .await?;
@@ -105,6 +107,10 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_subscriptions_work_without_manual_sender_registration()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -169,6 +175,10 @@ async fn generated_subscriptions_work_without_manual_sender_registration()
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_subscription_events_are_emitted_only_after_commit()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -266,6 +276,10 @@ async fn generated_subscription_events_are_emitted_only_after_commit()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_subscriptions_fail_explicitly_when_database_runtime_is_missing()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;

@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 #[path = "support/federation_sdl.rs"]
 mod federation_sdl;
 
@@ -84,11 +89,8 @@ async fn setup_pool() -> Result<sqlx::SqlitePool, sqlx::Error> {
 }
 
 #[cfg(feature = "postgres")]
-async fn setup_pool() -> Result<sqlx::PgPool, sqlx::Error> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    sqlx::PgPool::connect(&database_url).await
+async fn setup_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
+    owned_postgres::OwnedPostgres::pool("graphql-case-features", 5).await
 }
 
 #[allow(dead_code)]
@@ -113,6 +115,10 @@ fn assert_has(sdl: &str, expected: &str) {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn generated_schema_respects_crate_wide_case_features() {
     let pool = setup_pool().await.expect("test pool");
     let schema = schema_builder(graphql_orm::db::Database::new(pool))

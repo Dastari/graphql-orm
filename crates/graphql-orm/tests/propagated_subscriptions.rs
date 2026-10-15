@@ -1,3 +1,10 @@
+#![cfg(any(feature = "sqlite", feature = "postgres"))]
+
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::async_graphql::{Request, Response, Schema};
 use graphql_orm::futures::{StreamExt, future::poll_fn};
 use graphql_orm::prelude::*;
@@ -294,10 +301,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("propagated-subscriptions", 5).await?;
     for table in [
         "propagation_record_relationships",
         "propagation_notes",
@@ -470,6 +474,10 @@ async fn insert_node(
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn direct_entity_mutation_emits_direct_change_event() -> Result<(), Box<dyn std::error::Error>>
 {
     let _guard = test_mutex().lock().await;
@@ -531,6 +539,10 @@ async fn direct_entity_mutation_emits_direct_change_event() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn child_mutation_emits_parent_propagated_event() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
@@ -631,6 +643,10 @@ async fn child_mutation_emits_parent_propagated_event() -> Result<(), Box<dyn st
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn multi_parent_propagation_reaches_both_parents_and_deduplicates_same_parent()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -831,6 +847,10 @@ async fn multi_parent_propagation_reaches_both_parents_and_deduplicates_same_par
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn delete_propagation_uses_pre_delete_state() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
@@ -916,6 +936,10 @@ async fn delete_propagation_uses_pre_delete_state() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn propagation_cycles_do_not_reemit_source_indefinitely()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;

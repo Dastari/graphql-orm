@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::time::{Duration, timeout};
@@ -269,13 +274,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await?;
+    let pool = owned_postgres::OwnedPostgres::pool("mutation-context-reads", 1).await?;
     sqlx::query("DROP TABLE IF EXISTS refresh_sessions")
         .execute(&pool)
         .await?;
@@ -307,6 +306,10 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn mutation_hooks_can_read_related_rows_on_the_active_transaction()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;

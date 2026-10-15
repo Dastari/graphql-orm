@@ -3,7 +3,7 @@ title: "Postgres Test Coverage"
 kind: runbook
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-10-14
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -43,10 +43,21 @@ and bounded group results. The AI lane covers schema installation, durable
 persistence behavior, ownership isolation, and restoration against the
 backend-specific implementation.
 
-Some legacy opt-in tests still accept `TEST_DATABASE_URL` for focused
-development. They are not release acceptance evidence. Do not point them at an
-application or shared database; migrate a required lane to the owned harness
-before relying on it for a release.
+The migrated legacy lane owns a fresh container for every fixture and refuses
+ambient database URLs before creating resources. It includes generated schema,
+relations, mutations, transaction-local RLS, typed projections, binary keys, and
+PostGIS. Container-backed cases are explicitly ignored by ordinary runs; run:
+
+```sh
+scripts/run-owned-database-lanes.sh postgres-legacy
+```
+
+The owned pool helper retains its cleanup guard inside pool options, so every
+clone shares the same container lifetime. Tests with specialized connection
+options retain an explicit owner guard through their entire test scope.
+Docker failure is a test failure. Panics and early errors drop the guard; a
+process killed without destructors may leave a labelled container for explicit
+owner-verified recovery. Never clean unrelated containers by a name prefix.
 
 SQLite remains a separate, database-free lane:
 

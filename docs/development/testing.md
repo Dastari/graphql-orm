@@ -186,6 +186,7 @@ ambient database URL variables:
 ```sh
 scripts/run-owned-database-lanes.sh sqlite
 scripts/run-owned-database-lanes.sh postgres
+scripts/run-owned-database-lanes.sh postgres-legacy
 scripts/run-owned-database-lanes.sh mssql
 scripts/run-owned-database-lanes.sh ai-postgres
 ```
@@ -199,8 +200,13 @@ contract and coverage.
 Owned PostgreSQL and SQL Server tests are intentionally ignored in ordinary
 unit-test runs because they start containers. Invoke them through the canonical
 runner rather than exporting `TEST_DATABASE_URL`, `MSSQL_TEST_DATABASE_URL`, or
-`DATABASE_URL`. Older opt-in tests that still accept a URL are not release
-acceptance evidence until migrated to the owned harness.
+`DATABASE_URL`. The `postgres-legacy` lane migrates older generated-schema, relation, mutation,
+RLS, transaction, projection, and PostGIS tests to the owned harness. No ORM
+integration test accepts a manually supplied database URL. These tests now use
+`#[ignore]` for container startup rather than silently passing without a URL.
+The lifecycle regression proves cloned pools keep their container alive and
+release it when the last pool is dropped; exact identity and ownership labels
+remain required for cleanup. PostGIS tests use a separate owned PostGIS image.
 
 ## Authentication bridge lane
 

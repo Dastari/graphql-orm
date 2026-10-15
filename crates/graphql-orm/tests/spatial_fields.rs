@@ -1,5 +1,10 @@
 #![cfg(feature = "postgres")]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 
 #[derive(
@@ -93,7 +98,7 @@ fn line_string_value(coordinates: Vec<[f64; 2]>) -> graphql_orm::serde_json::Val
 #[tokio::test]
 async fn generated_sdl_includes_spatial_filter() {
     let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
-        .connect_lazy("postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test")
+        .connect_lazy("postgres://unused:unused@127.0.0.1:1/never_connected")
         .expect("lazy postgres pool");
     let database = graphql_orm::db::Database::<graphql_orm::PostgresBackend>::new(pool);
     let schema = schema_builder(database).finish();
@@ -181,10 +186,7 @@ fn leak_migration(
 }
 
 async fn setup_postgres_pool() -> Result<graphql_orm::sqlx::PgPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = graphql_orm::sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::postgis_pool("spatial-fields").await?;
     for table in ["spatial_places", "spatial_regions", "spatial_trails"] {
         graphql_orm::sqlx::query(&format!("DROP TABLE IF EXISTS {table} CASCADE"))
             .execute(&pool)
@@ -236,6 +238,10 @@ async fn count_trails(
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn postgis_spatial_fields_indexes_and_predicates_round_trip()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
