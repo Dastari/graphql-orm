@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.48.0 (unreleased)
+
+- Use the maintained native TLS transport for SQL Server while retaining the
+  reviewed Tiberius revision and its query-notification API. MSSQL builds now
+  need platform TLS build/runtime dependencies; upgrade trust-store configuration
+  as described in the migration guide. SQLite and PostgreSQL are unchanged.
+- Add an owned SQL Server certificate/hostname validation regression, including
+  an explicit private CA and rejection of an untrusted CA or mismatched hostname.
+
 ## 0.47.0 (unreleased)
 
 - Declare the SQLite quickstart example's required backend feature so alternative

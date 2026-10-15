@@ -1,5 +1,5 @@
 //! Disposable SQL Server owned by these upstream tests, never an application DSN.
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const SQL_SERVER_IMAGE: &str = "mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89";
 
@@ -124,6 +124,122 @@ impl OwnedSqlServer {
                 String::from_utf8_lossy(&output.stdout).trim()
                     == format!("{} {}", self.container_id, self.owner_token)
             })
+    }
+
+    /// Install synthetic certificates on this exact disposable server only.
+    #[allow(dead_code)]
+    pub(crate) async fn configure_tls(
+        &mut self,
+        certificate: &std::path::Path,
+        private_key: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.has_exact_owned_identity() {
+            return Err("refusing TLS configuration without exact owned identity".into());
+        }
+        // Open both inputs before changing the container. Keep file contents on
+        // stdin and use fixed destinations rather than interpolating shell data.
+        for (source, script) in [
+            (
+                std::fs::File::open(certificate)?,
+                "umask 077; cat > /var/opt/mssql/audit-server.pem",
+            ),
+            (
+                std::fs::File::open(private_key)?,
+                "umask 077; cat > /var/opt/mssql/audit-server.key",
+            ),
+        ] {
+            if !self.has_exact_owned_identity() {
+                return Err("refusing TLS configuration without exact owned identity".into());
+            }
+            let output = Command::new("docker")
+                .args(["exec", "--user", "0", "-i", &self.container_id])
+                .args(["sh", "-c", script])
+                .stdin(Stdio::from(source))
+                .output()?;
+            if !output.status.success() {
+                return Err("could not install owned TLS fixture".into());
+            }
+        }
+        let commands: &[&[&str]] = &[
+            &[
+                "chown",
+                "10001:0",
+                "/var/opt/mssql/audit-server.pem",
+                "/var/opt/mssql/audit-server.key",
+            ],
+            &[
+                "chmod",
+                "600",
+                "/var/opt/mssql/audit-server.pem",
+                "/var/opt/mssql/audit-server.key",
+            ],
+            &[
+                "/opt/mssql/bin/mssql-conf",
+                "set",
+                "network.tlscert",
+                "/var/opt/mssql/audit-server.pem",
+            ],
+            &[
+                "/opt/mssql/bin/mssql-conf",
+                "set",
+                "network.tlskey",
+                "/var/opt/mssql/audit-server.key",
+            ],
+            &[
+                "/opt/mssql/bin/mssql-conf",
+                "set",
+                "network.forceencryption",
+                "1",
+            ],
+        ];
+        for args in commands {
+            let output = Command::new("docker")
+                .args(["exec", "--user", "0", &self.container_id])
+                .args(*args)
+                .output()?;
+            if !output.status.success() {
+                return Err("owned SQL Server TLS configuration failed".into());
+            }
+        }
+        if !Command::new("docker")
+            .args(["restart", &self.container_id])
+            .output()?
+            .status
+            .success()
+        {
+            return Err("owned SQL Server TLS restart failed".into());
+        }
+        // Docker may assign a different ephemeral host port after restart. No
+        // pool is retained across TLS setup; resolve this same immutable server
+        // again before constructing the certificate-validation connections.
+        let published = Command::new("docker")
+            .args(["port", &self.container_id, "1433/tcp"])
+            .output()?;
+        if !published.status.success() {
+            return Err("cannot resolve restarted owned SQL Server port".into());
+        }
+        let published = String::from_utf8(published.stdout)?;
+        let port = published
+            .lines()
+            .find_map(|line| line.strip_prefix("127.0.0.1:"))
+            .ok_or("restarted owned SQL Server was not loopback-published")?;
+        let port: u16 = port.parse()?;
+        let (_, settings) = self
+            .connection_string
+            .split_once(';')
+            .ok_or("invalid owned connection settings")?;
+        self.connection_string = format!("server=tcp:127.0.0.1,{port};{settings}");
+        let mut last_error = String::new();
+        for _ in 0..180 {
+            let pool =
+                graphql_orm::db::mssql::MssqlPool::connect_ado(&self.connection_string).await?;
+            match pool.fetch_rows("SELECT 1 AS ready", &[]).await {
+                Ok(_) => return Ok(()),
+                Err(error) => last_error = error.to_string(),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        Err(format!("owned SQL Server TLS listener did not become ready: {last_error}").into())
     }
 
     pub(crate) fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {

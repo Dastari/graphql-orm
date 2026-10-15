@@ -13,6 +13,34 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.47.0 to 0.48.0: SQL Server platform TLS
+
+Upgrade ORM/macros together. The `mssql` feature now selects Tiberius native TLS
+instead of its legacy Rustls 0.21 transport. The reviewed driver revision and
+query-notification API stay the same. No SQL schema, GraphQL SDL or stored-data
+migration is required. SQLite and PostgreSQL transport selection is unchanged.
+
+For MSSQL deployments, install platform TLS dependencies in both build and
+runtime images. Linux builds require OpenSSL development headers and `pkg-config`
+(for example `libssl-dev` and `pkg-config` on Debian/Ubuntu); runtime images require
+the matching OpenSSL shared libraries and CA certificates. Cross-compilation and
+static/musl images must explicitly supply their target OpenSSL toolchain. Windows
+uses Schannel and macOS uses Security Framework. Validate your deployment target
+and do not assume a prior pure-Rust MSSQL image remains sufficient.
+
+During TLS negotiation, the default trust configuration verifies the certificate
+chain and hostname using platform roots. Set `Encrypt=true` to require TLS for
+the full session. Omitting `Encrypt` from an ADO connection string allows
+login-only encryption when the server does not require encrypted sessions.
+For private PKI, provision the platform trust store or set
+`TrustServerCertificateCA=/absolute/path/ca.pem` (PEM/CRT/DER supported); the private
+CA augments the platform roots and hostname verification still applies. Test with
+the actual server hostname and a certificate containing the matching SAN. Do not
+set `TrustServerCertificate=true` for sensitive deployments.
+That explicit escape hatch still disables chain and hostname validation and is
+only used by isolated fixtures. TLS errors should be fixed through trust and
+hostname configuration rather than by disabling verification.
+
 ## 0.46.0 to 0.47.0: current authority and coherent accepted requests
 
 Upgrade ORM/macros together. `Database` now defaults to
