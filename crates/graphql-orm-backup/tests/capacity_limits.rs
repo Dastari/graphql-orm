@@ -72,3 +72,14 @@ async fn buffered_sink_rejects_oversized_body_before_calling_legacy_sink() {
     assert!(matches!(NeverWrite.restore_object_stream(object, stream(&[b"abcd"])).await,
         Err(BackupError::CapacityExceeded { limit_bytes: 2 })));
 }
+
+#[test]
+fn decoder_rejects_oversized_history_window_before_reading_output() {
+    // Zstd frame: magic; no single segment/content size; 2 MiB window;
+    // final empty raw block. It expands to zero bytes but requests a large window.
+    let frame = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x58, 0x01, 0x00, 0x00];
+    assert!(matches!(decompress_payload_with_limit(&frame, BackupByteLimit::Bytes(1024)),
+        Err(BackupError::Compression { .. })));
+    assert!(decompress_payload_with_limit(&frame, BackupByteLimit::Unbounded)
+        .expect("valid empty frame with explicitly accepted library window policy").is_empty());
+}

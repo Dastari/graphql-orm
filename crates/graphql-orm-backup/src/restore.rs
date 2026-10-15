@@ -137,7 +137,7 @@ pub trait RestoreObjectSink: Send + Sync {
         object: BackupObjectRef,
         body: StorageByteStream,
     ) -> Result<(), BackupError> {
-        self.restore_object(object(body).await?)
+        self.restore_object(object, collect_backup_stream(body, self.buffered_byte_limit()).await?)
             .await
     }
 }
@@ -550,7 +550,9 @@ where
 
     let limits = repository.capacity_limits();
     let stored = collect_backup_stream(repository.get_blob_stream(&entry.content_key).await?, limits.buffered_bytes).await?;
-    let payload = decode_payload(&stored, &manifest.database.compression, limits.decompressed_bytes)?;
+    let remaining_stage = limits.stage_bytes.remaining(*stage_bytes)?;
+    let decode_limit = limits.decompressed_bytes.min(remaining_stage);
+    let payload = decode_payload(&stored, &manifest.database.compression, decode_limit)?;
     *stage_bytes = stage_bytes.checked_add(payload.len() as u64)
         .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
     limits.stage_bytes.check(*stage_bytes)?;

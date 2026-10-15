@@ -366,12 +366,20 @@ impl<'a> From<&'a BackupSnapshotManifest> for ChecksumManifestView<'a> {
 }
 
 /// Decodes zstd with an explicit output limit, checked before extending the buffer.
+/// Finite limits also cap the decoder history window before reading frame input:
+/// round down to a power of two, with a 1 KiB minimum and portable 1 GiB maximum.
+/// This bounds the window, not all decoder overhead or process memory. Unbounded
+/// leaves the zstd library's default window policy in effect.
 ///
 /// # Errors
 /// Returns a compression error or [`BackupError::CapacityExceeded`].
 pub fn decompress_payload_with_limit(bytes: &[u8], limit: crate::BackupByteLimit) -> Result<Vec<u8>, BackupError> {
     use std::io::Read;
-    let mut decoder = zstd::stream::read::Decoder::new(bytes).map_err(BackupError::compression)?;
+    let mut decoder = zstd::stream::read::Decoder::with_buffer(bytes).map_err(BackupError::compression)?;
+    if let crate::BackupByteLimit::Bytes(limit_bytes) = limit {
+        let window_log = (63 - limit_bytes.max(1).leading_zeros()).clamp(10, 30);
+        decoder.window_log_max(window_log).map_err(BackupError::compression)?;
+    }
     let mut result = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {

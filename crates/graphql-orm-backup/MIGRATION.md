@@ -20,8 +20,15 @@ Defaults are 64 MiB for each buffered repository body or compatibility stream
 fallback, 256 MiB for each decoded database payload, and 512 MiB of decoded
 payloads across one full/incremental manifest stage. Limits are inclusive.
 Stored payloads are limited before decoding; compressed expansion is checked
-incrementally before appending output. Aggregate decoded limits are checked
-before parsing each next payload. They do not limit the whole chain or row count.
+incrementally before appending output. Before reading frame input, a finite
+output cap also sets zstd's maximum history-window size: round down to the next
+power of two, with a 1 KiB minimum and a portable 1 GiB maximum. This may reject
+otherwise small output encoded with a larger window; the error is `Compression`.
+An unbounded override retains the zstd library's default window policy. Decoder
+metadata and other overhead still require a separate resource budget.
+
+Each payload's output limit is further clamped to the remaining stage budget,
+and aggregate decoded limits are checked before parsing each next payload. They do not limit the whole chain or row count.
 
 For legitimate larger backups, set reviewed finite `BackupCapacityLimits` via
 `LocalBackupRepository::with_capacity_limits` or

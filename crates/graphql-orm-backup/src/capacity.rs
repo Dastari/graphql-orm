@@ -16,6 +16,20 @@ impl Default for BackupByteLimit {
     fn default() -> Self { Self::Bytes(64 * 1024 * 1024) }
 }
 impl BackupByteLimit {
+    pub(crate) fn min(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bytes(a), Self::Bytes(b)) => Self::Bytes(a.min(b)),
+            (Self::Unbounded, limit) | (limit, Self::Unbounded) => limit,
+        }
+    }
+    pub(crate) fn remaining(self, consumed: u64) -> Result<Self, BackupError> {
+        self.check(consumed)?;
+        Ok(match self {
+            Self::Bytes(limit) => Self::Bytes(limit - consumed),
+            Self::Unbounded => Self::Unbounded,
+        })
+    }
+
     pub(crate) fn check(self, bytes: u64) -> Result<(), BackupError> {
         if let Self::Bytes(limit_bytes) = self {
             if bytes > limit_bytes { return Err(BackupError::CapacityExceeded { limit_bytes }); }
