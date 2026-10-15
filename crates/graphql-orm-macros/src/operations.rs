@@ -2008,9 +2008,14 @@ pub(crate) fn generate_graphql_operations(
         }
     };
     let subscription_pk_bind = pk_bind_value_for_entity.clone();
+    let subscription_key_visibility = if crate::entity::has_repository_entity_attribute(&input.attrs) {
+        quote! {}
+    } else {
+        quote! { pub }
+    };
     let subscription_key_method = quote! {
         #[doc(hidden)]
-        pub fn __gom_subscription_key_values(entity: &Self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
+        #subscription_key_visibility fn __gom_subscription_key_values(entity: &Self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
             vec![#subscription_pk_bind]
         }
     };
