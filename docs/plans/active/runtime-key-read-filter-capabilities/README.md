@@ -11,9 +11,11 @@ supersedes: []
 # Runtime key reads and filter matching interface review
 
 Requirement A received explicit implementation approval on 2026-10-15. Its
-implementation and scoped validation are complete; final release acceptance
-remains pending. Requirement B received explicit implementation approval on
-2026-10-15; its separate implementation is pending and is not part of this preview. This plan addresses only A and B in the [immutable consumer
+implementation and scoped validation are complete; final stack integration and
+release acceptance remain pending. Requirement B also received explicit
+implementation approval, using the validated structural Value prerequisite and
+excluding the optional raw JSON parser. Its separate implementation and scoped
+validation are in progress. This plan addresses only A and B in the [immutable consumer
 request](https://github.com/Dastari/digibase/blob/0d26ab1af68b80985cafa4a621fa850eda5afee4/docs/coordination/prompts/0020-graphql-orm-runtime-key-reads-and-record-filter-matching.md).
 The reviewed ORM baseline is `4059d10026b9b8d1e9a2be0f4f556df807f77794`,
 version0.48.0. Remote main was independently resolved to that commit.
@@ -22,9 +24,9 @@ version0.48.0. Remote main was independently resolved to that commit.
 
 The completed first checkpoint established whether public APIs satisfy each requirement, using
 compiled external consumer controls and narrowly scoped expected compile
-failures. The separate A approval authorizes only the checked point-read
-implementation below. B's proposed interfaces and semantics remain subject to
-owner review; no filter-lowering/matching API is included in A.
+failures. Separate approvals now authorize A point reads and B checked intent/
+matching under the bounded profiles below. B is a distinct additive implementation
+on exact A4c; no raw JSON parser or wire-duplicate guarantee is approved.
 
 At the reviewed baseline, owned APIs provided checked complete mutation keys,
 projection/row codecs, bounded SQL reads, relation anchor capture, backend auth
@@ -210,7 +212,7 @@ second interpretation engine. Duplicate field/operator keys in one input object
 and repeated occurrences in distinct Boolean children are different: the latter
 are valid and must remain in intent.
 
-**Unresolved B contract decision:** a prebuilt async-graphql Value has unique map
+**Approved B input boundary:** a prebuilt async-graphql Value has unique map
 keys and cannot reveal duplicates erased by an earlier parser. The proposed
 Value entry therefore requires an explicitly validated GraphQL coercion
 prerequisite: the host/integration supplies a structural value whose original
@@ -235,9 +237,9 @@ prepare_runtime_filter_json(
 
 That optional entry must reject duplicate object keys before erasure and feed
 the same canonical lowering, not a second SQL evaluator. It is not included
-implicitly in the Value signature. Owner review must choose whether the
-validated-coercion prerequisite suffices or raw input is in scope. This unresolved
-boundary is another reason to review B independently; it does not block A.
+implicitly in the Value signature. The owner selected the validated-coercion
+prerequisite; the raw-input entry remains excluded and requires a separate future
+contract review. Existing wire duplicate erasure remains an integration limitation.
  Existing RuntimePredicate APIs stay compatible
 and cannot fabricate original intent they never retained.
 
@@ -277,13 +279,13 @@ No sibling changes, event/journal/replay product, transport, auth store, raw SQL
 escape hatch or static API rewrite is included. No Actions dispatch, merge or
 publication is authorized here; proposal commits use `[skip ci]`.
 
-Before interface approval: compile the existing public consumer controls and
+The completed pre-approval checkpoint compiled the existing public consumer controls and
 confirm each expected diagnostic; review the actual nearest alternatives and
 publish exact source/features/compiler/lock provenance. Documentation checks and
 formatting run only in an assigned constrained lane. Then stop for owner contract
 review; no new API implementation proceeds automatically.
 
-After separate approval, A tests cover complete single/composite nonfilterable
+Following separate approval, A tests cover complete single/composite nonfilterable
 keys, exact projection, host denial before I/O, required restrictions, malformed
 and stale/cross-schema inputs, hidden/missing equivalence, multiplicity, owned
 non-superuser PostgreSQL RLS/auth isolation, cancellation and concurrent changes.
@@ -367,13 +369,13 @@ before pool I/O. A package build without any backend remains unsupported by the
 unchanged macro guard. The explicit package-selected native API comparison
 passed under a minor-release override to check additive compatibility.
 
-ORM/macros remain paired at 0.49.0 in an unpublished isolated local preview
-that integrates the reviewed 0.48.1–0.48.3 corrections, explicit SemVer gates
-and fixture lock/import correction while preserving their separate histories.
-This is source assembly only; no final-stack build, test or acceptance is
-claimed. The seven locks retain the reviewed local version and derive changes;
-the generated inventory is inherited from A and awaits regeneration/checks.
-Prior results above retain their actual input source identities. B has owner
-implementation approval but remains pending separately; final release freeze
-awaits its integration and affected validation. Main and existing PR branches
-are unchanged. No Actions, remote merge or publication is authorized here.
+The unpublished local preview now assembles the reviewed 0.48.1–0.48.3
+corrections, Q018, fixture derive fixes, A and B. B runtime evidence belongs to
+2bcc5628; selected quality and two native API comparisons belong to its
+initializer-only descendant 008764bd. These are scoped prior results, not
+acceptance of this assembly. The optional raw JSON parser remains excluded;
+wire duplicate erasure remains a host integration prerequisite.
+
+The paired version and inventory await final assembly reconciliation and
+constrained checks. No final-stack build, test, merge, Actions or publication is
+claimed. Existing owner branches and their evidence remain unchanged.

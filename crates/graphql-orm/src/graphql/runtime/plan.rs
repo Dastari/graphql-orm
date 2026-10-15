@@ -404,157 +404,324 @@ pub(super) struct FilterIntent {
     pub logical: Vec<&'static str>,
 }
 
+/// Lower a host-validated structural Value using the canonical runtime filter path.
+///
+/// The caller must validate GraphQL coercion and duplicate wire keys BEFORE
+/// conversion to Value. Value maps cannot expose erased duplicate occurrences.
+/// This function preserves every occurrence PRESENT in the supplied value; it
+/// proves neither transport provenance nor principal/policy authority.
+/// # Errors
+/// Rejects invalid handles/input, unsupported operators and bounded input costs.
+pub fn prepare_runtime_filter(
+    schema: &ValidatedRuntimeSchema,
+    collection: &RuntimeCollectionHandle,
+    input: &Value,
+    limits: RuntimeGraphqlLimits,
+) -> Result<CheckedRuntimeFilter, RuntimeFilterError> {
+    prepare_filter_inner(schema, collection, input, limits, false)
+}
+fn prepare_filter_inner(
+    schema: &ValidatedRuntimeSchema,
+    collection: &RuntimeCollectionHandle,
+    input: &Value,
+    limits: RuntimeGraphqlLimits,
+    canonical_execution: bool,
+) -> Result<CheckedRuntimeFilter, RuntimeFilterError> {
+    if canonical_execution && limits.query.max_predicate_depth == 0 {
+        return Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::LimitExceeded,
+        ));
+    }
+    let current = schema
+        .resolve_collection(collection.id())
+        .map_err(|_| RuntimeFilterError::new(RuntimeFilterErrorCode::InvalidHandle))?;
+    if &current != collection {
+        return Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::SchemaMismatch,
+        ));
+    }
+    let c = schema
+        .schema()
+        .collections
+        .iter()
+        .find(|c| &c.id == collection.id())
+        .ok_or(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::InvalidHandle,
+        ))?;
+    // Bound the supplied tree before allocating decoded literals or clones.
+    if !canonical_execution {
+        let mut pending = vec![(input, 0usize)];
+        let mut nodes = 0usize;
+        let mut bytes = 0usize;
+        while let Some((value, depth)) = pending.pop() {
+            nodes = nodes.checked_add(1).ok_or(RuntimeFilterError::new(
+                RuntimeFilterErrorCode::LimitExceeded,
+            ))?;
+            if nodes > limits.max_variable_nodes || depth > limits.max_depth {
+                return Err(RuntimeFilterError::new(
+                    RuntimeFilterErrorCode::LimitExceeded,
+                ));
+            }
+            let size =
+                match value {
+                    Value::String(s) => s.len(),
+                    Value::Binary(s) => s.len(),
+                    Value::Enum(s) => s.as_str().len(),
+                    Value::Object(entries) => {
+                        if entries.len()
+                            > limits
+                                .max_variable_nodes
+                                .saturating_sub(nodes)
+                                .saturating_sub(pending.len())
+                        {
+                            return Err(RuntimeFilterError::new(
+                                RuntimeFilterErrorCode::LimitExceeded,
+                            ));
+                        }
+                        for (k, v) in entries {
+                            bytes = bytes.checked_add(k.as_str().len()).ok_or(
+                                RuntimeFilterError::new(RuntimeFilterErrorCode::LimitExceeded),
+                            )?;
+                            pending.push((v, depth + 1));
+                        }
+                        0
+                    }
+                    Value::List(values) => {
+                        if values.len()
+                            > limits
+                                .max_variable_nodes
+                                .saturating_sub(nodes)
+                                .saturating_sub(pending.len())
+                        {
+                            return Err(RuntimeFilterError::new(
+                                RuntimeFilterErrorCode::LimitExceeded,
+                            ));
+                        }
+                        for v in values {
+                            pending.push((v, depth + 1));
+                        }
+                        0
+                    }
+                    _ => 32,
+                };
+            bytes = bytes.checked_add(size).ok_or(RuntimeFilterError::new(
+                RuntimeFilterErrorCode::LimitExceeded,
+            ))?;
+            if bytes > limits.max_variable_bytes {
+                return Err(RuntimeFilterError::new(
+                    RuntimeFilterErrorCode::LimitExceeded,
+                ));
+            }
+        }
+    }
+    let builder = schema
+        .runtime_filter_builder(collection, limits.query)?
+        .with_graphql_literal_limits(
+            limits.scalars.max_text_bytes,
+            limits.scalars.max_decoded_bytes,
+        );
+    let builder = if canonical_execution {
+        builder.for_canonical_execution()
+    } else {
+        builder
+    };
+    let root = checked_filter(&builder, c, input, limits, 0)?;
+    builder.finish(root)
+}
+
 pub(super) fn filter(
     schema: &ValidatedRuntimeSchema,
     collection: &RuntimeCollectionHandle,
+    _c: &RuntimeCollection,
+    value: &Value,
+    limits: RuntimeGraphqlLimits,
+    _depth: usize,
+    intent: &mut FilterIntent,
+) -> Result<RuntimePredicate, RuntimeGraphqlError> {
+    let checked = prepare_filter_inner(schema, collection, value, limits, true)
+        .map_err(|e| RuntimeGraphqlError::new(e.graphql_code()))?;
+    struct Flat<'a>(&'a mut FilterIntent);
+    impl RuntimeFilterIntentVisitor for Flat<'_> {
+        fn enter_boolean(&mut self, k: RuntimeFilterBoolean, ignored: bool) {
+            if ignored {
+                return;
+            }
+            let name = match k {
+                RuntimeFilterBoolean::ImplicitAnd => return,
+                RuntimeFilterBoolean::And => "and",
+                RuntimeFilterBoolean::Or => "or",
+                RuntimeFilterBoolean::Not => "not",
+            };
+            if !self.0.logical.contains(&name) {
+                self.0.logical.push(name);
+            }
+        }
+        fn leave_boolean(&mut self, _: RuntimeFilterBoolean, _: bool) {}
+        fn field(&mut self, f: &RuntimeFieldHandle, op: RuntimeFilterOperator, ignored: bool) {
+            if ignored {
+                return;
+            }
+            let name = match op {
+                RuntimeFilterOperator::Scalar(op) => match op {
+                    RuntimeScalarOperator::Eq => "eq",
+                    RuntimeScalarOperator::Ne => "ne",
+                    RuntimeScalarOperator::Lt => "lt",
+                    RuntimeScalarOperator::Lte => "lte",
+                    RuntimeScalarOperator::Gt => "gt",
+                    RuntimeScalarOperator::Gte => "gte",
+                    RuntimeScalarOperator::Contains => "contains",
+                    RuntimeScalarOperator::StartsWith => "startsWith",
+                    RuntimeScalarOperator::EndsWith => "endsWith",
+                },
+                RuntimeFilterOperator::List(RuntimeListOperator::In) => "in",
+                RuntimeFilterOperator::List(RuntimeListOperator::NotIn) => "notIn",
+                RuntimeFilterOperator::IsNull(true) => "isNull",
+                RuntimeFilterOperator::IsNull(false) => "isNotNull",
+                _ => return,
+            };
+            self.0.operations.push((f.clone(), name));
+        }
+    }
+    checked.visit_intent(&mut Flat(intent));
+    Ok(checked.predicate().clone())
+}
+fn checked_filter(
+    builder: &RuntimeFilterBuilder,
     c: &RuntimeCollection,
     value: &Value,
     limits: RuntimeGraphqlLimits,
     depth: usize,
-    intent: &mut FilterIntent,
-) -> Result<RuntimePredicate, RuntimeGraphqlError> {
+) -> Result<RuntimeFilterNode, RuntimeFilterError> {
     if depth >= limits.query.max_predicate_depth {
-        return Err(RuntimeGraphqlError::new("cost_exceeded"));
+        return Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::LimitExceeded,
+        ));
     }
     let Value::Object(entries) = value else {
-        return Err(invalid());
+        return Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::InvalidInput,
+        ));
     };
-    let mut predicates = Vec::new();
+    let mut nodes = Vec::new();
     for (name, value) in entries {
-        if value == &Value::Null {
-            continue;
-        }
-        if let Some(logical) = match name.as_str() {
-            "and" => Some("and"),
-            "or" => Some("or"),
-            "not" => Some("not"),
+        let logical = match name.as_str() {
+            "and" => Some(RuntimeFilterBoolean::And),
+            "or" => Some(RuntimeFilterBoolean::Or),
+            "not" => Some(RuntimeFilterBoolean::Not),
             _ => None,
-        } {
-            if !intent.logical.contains(&logical) {
-                intent.logical.push(logical);
+        };
+        if let Some(kind) = logical {
+            if value == &Value::Null {
+                nodes.push(builder.ignored_boolean(kind)?);
+                continue;
             }
-        }
-        match name.as_str() {
-            "and" | "or" => {
+            if kind == RuntimeFilterBoolean::Not {
+                nodes.push(builder.not(checked_filter(builder, c, value, limits, depth + 1)?)?)
+            } else {
                 let values = list_values(value);
                 if values.len() > limits.query.max_predicate_nodes {
-                    return Err(RuntimeGraphqlError::new("cost_exceeded"));
+                    return Err(RuntimeFilterError::new(
+                        RuntimeFilterErrorCode::LimitExceeded,
+                    ));
                 }
-                let parts = values
+                let children = values
                     .into_iter()
-                    .map(|v| filter(schema, collection, c, v, limits, depth + 1, intent))
+                    .map(|v| checked_filter(builder, c, v, limits, depth + 1))
                     .collect::<Result<Vec<_>, _>>()?;
-                predicates.push(
-                    if name == "and" {
-                        schema.runtime_and(collection, parts, limits.query)
-                    } else {
-                        schema.runtime_or(collection, parts, limits.query)
-                    }
-                    .map_err(query_error)?,
-                );
+                nodes.push(if kind == RuntimeFilterBoolean::And {
+                    builder.and(children)?
+                } else {
+                    builder.or(children)?
+                });
             }
-            "not" => predicates.push(
-                schema
-                    .runtime_not(
-                        collection,
-                        filter(schema, collection, c, value, limits, depth + 1, intent)?,
-                        limits.query,
-                    )
-                    .map_err(query_error)?,
-            ),
-            _ => {
-                let f = c
-                    .fields
-                    .iter()
-                    .find(|f| f.api_name == name.as_str())
-                    .ok_or_else(invalid)?;
-                let handle = schema
-                    .resolve_field(collection, &f.id)
-                    .map_err(record_error)?;
-                let Value::Object(ops) = value else {
-                    return Err(invalid());
-                };
-                for (op, value) in ops {
-                    if value == &Value::Null {
-                        continue;
+            continue;
+        }
+        let f = c
+            .fields
+            .iter()
+            .find(|f| f.api_name == name.as_str())
+            .ok_or(RuntimeFilterError::new(
+                RuntimeFilterErrorCode::InvalidInput,
+            ))?;
+        // Resolve through the already checked builder's schema, never physical names.
+        let field = builder.resolve_graphql_field(&f.id)?;
+        if value == &Value::Null {
+            nodes.push(builder.ignored_field(&field, RuntimeFilterOperator::Field)?);
+            continue;
+        }
+        let Value::Object(ops) = value else {
+            return Err(RuntimeFilterError::new(
+                RuntimeFilterErrorCode::InvalidInput,
+            ));
+        };
+        if ops.is_empty() {
+            nodes.push(builder.ignored_field(&field, RuntimeFilterOperator::Field)?);
+        }
+        for (op, value) in ops {
+            let operation = match op.as_str() {
+                "isNull" => RuntimeFilterOperator::IsNull(value != &Value::Boolean(false)),
+                "in" => RuntimeFilterOperator::List(RuntimeListOperator::In),
+                "notIn" => RuntimeFilterOperator::List(RuntimeListOperator::NotIn),
+                _ => RuntimeFilterOperator::Scalar(match op.as_str() {
+                    "eq" => RuntimeScalarOperator::Eq,
+                    "ne" => RuntimeScalarOperator::Ne,
+                    "lt" => RuntimeScalarOperator::Lt,
+                    "lte" => RuntimeScalarOperator::Lte,
+                    "gt" => RuntimeScalarOperator::Gt,
+                    "gte" => RuntimeScalarOperator::Gte,
+                    "contains" => RuntimeScalarOperator::Contains,
+                    "startsWith" => RuntimeScalarOperator::StartsWith,
+                    "endsWith" => RuntimeScalarOperator::EndsWith,
+                    _ => {
+                        return Err(RuntimeFilterError::new(
+                            RuntimeFilterErrorCode::InvalidInput,
+                        ));
                     }
-                    // Capture requested capabilities before empty lists lower to constants.
-                    let operation = match op.as_str() {
-                        "eq" => "eq",
-                        "ne" => "ne",
-                        "lt" => "lt",
-                        "lte" => "lte",
-                        "gt" => "gt",
-                        "gte" => "gte",
-                        "contains" => "contains",
-                        "startsWith" => "startsWith",
-                        "endsWith" => "endsWith",
-                        "in" => "in",
-                        "notIn" => "notIn",
-                        "isNull" if value == &Value::Boolean(false) => "isNotNull",
-                        "isNull" => "isNull",
-                        _ => return Err(invalid()),
+                }),
+            };
+            if value == &Value::Null {
+                nodes.push(builder.ignored_field(&field, operation)?);
+                continue;
+            }
+            let decode = |v| {
+                scalar::decode(f.value_kind, v, limits.scalars)
+                    .map_err(|_| RuntimeFilterError::new(RuntimeFilterErrorCode::InvalidInput))
+            };
+            nodes.push(match operation {
+                RuntimeFilterOperator::IsNull(_) => {
+                    let Value::Boolean(v) = value else {
+                        return Err(RuntimeFilterError::new(
+                            RuntimeFilterErrorCode::InvalidInput,
+                        ));
                     };
-                    intent.operations.push((handle.clone(), operation));
-                    let predicate = match op.as_str() {
-                        "isNull" => {
-                            let Value::Boolean(v) = value else {
-                                return Err(invalid());
-                            };
-                            schema.runtime_is_null(collection, &handle, *v, limits.query)
-                        }
-                        "in" | "notIn" => {
-                            let values = list_values(value);
-                            if values.len() > limits.query.max_values_per_list {
-                                return Err(RuntimeGraphqlError::new("cost_exceeded"));
-                            }
-                            let values = values
-                                .into_iter()
-                                .map(|v| scalar::decode(f.value_kind, v, limits.scalars))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            schema.runtime_list(
-                                collection,
-                                &handle,
-                                if op == "in" {
-                                    RuntimeListOperator::In
-                                } else {
-                                    RuntimeListOperator::NotIn
-                                },
-                                values,
-                                limits.query,
-                            )
-                        }
-                        _ => {
-                            let op = match op.as_str() {
-                                "eq" => RuntimeScalarOperator::Eq,
-                                "ne" => RuntimeScalarOperator::Ne,
-                                "lt" => RuntimeScalarOperator::Lt,
-                                "lte" => RuntimeScalarOperator::Lte,
-                                "gt" => RuntimeScalarOperator::Gt,
-                                "gte" => RuntimeScalarOperator::Gte,
-                                "contains" => RuntimeScalarOperator::Contains,
-                                "startsWith" => RuntimeScalarOperator::StartsWith,
-                                "endsWith" => RuntimeScalarOperator::EndsWith,
-                                _ => return Err(invalid()),
-                            };
-                            schema.runtime_compare(
-                                collection,
-                                &handle,
-                                op,
-                                scalar::decode(f.value_kind, value, limits.scalars)?,
-                                limits.query,
-                            )
-                        }
-                    }
-                    .map_err(query_error)?;
-                    predicates.push(predicate);
+                    builder.is_null(&field, *v)?
                 }
-            }
+                RuntimeFilterOperator::List(op) => {
+                    let values = list_values(value);
+                    if values.len() > limits.query.max_values_per_list {
+                        return Err(RuntimeFilterError::new(
+                            RuntimeFilterErrorCode::LimitExceeded,
+                        ));
+                    }
+                    builder.membership(
+                        &field,
+                        op,
+                        values
+                            .into_iter()
+                            .map(decode)
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )?
+                }
+                RuntimeFilterOperator::Scalar(op) => builder.compare(&field, op, decode(value)?)?,
+                _ => {
+                    return Err(RuntimeFilterError::new(
+                        RuntimeFilterErrorCode::InvalidInput,
+                    ));
+                }
+            });
         }
     }
-    schema
-        .runtime_and(collection, predicates, limits.query)
-        .map_err(query_error)
+    builder.implicit_and(nodes)
 }
 
 fn list_values(value: &Value) -> Vec<&Value> {
@@ -568,5 +735,129 @@ fn enum_text(value: &Value) -> Result<&str, RuntimeGraphqlError> {
         Value::String(v) => Ok(v),
         Value::Enum(v) => Ok(v.as_str()),
         _ => Err(invalid()),
+    }
+}
+
+#[cfg(test)]
+mod checked_compatibility_tests {
+    use super::*;
+    fn schema() -> ValidatedRuntimeSchema {
+        RuntimeSchema {
+            format_version: 1,
+            collections: vec![RuntimeCollection {
+                id: CollectionId::new("items").unwrap(),
+                api_type_name: "Item".into(),
+                api_plural_name: "Items".into(),
+                physical_table: "items".into(),
+                primary_key: vec![FieldId::new("id").unwrap()],
+                append_only: false,
+                retention_purge: false,
+                fields: [
+                    ("id", RuntimeValueKind::Integer, false),
+                    ("text", RuntimeValueKind::String, true),
+                    ("flag", RuntimeValueKind::Boolean, true),
+                    ("bytes", RuntimeValueKind::Bytes, true),
+                    ("score", RuntimeValueKind::Float, true),
+                    ("hidden", RuntimeValueKind::String, false),
+                ]
+                .into_iter()
+                .map(|(n, k, filterable)| RuntimeField {
+                    id: FieldId::new(n).unwrap(),
+                    api_name: n.into(),
+                    physical_column: n.into(),
+                    value_kind: k,
+                    nullable: false,
+                    unique: n == "id",
+                    filterable,
+                    sortable: n == "id",
+                    generated: false,
+                    default: None,
+                })
+                .collect(),
+                relations: vec![],
+                indexes: vec![],
+                composite_unique: vec![],
+                default_order: vec![],
+            }],
+        }
+        .validate()
+        .unwrap()
+    }
+    fn legacy(
+        s: &ValidatedRuntimeSchema,
+        input: Value,
+        limits: RuntimeGraphqlLimits,
+    ) -> Result<RuntimePredicate, RuntimeGraphqlError> {
+        let c = &s.schema().collections[0];
+        let h = s.resolve_collection(&c.id).unwrap();
+        filter(s, &h, c, &input, limits, 0, &mut FilterIntent::default())
+    }
+    #[test]
+    // Internal old-filter compatibility; these are not claims that unknown or
+    // unfilterable wire fields pass GraphQL schema validation.
+    fn legacy_null_skip_and_empty_operator_costs_remain_unchanged() {
+        let s = schema();
+        let limits = RuntimeGraphqlLimits {
+            query: RuntimeQueryLimits {
+                max_predicate_nodes: 1,
+                max_predicate_depth: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for value in [
+            async_graphql::value!({"text":{"eq":null}}),
+            async_graphql::value!({"and":null}),
+            async_graphql::value!({"text":{}}),
+            async_graphql::value!({"hidden":{"eq":null}}),
+            async_graphql::value!({"flag":{"lt":null}}),
+            async_graphql::value!({"bytes":{"contains":null}}),
+        ] {
+            assert!(legacy(&s, value, limits).is_ok());
+        }
+    }
+    #[test]
+    fn legacy_query_errors_configured_literals_and_postgres_suffix_budget_survive() {
+        let s = schema();
+        let limits = RuntimeGraphqlLimits::default();
+        assert_eq!(
+            legacy(&s, async_graphql::value!({"hidden":{"eq":"x"}}), limits)
+                .unwrap_err()
+                .code(),
+            "invalid_filter"
+        );
+        assert_eq!(
+            legacy(&s, async_graphql::value!({"flag":{"lt":true}}), limits)
+                .unwrap_err()
+                .code(),
+            "unsupported_operator"
+        );
+        let mut limits = limits;
+        limits.scalars.max_text_bytes = 128 * 1024;
+        limits.max_variable_bytes = 256 * 1024;
+        assert!(
+            legacy(
+                &s,
+                async_graphql::value!({"text":{"eq":"x".repeat(70*1024)}}),
+                limits
+            )
+            .is_ok()
+        );
+        limits.query.max_bind_parameters = 1;
+        assert!(legacy(&s, async_graphql::value!({"text":{"endsWith":"x"}}), limits).is_ok());
+        let small = RuntimeGraphqlLimits {
+            max_variable_bytes: 256,
+            ..Default::default()
+        };
+        let input =
+            async_graphql::value!({"score":{"in":[0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.1]}});
+        let variables = Variables::from_json(
+            serde_json::json!({"where":serde_json::to_value(&input).unwrap()}),
+        );
+        super::super::execution::bounded_variables(&variables, small).unwrap();
+        assert!(legacy(&s, input, small).is_ok());
+        // This preserves legacy logical admission. PostgreSQL emits one native
+        // suffix bind; SQLite emits two. Only the new public checked artifact
+        // reserves the worst-case emitted count here.
     }
 }

@@ -13,6 +13,61 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.49.0 to 0.50.0: checked filter intent and offline matching
+
+Upgrade ORM/macros together. This additive API requires no stored-data/schema
+migration; existing predicates, key reads, record codecs and wire forms remain
+compatible. Use the core `runtime_filter_builder` to construct private checked
+nodes and `finish` them, or opt into `runtime-graphql` for
+`prepare_runtime_filter(schema, collection, &Value, limits)`.
+
+A Value map cannot recover duplicate wire keys. The caller must validate GraphQL
+coercion and duplicate input keys **before** conversion to Value/Variables. The
+current upstream parser and JSON Value decoder erase duplicate object keys
+before runtime validation; this change does not repair or certify that wire
+boundary. It preserves every occurrence present in the supplied structural Value,
+including repeated Boolean children and null/empty entries. No raw JSON entry is
+added. Construct trusted Values or supply a separately validated transport seam.
+
+Authorize the complete `visit_intent` tree before protected SQL or matching:
+`referenced_fields` alone still omits constant-lowered intent. Implicit object
+conjunctions emit `ImplicitAnd`, distinct from explicit logical operators. Existing
+flat RuntimeReadCheck authorization ignores implicit conjunction permissions and
+retains its prior public behavior. Public checked null operators validate
+filterability and operator/kind admission; existing canonical null skips remain
+private compatibility behavior. Existing configured GraphQL scalar limits and
+legacy logical bind admission remain unchanged; the new public checked artifact
+reserves worst-case emitted binds, including SQLite suffix duplication. Existing
+canonical execution is not upgraded to a new actual-bind policy by this change. The core builder has
+fixed text/binary literal caps of64KiB/32KiB and counts SQLite suffix binds twice;
+imported/reused nodes revalidate full bounds on each composition/finalization.
+
+`prepare_match` validates the full original operator profile; `matches` validates
+all original loaded dependencies before evaluation. Missing is an error, never
+NULL; SQL UNKNOWN remains UNKNOWN under NOT, and only TRUE selects. JSON
+comparisons remain unsupported. Even JSON IS NULL, which can be a valid checked
+SQL filter, is outside the first conservative offline profiles. MSSQL returns
+`UnsupportedSemantics` before matching. Safe errors/Debug include no literals or
+record values.
+
+Profile selection is a trusted physical-storage assertion, not inferred from a
+backend or decoded record. SQLite requires String TEXT/BINARY UTF-8, booleans
+INTEGER0/1, exact i64 INTEGER, finite REAL, bytes BLOB, lowercase canonical UUID
+TEXT and microsecond UTC timestamp TEXT. PostgreSQL requires UTF-8/C String TEXT
+(or proven equivalent VARCHAR, never fixed CHAR/bpchar), native typed values and
+finite floats. Date-times are restricted to canonical years0001–9999 without
+leap seconds; control/NUL strings are rejected. Foreign storage spelling/classes
+can be normalized by row decoding, so the matcher cannot detect prior violations
+(e.g. SQLite integer7 decoded as true or uppercase UUID text). Unsupported
+profiles must fail closed; do not guess Rust comparison equivalence.
+
+An authoritative immutable image remains a host premise. Matching supplies no
+principal/tenant/field policy, snapshot authenticity, current authority or native
+RLS proof. In particular it cannot establish a deleted row's current SELECT
+visibility or bypass default-deny deleted-preimage release. See the canonical
+[runtime query reference](docs/reference/graphql-orm/runtime-queries.md#checked-original-intent-and-offline-matching)
+and host-neutral `examples/runtime_filter_match.rs`.
+
 ## 0.48.x to 0.49.0: checked owned complete-key reads
 
 Upgrade ORM/macros together. The additive `runtime_key_read_request` and

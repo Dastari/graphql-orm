@@ -245,3 +245,45 @@ authenticated pages/counts and absence of transaction-local identity leakage.
 MSSQL evidence is compilation/rendering/capability rejection, not live execution.
 Separate page requests still do not pin a snapshot under concurrent writes;
 this correction changes no existing pagination or authorization guarantee.
+
+## Checked original intent and offline matching
+
+Version0.50 adds `CheckedRuntimeFilter`, owned `RuntimeFilterBuilder`/private nodes,
+value-free `RuntimeFilterIntentVisitor` and explicit-profile `RuntimeRecordMatcher`.
+Core construction needs no GraphQL feature. `graphql::runtime::prepare_runtime_filter`
+requires `runtime-graphql` and reuses canonical lowering rather than another parser.
+All original Boolean grouping (including implicit object AND), field/operator
+occurrences and null/empty entries remain available before optimized SQL folding.
+The artifact does not authorize its own intent. Always visit and authorize the
+entire tree before protected I/O or record disclosure; dependency lists alone
+remain insufficient. See the [migration contract](../../../MIGRATION.md#0490-to-0500-checked-filter-intent-and-offline-matching)
+for exact methods, limits, host prerequisites and compatibility.
+
+The Value entry assumes prior coercion and duplicate-key validation. Existing
+GraphQL parsing and JSON Variables maps can erase wire duplicates before schema
+validation. No argument type or checked artifact proves that upstream validation
+occurred, and no raw parser was added. Repeated occurrences in separate Boolean
+children remain distinct and supported. Tests explicitly separate these cases.
+
+Matching is SQL selection over a host-attested immutable RuntimeRecord, with
+TRUE/FALSE/UNKNOWN and only TRUE selected. It validates every original dependency,
+including fields folded out of empty membership, before any evaluation. Missing
+fields, schema/collection mismatch, invalid kinds and unsupported semantics fail
+safely. Neither short-circuit branches nor constant predicates skip preflight.
+
+The conservative storage profiles are explicit host assertions. SQLite requires
+String TEXT with BINARY UTF-8 comparisons; canonical booleans0/1, exact i64 INTEGER,
+finite REAL, bytes BLOB, lowercase UUID TEXT and canonical microsecond UTC TEXT.
+PostgreSQL requires UTF-8/C String TEXT or proven VARCHAR, excluding CHAR/bpchar,
+and native typed values. Date-time years0001–9999 only, no leap seconds; control/NUL
+strings and JSON offline operations are unsupported. MSSQL is unsupported. Row
+decoding may normalize foreign physical storage, so logical kinds alone cannot
+prove these premises. Literal string functions are exact and do not interpret
+percent/underscore as wildcards; owned SQLite/PG conformance compares actual SQL
+selected IDs with matches across empty/long/Unicode operands, NULL logic and
+canonical scalar storage.
+
+Offline matching proves no provenance, current principal/tenant policy or native
+RLS. It cannot establish current SELECT visibility for a deleted image. Existing
+deleted-preimage policy remains default-deny. The host-neutral example explicitly
+authorizes all intent and requires host snapshot/profile premises.
