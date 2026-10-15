@@ -89,7 +89,10 @@ that guarantee must fence the database write using their authoritative session
 version/transaction policy.
 
 Generated roots, relationship loads and Federation lookups call the entity policy.
-Subscriptions require per-event enforcement in addition to admission. Repository
+Subscriptions repeat this entity policy for each event using the original accepted
+request. Deleted snapshots additionally require an explicit host
+`RowPolicy::can_read_deleted_preimage` grant; wrapping an entity policy does not
+install or replace that row policy. Repository
 convenience calls with `ctx=None` deny under this wrapper. Custom resolvers can use
 `AgqlCurrentAuthorityGuard::new(entity, policy_key, kind, surface)` with the shared
 enforcement installed as trusted schema configuration, or call `enforce` directly.

@@ -32,7 +32,7 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 Version 0.39.1 aligns with the runtime string/binding correction; generated
 static fragment rebasing, inputs, GraphQL SDL and timestamp behavior are unchanged.
 
-Version 0.47.0 requires explicit finite scan budgets for generated residual-policy
+Version 0.46.0 requires explicit finite scan budgets for generated residual-policy
 offset lists and all generated fallback search, including database-RLS-only
 deployments without a RowPolicy. Exact counts are returned only when
 scanning completes; missing/exhausted budgets fail closed without partial data.

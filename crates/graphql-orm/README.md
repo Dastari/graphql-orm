@@ -21,7 +21,7 @@ system, or a promise that a generated field is safe to expose. Applications
 own connection lifecycle, schema-application decisions, request identity,
 field/row policy, and HTTP transport.
 
-Version 0.47.0 requires explicit finite scan budgets for generated residual-policy
+Version 0.46.0 requires explicit finite scan budgets for generated residual-policy
 offset lists and all generated fallback search, including database-RLS-only
 deployments without a RowPolicy. Exact counts are returned only when
 scanning completes; missing/exhausted budgets fail closed without partial data.
