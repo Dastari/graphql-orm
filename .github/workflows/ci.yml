@@ -17,17 +17,20 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: "0"
 
+permissions:
+  contents: read
+
 jobs:
   workspace-integrity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Check documentation governance
         run: python3 scripts/check-documentation.py --base "${{ github.event.pull_request.base.sha }}"
       - name: Check generated workspace inventory
@@ -51,11 +54,11 @@ jobs:
   orm:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
@@ -102,11 +105,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Execute complete SQLite groups and authorized aggregates
         run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test complete_group_pages --test portable_group_pages --test grouped_aggregates
       - name: Execute the dependency-minimal private repository example
@@ -131,11 +134,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test projection_visibility --test read_projections
       - name: Execute projection authorization on a test-owned PostgreSQL container
         run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test projection_visibility
@@ -149,11 +152,11 @@ jobs:
   companions:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: scripts/check-ai-provider-lanes.sh test
       - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming
       - run: cargo clippy -p graphql-orm-ai --all-targets --features provider-openai,provider-anthropic,provider-xai,provider-ollama,provider-openai-compatible,local-harness -- -D warnings
@@ -164,11 +167,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm-router-protocol --locked
       - run: cargo test -p graphql-orm-router --locked
       - run: cargo test -p graphql-orm-router --locked --features auth-agql
@@ -183,11 +186,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: 1.90.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm-router-protocol --locked
       - run: cargo test -p graphql-orm-router --locked
 
@@ -195,7 +198,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
       - run: scripts/check-package-release-policy.sh "${{ github.event.pull_request.base.sha }}"
@@ -203,9 +206,9 @@ jobs:
   alternate-features:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo check -p graphql-orm-ai --no-default-features --features postgres
       - run: cargo check -p graphql-orm-ai --no-default-features --features mssql
       - run: cargo check -p graphql-orm-ai -p graphql-orm --no-default-features --features graphql-orm-ai/sqlite,graphql-orm/mssql
@@ -217,9 +220,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@1.97.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Run ORM parity against a test-owned disposable PostgreSQL container
         run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity -- --test-threads=1
 
@@ -227,7 +230,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
       - name: Create baseline worktree
@@ -248,7 +251,7 @@ jobs:
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
-      - uses: obi1kenobi/cargo-semver-checks-action@v2
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm
@@ -260,43 +263,43 @@ jobs:
       # the same reason. Macro compatibility is covered by the aligned
       # package-version gate and the full compile/trybuild fixture matrix.
       - if: steps.companion-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-operation-catalog/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-operation-catalog
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-ai-tool-profiles/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai-tool-profiles
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-storage/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-storage
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-backup/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-backup
           feature-group: default-features
       - if: steps.companion-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-ai/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-ai
           feature-group: default-features
       - if: steps.router-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-router-protocol/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-router-protocol
           feature-group: default-features
       - if: steps.router-baseline.outputs.exists == 'true'
-        uses: obi1kenobi/cargo-semver-checks-action@v2
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2
         with:
           manifest-path: crates/graphql-orm-router/Cargo.toml
           baseline-root: ../graphql-orm-baseline/crates/graphql-orm-router

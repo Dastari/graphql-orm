@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-12
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,6 +14,32 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.44.1 (unreleased)
+
+- Route generated query, search, keyset, mutation and Federation backend failures
+  through the public error sanitizer. Relationship/Federation loaders retain
+  safe public categories in a code-only String transport; SQL/schema/record diagnostics stay private.
+- Sanitize legacy update/delete/bulk mutation error payloads without changing
+  their GraphQL shape. Preserve established safe SQLx public categories and
+  log internal detail only through the existing opt-in server diagnostic path.
+- Align ORM/macros at 0.44.1. Add portable generated-resolver leak regressions
+  covering missing tables, constraints, preloaded/loader relations, Federation,
+  pool failure and decode diagnostics with test-owned databases.
+
+## 0.44.0 (unreleased)
+
+- Add opaque structural authorization partitions retaining all identity, policy,
+  assurance and claim fields for relation/Federation equality and batch grouping.
+  Delimiters, optional empty fields and distinct scope sets cannot merge callers.
+- Replace ambiguous external authorization keys and short claim fingerprints with
+  versioned `auth-v2:` SHA-256 digests. Normalize role/scope order and duplicates;
+  redact structural partition Debug output. Hosts must invalidate prior cache keys.
+- Retain SQL type identity and lossless binary bytes in relation keys, separating
+  strings, numbers, typed nulls and composite boundaries. Align generated source
+  keys and projected SQL row keys on SQLite, PostgreSQL and MSSQL.
+- Align ORM/macros at 0.44.0. Existing relationship target authorization checks
+  remain covered by cross-crate policy, preload, cache and pagination regressions.
+
 ## 0.43.1 (unreleased)
 
 - Require test-owned disposable PostgreSQL/PostGIS/SQL Server infrastructure in
@@ -21,6 +47,10 @@ for historical context.
   no-URL passes; add explicit container opt-in and pool-lifetime cleanup checks.
   Make the operation-catalog example use the selected backend. Library APIs and
   package versions are unchanged by these development-only changes.
+
+- Pin external CI/release actions to full revisions and restrict workflow tokens
+  to read-only contents outside the publication job. No library API or migration
+  change; all backend/provider validation lanes remain enabled.
 
 - Fix generated repository inserts for host-supplied integer primary keys. Reuse
   typed key binding for bare-pool readback and related single-key lookups/updates,

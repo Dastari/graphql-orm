@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-12
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,56 @@ Install local Docker and run `scripts/run-owned-database-lanes.sh postgres-legac
 or `mssql` to explicitly execute container-backed cases. Ordinary unit runs
 report those cases as ignored rather than silently passing. Application data,
 public library APIs, and persisted formats are unaffected.
+
+## 0.44.0 to 0.44.1: generated resolver public errors
+
+Upgrade runtime/macros together. Generated SQL and Federation failures now use
+stable safe GraphQL messages and `extensions.code` instead of backend diagnostic
+text. Match public codes such as `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE` and
+`CONSTRAINT_VIOLATION`; stop matching SQL text, table names or driver strings.
+Existing legacy mutation result objects retain their `success`/`error` shape,
+with a safe message in `error` rather than raw backend details. They do not gain
+an error-code field in this patch. Typed SQLx constraint categories are retained;
+SQL Server errors currently represented as SQLx Protocol retain the sanitizer's
+safe `INTERNAL_ERROR` classification.
+
+No data/schema/SDL migration is required. Internal details continue through the
+existing opt-in `GRAPHQL_ORM_LOG_INTERNAL_ERRORS` server diagnostic path and are
+excluded from client extensions. Host-defined errors and deliberately mapped
+extensions remain host-owned. Low-level repository errors remain internal values. Loader String failures now
+carry only a public category; handwritten loader consumers should use
+`graphql_error_from_loader`. Applications exposing repository errors through
+handwritten resolvers must use the public mapping instead of forwarding Display
+text. Unknown host loader failures are sanitized as `INTERNAL_ERROR`.
+
+## 0.43.1 to 0.44.0: authorization and relation partition identities
+
+Upgrade `graphql-orm` and `graphql-orm-macros` together. No database schema or
+GraphQL SDL migration is required. `AuthSubject::canonical_key()` and
+`DbAuthContext::canonical_key()` now return `auth-v2:` plus a SHA-256 digest of
+unambiguous, versioned structural fields. Invalidate stored authorization cache
+keys and any host cursors derived from the old format; never compare old and new
+keys. Hashes are opaque identifiers, not encryption or an authentication proof.
+
+Use the new `partition_key()` value for in-memory authorization partitions.
+Equality/hash include complete claims rather than a short fingerprint and
+preserve absent versus present-empty metadata. Roles/scopes are treated as sets,
+normalizing order and duplicates. JSON object property order is immaterial.
+Structural keys retain claim bodies in memory and redact Debug output; external
+canonical keys expose only the digest. Continue to exclude tokens/secrets from
+claims and protect authorization metadata in host logs and caches.
+
+`RelationKey::from_sql_values()` now preserves SQL type and lossless binary
+identity. `RelationKey::new()`/`single()` construct text-only keys. Hosts manually
+constructing numeric/UUID/composite loader keys should use `from_sql_values()`
+for bind values, or `from_projected_parts(parts, kinds)` for non-null SQL text
+projections with exactly one declared type per part. `parts()` remains a text
+view, not a complete identity; binary entries now use lossless `bin:` hexadecimal.
+Do not rebuild typed identities using `new(key.parts().to_vec())`. Recreate
+application-owned loader caches during upgrade. Generated keys and SQL row
+projections use matching declared types on SQLite/PostgreSQL/MSSQL. This fix does
+not add binary/JSON/decimal source support to the relationship derive; those
+values have lossless identity in the general SQL-value key constructor only.
 
 ## 0.43.0 to 0.43.1: host-supplied integer primary-key binding
 
