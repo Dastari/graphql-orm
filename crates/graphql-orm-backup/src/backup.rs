@@ -565,6 +565,18 @@ async fn write_object_entries(
                 };
                 (format!("{:x}", hasher.0.finalize()), hasher.1)
             } else {
+                // A matching stored blob does not establish that current source
+                // bytes still match the index checksum. Preserve independent
+                // source validation before reusing verified repository content.
+                let (source_checksum, _) =
+                    hash_object_source(objects.load_object_stream(&object).await?).await?;
+                if source_checksum != object.sha256_hex {
+                    return Err(BackupError::ChecksumMismatch {
+                        key: content_key,
+                        expected: object.sha256_hex.clone(),
+                        actual: source_checksum,
+                    });
+                }
                 let size = crate::verify::verify_blob_checksum(repository, content_key.clone(), object.sha256_hex.clone()).await?;
                 (object.sha256_hex.clone(), size)
             };
@@ -597,6 +609,22 @@ async fn write_object_entries(
     object_entries.sort_by_key(|(index, _)| *index);
     let object_entries = object_entries.into_iter().map(|(_, entry)| entry).collect();
     Ok(object_entries)
+}
+
+async fn hash_object_source(source: StorageByteStream) -> Result<(String, u64), BackupError> {
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut stream = source.into_inner();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        size = size
+            .checked_add(chunk.len() as u64)
+            .ok_or(BackupError::CapacityExceeded {
+                limit_bytes: u64::MAX,
+            })?;
+        hasher.update(&chunk);
+    }
+    Ok((format!("{:x}", hasher.finalize()), size))
 }
 
 async fn release_lock<T>(
