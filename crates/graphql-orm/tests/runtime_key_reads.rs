@@ -618,17 +618,7 @@ async fn host_example_authorizes_exact_intent_and_denies_before_protected_io() {
             schema: &'a ValidatedRuntimeSchema,
             key: &'a RuntimeKey,
             projection: &'a RuntimeProjection,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            (RuntimePredicate, DbAuthContext),
-                            host_example::HostReadError,
-                        >,
-                    > + Send
-                    + 'a,
-            >,
-        > {
+        ) -> host_example::AuthorityFuture<'a> {
             Box::pin(async move {
                 // Synthetic trusted authority, not principal data from a caller.
                 if !self.allow_key_read

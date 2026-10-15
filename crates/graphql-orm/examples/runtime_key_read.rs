@@ -13,6 +13,14 @@ mod checked {
         Read(RuntimeKeyReadError),
     }
 
+    pub type AuthorityFuture<'a> = Pin<
+        Box<
+            dyn Future<Output = Result<(RuntimePredicate, DbAuthContext), HostReadError>>
+                + Send
+                + 'a,
+        >,
+    >;
+
     /// Implemented by the trusted host adapter, never by an untrusted request.
     /// Authenticate and revalidate current principal/field/key-read policy and the
     /// active catalog revision here. Return coherent backend auth and a required
@@ -23,13 +31,7 @@ mod checked {
             schema: &'a ValidatedRuntimeSchema,
             key: &'a RuntimeKey,
             projection: &'a RuntimeProjection,
-        ) -> Pin<
-            Box<
-                dyn Future<Output = Result<(RuntimePredicate, DbAuthContext), HostReadError>>
-                    + Send
-                    + 'a,
-            >,
-        >;
+        ) -> AuthorityFuture<'a>;
     }
 
     pub async fn read_authorized<B: OrmBackend + RuntimeRowDecoder>(
