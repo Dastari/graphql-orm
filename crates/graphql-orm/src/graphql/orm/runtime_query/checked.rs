@@ -659,15 +659,15 @@ impl CheckedRuntimeFilter {
 /// Neither backend naming nor a record codec establishes this assertion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeMatchProfile {
-    /// SQLite UTF-8 String TEXT with BINARY collation and canonical physical storage: booleans INTEGER0/1,
+    /// SQLite UTF-8 String TEXT with BINARY collation and canonical physical storage: booleans INTEGER 0/1,
     /// exact i64 INTEGER, finite REAL, byte BLOB, canonical lowercase UUID TEXT
-    /// and canonical microsecond UTC date-time TEXT (years0001–9999, no leap second).
+    /// and canonical microsecond UTC date-time TEXT (years 0001–9999, no leap second).
     /// The host asserts these invariants; decoding cannot recover prior storage
     /// spelling/class or detect externally written noncanonical values.
     SqliteBinaryCanonical,
     /// PostgreSQL UTF-8 C collation with String physically TEXT (or proven
     /// equivalent VARCHAR, never fixed CHAR/bpchar), native typed values and
-    /// finite numeric values; microsecond UTC years0001–9999 without leap seconds.
+    /// finite numeric values; microsecond UTC years 0001–9999 without leap seconds.
     /// Logical kind/decoding alone cannot establish physical storage semantics.
     PostgresCUtf8,
     /// Reserved unsupported profile; always rejects before matching.

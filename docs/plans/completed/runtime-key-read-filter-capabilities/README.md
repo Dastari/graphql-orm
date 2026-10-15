@@ -1,7 +1,7 @@
 ---
 title: Runtime key reads and filter matching interface review
 kind: plan
-status: active
+status: accepted
 owner: workspace-maintainers
 last_reviewed: 2026-10-15
 review_by: 2026-11-15
@@ -15,10 +15,10 @@ implementation and scoped validation are complete; final stack integration and
 release acceptance remain pending. Requirement B also received explicit
 implementation approval, using the validated structural Value prerequisite and
 excluding the optional raw JSON parser. Its separate implementation and scoped
-validation are in progress. This plan addresses only A and B in the [immutable consumer
+validation are complete; coherent release acceptance remains separate. This plan addresses only A and B in the [immutable consumer
 request](https://github.com/Dastari/digibase/blob/0d26ab1af68b80985cafa4a621fa850eda5afee4/docs/coordination/prompts/0020-graphql-orm-runtime-key-reads-and-record-filter-matching.md).
 The reviewed ORM baseline is `4059d10026b9b8d1e9a2be0f4f556df807f77794`,
-version0.48.0. Remote main was independently resolved to that commit.
+version 0.48.0. Remote main was independently resolved to that commit.
 
 ## Outcome and current boundary
 
@@ -128,7 +128,7 @@ SQLite and PostgreSQL use existing runtime row decoding. MSSQL must fail its
 existing unsupported decoding capability before I/O; A adds no live
 MSSQL runtime decoding support.
 
-## B: proposed checked intent and record semantics
+## B: approved checked intent and record semantics
 
 Review as smaller pieces: canonical lowering plus preserved intent; independently
 reviewed structural matching. Exposing lowering alone does not solve matching.
@@ -163,7 +163,7 @@ expose private predicate AST or values. The host must authorize all intent befor
 protected SQL or record disclosure. No public deserialize/unchecked constructor
 or wrapper around an already-folded predicate may fabricate missing intent.
 
-Concrete proposed core construction (no GraphQL feature required):
+Core construction (no GraphQL feature required):
 
 ```text
 ValidatedRuntimeSchema::runtime_filter_builder(
@@ -263,7 +263,7 @@ Use a new safe RuntimeFilterError with invalid_input, invalid_handle,
 limit_exceeded, missing_loaded_field, wrong_value_kind, unsupported_semantics
 and schema_mismatch categories. Debug/Display must not include filter literals
 or record values. Existing predicates, query wire forms, hashes, names and codecs
-remain unchanged. No package version is bumped for an unimplemented proposal.
+remain unchanged. The implementation uses paired ORM/macros 0.50.0.
 
 A trusted authoritative immutable record is still only host-supplied evidence.
 Neither matching nor a record codec establishes provenance, principal authority,
@@ -369,15 +369,34 @@ before pool I/O. A package build without any backend remains unsupported by the
 unchanged macro guard. The explicit package-selected native API comparison
 passed under a minor-release override to check additive compatibility.
 
-The unpublished local preview now assembles the reviewed 0.48.1–0.48.3
-corrections, Q018, fixture derive fixes, A and B. B runtime evidence belongs to
-2bcc5628; selected quality and two native API comparisons belong to its
-initializer-only descendant 008764bd. These are scoped prior results, not
-acceptance of this assembly. The optional raw JSON parser remains excluded;
-wire duplicate erasure remains a host integration prerequisite.
+ORM/macros 0.49.0, all seven existing locks and the generated inventory are
+reconciled on this proposal-based stack. Before release, integrate the reviewed
+0.48.x correctness fixes and validate the coherent final stack. No merge,
+Actions or publication follows from these implementation gates.
 
-The preview uses paired ORM/macros 0.50.1 and includes Q019 emitted-bind
-budget enforcement. Its inventory is mechanically merged and awaits constrained
-regeneration. Source assembly awaits final review and
-constrained checks. No final-stack build, test, merge, Actions or publication is
-claimed. Existing owner branches and their evidence remain unchanged.
+B was separately approved with the host-validated coercion/duplicate
+prerequisite for structural Value input; the optional raw JSON parser remains
+excluded. The implementation is based on A4c0502e with paired ORM/macros 0.50.0.
+Scoped SQLite and owned PostgreSQL matching tests passed at 2bcc5628, including
+83 SQL cases across eight records on each backend. Its test-initializer-only
+descendant 008764bd passed four selected backend quality profiles and two
+explicit native minor-release API comparisons (196 checks each). External
+public consumer tests passed at 008764bd: core 1, SQLite 2, PostgreSQL 2 and
+MSSQL 2, without database services. The exact reviewed consumer lock was adopted
+with locked metadata; the initial strict optional-edge rejection remains a
+retained failed preparation, not a test pass.
+
+The separate unpublished coherent preview 01b73b00 (paired 0.50.1, including
+Q014–Q017 corrections, Q018 release tooling, reviewed derive fixes and
+Q019 emitted-bind enforcement) passed generator/policy gates and nine
+finite canonical/parity phases: 54 tests, zero failed or ignored. Both SQLite
+and owned PostgreSQL completed 83 SQL matching cases across eight records;
+owned service cleanup was verified. Those are actual preview results, not
+execution of the B-only commit or whole-workspace release acceptance.
+
+This completes the scoped capability plan. Final release-wide integration,
+feature/provider gates and publication remain under the separate release plan.
+Offline matching establishes neither principal authority nor current native
+RLS or deleted-record provenance. Duplicate wire keys must be checked before
+Value construction; existing parser erasure is not repaired by this API.
+No Actions, merge or publication follows from this plan's completion.

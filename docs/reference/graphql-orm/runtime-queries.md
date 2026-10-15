@@ -248,7 +248,7 @@ this correction changes no existing pagination or authorization guarantee.
 
 ## Checked original intent and offline matching
 
-Version0.50 adds `CheckedRuntimeFilter`, owned `RuntimeFilterBuilder`/private nodes,
+Version 0.50 adds `CheckedRuntimeFilter`, owned `RuntimeFilterBuilder`/private nodes,
 value-free `RuntimeFilterIntentVisitor` and explicit-profile `RuntimeRecordMatcher`.
 Core construction needs no GraphQL feature. `graphql::runtime::prepare_runtime_filter`
 requires `runtime-graphql` and reuses canonical lowering rather than another parser.
@@ -272,10 +272,10 @@ fields, schema/collection mismatch, invalid kinds and unsupported semantics fail
 safely. Neither short-circuit branches nor constant predicates skip preflight.
 
 The conservative storage profiles are explicit host assertions. SQLite requires
-String TEXT with BINARY UTF-8 comparisons; canonical booleans0/1, exact i64 INTEGER,
+String TEXT with BINARY UTF-8 comparisons; canonical booleans 0/1, exact i64 INTEGER,
 finite REAL, bytes BLOB, lowercase UUID TEXT and canonical microsecond UTC TEXT.
 PostgreSQL requires UTF-8/C String TEXT or proven VARCHAR, excluding CHAR/bpchar,
-and native typed values. Date-time years0001–9999 only, no leap seconds; control/NUL
+and native typed values. Date-time years 0001–9999 only, no leap seconds; control/NUL
 strings and JSON offline operations are unsupported. MSSQL is unsupported. Row
 decoding may normalize foreign physical storage, so logical kinds alone cannot
 prove these premises. Literal string functions are exact and do not interpret
