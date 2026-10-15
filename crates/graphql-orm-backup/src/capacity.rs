@@ -1,8 +1,8 @@
 //! Limits for compatibility buffering and decoded database payloads.
+use crate::BackupError;
 use bytes::Bytes;
 use futures::StreamExt;
 use graphql_orm_storage::StorageByteStream;
-use crate::BackupError;
 
 /// Maximum bytes accepted at a buffering boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,7 +13,9 @@ pub enum BackupByteLimit {
     Unbounded,
 }
 impl Default for BackupByteLimit {
-    fn default() -> Self { Self::Bytes(64 * 1024 * 1024) }
+    fn default() -> Self {
+        Self::Bytes(64 * 1024 * 1024)
+    }
 }
 impl BackupByteLimit {
     pub(crate) fn min(self, other: Self) -> Self {
@@ -32,7 +34,9 @@ impl BackupByteLimit {
 
     pub(crate) fn check(self, bytes: u64) -> Result<(), BackupError> {
         if let Self::Bytes(limit_bytes) = self {
-            if bytes > limit_bytes { return Err(BackupError::CapacityExceeded { limit_bytes }); }
+            if bytes > limit_bytes {
+                return Err(BackupError::CapacityExceeded { limit_bytes });
+            }
         }
         Ok(())
     }
@@ -50,7 +54,13 @@ pub struct BackupCapacityLimits {
     pub stage_bytes: BackupByteLimit,
 }
 impl Default for BackupCapacityLimits {
-    fn default() -> Self { Self { buffered_bytes: BackupByteLimit::default(), decompressed_bytes: BackupByteLimit::Bytes(256 * 1024 * 1024), stage_bytes: BackupByteLimit::Bytes(512 * 1024 * 1024) } }
+    fn default() -> Self {
+        Self {
+            buffered_bytes: BackupByteLimit::default(),
+            decompressed_bytes: BackupByteLimit::Bytes(256 * 1024 * 1024),
+            stage_bytes: BackupByteLimit::Bytes(512 * 1024 * 1024),
+        }
+    }
 }
 
 /// Collects a stream, rejecting oversized chunks before copying them.
@@ -58,15 +68,23 @@ impl Default for BackupCapacityLimits {
 ///
 /// # Errors
 /// Returns a stream error or [`BackupError::CapacityExceeded`].
-pub async fn collect_backup_stream(body: StorageByteStream, limit: BackupByteLimit) -> Result<Bytes, BackupError> {
-    if let Some(size) = body.size_hint() { limit.check(size)?; }
+pub async fn collect_backup_stream(
+    body: StorageByteStream,
+    limit: BackupByteLimit,
+) -> Result<Bytes, BackupError> {
+    if let Some(size) = body.size_hint() {
+        limit.check(size)?;
+    }
     let mut stream = body.into_inner();
     let mut buffer = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        let size = u64::try_from(buffer.len()).unwrap_or(u64::MAX)
+        let size = u64::try_from(buffer.len())
+            .unwrap_or(u64::MAX)
             .checked_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX))
-            .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
+            .ok_or(BackupError::CapacityExceeded {
+                limit_bytes: u64::MAX,
+            })?;
         limit.check(size)?;
         buffer.extend_from_slice(&chunk);
     }

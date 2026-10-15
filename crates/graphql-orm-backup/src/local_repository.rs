@@ -50,7 +50,9 @@ impl LocalBackupRepository {
 
 #[async_trait]
 impl BackupRepository for LocalBackupRepository {
-    fn capacity_limits(&self) -> BackupCapacityLimits { self.inner.capacity_limits() }
+    fn capacity_limits(&self) -> BackupCapacityLimits {
+        self.inner.capacity_limits()
+    }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.inner.delete_blob_once(key).await
     }
@@ -58,7 +60,11 @@ impl BackupRepository for LocalBackupRepository {
     async fn put_blob_stream(&self, key: &str, body: StorageByteStream) -> Result<(), BackupError> {
         self.inner.put_blob_stream(key, body).await
     }
-    async fn put_blob_stream_if_absent(&self, key: &str, body: StorageByteStream) -> Result<bool, BackupError> {
+    async fn put_blob_stream_if_absent(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+    ) -> Result<bool, BackupError> {
         self.inner.put_blob_stream_if_absent(key, body).await
     }
     async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {

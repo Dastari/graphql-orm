@@ -9,9 +9,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    BackupChangeExport, BackupCompression, BackupError, BackupObjectRef, BackupRepository,
-    BackupSnapshotManifest, BackupTableExport, GraphqlOrmBackupAdapter, ObjectBackupEntry,
-    TableBackupEntry, BackupByteLimit, collect_backup_stream, load_manifest_chain, verify_manifest_and_objects,
+    BackupByteLimit, BackupChangeExport, BackupCompression, BackupError, BackupObjectRef,
+    BackupRepository, BackupSnapshotManifest, BackupTableExport, GraphqlOrmBackupAdapter,
+    ObjectBackupEntry, TableBackupEntry, collect_backup_stream, load_manifest_chain,
+    verify_manifest_and_objects,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -115,7 +116,9 @@ pub struct RestoreResult {
 /// Sink used by `restore_objects` to rehydrate application object stores.
 pub trait RestoreObjectSink: Send + Sync {
     /// Limit used by the buffered default, independently for each object.
-    fn buffered_byte_limit(&self) -> BackupByteLimit { BackupByteLimit::default() }
+    fn buffered_byte_limit(&self) -> BackupByteLimit {
+        BackupByteLimit::default()
+    }
     /// Restores one object loaded from a backup repository.
     ///
     /// # Errors
@@ -137,8 +140,11 @@ pub trait RestoreObjectSink: Send + Sync {
         object: BackupObjectRef,
         body: StorageByteStream,
     ) -> Result<(), BackupError> {
-        self.restore_object(object, collect_backup_stream(body, self.buffered_byte_limit()).await?)
-            .await
+        self.restore_object(
+            object,
+            collect_backup_stream(body, self.buffered_byte_limit()).await?,
+        )
+        .await
     }
 }
 
@@ -549,19 +555,34 @@ where
     }
 
     let limits = repository.capacity_limits();
-    let stored = collect_backup_stream(repository.get_blob_stream(&entry.content_key).await?, limits.buffered_bytes).await?;
+    let stored = collect_backup_stream(
+        repository.get_blob_stream(&entry.content_key).await?,
+        limits.buffered_bytes,
+    )
+    .await?;
     let remaining_stage = limits.stage_bytes.remaining(*stage_bytes)?;
     let decode_limit = limits.decompressed_bytes.min(remaining_stage);
     let payload = decode_payload(&stored, &manifest.database.compression, decode_limit)?;
-    *stage_bytes = stage_bytes.checked_add(payload.len() as u64)
-        .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
+    *stage_bytes =
+        stage_bytes
+            .checked_add(payload.len() as u64)
+            .ok_or(BackupError::CapacityExceeded {
+                limit_bytes: u64::MAX,
+            })?;
     limits.stage_bytes.check(*stage_bytes)?;
     parse_jsonl(&payload)
 }
 
-fn decode_payload(bytes: &[u8], compression: &BackupCompression, limit: BackupByteLimit) -> Result<Vec<u8>, BackupError> {
+fn decode_payload(
+    bytes: &[u8],
+    compression: &BackupCompression,
+    limit: BackupByteLimit,
+) -> Result<Vec<u8>, BackupError> {
     match compression {
-        BackupCompression::None => { limit.check(bytes.len() as u64)?; Ok(bytes.to_vec()) },
+        BackupCompression::None => {
+            limit.check(bytes.len() as u64)?;
+            Ok(bytes.to_vec())
+        }
         BackupCompression::Zstd => crate::manifest::decompress_payload_with_limit(bytes, limit),
     }
 }

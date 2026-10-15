@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use graphql_orm_storage::{
-    BlobPutOptions, BlobStore, StorageByteStream, validate_blob_key,
-};
+use graphql_orm_storage::{BlobPutOptions, BlobStore, StorageByteStream, validate_blob_key};
 
-use crate::{BackupError, BackupCapacityLimits, collect_backup_stream};
+use crate::{BackupCapacityLimits, BackupError, collect_backup_stream};
 
 #[async_trait]
 /// Key-addressed backup repository.
 pub trait BackupRepository: Send + Sync {
     /// Per-payload limits for buffered compatibility APIs and database decoding.
-    fn capacity_limits(&self) -> BackupCapacityLimits { BackupCapacityLimits::default() }
+    fn capacity_limits(&self) -> BackupCapacityLimits {
+        BackupCapacityLimits::default()
+    }
 
     /// Writes a blob at a repository key.
     ///
@@ -28,8 +28,11 @@ pub trait BackupRepository: Send + Sync {
     /// stream (64 MiB by default) and delegating to [`BackupRepository::put_blob`]. Repositories
     /// with native streaming support should override this method.
     async fn put_blob_stream(&self, key: &str, body: StorageByteStream) -> Result<(), BackupError> {
-        self.put_blob(key, collect_backup_stream(body, self.capacity_limits().buffered_bytes).await?)
-            .await
+        self.put_blob(
+            key,
+            collect_backup_stream(body, self.capacity_limits().buffered_bytes).await?,
+        )
+        .await
     }
 
     /// Writes a blob only when no blob exists at the key.
@@ -58,8 +61,11 @@ pub trait BackupRepository: Send + Sync {
         key: &str,
         body: StorageByteStream,
     ) -> Result<bool, BackupError> {
-        self.put_blob_if_absent(key, collect_backup_stream(body, self.capacity_limits().buffered_bytes).await?)
-            .await
+        self.put_blob_if_absent(
+            key,
+            collect_backup_stream(body, self.capacity_limits().buffered_bytes).await?,
+        )
+        .await
     }
 
     /// Reads a blob from a repository key.
@@ -77,7 +83,9 @@ pub trait BackupRepository: Send + Sync {
     /// this cannot guarantee bounded process memory.
     async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
         let bytes = self.get_blob(key).await?;
-        self.capacity_limits().buffered_bytes.check(bytes.len() as u64)?;
+        self.capacity_limits()
+            .buffered_bytes
+            .check(bytes.len() as u64)?;
         Ok(StorageByteStream::from_bytes(bytes))
     }
 
@@ -210,7 +218,9 @@ impl std::fmt::Debug for BlobStoreBackupRepository {
 
 #[async_trait]
 impl BackupRepository for BlobStoreBackupRepository {
-    fn capacity_limits(&self) -> BackupCapacityLimits { self.limits }
+    fn capacity_limits(&self) -> BackupCapacityLimits {
+        self.limits
+    }
     async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
         self.store
             .delete_blob_once(&self.apply_prefix(key))
@@ -306,7 +316,10 @@ mod conditional_write_tests {
     #[async_trait]
     impl BackupRepository for NoConditionalWrite {
         fn capacity_limits(&self) -> BackupCapacityLimits {
-            BackupCapacityLimits { buffered_bytes: crate::BackupByteLimit::Bytes(2), ..BackupCapacityLimits::default() }
+            BackupCapacityLimits {
+                buffered_bytes: crate::BackupByteLimit::Bytes(2),
+                ..BackupCapacityLimits::default()
+            }
         }
         async fn put_blob(&self, _: &str, _: Bytes) -> Result<(), BackupError> {
             panic!("default conditional create must not write")
@@ -346,12 +359,28 @@ mod conditional_write_tests {
     }
     #[tokio::test]
     async fn inherited_stream_write_rejects_capacity_before_provider_write() {
-        let error = NoConditionalWrite.put_blob_stream("payload", StorageByteStream::from_bytes(Bytes::from_static(b"large")))
-            .await.expect_err("fallback must reject before panic-on-write provider");
-        assert!(matches!(error, BackupError::CapacityExceeded { limit_bytes: 2 }));
-        let error = NoConditionalWrite.put_blob_stream_if_absent("payload", StorageByteStream::from_bytes(Bytes::from_static(b"large")))
-            .await.expect_err("conditional fallback must reject before provider call");
-        assert!(matches!(error, BackupError::CapacityExceeded { limit_bytes: 2 }));
+        let error = NoConditionalWrite
+            .put_blob_stream(
+                "payload",
+                StorageByteStream::from_bytes(Bytes::from_static(b"large")),
+            )
+            .await
+            .expect_err("fallback must reject before panic-on-write provider");
+        assert!(matches!(
+            error,
+            BackupError::CapacityExceeded { limit_bytes: 2 }
+        ));
+        let error = NoConditionalWrite
+            .put_blob_stream_if_absent(
+                "payload",
+                StorageByteStream::from_bytes(Bytes::from_static(b"large")),
+            )
+            .await
+            .expect_err("conditional fallback must reject before provider call");
+        assert!(matches!(
+            error,
+            BackupError::CapacityExceeded { limit_bytes: 2 }
+        ));
     }
     struct CreateWithoutRelease;
 
