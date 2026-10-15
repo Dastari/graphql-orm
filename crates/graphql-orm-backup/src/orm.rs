@@ -435,8 +435,8 @@ pub struct OrmObjectIndexColumns {
 /// Rows whose checksum column does not contain a valid SHA-256 (for example
 /// when a hash backfill queue has not caught up) are hashed from the loaded
 /// blob stream at listing time, with checked byte counting and no whole-blob
-/// collection. Valid recorded metadata is verified against bytes by backup, not
-/// trusted to constrain buffered allocation.
+/// collection. Backup verifies recorded checksums against object bytes; recorded
+/// sizes are not independently verified and cannot constrain buffered allocation.
 pub struct OrmBackupObjectIndex {
     database: Arc<Database>,
     entities: Vec<&'static EntityMetadata>,

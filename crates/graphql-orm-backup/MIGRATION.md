@@ -34,15 +34,16 @@ For legitimate larger backups, set reviewed finite `BackupCapacityLimits` via
 `LocalBackupRepository::with_capacity_limits` or
 `BlobStoreBackupRepository::with_capacity_limits`; custom repositories override
 `BackupRepository::capacity_limits`. Indexes and sinks override
-`buffered_byte_limit` for their buffered compatibility defaults. The built-in optional `OrmBackupObjectIndex` also defaults its direct buffered
+`buffered_byte_limit` for their buffered compatibility defaults. The built-in
+optional `OrmBackupObjectIndex` also defaults its direct buffered
 `load_object` to 64 MiB; configure it with `with_buffered_byte_limit`. Missing or
 invalid checksum/size metadata is backfilled by incremental hashing and checked
 byte counting, without collecting the object or reserving a provider size hint.
 Its native `load_object_stream` bypasses that buffered cap so large object streams
-remain supported. Valid but understated metadata cannot bypass actual buffered
-byte checks; backup checksum/size verification remains responsible for integrity.
-Direct zstd
-callers use `decompress_payload_with_limit`. `BackupByteLimit::Unbounded` is an
+remain supported. Recorded sizes are not independently verified and cannot
+constrain buffered allocation; actual buffered byte checks apply regardless of
+recorded size. Backup verifies recorded checksums against the object bytes.
+Direct zstd callers use `decompress_payload_with_limit`. `BackupByteLimit::Unbounded` is an
 explicit opt-in accepting the associated allocation risk; it is not recommended
 for untrusted input. Do not retry capacity errors without changing the relevant
 limit or input. Restore errors retain the Q003 stage/progress boundary.
