@@ -12,6 +12,8 @@ supersedes: []
 
 ## Active
 
+- [Runtime key reads and filter matching interface review](active/runtime-key-read-filter-capabilities/README.md)
+
 - [Security assurance remediation](active/security-assurance-remediation/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [Documentation experience](active/documentation-experience/README.md)
