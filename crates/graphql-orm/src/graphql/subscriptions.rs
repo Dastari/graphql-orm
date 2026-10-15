@@ -350,7 +350,8 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
             if name == "__typename" {
                 continue;
             }
-            if !T::columns().iter().any(|column| column.api_name == name)
+            if !field.node.selection_set.node.items.is_empty()
+                || !T::columns().iter().any(|column| column.api_name == name)
                 || !T::subscription_field_policy(name).is_some_and(|(_, available, _)| available)
             {
                 return Err(unsupported_subscription_selection());
@@ -388,7 +389,8 @@ where
                 }
                 // Nested relation/custom resolvers can fail after outer metadata
                 // has been written. Only persisted scalar snapshots are proved here.
-                if !T::columns()
+                if !scalar.node.selection_set.node.items.is_empty()
+                    || !T::columns()
                     .iter()
                     .any(|column| column.api_name == scalar.node.name.node.as_str())
                 {

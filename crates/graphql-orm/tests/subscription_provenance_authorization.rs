@@ -72,13 +72,29 @@ struct GuardedKeyRow {
     id: String,
     value: String,
 }
+#[derive(async_graphql::SimpleObject, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PersistedDetails {
+    #[graphql(guard = "NeverRelease")]
+    secret: String,
+}
+#[derive(GraphQLEntity, GraphQLOperations, async_graphql::SimpleObject, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "persisted_object_rows", plural = "PersistedObjectRows")]
+struct PersistedObjectRow {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    #[filterable(type = "string")]
+    #[sortable]
+    id: String,
+    #[graphql_orm(json)]
+    details: PersistedDetails,
+}
 struct NeverRelease;
 impl async_graphql::Guard for NeverRelease {
     async fn check(&self, _: &async_graphql::Context<'_>) -> async_graphql::Result<()> {
         Err(async_graphql::Error::new("synthetic-private-field-guard"))
     }
 }
-schema_roots! { query_custom_ops: [], entities: [ProofParent, ProofChild, GuardedKeyRow], }
+schema_roots! { query_custom_ops: [], entities: [ProofParent, ProofChild, GuardedKeyRow, PersistedObjectRow], }
 #[derive(Clone)]
 struct Policy {
     source_allowed: Arc<AtomicBool>,
@@ -388,6 +404,22 @@ async fn unsupported_primary_key_guard_is_rejected_for_outer_identifier_aliases(
     for query in [
         "subscription { guardedKeyRowChanged { outward: id } }",
         "subscription { guardedKeyRowChanged { ...Identity } } fragment Identity on GuardedKeyRowChangedEvent { hidden: id }",
+    ] {
+        let mut stream = Box::pin(schema.execute_stream(Request::new(query).data(AuthSubject::new("alice"))));
+        let response = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+        assert_eq!(response.errors.len(), 1, "{response:?}");
+        assert_eq!(response.errors[0].extensions.as_ref().unwrap().get("code"), Some(&async_graphql::Value::from("INVALID_INPUT")));
+        assert!(!serde_json::to_string(&response).unwrap().contains("synthetic-private-field-guard"));
+        assert_eq!(response.data, async_graphql::Value::Null);
+    }
+}
+
+#[tokio::test]
+async fn persisted_object_columns_are_not_mistaken_for_scalar_payloads() {
+    let (schema, _, _) = setup().await;
+    for query in [
+        "subscription { persistedObjectRowChanged { id persistedObjectRow { details { secret } } } }",
+        "subscription { persistedObjectRowChanged { id row: persistedObjectRow { column: details { ...NestedDetails } } } } fragment NestedDetails on PersistedDetails { hidden: secret }",
     ] {
         let mut stream = Box::pin(schema.execute_stream(Request::new(query).data(AuthSubject::new("alice"))));
         let response = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();

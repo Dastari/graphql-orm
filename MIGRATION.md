@@ -29,7 +29,8 @@ forbidden dynamic field-policy decision drops the whole event rather than
 releasing outer metadata alongside a GraphQL field error.
 
 Selected entity payloads support persisted scalars only. Subscriptions requesting
-nested relations, computed/custom resolver fields, or fields with arbitrary
+nested relations, object-valued persisted JSON/custom columns, computed/custom
+resolver fields, or fields with arbitrary
 GraphQL `guard`/dynamic `visible` behavior are rejected at admission
 with `INVALID_INPUT`: their late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
