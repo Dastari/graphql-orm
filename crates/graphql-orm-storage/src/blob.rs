@@ -162,7 +162,11 @@ pub trait BlobStore: Send + Sync {
         options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError>;
 
-    /// Writes a blob only when the destination key does not exist.
+    /// Atomically writes a blob only when the destination key does not exist.
+    ///
+    /// Implementations must preserve create-if-absent across all writers.
+    /// Existence checks followed by writes do not satisfy this contract.
+    /// The default fails closed without provider I/O.
     ///
     /// # Errors
     ///
@@ -170,15 +174,13 @@ pub trait BlobStore: Send + Sync {
     /// conditionally write the blob.
     async fn put_blob_if_not_exists(
         &self,
-        key: &str,
-        body: StorageByteStream,
-        options: BlobPutOptions,
+        _key: &str,
+        _body: StorageByteStream,
+        _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        if self.blob_exists(key).await? {
-            return Ok(None);
-        }
-
-        self.put_blob(key, body, options).await.map(Some)
+        Err(StorageError::UnsupportedOperation {
+            operation: "atomic conditional blob write".to_string(),
+        })
     }
 
     /// Loads a blob stream.
@@ -274,6 +276,26 @@ pub trait BlobStore: Send + Sync {
         self.put_blob(to, blob.body, BlobPutOptions::default())
             .await?;
         Ok(())
+    }
+
+    /// Deletes a blob without replaying deletion against a replacement object.
+    ///
+    /// After a deletion may have reached the server, implementations must never
+    /// retry by key. A lost response leaves the outcome unknown. This capability
+    /// is required for lock release; ordinary idempotent deletion is insufficient
+    /// when another writer can immediately reuse the key. Cancellation must not
+    /// schedule a later replay. The default fails closed without provider I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::UnsupportedOperation`] unless the provider opts in.
+    /// Operation failures must be non-retryable (for example,
+    /// [`StorageError::SingleAttemptFailed`]). This does not mean the operation
+    /// had no effect. Never retry an ambiguous failure.
+    async fn delete_blob_once(&self, _key: &str) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedOperation {
+            operation: "single-attempt blob deletion".to_string(),
+        })
     }
 
     /// Deletes a blob.

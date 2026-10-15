@@ -883,7 +883,12 @@ impl SmbStorageBackend {
         let args = write_create_args(exclusive);
         let (file, generation, request_limit) =
             self.create_write_file(key, &args, !exclusive).await?;
-        let mut cleanup = WriteCleanupGuard::new(self.clone(), key.to_string(), file, generation);
+        let target = if exclusive {
+            WriteCleanupTarget::ExclusiveHandle
+        } else {
+            WriteCleanupTarget::TemporaryPath(key.to_string())
+        };
+        let mut cleanup = WriteCleanupGuard::new(self.clone(), target, file, generation);
 
         // Delete-on-close makes cancellation safe after CREATE succeeds. The flag
         // is cleared only after the complete stream has been flushed.
@@ -1066,6 +1071,25 @@ impl SmbStorageBackend {
             let _ = self.reconnect_after(generation).await;
         }
         combined
+    }
+
+    async fn remove_file_once(&self, key: &str) -> Result<(), StorageError> {
+        remove_file_without_replay(
+            self.open_file(key, FileAccessMask::new().with_delete(true)),
+            |file| async move {
+                let result = self
+                    .with_timeout(
+                        "delete",
+                        file.set_info(FileDispositionInformation::default()),
+                    )
+                    .await;
+                let close_result = self.with_timeout("close", file.close()).await;
+                // Never reconnect and reopen this path after disposition or
+                // close may have deleted it. The key may already have a new owner.
+                result.and(close_result)
+            },
+        )
+        .await
     }
 
     async fn remove_file(&self, key: &str) -> Result<(), StorageError> {
@@ -1269,9 +1293,29 @@ impl Drop for UploadDiagnosticGuard {
     }
 }
 
+#[derive(Clone)]
+enum WriteCleanupTarget {
+    // Conditional creation uses a shared key. Never retain it for fallback
+    // cleanup: closing the original handle can allow a new owner to create it.
+    ExclusiveHandle,
+    TemporaryPath(String),
+}
+
+async fn cleanup_write_target<'a, C, R, F>(target: &'a WriteCleanupTarget, close: C, remove: R)
+where
+    C: std::future::Future<Output = ()>,
+    R: FnOnce(&'a str) -> F,
+    F: std::future::Future<Output = Result<(), StorageError>>,
+{
+    close.await;
+    if let WriteCleanupTarget::TemporaryPath(key) = target {
+        let _ = remove(key).await;
+    }
+}
+
 struct WriteCleanupGuard {
     backend: SmbStorageBackend,
-    key: String,
+    target: WriteCleanupTarget,
     file: Option<File>,
     generation: u64,
     armed: bool,
@@ -1320,10 +1364,15 @@ impl Drop for TempObjectCleanupGuard {
 }
 
 impl WriteCleanupGuard {
-    fn new(backend: SmbStorageBackend, key: String, file: File, generation: u64) -> Self {
+    fn new(
+        backend: SmbStorageBackend,
+        target: WriteCleanupTarget,
+        file: File,
+        generation: u64,
+    ) -> Self {
         Self {
             backend,
-            key,
+            target,
             file: Some(file),
             generation,
             armed: true,
@@ -1340,15 +1389,21 @@ impl WriteCleanupGuard {
         if !self.armed {
             return;
         }
-        if let Some(file) = &self.file {
-            let close = self.backend.with_timeout("close", file.close()).await;
-            if let Err(error) = close
-                && error.is_retryable()
-            {
-                let _ = self.backend.reconnect_after(self.generation).await;
-            }
-        }
-        let _ = self.backend.remove_file(&self.key).await;
+        cleanup_write_target(
+            &self.target,
+            async {
+                if let Some(file) = &self.file {
+                    let close = self.backend.with_timeout("close", file.close()).await;
+                    if let Err(error) = close
+                        && error.is_retryable()
+                    {
+                        let _ = self.backend.reconnect_after(self.generation).await;
+                    }
+                }
+            },
+            |key| self.backend.remove_file(key),
+        )
+        .await;
         self.armed = false;
         self.file.take();
     }
@@ -1368,17 +1423,23 @@ impl Drop for WriteCleanupGuard {
             return;
         };
         let backend = self.backend.clone();
-        let key = self.key.clone();
+        let target = self.target.clone();
         let generation = self.generation;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let close = backend.with_timeout("close", file.close()).await;
-                if let Err(error) = close
-                    && error.is_retryable()
-                {
-                    let _ = backend.reconnect_after(generation).await;
-                }
-                let _ = backend.remove_file(&key).await;
+                cleanup_write_target(
+                    &target,
+                    async {
+                        let close = backend.with_timeout("close", file.close()).await;
+                        if let Err(error) = close
+                            && error.is_retryable()
+                        {
+                            let _ = backend.reconnect_after(generation).await;
+                        }
+                    },
+                    |key| backend.remove_file(key),
+                )
+                .await;
             });
         }
     }
@@ -1544,6 +1605,11 @@ fn write_create_args(exclusive: bool) -> FileCreateArgs {
 
 #[async_trait]
 impl BlobStore for SmbStorageBackend {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {
+        validate_blob_key(key)?;
+        self.remove_file_once(key).await
+    }
+
     fn backend(&self) -> StorageBackend {
         StorageBackend::Smb
     }
@@ -1802,6 +1868,22 @@ impl BlobStore for SmbStorageBackend {
         validate_blob_key(key)?;
         self.remove_file(key).await
     }
+}
+
+async fn remove_file_without_replay<H, O, D, F>(open: O, dispose: D) -> Result<(), StorageError>
+where
+    O: std::future::Future<Output = Result<H, StorageError>>,
+    D: FnOnce(H) -> F,
+    F: std::future::Future<Output = Result<(), StorageError>>,
+{
+    // A future and FnOnce encode a single open/dispose attempt. An ambiguous
+    // mutation error is returned directly, never followed by a new path open.
+    let handle = match open.await {
+        Ok(handle) => handle,
+        Err(error) if is_not_found(&error) => return Ok(()),
+        Err(error) => return Err(StorageError::single_attempt(error)),
+    };
+    dispose(handle).await.map_err(StorageError::single_attempt)
 }
 
 async fn connect_client(
@@ -2413,5 +2495,61 @@ mod tests {
         }
         assert_eq!(remote_creates.load(Ordering::Relaxed), 1);
         assert_eq!(cache.len().await, 1);
+    }
+    #[tokio::test]
+    async fn single_attempt_delete_never_reopens_after_ambiguous_disposition() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let opens = AtomicUsize::new(0);
+        let replacement_alive = std::sync::atomic::AtomicBool::new(false);
+        let result = remove_file_without_replay(
+            async {
+                opens.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |()| async {
+                // Disposition deleted the old object and another writer acquired.
+                replacement_alive.store(true, Ordering::SeqCst);
+                Err(remote_error(
+                    StorageProviderErrorKind::Timeout,
+                    "close",
+                    "response lost after disposition",
+                    true,
+                ))
+            },
+        )
+        .await;
+        let error = result.expect_err("ambiguous failure");
+        assert!(!error.is_retryable());
+        let StorageError::SingleAttemptFailed { source } = error else {
+            panic!("original failure must be preserved as a source");
+        };
+        assert!(source.is_retryable());
+        assert_eq!(opens.load(Ordering::SeqCst), 1);
+        assert!(replacement_alive.load(Ordering::SeqCst));
+    }
+    #[tokio::test]
+    async fn exclusive_write_cleanup_preserves_replacement_after_original_handle_closes() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let original_closed = AtomicBool::new(false);
+        let replacement_alive = AtomicBool::new(false);
+        let path_deletes = AtomicUsize::new(0);
+        cleanup_write_target(
+            &WriteCleanupTarget::ExclusiveHandle,
+            async {
+                original_closed.store(true, Ordering::SeqCst);
+                // Closing the delete-on-close handle removes the old object;
+                // another writer can now atomically acquire the shared key.
+                replacement_alive.store(true, Ordering::SeqCst);
+            },
+            |_| async {
+                path_deletes.fetch_add(1, Ordering::SeqCst);
+                replacement_alive.store(false, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(original_closed.load(Ordering::SeqCst));
+        assert_eq!(path_deletes.load(Ordering::SeqCst), 0);
+        assert!(replacement_alive.load(Ordering::SeqCst));
     }
 }

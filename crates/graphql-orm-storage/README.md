@@ -18,6 +18,10 @@ It is not an application file service: it defines no tables, GraphQL roots,
 tenant model, authorization policy, or HTTP endpoint. It never stores file
 bytes in database rows.
 
+The local backend requires a trusted, exclusively managed filesystem root and
+restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
+before using local directories or OS-mounted shares.
+
 ## Install
 
 Packages are Git-only. Pin the full reviewed monorepo revision, and use that
@@ -29,13 +33,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.2" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.2", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start

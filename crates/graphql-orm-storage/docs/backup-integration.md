@@ -35,7 +35,7 @@ Those repository keys should not be forced through primary object metadata.
 
 ## Adapter Shape
 
-`graphql-orm-backup` 0.7.2 exposes this adapter:
+`graphql-orm-backup` 0.8.0 exposes this adapter:
 
 ```rust
 pub struct BlobStoreBackupRepository {
@@ -45,6 +45,11 @@ pub struct BlobStoreBackupRepository {
 ```
 
 Mapping:
+
+- Lock release uses `BackupRepository::delete_blob_once` through
+  `BlobStore::delete_blob_once`; both require explicit provider opt-in and never
+  replay deletion by key after the server may have applied it. Ordinary deletion
+  remains a separate operation. Failed/cancelled release has an unknown outcome.
 
 - `BackupRepository::put_blob` calls `BlobStore::put_blob` with backup-owned
   write options
