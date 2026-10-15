@@ -3,7 +3,7 @@ title: "Development"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -81,8 +81,15 @@ After restart the test verifies the original mapping and waits at most 30 second
 for TCP readiness before exercising the same existing backend's reconnect path.
 
 The daemon-free ownership regression suite substitutes private fake Docker/Cargo
-executables and checks startup collisions, exact-ID cleanup, ownership changes
-and a lost create response. Run it with:
+executables and checks startup collisions, exact-ID cleanup, ownership changes,
+a lost create response, failed temporary-file inspection and missing native
+test matches. Every selected Cargo command must execute exactly its expected
+ignored test and report one pass; a zero-match exit or unrelated test is not
+coverage. Restart diagnostics may split the native test-start line without
+invalidating a successful completion. Docker or remote `find` failure during
+temporary-file inspection fails the runner and preserves its error status; it
+is never treated as a clean share. These runner evidence checks do not change
+the library API or provider behavior. Run it with:
 
 ```bash
 python3 crates/graphql-orm-storage/tests/samba/test_run.py
