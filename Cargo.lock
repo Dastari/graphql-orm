@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.45.0"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
@@ -3101,7 +3101,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",

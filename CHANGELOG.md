@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.46.0 (unreleased)
+
+- Bound generated ordinary/append-only residual-policy offset lists using the
+  existing explicit AuthorizedScanConfig. Fetch finite candidate batches, retain
+  only the requested visible window and publish exact totals only on exhaustion.
+  Missing/exhausted budgets fail closed without partial nodes or totals.
+- Bound protected search with native ranked SQL batches or finite raw fallback
+  batches and bounded score-window retention. Require explicit budgets for every
+  generated fallback, including hosts using only database RLS without RowPolicy.
+  Apply declared SQL read visibility,
+  preserve complete native SQL count/page behavior and stable primary-key ties.
+- Align ORM/macros at 0.46.0. Add portable actual-row/callback-budget regressions
+  and document host configuration, exhaustion errors and AI consumer handling.
+
 ## 0.45.0 (unreleased)
 
 - Reauthorize generated ordinary and append-only subscriptions for every event

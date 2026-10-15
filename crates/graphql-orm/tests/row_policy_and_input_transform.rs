@@ -206,7 +206,8 @@ async fn row_policy_filters_reads_and_write_transform_injects_server_fields()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
     let transform = ScopedWriteTransform::default();
-    let mut db = graphql_orm::db::Database::new(pool.clone());
+    let mut db = graphql_orm::db::Database::new(pool.clone())
+        .with_authorized_scan_config(AuthorizedScanConfig::new([5; 32], 8, 64));
     db.set_row_policy(ScopedRowPolicy);
     db.set_write_input_transform(transform.clone());
 

@@ -13,6 +13,55 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.45.0 to 0.46.0: bounded protected offset and search reads
+
+Upgrade runtime/macros together. Generated ordinary and append-only offset lists
+with callback-only/prefilter visibility no longer fetch every candidate in one
+unbounded allocation. Install the existing host-owned scan configuration before
+exposing those operations:
+
+```rust,ignore
+let database = database.with_authorized_scan_config(AuthorizedScanConfig::new(
+    host_scan_cursor_key, // Secret, randomly generated [u8; 32] from host configuration.
+    64,                  // Maximum candidates fetched per SQL batch.
+    4096,                // Maximum candidates examined per operation.
+));
+```
+
+The same configuration controls existing bounded relation and cursor-scan paths;
+there is no implicit unlimited fallback or legacy unbounded opt-in. Keep the key
+stable across instances sharing encrypted scan cursors and rotate it deliberately.
+Missing/zero bounds or exhaustion return `AUTHORIZATION_MISCONFIGURED` before
+releasing nodes or misleading partial totals. Configure a finite page limit and
+allow room to prove exhaustion: if the final batch exactly fills the remaining
+budget, the operation fails closed rather than guessing there are no more rows.
+Visible offsets and exact totals are retained only when scanning completes within
+the host budget. Empty denied batches do not establish end-of-data. Filters that
+require whole-result in-memory matching are rejected on these bounded paths;
+move filtering into supported SQL predicates.
+
+Generated search also uses bounded work. Native SQLite/PostgreSQL
+ranking is retained and scanned in stable SQL batches when callbacks remain.
+Fallback scoring (including MSSQL) scans bounded raw candidates and retains
+only the requested highest-score window; its budget includes nonmatching and
+unauthorized raw candidates. A complete SQL visibility predicate bypasses row
+callbacks as specified by that contract. Complete native search continues using
+SQL count/page queries under Complete/Unrestricted visibility. Generated fallback always requires a scan budget, including when no `RowPolicy` is registered: database RLS is not discoverable through that registry. The
+bounds constrain rows fetched/decoded and policy calls, not database planner or
+COUNT work; host statement deadlines and indexes remain separate controls.
+
+GraphQL shapes and successful exact count semantics are unchanged. AI/tool
+consumers must handle the safe budget error as a failed operation; do not turn it
+into an empty page, partial success or an unbounded retry. For large protected
+sets use the existing explicit `...Scan` cursor contract where available, which
+reports incomplete progress without inventing an exact total, or provide a
+reviewed complete SQL visibility predicate. No database/schema migration is
+required. Handwritten low-level `fetch_all` APIs remain host-owned full-fetch
+boundaries; this change covers generated GraphQL protected offset/search operations.
+`RepositorySearchQuery::fetch_all` retains its separate repository policy-record
+contract and can materialize fallback candidates; a return-value limit is not
+an authorization-work budget for that explicit Rust full-fetch API.
+
 ## 0.44.1 to 0.45.0: subscriptions authorize each release
 
 Upgrade runtime/macros together. Existing subscription SDL and public changed

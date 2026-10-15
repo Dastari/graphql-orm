@@ -21,6 +21,13 @@ system, or a promise that a generated field is safe to expose. Applications
 own connection lifecycle, schema-application decisions, request identity,
 field/row policy, and HTTP transport.
 
+Version 0.46.0 requires explicit finite scan budgets for generated residual-policy
+offset lists and all generated fallback search, including database-RLS-only
+deployments without a RowPolicy. Exact counts are returned only when
+scanning completes; missing/exhausted budgets fail closed without partial data.
+See the [bounded read migration](../../MIGRATION.md#0450-to-0460-bounded-protected-offset-and-search-reads)
+for configuration and AI/tool consumer error handling.
+
 Version 0.45.0 rechecks generated subscription authorization for each event,
 releases current authorized live rows and requires bounded source provenance.
 Denied fields/rows and missing proofs suppress the whole event, including
@@ -38,7 +45,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.45.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.46.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

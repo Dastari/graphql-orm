@@ -408,7 +408,7 @@ where
 pub async fn scan_authorized_relation<T, B>(
     db: &crate::db::Database<B>,
     ctx: &async_graphql::Context<'_>,
-    mut query: crate::graphql::orm::EntityQuery<T, B>,
+    query: crate::graphql::orm::EntityQuery<T, B>,
     auth: Option<&DbAuthContext>,
     visibility: &crate::graphql::orm::ReadVisibility,
     page: crate::graphql::orm::PaginationRequest,
@@ -417,8 +417,41 @@ where
     B: OrmBackend,
     T: BatchLoadEntity<B> + crate::graphql::orm::Entity,
 {
+    scan_authorized_query(
+        db,
+        ctx,
+        query,
+        auth,
+        visibility,
+        page,
+        crate::graphql::orm::EntityAccessSurface::GraphqlRelation,
+    )
+    .await
+}
+
+/// Bounded exact callback pagination shared by generated root and relation reads.
+/// A missing budget, unsupported residual filter or incomplete scan fails closed.
+#[doc(hidden)]
+pub async fn scan_authorized_query<T, B>(
+    db: &crate::db::Database<B>,
+    ctx: &async_graphql::Context<'_>,
+    mut query: crate::graphql::orm::EntityQuery<T, B>,
+    auth: Option<&DbAuthContext>,
+    visibility: &crate::graphql::orm::ReadVisibility,
+    page: crate::graphql::orm::PaginationRequest,
+    surface: crate::graphql::orm::EntityAccessSurface,
+) -> async_graphql::Result<RelationLoadResult<T>>
+where
+    B: OrmBackend,
+    T: crate::graphql::orm::Entity
+        + crate::graphql::orm::FromSqlRow<B>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
     use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
-    use crate::graphql::orm::{EntityAccessSurface, PageInput, PaginationConfig, SqlDialect};
+    use crate::graphql::orm::{PageInput, PaginationConfig};
     let invalid =
         || OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured).into_graphql_error();
     let config = db.authorized_scan_config().ok_or_else(invalid)?;
@@ -436,9 +469,7 @@ where
             .iter()
             .any(|clause| crate::graphql::orm::sort_clause_mentions_column(clause, column))
         {
-            query
-                .order_clauses
-                .push(format!("{} ASC", B::DIALECT.quote_identifier(column)));
+            query.order_clauses.push(format!("{column} ASC"));
         }
     }
     let offset = page.offset.max(0);
@@ -468,7 +499,7 @@ where
                     Some(ctx),
                     T::entity_name(),
                     T::metadata().read_policy,
-                    EntityAccessSurface::GraphqlRelation,
+                    surface,
                     &row,
                 )
                 .await
