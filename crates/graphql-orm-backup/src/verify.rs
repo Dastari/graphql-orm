@@ -118,8 +118,11 @@ pub(crate) async fn verify_blob_checksum(
     let mut size = 0_u64;
     while let Some(chunk) = body.next().await {
         let chunk = chunk?;
-        size = size.checked_add(chunk.len() as u64)
-            .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
+        size = size
+            .checked_add(chunk.len() as u64)
+            .ok_or(BackupError::CapacityExceeded {
+                limit_bytes: u64::MAX,
+            })?;
         hasher.update(&chunk);
     }
     let actual = format!("{:x}", hasher.finalize());

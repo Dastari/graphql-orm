@@ -157,10 +157,7 @@ async fn deduplication_verifies_current_source_and_existing_repository_content()
             .expect("owned existing content fixture");
         repository.clear_write_order();
         let database = MockDatabase::new(Vec::new());
-        let objects = MockObjectIndex::new(
-            vec![object_ref(&expected_hash)],
-            vec![source_bytes],
-        );
+        let objects = MockObjectIndex::new(vec![object_ref(&expected_hash)], vec![source_bytes]);
 
         let error = create_full_backup(&repository, &database, &objects, backup_request())
             .await
@@ -175,7 +172,10 @@ async fn deduplication_verifies_current_source_and_existing_repository_content()
         );
         assert!(!repository.write_order().contains(&object_key));
         assert_eq!(
-            repository.get_blob(&object_key).await.expect("existing content retained"),
+            repository
+                .get_blob(&object_key)
+                .await
+                .expect("existing content retained"),
             stored_bytes,
             "failure must not delete or replace existing repository content"
         );

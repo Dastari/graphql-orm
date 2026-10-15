@@ -432,43 +432,82 @@ fn validation_source(error: BackupError) -> BackupError {
 
 #[tokio::test]
 async fn object_sizes_are_observed_for_new_deduplicated_and_historical_restores() {
-    use graphql_orm_backup::{CompactChainRequest, compact_chain, load_manifest, verify_manifest_and_objects, write_manifest};
+    use graphql_orm_backup::{
+        CompactChainRequest, compact_chain, load_manifest, verify_manifest_and_objects,
+        write_manifest,
+    };
     let temp = TempDir::new().expect("owned repository");
     let repository = LocalBackupRepository::new(temp.path());
     let object_bytes = Bytes::from_static(b"actual object bytes");
     let actual_size = object_bytes.len() as u64;
-    let source = MockDatabase::with_tables(vec![BackupTableExport { table_name: "users".to_string(), rows: Vec::new() }]);
+    let source = MockDatabase::with_tables(vec![BackupTableExport {
+        table_name: "users".to_string(),
+        rows: Vec::new(),
+    }]);
     let mut objects = MockObjectIndex {
-        objects: vec![BackupObjectRef { object_id: object_id(), storage_key: "objects/owned".to_string(),
-            sha256_hex: bytes_sha256_hex(&object_bytes), size_bytes: 1, mime_type: None }],
+        objects: vec![BackupObjectRef {
+            object_id: object_id(),
+            storage_key: "objects/owned".to_string(),
+            sha256_hex: bytes_sha256_hex(&object_bytes),
+            size_bytes: 1,
+            mime_type: None,
+        }],
         bytes: vec![object_bytes.clone()],
     };
-    let first = create_full_backup(&repository, &source, &objects, backup_request()).await.expect("new object with understated metadata");
+    let first = create_full_backup(&repository, &source, &objects, backup_request())
+        .await
+        .expect("new object with understated metadata");
     assert_eq!(first.manifest.objects[0].size_bytes, actual_size);
     objects.objects[0].size_bytes = 999_999;
     let mut second_request = backup_request();
     second_request.snapshot_id = Uuid::new_v4();
-    let second = create_full_backup(&repository, &source, &objects, second_request).await.expect("deduplicated content with overstated metadata");
+    let second = create_full_backup(&repository, &source, &objects, second_request)
+        .await
+        .expect("deduplicated content with overstated metadata");
     assert_eq!(second.manifest.objects[0].size_bytes, actual_size);
-    assert_eq!(second.manifest.objects[0].content_key, first.manifest.objects[0].content_key);
+    assert_eq!(
+        second.manifest.objects[0].content_key,
+        first.manifest.objects[0].content_key
+    );
 
     // Historical valid-content manifests remain readable without rewriting them.
     let mut historical = first.manifest;
     historical.objects[0].size_bytes = u64::MAX;
-    write_manifest(&repository, &mut historical).await.expect("historical advisory size fixture");
-    verify_manifest_and_objects(&repository, &historical).await.expect("historical size does not reject valid content");
+    write_manifest(&repository, &mut historical)
+        .await
+        .expect("historical advisory size fixture");
+    verify_manifest_and_objects(&repository, &historical)
+        .await
+        .expect("historical size does not reject valid content");
     let sink = RecordingObjectSink::default();
-    restore_objects(&repository, &historical, &sink).await.expect("normalize size before custom sink");
+    restore_objects(&repository, &historical, &sink)
+        .await
+        .expect("normalize size before custom sink");
     let received = sink.restored();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].0.size_bytes, actual_size);
     assert_eq!(received[0].1, object_bytes);
-    let compacted = compact_chain(&repository, CompactChainRequest {
-        snapshot_id: Uuid::new_v4(), source_snapshot_id: historical.snapshot_id,
-        created_at: 1_775_174_500, app_id: "example-app".to_string(), app_version: "0.1.0".to_string(),
-    }).await.expect("compact historical size metadata");
+    let compacted = compact_chain(
+        &repository,
+        CompactChainRequest {
+            snapshot_id: Uuid::new_v4(),
+            source_snapshot_id: historical.snapshot_id,
+            created_at: 1_775_174_500,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect("compact historical size metadata");
     assert_eq!(compacted.manifest.objects[0].size_bytes, actual_size);
-    assert_eq!(load_manifest(&repository, historical.snapshot_id).await.expect("original manifest unchanged").objects[0].size_bytes, u64::MAX);
+    assert_eq!(
+        load_manifest(&repository, historical.snapshot_id)
+            .await
+            .expect("original manifest unchanged")
+            .objects[0]
+            .size_bytes,
+        u64::MAX
+    );
 }
 
 struct VersionedObjectRepository {
@@ -540,11 +579,9 @@ async fn changed_content_after_size_preflight_fails_after_sink_receives_second_v
     let temp = TempDir::new().expect("owned repository");
     let original = Bytes::from_static(b"original");
     let replacement = Bytes::from_static(b"replacement is longer");
-    let manifest = manifest_for_object_restore(
-        &LocalBackupRepository::new(temp.path()),
-        original.clone(),
-    )
-    .await;
+    let manifest =
+        manifest_for_object_restore(&LocalBackupRepository::new(temp.path()), original.clone())
+            .await;
     let repository = VersionedObjectRepository {
         key: manifest.objects[0].content_key.clone(),
         preflight_bytes: original.clone(),
@@ -557,8 +594,10 @@ async fn changed_content_after_size_preflight_fails_after_sink_receives_second_v
         .await
         .expect_err("second read must retain checksum verification");
 
-    assert!(matches!(error, BackupError::ChecksumMismatch { expected, actual, .. }
-        if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&replacement)));
+    assert!(
+        matches!(error, BackupError::ChecksumMismatch { expected, actual, .. }
+        if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&replacement))
+    );
     assert_eq!(repository.reads.load(Ordering::SeqCst), 2);
     let received = sink.restored();
     assert_eq!(received.len(), 1);
@@ -572,11 +611,9 @@ async fn changed_content_after_size_preflight_fails_after_sink_receives_second_v
 async fn corrupt_object_preflight_rejects_before_invoking_sink() {
     let temp = TempDir::new().expect("owned repository");
     let original = Bytes::from_static(b"original");
-    let manifest = manifest_for_object_restore(
-        &LocalBackupRepository::new(temp.path()),
-        original.clone(),
-    )
-    .await;
+    let manifest =
+        manifest_for_object_restore(&LocalBackupRepository::new(temp.path()), original.clone())
+            .await;
     let corrupt = Bytes::from_static(b"corrupt");
     let repository = VersionedObjectRepository {
         key: manifest.objects[0].content_key.clone(),
@@ -590,8 +627,10 @@ async fn corrupt_object_preflight_rejects_before_invoking_sink() {
         .await
         .expect_err("preflight content must verify before any sink write");
 
-    assert!(matches!(error, BackupError::ChecksumMismatch { expected, actual, .. }
-        if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&corrupt)));
+    assert!(
+        matches!(error, BackupError::ChecksumMismatch { expected, actual, .. }
+        if expected == bytes_sha256_hex(&original) && actual == bytes_sha256_hex(&corrupt))
+    );
     assert_eq!(repository.reads.load(Ordering::SeqCst), 1);
     assert!(sink.restored().is_empty());
 }

@@ -479,7 +479,12 @@ pub async fn restore_objects(
     for object in &manifest.objects {
         // Historical size metadata was advisory. Verify/count without collection
         // before calling the sink, then retain the streamed checksum guard below.
-        let observed_size = crate::verify::verify_blob_checksum(repository, object.content_key.clone(), object.sha256_hex.clone()).await?;
+        let observed_size = crate::verify::verify_blob_checksum(
+            repository,
+            object.content_key.clone(),
+            object.sha256_hex.clone(),
+        )
+        .await?;
         let mut reference = object_ref_from_entry(object);
         reference.size_bytes = observed_size;
         let source = repository.get_blob_stream(&object.content_key).await?;
@@ -496,11 +501,8 @@ pub async fn restore_objects(
             hasher.update(&chunk);
             Ok::<_, graphql_orm_storage::StorageError>(chunk)
         });
-        sink.restore_object_stream(
-            reference,
-            StorageByteStream::new(Box::pin(stream)),
-        )
-        .await?;
+        sink.restore_object_stream(reference, StorageByteStream::new(Box::pin(stream)))
+            .await?;
         let actual = format!(
             "{:x}",
             match state.lock() {

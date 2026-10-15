@@ -447,7 +447,12 @@ async fn compact_chain_inner(
 
     let mut object_entries = compact_object_entries(&chain);
     for object in &mut object_entries {
-        object.size_bytes = crate::verify::verify_blob_checksum(repository, object.content_key.clone(), object.sha256_hex.clone()).await?;
+        object.size_bytes = crate::verify::verify_blob_checksum(
+            repository,
+            object.content_key.clone(),
+            object.sha256_hex.clone(),
+        )
+        .await?;
     }
     let latest = chain
         .last()
@@ -548,10 +553,12 @@ async fn write_object_entries(
                     Ok(hasher) => hasher,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                hasher.1 = hasher.1.checked_add(chunk.len() as u64)
-                    .ok_or_else(|| graphql_orm_storage::StorageError::PreconditionFailed {
-                        key: "object stream".to_string(), condition: "byte count overflow".to_string()
-                    })?;
+                hasher.1 = hasher.1.checked_add(chunk.len() as u64).ok_or_else(|| {
+                    graphql_orm_storage::StorageError::PreconditionFailed {
+                        key: "object stream".to_string(),
+                        condition: "byte count overflow".to_string(),
+                    }
+                })?;
                 hasher.0.update(&chunk);
                 Ok(chunk)
             });
@@ -577,7 +584,12 @@ async fn write_object_entries(
                         actual: source_checksum,
                     });
                 }
-                let size = crate::verify::verify_blob_checksum(repository, content_key.clone(), object.sha256_hex.clone()).await?;
+                let size = crate::verify::verify_blob_checksum(
+                    repository,
+                    content_key.clone(),
+                    object.sha256_hex.clone(),
+                )
+                .await?;
                 (object.sha256_hex.clone(), size)
             };
             if actual != object.sha256_hex {

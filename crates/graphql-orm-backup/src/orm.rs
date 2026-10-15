@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::StreamExt;
 use graphql_orm::db::Database;
 use graphql_orm::graphql::orm::{
     BackupRow as OrmBackupRow, BackupValue, ColumnBackupPolicy, EntityBackupDescriptor,
@@ -23,14 +24,13 @@ use graphql_orm::graphql::orm::{
 };
 use graphql_orm::sqlx::Row as _;
 use graphql_orm_storage::{BlobStore, StorageByteStream};
-use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef, BackupRow,
-    BackupTableExport, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema, RestoreContext,
-    RestoreMode, BackupByteLimit, collect_backup_stream,
+    BackupByteLimit, BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef,
+    BackupRow, BackupTableExport, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema, RestoreContext,
+    RestoreMode, collect_backup_stream,
 };
 
 /// [`GraphqlOrmBackupAdapter`] over a `graphql-orm` [`Database`].
@@ -499,8 +499,12 @@ impl OrmBackupObjectIndex {
         let recorded_sha256 = row_optional_string(row, &self.columns.sha256_hex_column);
         let recorded_size = row_optional_i64(row, &self.columns.size_bytes_column);
         let (sha256_hex, size_bytes) = object_metadata_from_store(
-            self.store.as_ref(), &storage_key, recorded_sha256, recorded_size,
-        ).await?;
+            self.store.as_ref(),
+            &storage_key,
+            recorded_sha256,
+            recorded_size,
+        )
+        .await?;
 
         Ok(BackupObjectRef {
             object_id,
@@ -514,7 +518,9 @@ impl OrmBackupObjectIndex {
 
 #[async_trait]
 impl BackupObjectIndex for OrmBackupObjectIndex {
-    fn buffered_byte_limit(&self) -> BackupByteLimit { self.buffered_limit }
+    fn buffered_byte_limit(&self) -> BackupByteLimit {
+        self.buffered_limit
+    }
     async fn list_objects_for_full_backup(&self) -> Result<Vec<BackupObjectRef>, BackupError> {
         let descriptor = self.object_table_descriptor()?;
         let mut snapshot = self
@@ -551,27 +557,46 @@ impl BackupObjectIndex for OrmBackupObjectIndex {
     }
 
     async fn load_object(&self, object: &BackupObjectRef) -> Result<Bytes, BackupError> {
-        load_blob(self.store.as_ref(), &object.storage_key, self.buffered_limit).await
+        load_blob(
+            self.store.as_ref(),
+            &object.storage_key,
+            self.buffered_limit,
+        )
+        .await
     }
 
-    async fn load_object_stream(&self, object: &BackupObjectRef) -> Result<StorageByteStream, BackupError> {
+    async fn load_object_stream(
+        &self,
+        object: &BackupObjectRef,
+    ) -> Result<StorageByteStream, BackupError> {
         load_blob_stream(self.store.as_ref(), &object.storage_key).await
     }
 }
 
-async fn load_blob_stream(store: &dyn BlobStore, storage_key: &str) -> Result<StorageByteStream, BackupError> {
+async fn load_blob_stream(
+    store: &dyn BlobStore,
+    storage_key: &str,
+) -> Result<StorageByteStream, BackupError> {
     Ok(store.get_blob(storage_key).await?.body)
 }
-async fn load_blob(store: &dyn BlobStore, storage_key: &str, limit: BackupByteLimit) -> Result<Bytes, BackupError> {
+async fn load_blob(
+    store: &dyn BlobStore,
+    storage_key: &str,
+    limit: BackupByteLimit,
+) -> Result<Bytes, BackupError> {
     collect_backup_stream(load_blob_stream(store, storage_key).await?, limit).await
 }
 async fn object_metadata_from_store(
-    store: &dyn BlobStore, storage_key: &str, recorded_sha256: Option<String>, recorded_size: Option<i64>,
+    store: &dyn BlobStore,
+    storage_key: &str,
+    recorded_sha256: Option<String>,
+    recorded_size: Option<i64>,
 ) -> Result<(String, u64), BackupError> {
-    if let (Some(checksum), Some(size)) = (recorded_sha256, recorded_size) {
-        if is_valid_sha256_hex(&checksum) && size >= 0 {
-            return Ok((checksum.to_ascii_lowercase(), size as u64));
-        }
+    if let (Some(checksum), Some(size)) = (recorded_sha256, recorded_size)
+        && is_valid_sha256_hex(&checksum)
+        && size >= 0
+    {
+        return Ok((checksum.to_ascii_lowercase(), size as u64));
     }
     // Ignore untrusted size hints: hashing needs neither reservation nor a buffer.
     let mut stream = load_blob_stream(store, storage_key).await?.into_inner();
@@ -579,8 +604,11 @@ async fn object_metadata_from_store(
     let mut size = 0_u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
-        size = size.checked_add(chunk.len() as u64)
-            .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
+        size = size
+            .checked_add(chunk.len() as u64)
+            .ok_or(BackupError::CapacityExceeded {
+                limit_bytes: u64::MAX,
+            })?;
         hasher.update(&chunk);
     }
     Ok((format!("{:x}", hasher.finalize()), size))
@@ -720,67 +748,155 @@ fn quote_identifier(identifier: &str) -> String {
 #[cfg(test)]
 mod object_stream_capacity_tests {
     use super::*;
-    use graphql_orm_storage::{BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobWriteOutcome, StorageBackend, StorageError};
+    use graphql_orm_storage::{
+        BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobWriteOutcome, StorageBackend,
+        StorageError,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct ChunkStore { hint: u64, reads: AtomicUsize }
+    struct ChunkStore {
+        hint: u64,
+        reads: AtomicUsize,
+    }
     #[async_trait]
     impl BlobStore for ChunkStore {
-        fn backend(&self) -> StorageBackend { StorageBackend::Local }
+        fn backend(&self) -> StorageBackend {
+            StorageBackend::Local
+        }
         async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            Ok(BlobBody { key: key.to_string(), metadata: None,
-                body: StorageByteStream::with_size_hint(Box::pin(futures::stream::iter([
-                    Ok(Bytes::from_static(b"abc")), Ok(Bytes::from_static(b"def")),
-                ])), self.hint) })
+            Ok(BlobBody {
+                key: key.to_string(),
+                metadata: None,
+                body: StorageByteStream::with_size_hint(
+                    Box::pin(futures::stream::iter([
+                        Ok(Bytes::from_static(b"abc")),
+                        Ok(Bytes::from_static(b"def")),
+                    ])),
+                    self.hint,
+                ),
+            })
         }
-        async fn put_blob(&self, _: &str, _: StorageByteStream, _: BlobPutOptions) -> Result<BlobWriteOutcome, StorageError> { panic!("read-only fixture") }
-        async fn blob_exists(&self, _: &str) -> Result<bool, StorageError> { panic!("read-only fixture") }
-        async fn head_blob(&self, _: &str) -> Result<Option<BlobMetadata>, StorageError> { panic!("read-only fixture") }
-        async fn list_blobs_page(&self, _: &str, _: Option<String>, _: usize) -> Result<BlobListPage, StorageError> { panic!("read-only fixture") }
-        async fn delete_blob(&self, _: &str) -> Result<(), StorageError> { panic!("read-only fixture") }
+        async fn put_blob(
+            &self,
+            _: &str,
+            _: StorageByteStream,
+            _: BlobPutOptions,
+        ) -> Result<BlobWriteOutcome, StorageError> {
+            panic!("read-only fixture")
+        }
+        async fn blob_exists(&self, _: &str) -> Result<bool, StorageError> {
+            panic!("read-only fixture")
+        }
+        async fn head_blob(&self, _: &str) -> Result<Option<BlobMetadata>, StorageError> {
+            panic!("read-only fixture")
+        }
+        async fn list_blobs_page(
+            &self,
+            _: &str,
+            _: Option<String>,
+            _: usize,
+        ) -> Result<BlobListPage, StorageError> {
+            panic!("read-only fixture")
+        }
+        async fn delete_blob(&self, _: &str) -> Result<(), StorageError> {
+            panic!("read-only fixture")
+        }
     }
 
     #[cfg(feature = "orm-sqlite")]
     #[tokio::test]
     async fn built_in_index_uses_streaming_backfill_and_configurable_buffered_limit() {
-        let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:").await.expect("owned in-memory DB");
-        let store = Arc::new(ChunkStore { hint: 1, reads: AtomicUsize::new(0) });
-        let index = OrmBackupObjectIndex::new(Arc::new(Database::new(pool)), Vec::new(), OrmObjectIndexColumns {
-            table_name: "objects".to_string(), object_id_column: "id".to_string(),
-            storage_key_column: "key".to_string(), sha256_hex_column: "hash".to_string(),
-            size_bytes_column: "size".to_string(), mime_type_column: None,
-        }, store.clone()).with_buffered_byte_limit(BackupByteLimit::Bytes(4));
-        let mut row = OrmBackupRow { table_name: "objects".to_string(), primary_key: "1".to_string(), row_hash: String::new(), values: BTreeMap::from([
-            ("id".to_string(), BackupValue::Uuid(Uuid::nil())),
-            ("key".to_string(), BackupValue::String("owned".to_string())),
-        ]) };
+        let pool = graphql_orm::sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("owned in-memory DB");
+        let store = Arc::new(ChunkStore {
+            hint: 1,
+            reads: AtomicUsize::new(0),
+        });
+        let index = OrmBackupObjectIndex::new(
+            Arc::new(Database::new(pool)),
+            Vec::new(),
+            OrmObjectIndexColumns {
+                table_name: "objects".to_string(),
+                object_id_column: "id".to_string(),
+                storage_key_column: "key".to_string(),
+                sha256_hex_column: "hash".to_string(),
+                size_bytes_column: "size".to_string(),
+                mime_type_column: None,
+            },
+            store.clone(),
+        )
+        .with_buffered_byte_limit(BackupByteLimit::Bytes(4));
+        let mut row = OrmBackupRow {
+            table_name: "objects".to_string(),
+            primary_key: "1".to_string(),
+            row_hash: String::new(),
+            values: BTreeMap::from([
+                ("id".to_string(), BackupValue::Uuid(Uuid::nil())),
+                ("key".to_string(), BackupValue::String("owned".to_string())),
+            ]),
+        };
         let checksum = crate::bytes_sha256_hex(b"abcdef");
-        for (hash, size) in [(BackupValue::Null, BackupValue::Integer(6)),
-            (BackupValue::String("invalid".to_string()), BackupValue::Integer(6)),
+        for (hash, size) in [
+            (BackupValue::Null, BackupValue::Integer(6)),
+            (
+                BackupValue::String("invalid".to_string()),
+                BackupValue::Integer(6),
+            ),
             (BackupValue::String(checksum.clone()), BackupValue::Null),
-            (BackupValue::String(checksum.clone()), BackupValue::Integer(-1))] {
+            (
+                BackupValue::String(checksum.clone()),
+                BackupValue::Integer(-1),
+            ),
+        ] {
             row.values.insert("hash".to_string(), hash);
             row.values.insert("size".to_string(), size);
-            let reference = index.object_ref_from_row(&row).await.expect("actual built-in metadata path");
+            let reference = index
+                .object_ref_from_row(&row)
+                .await
+                .expect("actual built-in metadata path");
             assert_eq!(reference.sha256_hex, checksum);
             assert_eq!(reference.size_bytes, 6);
         }
-        row.values.insert("hash".to_string(), BackupValue::String(checksum));
-        row.values.insert("size".to_string(), BackupValue::Integer(1));
-        let understated = index.object_ref_from_row(&row).await.expect("understated recorded size");
-        assert!(matches!(index.load_object(&understated).await, Err(BackupError::CapacityExceeded { limit_bytes: 4 })));
-        let mut body = index.load_object_stream(&understated).await.expect("native object stream").into_inner();
+        row.values
+            .insert("hash".to_string(), BackupValue::String(checksum));
+        row.values
+            .insert("size".to_string(), BackupValue::Integer(1));
+        let understated = index
+            .object_ref_from_row(&row)
+            .await
+            .expect("understated recorded size");
+        assert!(matches!(
+            index.load_object(&understated).await,
+            Err(BackupError::CapacityExceeded { limit_bytes: 4 })
+        ));
+        let mut body = index
+            .load_object_stream(&understated)
+            .await
+            .expect("native object stream")
+            .into_inner();
         let mut size = 0;
-        while let Some(chunk) = body.next().await { size += chunk.expect("chunk").len(); }
+        while let Some(chunk) = body.next().await {
+            size += chunk.expect("chunk").len();
+        }
         assert_eq!(size, 6);
         let reviewed = index.with_buffered_byte_limit(BackupByteLimit::Bytes(6));
-        assert_eq!(reviewed.load_object(&understated).await.expect("finite override"), b"abcdef"[..]);
+        assert_eq!(
+            reviewed
+                .load_object(&understated)
+                .await
+                .expect("finite override"),
+            b"abcdef"[..]
+        );
     }
 
     #[tokio::test]
     async fn missing_or_invalid_metadata_hashes_stream_without_reserving_huge_hint() {
-        let store = ChunkStore { hint: u64::MAX, reads: AtomicUsize::new(0) };
+        let store = ChunkStore {
+            hint: u64::MAX,
+            reads: AtomicUsize::new(0),
+        };
         let checksum = crate::bytes_sha256_hex(b"abcdef");
         for (hash, size) in [
             (None, Some(6)),
@@ -788,7 +904,9 @@ mod object_stream_capacity_tests {
             (Some(checksum.clone()), None),
             (Some(checksum.clone()), Some(-1)),
         ] {
-            let actual = object_metadata_from_store(&store, "owned", hash, size).await.expect("streamed backfill ignores allocation hint");
+            let actual = object_metadata_from_store(&store, "owned", hash, size)
+                .await
+                .expect("streamed backfill ignores allocation hint");
             assert_eq!(actual, (checksum.clone(), 6));
         }
         assert_eq!(store.reads.load(Ordering::SeqCst), 4);
@@ -796,17 +914,41 @@ mod object_stream_capacity_tests {
 
     #[tokio::test]
     async fn understated_metadata_cannot_bypass_buffer_cap_but_native_stream_stays_usable() {
-        let store = ChunkStore { hint: 1, reads: AtomicUsize::new(0) };
-        let recorded = object_metadata_from_store(&store, "owned", Some(crate::bytes_sha256_hex(b"abcdef")), Some(1))
-            .await.expect("valid metadata deferred to backup integrity verification");
+        let store = ChunkStore {
+            hint: 1,
+            reads: AtomicUsize::new(0),
+        };
+        let recorded = object_metadata_from_store(
+            &store,
+            "owned",
+            Some(crate::bytes_sha256_hex(b"abcdef")),
+            Some(1),
+        )
+        .await
+        .expect("valid metadata deferred to backup integrity verification");
         assert_eq!(recorded.1, 1);
         assert_eq!(store.reads.load(Ordering::SeqCst), 0);
-        assert!(matches!(load_blob(&store, "owned", BackupByteLimit::Bytes(4)).await,
-            Err(BackupError::CapacityExceeded { limit_bytes: 4 })));
-        let mut stream = load_blob_stream(&store, "owned").await.expect("native stream").into_inner();
+        assert!(matches!(
+            load_blob(&store, "owned", BackupByteLimit::Bytes(4)).await,
+            Err(BackupError::CapacityExceeded { limit_bytes: 4 })
+        ));
+        let mut stream = load_blob_stream(&store, "owned")
+            .await
+            .expect("native stream")
+            .into_inner();
         let mut observed = 0;
-        while let Some(chunk) = stream.next().await { observed += chunk.expect("chunk").len(); }
-        assert_eq!(observed, 6, "streaming remains usable beyond a small buffered cap");
-        assert_eq!(load_blob(&store, "owned", BackupByteLimit::Bytes(6)).await.expect("reviewed finite override"), b"abcdef"[..]);
+        while let Some(chunk) = stream.next().await {
+            observed += chunk.expect("chunk").len();
+        }
+        assert_eq!(
+            observed, 6,
+            "streaming remains usable beyond a small buffered cap"
+        );
+        assert_eq!(
+            load_blob(&store, "owned", BackupByteLimit::Bytes(6))
+                .await
+                .expect("reviewed finite override"),
+            b"abcdef"[..]
+        );
     }
 }

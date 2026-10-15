@@ -33,10 +33,10 @@ impl BackupByteLimit {
     }
 
     pub(crate) fn check(self, bytes: u64) -> Result<(), BackupError> {
-        if let Self::Bytes(limit_bytes) = self {
-            if bytes > limit_bytes {
-                return Err(BackupError::CapacityExceeded { limit_bytes });
-            }
+        if let Self::Bytes(limit_bytes) = self
+            && bytes > limit_bytes
+        {
+            return Err(BackupError::CapacityExceeded { limit_bytes });
         }
         Ok(())
     }
