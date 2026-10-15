@@ -155,10 +155,10 @@ impl Fixture {
                 Ok(())
             }
             .await;
-            if let Err(error) = outcome {
-                if first.is_none() {
-                    first = Some(error);
-                }
+            if let Err(error) = outcome
+                && first.is_none()
+            {
+                first = Some(error);
             }
         }
         if self.directory_created {
@@ -184,16 +184,16 @@ impl Fixture {
                 Ok(())
             }
             .await;
-            if let Err(error) = outcome {
-                if first.is_none() {
-                    first = Some(error);
-                }
+            if let Err(error) = outcome
+                && first.is_none()
+            {
+                first = Some(error);
             }
         }
-        if let Err(error) = self.client.close().await {
-            if first.is_none() {
-                first = Some(error.into());
-            }
+        if let Err(error) = self.client.close().await
+            && first.is_none()
+        {
+            first = Some(error.into());
         }
         match first {
             Some(error) => Err(error),
