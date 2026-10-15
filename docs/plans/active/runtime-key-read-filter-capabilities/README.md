@@ -370,5 +370,15 @@ passed under a minor-release override to check additive compatibility.
 ORM/macros 0.49.0, all seven existing locks and the generated inventory are
 reconciled on this proposal-based stack. Before release, integrate the reviewed
 0.48.x correctness fixes and validate the coherent final stack. No merge,
-Actions or publication follows from these implementation gates. B remains
-unapproved, including its duplicate-wire/coercion and matching-semantics decisions.
+Actions or publication follows from these implementation gates.
+
+The owner subsequently approved B on the same proposal contract with the
+host-validated coercion/duplicate prerequisite for structural Value input; the
+optional raw JSON parser remains out of scope. The separate B implementation
+starts from exact A4c0502e, uses paired ORM/macros0.50.0, shares canonical lowering,
+retains complete original intent and adds conservative explicit-profile matching.
+Current parser/Variables wire duplicate erasure is a documented integration
+limitation, not a validated provenance guarantee. Source and public tests are
+prepared; initial seven-lock reconciliation, formatting, documentation and narrow
+SQLite/runtime-GraphQL compilation passed. Runtime/backend/API evidence and final
+integration review remain pending. No Actions, merge or publication is authorized.

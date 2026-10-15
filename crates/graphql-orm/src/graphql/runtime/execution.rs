@@ -135,7 +135,7 @@ fn server(e: RuntimeGraphqlError) -> async_graphql::ServerError {
         error
     }
 }
-fn bounded_variables(
+pub(super) fn bounded_variables(
     variables: &Variables,
     limits: RuntimeGraphqlLimits,
 ) -> Result<(), RuntimeGraphqlError> {

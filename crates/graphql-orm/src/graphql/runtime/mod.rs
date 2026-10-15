@@ -45,6 +45,7 @@ impl std::error::Error for RuntimeGraphqlError {}
 mod execution;
 mod module;
 mod plan;
+pub use plan::prepare_runtime_filter;
 mod schema;
 pub use execution::{
     RuntimeGraphqlRequest, RuntimeReadAuthority, RuntimeReadCheck, RuntimeReadGrant,
