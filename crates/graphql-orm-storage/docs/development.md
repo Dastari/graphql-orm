@@ -63,6 +63,39 @@ cargo test -p graphql-orm-storage --features s3 --no-default-features --test s3_
 Use a dedicated throwaway bucket or prefix. The test writes and deletes objects
 under a generated prefix.
 
+## Managed SMB fixture ownership
+
+`tests/samba/run.sh` runs the seven managed protocol, cancellation, encryption,
+constrained-write, backup-lifecycle and reconnect cases. It creates fresh randomly
+named containers and a fresh labelled volume, binds dynamic ports only on
+`127.0.0.1`, and passes the exact normal container ID to the restart test. It never
+reuses or deletes a pre-existing fixed-name fixture. Cleanup selects only its
+random run label, rechecks ownership and removes exact container IDs plus its
+owned volume; failures and interrupts use the same cleanup path. The runner
+selects unused OS ports and publishes each port explicitly so restarts preserve
+the mapping; a competing bind fails startup instead of reusing another service.
+The restart test requires a full immutable container ID and explicit run ID from
+the harness, and verifies the container's run label before any mutation. Missing
+or mismatched ownership fails closed, including manually invoked ignored tests.
+After restart the test verifies the original mapping and waits at most 30 seconds
+for TCP readiness before exercising the same existing backend's reconnect path.
+
+The daemon-free ownership regression suite substitutes private fake Docker/Cargo
+executables and checks startup collisions, exact-ID cleanup, ownership changes
+and a lost create response. Run it with:
+
+```bash
+python3 crates/graphql-orm-storage/tests/samba/test_run.py
+```
+
+Local execution defaults to `SMB_TEST_PULL_POLICY=never`: provision and review a
+cached image beforehand. `SMB_TEST_IMAGE` selects the reviewed image reference.
+Disposable hosted CI explicitly uses `SMB_TEST_PULL_POLICY=missing`. The script
+does not change Docker daemon or application resources. Under a host resource
+wrapper, keep setup, all tests and cleanup in one admitted invocation; its Docker
+shim remains responsible for resource limits and may require cached images even
+when the harness permits pulling missing images.
+
 ## Owned HTTPS transport fixture
 
 The [HTTPS fixture test](../tests/s3_https_transport.rs) uses OpenSSL and Python
