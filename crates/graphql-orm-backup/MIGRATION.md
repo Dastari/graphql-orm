@@ -10,6 +10,46 @@ supersedes: []
 
 # Migration Guide
 
+## 0.8.0 to 0.9.0: restore failure progress
+
+This is a breaking pre-1.0 error-contract change. `restore_snapshot` returns
+`BackupError::RestoreStageFailed { progress, source }` for failures, including
+validation and schema/empty-target failures. Update exhaustive `BackupError`
+matches and inspect `source` for the original error category, such as
+`RestoreSchemaMismatch` or `RestoreTargetNotEmpty`. Direct adapter calls and
+`ensure_empty_restore_target` retain their own error boundaries.
+
+`RestoreFailureProgress` identifies the requested snapshot, the failing manifest
+when known, the phase and the manifests whose adapter apply calls reported
+success. `Validation` runs before apply calls; `Preparation` does not apply the
+failing stage, but earlier completed stages can remain. `Apply` has an unknown
+outcome and may be partial even when no earlier stage completed. The primary
+display contains only phase/progress; the original cause remains available for
+trusted diagnostics through the error source chain.
+
+`target_may_have_changed()` describes changes by this attempt, not data that
+already existed in the target. Dry run never records completed apply stages or
+calls adapter apply methods. Backend/schema validation still occurs before
+checking target emptiness or applying rows.
+
+Progress is not permission to resume from the next manifest or retry in place.
+Orchestration does not roll back earlier stages or provide a transaction across
+the chain. Restore into a disposable empty staging database; if an apply fails,
+or later preparation fails after earlier stages applied, quarantine/discard that
+staging target through its owner and restart from a fresh empty target after
+resolving the failure. An empty-target retry rejects a partially populated target. Cancellation or
+dropping the future cannot return progress or roll back an active adapter call;
+treat cancellation during apply as an unknown outcome requiring the same recovery.
+
+Object restore is a separate operation and consistency boundary. Earlier objects
+may remain after failure, and custom sinks may partially write a failing object;
+checksum failure can be reported after writes. Use an isolated staging object
+namespace and publish the database/object set only after every required restore
+and verification step succeeds. There is no cross-store rollback guarantee.
+
+The snapshot format and stored data need no migration. Keep workspace packages
+on one reviewed revision and regenerate `Cargo.lock`.
+
 ## 0.7.2 to 0.8.0: fail-closed writer locks
 
 This is a breaking pre-1.0 release. Upgrade all writers sharing a repository
