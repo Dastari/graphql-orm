@@ -3,7 +3,7 @@ title: "Authentication and authorization architecture"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-14
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -18,12 +18,10 @@ request principal shape that generated resolvers and policy hooks can understand
 Attach `AuthSubject` to each async-graphql request:
 
 ```rust
-let subject = AuthSubject {
-    id: user.id.to_string(),
-    roles: user.roles.clone(),
-    scopes: user.scopes.clone(),
-    tenant_id: user.tenant_id.clone(),
-};
+let subject = AuthSubject::builder(user.id.to_string())
+    .roles(user.roles.clone())
+    .scopes(user.scopes.clone())
+    .build();
 
 let request = request.data(subject);
 ```
@@ -123,7 +121,11 @@ let database = Database::new(pool)
     .with_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
 ```
 
-Current default: `LegacyPermissive`. Secure recommended: `DeclaredPoliciesRequired`.
+Current default: `DeclaredPoliciesRequired`. Sensitive applications should use
+`ExplicitPolicyForAllExposedOperations`; neither mode creates tenant isolation.
+For immediate revocation, retain a coherent accepted principal and use the
+[current-authority bridge](../reference/graphql-orm/agql-auth-bridge.md).
+Pure subject/database projections do not perform current-status checks.
 
 ## Expanded AuthSubject
 

@@ -21,7 +21,7 @@ system, or a promise that a generated field is safe to expose. Applications
 own connection lifecycle, schema-application decisions, request identity,
 field/row policy, and HTTP transport.
 
-Version 0.46.0 requires explicit finite scan budgets for generated residual-policy
+Version 0.47.0 requires explicit finite scan budgets for generated residual-policy
 offset lists and all generated fallback search, including database-RLS-only
 deployments without a RowPolicy. Exact counts are returned only when
 scanning completes; missing/exhausted budgets fail closed without partial data.
@@ -45,7 +45,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.46.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.47.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
@@ -243,3 +243,11 @@ for host cache and manually constructed key changes.
 Version 0.44.1 sanitizes generated backend failures and legacy mutation error
 payloads. Match stable GraphQL public error codes rather than SQL/driver text;
 see the [public error migration](../../MIGRATION.md#0440-to-0441-generated-resolver-public-errors).
+
+Database authorization defaults to `DeclaredPoliciesRequired` in 0.47.0. Install
+providers for marked policies; sensitive applications should select
+`ExplicitPolicyForAllExposedOperations` and enforce tenant/business boundaries.
+With `auth-agql`, retain a coherent full accepted principal and wrap sensitive
+entity policies with immediate current-authority checks. See the
+[current-authority bridge](../../docs/reference/graphql-orm/agql-auth-bridge.md)
+and [upgrade guide](../../MIGRATION.md#0460-to-0470-current-authority-and-coherent-accepted-requests).

@@ -27,7 +27,7 @@ license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
 
 [workspace.dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.19.1", version = "0.19.1" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "406e12b74a9e31326b03ebcd3940610fa010f942", version = "0.21.2" }
 arc-swap = "1.7"
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 async-graphql-parser = "7"
@@ -37,7 +37,7 @@ cynic-parser = { version = "=0.11.2", features = ["pretty"] }
 futures = "0.3"
 getrandom = "0.3"
 graphql-composition = "=0.12.2"
-graphql-orm = { path = "crates/graphql-orm", version = "0.46.0", default-features = false }
+graphql-orm = { path = "crates/graphql-orm", version = "0.47.0", default-features = false }
 graphql-orm-ai-tool-profiles = { path = "crates/graphql-orm-ai-tool-profiles", version = "0.16.0" }
 graphql-orm-backup = { path = "crates/graphql-orm-backup", version = "0.10.0", default-features = false }
 graphql-orm-operation-catalog = { path = "crates/graphql-orm-operation-catalog", version = "0.4.0" }

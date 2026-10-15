@@ -57,8 +57,11 @@ async fn declared_policy_without_provider_fails_in_strict_mode()
         .execute(&pool)
         .await?;
 
-    let database =
-        Database::new(pool).with_authorization_mode(AuthorizationMode::DeclaredPoliciesRequired);
+    let database = Database::new(pool);
+    assert_eq!(
+        database.authorization_mode(),
+        AuthorizationMode::DeclaredPoliciesRequired
+    );
     let schema = schema_builder(database)
         .data(AuthSubject::new("user-1"))
         .finish();

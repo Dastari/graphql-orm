@@ -151,6 +151,7 @@ async fn setup(mode: Mode, min: i64, budget: u32) -> (Database, Policy, Capture)
     let capture = Capture::default();
     let mut database = database;
     database.set_row_policy(policy.clone());
+    database.set_field_policy(ReadPayload);
     let database = database
         .with_authorized_scan_config(AuthorizedScanConfig::new([7; 32], 7, budget))
         .with_read_query_observer(capture.clone());
@@ -555,6 +556,46 @@ impl EntityPolicy for DenyEntity {
         _: EntityAccessSurface,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async { Ok(false) })
+    }
+}
+struct ReadPayload;
+impl FieldPolicy for ReadPayload {
+    fn can_read_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn can_write_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+    fn can_read_repository_field<'a>(
+        &'a self,
+        _: Option<AccessContext<'a>>,
+        _: &'a Database,
+        entity: &'static str,
+        field: &'static str,
+        key: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity == "VisibilityItem"
+                && (key.is_none() || (field == "payload" && key == Some("payload.read"))))
+        })
     }
 }
 struct DenyFields;

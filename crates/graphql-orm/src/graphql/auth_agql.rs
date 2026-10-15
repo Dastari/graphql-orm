@@ -3,9 +3,16 @@
 //! Enable the `auth-agql` feature to compile this module. The bridge is a
 //! one-way dependency: `graphql-orm` does not require `agql-auth` by default,
 //! and `agql-auth` must never depend on `graphql-orm`.
-//! It projects only an already accepted [`agql_auth::AuthPrincipal`]; it does
+//! It projects an already accepted [`agql_auth::AuthPrincipal`] and offers
+//! optional current-authority enforcement through mandatory host dependencies. It does
 //! not create or evaluate OIDC requests/outcomes, persist rate-limit state,
 //! mint tokens, infer MFA, or own product authorization policy.
+
+mod current_authority;
+pub use current_authority::{
+    AgqlAcceptedRequest, AgqlBindingAuthorizer, AgqlCurrentAuthorityEnforcement,
+    AgqlCurrentAuthorityGuard, AgqlCurrentAuthorityPolicy,
+};
 
 use std::fmt;
 use std::sync::Arc;
@@ -180,7 +187,9 @@ pub fn db_auth_context_from_principal_with_tenant(
     context
 }
 
-/// Convert an `AuthPrincipal` into both GraphQL and database auth values.
+/// Convert an `AuthPrincipal` into safe GraphQL and database auth values.
+/// This does not retain full bindings or revalidate authority. Sensitive request
+/// integrations should use [`AgqlAcceptedRequest`] with current-authority enforcement.
 pub fn auth_bundle_from_principal(principal: &AuthPrincipal) -> (AuthSubject, DbAuthContext) {
     let subject = auth_subject_from_principal(principal);
     let mut db = DbAuthContext::from_subject(&subject);

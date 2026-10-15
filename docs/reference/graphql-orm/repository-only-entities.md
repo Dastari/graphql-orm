@@ -3,7 +3,7 @@ title: "Repository-only entities"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-02
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -248,6 +248,14 @@ installs transaction-local `DbAuthContext`/RLS settings through
 `transaction_with_auth`.
 
 ## Authorization
+
+Typed repository operations and `AccessContext` are primitives, not proof that a
+caller is authorized. `EntityQuery`, raw pools, direct loaders and custom SQL are
+trusted host boundaries: establish identity, current status and business/row policy
+before using them. An absent context or `SystemAccess` value does not create a
+universal bypass. The sensitive current-authority wrapper denies `ctx=None`; use
+an explicit accepted request/guard contract or a separately authorized host worker
+policy. See the [accepted-request workflow](agql-auth-bridge.md#accepted-request-and-current-authority).
 
 Entity and row policy decisions use `EntityAccessSurface::Repository` and obey
 the configured `AuthorizationMode`. A missing GraphQL request context is not

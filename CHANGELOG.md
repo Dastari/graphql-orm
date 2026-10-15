@@ -14,6 +14,20 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.47.0 (unreleased)
+
+- Default database authorization to `DeclaredPoliciesRequired`; missing marked
+  policy providers fail closed. Sensitive applications should select
+  `ExplicitPolicyForAllExposedOperations` and install tenant/business policies.
+- Add immutable `AgqlAcceptedRequest` injection and coherence validation across
+  all request, connection and schema data layers. Preserve the full accepted
+  principal separately from safe subject/database projections.
+- Add mandatory-dependency current-authority policy, enforcement and custom guard.
+  Recheck status, identity, grants, bindings and expiry for each sensitive operation;
+  deny changed authority and context-free repository bypasses.
+- Align ORM/macros at 0.47.0 and adopt a reviewed full external auth revision.
+
+
 ## 0.46.0 (unreleased)
 
 - Bound generated ordinary/append-only residual-policy offset lists using the
