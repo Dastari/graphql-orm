@@ -66,7 +66,7 @@ raise AssertionError('Unexpected Docker invocation: ' + repr(args))
 FAKE_CARGO = r'''
 import json, os, sys
 from pathlib import Path
-with (Path(os.environ['FAKE_ROOT']) / 'cargo').open('a') as log:
+with (Path(os.environ['FAKE_ROOT']) / 'cargo-calls.jsonl').open('a') as log:
     log.write(json.dumps({'args': sys.argv[1:], 'port': os.environ.get('SMB_TEST_PORT'),
                          'container': os.environ.get('SMB_TEST_CONTAINER_NAME')}) + '\n')
 '''
@@ -92,7 +92,7 @@ class FixtureOwnershipTests(unittest.TestCase):
                                     text=True, capture_output=True, timeout=20)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
             state = json.loads((root / "state").read_text()) if (root / "state").exists() else None
-            cargo = [json.loads(line) for line in (root / "cargo").read_text().splitlines()] if (root / "cargo").exists() else []
+            cargo = [json.loads(line) for line in (root / "cargo-calls.jsonl").read_text().splitlines()] if (root / "cargo-calls.jsonl").exists() else []
             return result, calls, state, cargo
 
     def test_startup_collisions_fail_before_create_or_delete(self):
