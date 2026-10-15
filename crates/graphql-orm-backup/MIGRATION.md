@@ -40,9 +40,18 @@ optional `OrmBackupObjectIndex` also defaults its direct buffered
 invalid checksum/size metadata is backfilled by incremental hashing and checked
 byte counting, without collecting the object or reserving a provider size hint.
 Its native `load_object_stream` bypasses that buffered cap so large object streams
-remain supported. Recorded sizes are not independently verified and cannot
-constrain buffered allocation; actual buffered byte checks apply regardless of
-recorded size. Backup verifies recorded checksums against the object bytes.
+remain supported. Recorded sizes cannot constrain buffered allocation; actual
+buffered byte checks apply regardless of recorded size. New and deduplicated
+backup entries record the byte count observed alongside SHA-256 verification;
+compaction normalizes output sizes from verified stored content as well.
+Historical manifest `size_bytes` remains advisory for compatibility: valid
+content is not rejected solely for a stale size. Object restore performs a
+streaming checksum/count preflight and supplies the observed verified size to
+the sink, then streams again with the existing checksum guard. This adds a read
+pass without whole-object buffering or a transaction guarantee. Existing
+historical manifests are not rewritten. Changes between preflight and sink
+streaming remain subject to final checksum verification; use staging namespaces
+and the existing partial-object recovery rules.
 Direct zstd callers use `decompress_payload_with_limit`. `BackupByteLimit::Unbounded` is an
 explicit opt-in accepting the associated allocation risk; it is not recommended
 for untrusted input. Do not retry capacity errors without changing the relevant

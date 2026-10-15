@@ -108,15 +108,19 @@ pub async fn verify_object_checksums_with_options(
     Ok(())
 }
 
-async fn verify_blob_checksum(
+pub(crate) async fn verify_blob_checksum(
     repository: &dyn BackupRepository,
     content_key: String,
     expected_sha256_hex: String,
-) -> Result<(), BackupError> {
+) -> Result<u64, BackupError> {
     let mut body = repository.get_blob_stream(&content_key).await?.into_inner();
     let mut hasher = Sha256::new();
+    let mut size = 0_u64;
     while let Some(chunk) = body.next().await {
-        hasher.update(&chunk?);
+        let chunk = chunk?;
+        size = size.checked_add(chunk.len() as u64)
+            .ok_or(BackupError::CapacityExceeded { limit_bytes: u64::MAX })?;
+        hasher.update(&chunk);
     }
     let actual = format!("{:x}", hasher.finalize());
     if actual != expected_sha256_hex {
@@ -127,5 +131,5 @@ async fn verify_blob_checksum(
         });
     }
 
-    Ok(())
+    Ok(size)
 }

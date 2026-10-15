@@ -22,6 +22,9 @@ supersedes: []
 - Optional ORM object-index metadata backfill now hashes/counts native streams
   without whole-blob collection. Its direct buffered loader has a configurable
   finite cap; native object streaming remains supported beyond that cap.
+- New/deduplicated and compacted object entries use observed verified byte sizes.
+  Historical sizes remain advisory; restore streams a checksum/count preflight
+  and normalizes sink metadata without rewriting existing manifests.
 
 ## 0.9.0 - 2026-10-15
 

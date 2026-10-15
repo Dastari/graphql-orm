@@ -456,6 +456,11 @@ fn restore_stage_error(
 
 /// Restores object blobs from a manifest through a caller-supplied sink.
 ///
+/// Historical object sizes are advisory. A streaming checksum/count preflight
+/// supplies observed content size to the sink; restoring then reads the stream
+/// again and verifies its checksum after sink consumption. No whole-object
+/// buffering is required by this preflight, and existing manifests are not changed.
+///
 /// This is a separate boundary from database restore. Earlier objects may remain
 /// after a later failure, and the failing object can be partially written by a
 /// custom sink. Checksum errors can be reported after sink writes. Use an owned
@@ -472,6 +477,11 @@ pub async fn restore_objects(
     sink: &dyn RestoreObjectSink,
 ) -> Result<(), BackupError> {
     for object in &manifest.objects {
+        // Historical size metadata was advisory. Verify/count without collection
+        // before calling the sink, then retain the streamed checksum guard below.
+        let observed_size = crate::verify::verify_blob_checksum(repository, object.content_key.clone(), object.sha256_hex.clone()).await?;
+        let mut reference = object_ref_from_entry(object);
+        reference.size_bytes = observed_size;
         let source = repository.get_blob_stream(&object.content_key).await?;
         let expected = object.sha256_hex.clone();
         let key = object.content_key.clone();
@@ -487,7 +497,7 @@ pub async fn restore_objects(
             Ok::<_, graphql_orm_storage::StorageError>(chunk)
         });
         sink.restore_object_stream(
-            object_ref_from_entry(object),
+            reference,
             StorageByteStream::new(Box::pin(stream)),
         )
         .await?;

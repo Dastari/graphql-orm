@@ -107,7 +107,7 @@ pub struct ObjectBackupEntry {
     pub content_key: String,
     /// SHA-256 checksum of the object bytes.
     pub sha256_hex: String,
-    /// Object size in bytes.
+    /// Observed object size for new entries; historical values remain advisory.
     pub size_bytes: u64,
     /// Optional MIME type.
     pub mime_type: Option<String>,

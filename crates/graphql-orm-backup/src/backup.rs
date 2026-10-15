@@ -445,7 +445,10 @@ async fn compact_chain_inner(
         });
     }
 
-    let object_entries = compact_object_entries(&chain);
+    let mut object_entries = compact_object_entries(&chain);
+    for object in &mut object_entries {
+        object.size_bytes = crate::verify::verify_blob_checksum(repository, object.content_key.clone(), object.sha256_hex.clone()).await?;
+    }
     let latest = chain
         .last()
         .ok_or_else(|| BackupError::InvalidManifestChain {
@@ -537,7 +540,7 @@ async fn write_object_entries(
         .map(|(index, object)| async move {
             let content_key = object_content_key(&object.sha256_hex);
             let source = objects.load_object_stream(&object).await?;
-            let hash_state = std::sync::Arc::new(std::sync::Mutex::new(Sha256::new()));
+            let hash_state = std::sync::Arc::new(std::sync::Mutex::new((Sha256::new(), 0_u64)));
             let stream_state = std::sync::Arc::clone(&hash_state);
             let stream = source.into_inner().map(move |chunk| {
                 let chunk = chunk?;
@@ -545,20 +548,25 @@ async fn write_object_entries(
                     Ok(hasher) => hasher,
                     Err(poisoned) => poisoned.into_inner(),
                 };
-                hasher.update(&chunk);
+                hasher.1 = hasher.1.checked_add(chunk.len() as u64)
+                    .ok_or_else(|| graphql_orm_storage::StorageError::PreconditionFailed {
+                        key: "object stream".to_string(), condition: "byte count overflow".to_string()
+                    })?;
+                hasher.0.update(&chunk);
                 Ok(chunk)
             });
             let written = repository
                 .put_blob_stream_if_absent(&content_key, StorageByteStream::new(Box::pin(stream)))
                 .await?;
-            let actual = if written {
+            let (actual, observed_size) = if written {
                 let hasher = match hash_state.lock() {
                     Ok(hasher) => hasher.clone(),
                     Err(poisoned) => poisoned.into_inner().clone(),
                 };
-                format!("{:x}", hasher.finalize())
+                (format!("{:x}", hasher.0.finalize()), hasher.1)
             } else {
-                hash_object_source(objects.load_object_stream(&object).await?).await?
+                let size = crate::verify::verify_blob_checksum(repository, content_key.clone(), object.sha256_hex.clone()).await?;
+                (object.sha256_hex.clone(), size)
             };
             if actual != object.sha256_hex {
                 if written {
@@ -578,7 +586,7 @@ async fn write_object_entries(
                     storage_key: object.storage_key.clone(),
                     content_key,
                     sha256_hex: object.sha256_hex.clone(),
-                    size_bytes: object.size_bytes,
+                    size_bytes: observed_size,
                     mime_type: object.mime_type.clone(),
                 },
             ))
@@ -589,15 +597,6 @@ async fn write_object_entries(
     object_entries.sort_by_key(|(index, _)| *index);
     let object_entries = object_entries.into_iter().map(|(_, entry)| entry).collect();
     Ok(object_entries)
-}
-
-async fn hash_object_source(source: StorageByteStream) -> Result<String, BackupError> {
-    let mut hasher = Sha256::new();
-    let mut stream = source.into_inner();
-    while let Some(chunk) = stream.next().await {
-        hasher.update(&chunk?);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn release_lock<T>(
