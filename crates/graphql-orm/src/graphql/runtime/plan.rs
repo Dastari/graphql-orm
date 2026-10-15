@@ -849,7 +849,8 @@ mod checked_compatibility_tests {
         );
         super::super::execution::bounded_variables(&variables, small).unwrap();
         assert!(legacy(&s, input, small).is_ok());
-        // Existing backend request rendering, not this parser, still enforces
-        // duplicated suffix binds for SQLite; PostgreSQL emits one native bind.
+        // This preserves legacy logical admission. PostgreSQL emits one native
+        // suffix bind; SQLite emits two. Only the new public checked artifact
+        // reserves the worst-case emitted count here.
     }
 }

@@ -36,7 +36,9 @@ flat RuntimeReadCheck authorization ignores implicit conjunction permissions and
 retains its prior public behavior. Public checked null operators validate
 filterability and operator/kind admission; existing canonical null skips remain
 private compatibility behavior. Existing configured GraphQL scalar limits and
-backend-specific rendered bind checks remain effective. The core builder has
+legacy logical bind admission remain unchanged; the new public checked artifact
+reserves worst-case emitted binds, including SQLite suffix duplication. Existing
+canonical execution is not upgraded to a new actual-bind policy by this change. The core builder has
 fixed text/binary literal caps of64KiB/32KiB and counts SQLite suffix binds twice;
 imported/reused nodes revalidate full bounds on each composition/finalization.
 

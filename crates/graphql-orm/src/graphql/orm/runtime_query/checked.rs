@@ -220,6 +220,7 @@ pub struct RuntimeFilterBuilder {
     max_text_bytes: usize,
     max_binary_bytes: usize,
     sqlite_suffix_binds: bool,
+    #[cfg(feature = "runtime-graphql")]
     legacy_nulls: bool,
 }
 impl fmt::Debug for RuntimeFilterBuilder {
@@ -251,6 +252,7 @@ impl ValidatedRuntimeSchema {
             max_text_bytes: RUNTIME_FILTER_MAX_TEXT_BYTES,
             max_binary_bytes: RUNTIME_FILTER_MAX_BINARY_BYTES,
             sqlite_suffix_binds: true,
+            #[cfg(feature = "runtime-graphql")]
             legacy_nulls: false,
         })
     }
