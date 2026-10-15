@@ -617,7 +617,7 @@ pub(crate) fn generate_graphql_relations(
                     let mut relation_key_parts = Vec::new();
                     #(#source_value_bindings)*
                     Some((
-                        ::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts),
+                        ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]),
                         relation_sql_values,
                     ))
                 })() else {
@@ -638,7 +638,7 @@ pub(crate) fn generate_graphql_relations(
                     let mut relation_key_parts = Vec::new();
                     #(#source_value_bindings)*
                     (
-                        ::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts),
+                        ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]),
                         relation_sql_values,
                     )
                 };
@@ -652,7 +652,7 @@ pub(crate) fn generate_graphql_relations(
                     let mut relation_key_parts = Vec::new();
                     #(#source_value_bindings)*
                     Some((
-                        ::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts),
+                        ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]),
                         relation_sql_values,
                     ))
                 })() else {
@@ -666,7 +666,7 @@ pub(crate) fn generate_graphql_relations(
                     let mut relation_key_parts = Vec::new();
                     #(#source_value_bindings)*
                     (
-                        ::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts),
+                        ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]),
                         relation_sql_values,
                     )
                 };
@@ -1093,7 +1093,7 @@ pub(crate) fn generate_graphql_relations(
                     let mut relation_key_parts = Vec::new();
                     #(#source_value_bindings)*
                     Some((
-                        ::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts),
+                        ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]),
                         relation_sql_values,
                     ))
                 })()
@@ -1105,7 +1105,7 @@ pub(crate) fn generate_graphql_relations(
                     }
                     let mut relation_key_parts = Vec::new();
                     #(#source_key_bindings)*
-                    Some(::graphql_orm::graphql::loaders::RelationKey::new(relation_key_parts))
+                    Some(::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(relation_key_parts, &[#(#key_part_kind_tokens),*]))
                 })()
             };
 
@@ -1270,9 +1270,9 @@ pub(crate) fn generate_graphql_relations(
                         )
                         .await?;
                         for row in rows {
-                            let relation_key = ::graphql_orm::graphql::loaders::RelationKey::new(vec![
+                            let relation_key = ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(vec![
                                 #(<#backend_marker as ::graphql_orm::OrmBackend>::try_get_string(&row, #relation_key_aliases)?),*
-                            ]);
+                            ], &[#(#key_part_kind_tokens),*]);
                             let related = <#target_type as ::graphql_orm::graphql::orm::FromSqlRow<#backend_marker>>::from_row(&row)?;
                             #insert_grouped
                         }
