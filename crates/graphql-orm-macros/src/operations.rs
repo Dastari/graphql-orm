@@ -2008,11 +2008,12 @@ pub(crate) fn generate_graphql_operations(
         }
     };
     let subscription_pk_bind = pk_bind_value_for_entity.clone();
-    let subscription_key_visibility = if crate::entity::has_repository_entity_attribute(&input.attrs) {
-        quote! {}
-    } else {
-        quote! { pub }
-    };
+    let subscription_key_visibility =
+        if crate::entity::has_repository_entity_attribute(&input.attrs) {
+            quote! {}
+        } else {
+            quote! { pub }
+        };
     let subscription_key_method = quote! {
         #[doc(hidden)]
         #subscription_key_visibility fn __gom_subscription_key_values(entity: &Self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
@@ -2059,7 +2060,7 @@ pub(crate) fn generate_graphql_operations(
         pub(crate) fn __gom_queue_propagated_changed_event(
             hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
             action: ::graphql_orm::graphql::orm::ChangeAction,
-            id: &#pk_type,
+            id: #pk_type,
             parent_entity: Option<&Self>,
             source_entity: &str,
             source_id: &str,
@@ -2069,7 +2070,7 @@ pub(crate) fn generate_graphql_operations(
             let event = #changed_event {
                 action,
                 change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
-                id: id.clone(),
+                id,
                 source_entity: Some(source_entity.to_string()),
                 source_id: Some(source_id.to_string()),
                 path,
@@ -2140,7 +2141,7 @@ pub(crate) fn generate_graphql_operations(
                     if visited.insert(dedupe_key) {
                         #fetch_parent
                         <#target_type>::__gom_queue_propagated_changed_event(
-                            hook_ctx, action, parent_id, parent_entity.as_ref(), source_entity,
+                            hook_ctx, action, parent_id.clone(), parent_entity.as_ref(), source_entity,
                             source_id, next_path.clone(), next_provenance.clone(),
                         );
                         if let Some(parent_entity) = parent_entity.as_ref() {
