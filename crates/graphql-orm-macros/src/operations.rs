@@ -2076,7 +2076,7 @@ pub(crate) fn generate_graphql_operations(
                     );
                     if visited.insert(dedupe_key) {
                         #fetch_parent
-                        let event = #target_changed_event {
+                        let mut event = #target_changed_event {
                             action,
                             change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
                             id: parent_id.clone(),
@@ -2087,6 +2087,7 @@ pub(crate) fn generate_graphql_operations(
                         };
                         hook_ctx.queue_event(event.clone());
                         if let Some(parent_entity) = parent_entity.as_ref() {
+                            event.entity = None;
                             if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#target_changed_event, #backend_marker>::new(
                                 event, <#target_type>::__gom_subscription_key_values(parent_entity), false, next_provenance.clone(),
                             ) { hook_ctx.queue_event(witness); }
@@ -4991,11 +4992,11 @@ pub(crate) fn generate_graphql_operations(
                         let actions = actions.clone();
                         async move {
                             let witness = result.ok()?;
-                            let mut event = (*witness.event).clone();
+                            let event = witness.event.as_ref();
                             if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
                                 != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
                             if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
-                            let authorized: ::graphql_orm::async_graphql::Result<()> = async {
+                            let authorized: ::graphql_orm::async_graphql::Result<#struct_name> = async {
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
@@ -5017,11 +5018,18 @@ pub(crate) fn generate_graphql_operations(
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                event.entity = Some(row);
-                                Ok(())
+                                Ok(row)
                             }.await;
                             match authorized {
-                                Ok(()) => Some(event),
+                                Ok(row) => Some(#changed_event {
+                                    action: event.action,
+                                    change_kind: event.change_kind,
+                                    id: event.id.clone(),
+                                    source_entity: event.source_entity.clone(),
+                                    source_id: event.source_id.clone(),
+                                    path: event.path.clone(),
+                                    entity: Some(row),
+                                }),
                                 Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                             }
                         }
@@ -5064,13 +5072,14 @@ pub(crate) fn generate_graphql_operations(
                 ) -> ::graphql_orm::Result<()> {
                     #search_write_maintenance
                     let source_id = #pk_id_for_entity;
-                    let event = #changed_event {
+                    let mut event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
                         source_entity: None, source_id: None, path: Vec::new(), entity: Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
+                    if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
                     if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
                         event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
                     ) { hook_ctx.queue_event(witness); }
@@ -7758,11 +7767,11 @@ pub(crate) fn generate_graphql_operations(
                         let actions = actions.clone();
                         async move {
                             let witness = result.ok()?;
-                            let mut event = (*witness.event).clone();
+                            let event = witness.event.as_ref();
                             if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
                                 != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
                             if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
-                            let authorized: ::graphql_orm::async_graphql::Result<()> = async {
+                            let authorized: ::graphql_orm::async_graphql::Result<#struct_name> = async {
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
@@ -7784,11 +7793,18 @@ pub(crate) fn generate_graphql_operations(
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                event.entity = Some(row);
-                                Ok(())
+                                Ok(row)
                             }.await;
                             match authorized {
-                                Ok(()) => Some(event),
+                                Ok(row) => Some(#changed_event {
+                                    action: event.action,
+                                    change_kind: event.change_kind,
+                                    id: event.id.clone(),
+                                    source_entity: event.source_entity.clone(),
+                                    source_id: event.source_id.clone(),
+                                    path: event.path.clone(),
+                                    entity: Some(row),
+                                }),
                                 Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                             }
                         }
@@ -7818,7 +7834,7 @@ pub(crate) fn generate_graphql_operations(
                 entity: Option<&Self>,
             ) {
                 if let Some(entity) = entity {
-                    let event = #changed_event {
+                    let mut event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
@@ -7828,6 +7844,7 @@ pub(crate) fn generate_graphql_operations(
                         entity: Some(entity.clone()),
                     };
                     db.emit_event(event.clone());
+                    if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
                     if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
                         event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
                     ) { db.emit_event(witness); }
@@ -7865,7 +7882,7 @@ pub(crate) fn generate_graphql_operations(
                 if let Some(entity) = entity {
                     #search_write_maintenance
                     let source_id = #pk_id_for_entity;
-                    let event = #changed_event {
+                    let mut event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
                         id: entity.#pk_field.clone(),
@@ -7875,6 +7892,7 @@ pub(crate) fn generate_graphql_operations(
                         entity: Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
+                    if action != ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity = None; }
                     if let Some(witness) = ::graphql_orm::graphql::subscriptions::SubscriptionEvent::<#changed_event, #backend_marker>::new(
                         event, Self::__gom_subscription_key_values(entity), action == ::graphql_orm::graphql::orm::ChangeAction::Deleted, Vec::new(),
                     ) { hook_ctx.queue_event(witness); }

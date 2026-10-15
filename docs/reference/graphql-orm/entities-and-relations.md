@@ -312,7 +312,9 @@ fresh authorized rows, not historical snapshots. Errors or denials suppress the
 whole event, including its outer identifier and provenance. Propagated events
 also require current authorization of each source primary key, foreign key and
 relationship; absent/deleted sources suppress invalidations. Source proofs hold
-only typed keys and are limited to 16 hops; propagation examines at most 256
+only typed keys and are limited to 16 hops; live/propagated GraphQL witnesses
+retain no row snapshot and denied subscribers do not clone one. Propagation
+examines at most 256
 targets per originating change. Consumers should refresh authorized queries.
 
 Selected entity payloads support persisted scalars only. Subscriptions requesting

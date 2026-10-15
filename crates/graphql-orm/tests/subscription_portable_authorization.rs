@@ -11,7 +11,7 @@ mod owned_mssql;
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 #[derive(
-    GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+    GraphQLEntity, GraphQLOperations, Debug, PartialEq, serde::Serialize, serde::Deserialize,
 )]
 #[cfg_attr(
     feature = "sqlite",
@@ -46,6 +46,22 @@ struct PortableRow {
     id: String,
     owner: String,
     label: String,
+}
+static PRIVATE_SNAPSHOT_CLONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+impl Clone for PortableRow {
+    fn clone(&self) -> Self {
+        if self.id == "clone-probe-only" {
+            PRIVATE_SNAPSHOT_CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Self { id: self.id.clone(), owner: self.owner.clone(), label: self.label.clone() }
+    }
+}
+#[derive(Clone)]
+struct ReadCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl ReadQueryObserver for ReadCounter {
+    fn on_read(&self, _: &str, rows: usize) {
+        self.0.fetch_add(rows, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 #[cfg(feature = "sqlite")]
 schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [PortableRow], }
@@ -263,6 +279,30 @@ async fn rls_only_visibility_never_authorizes_another_owners_deleted_preimage() 
     }
     pool.close().await;
     admin.pool().close().await;
+    owner.cleanup()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_subscribers_do_not_clone_private_queued_snapshots() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let (mut db, mut owner) = fixture().await?;
+    execute(&db, "CREATE TABLE portable_subscription_rows (id VARCHAR(80) PRIMARY KEY, owner VARCHAR(80) NOT NULL, label VARCHAR(100) NOT NULL)").await?;
+    db.set_row_policy(OwnedRowPolicy);
+    let reads = Arc::new(AtomicUsize::new(0));
+    let db = db.with_read_query_observer(ReadCounter(reads.clone()));
+    let schema = schema_builder(db).finish();
+    let mut stream = Box::pin(schema.execute_stream(Request::new(
+        "subscription { portableRowChanged { id } }"
+    ).data(AuthSubject::new("alice"))));
+    registered(&mut stream).await;
+    publish(&schema, "clone-probe-only", "bob").await;
+    PRIVATE_SNAPSHOT_CLONES.store(0, Ordering::Relaxed);
+    reads.store(0, Ordering::Relaxed);
+    assert!(timeout(Duration::from_secs(1), stream.next()).await.is_err());
+    assert!(reads.load(Ordering::Relaxed) > 0, "event was not processed");
+    assert_eq!(PRIVATE_SNAPSHOT_CLONES.load(Ordering::Relaxed), 0);
+    drop(stream); drop(schema);
     owner.cleanup()?;
     Ok(())
 }

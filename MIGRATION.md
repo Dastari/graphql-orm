@@ -35,7 +35,10 @@ GraphQL `guard`/dynamic `visible` behavior are rejected at admission
 with `INVALID_INPUT`: their late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
 
-Live payloads now contain the freshly loaded authorized current row. They are
+Live payloads now contain the freshly loaded authorized current row. The
+GraphQL witness channel retains metadata/typed keys for live and propagated
+events; denied subscribers do not clone queued snapshots. Only explicit deleted
+preimages retain a snapshot for the default-deny authorization hook. Events are
 invalidation notifications, not an immutable change journal: queued historical
 payloads, including a previous owner's data after ownership transfer, are not
 released. Direct generated deletes suppress their trusted final preimages by default.
