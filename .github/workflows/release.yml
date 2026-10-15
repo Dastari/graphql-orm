@@ -135,6 +135,32 @@ jobs:
           RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles -p graphql-orm-storage --no-deps --locked
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-backup --features orm-sqlite --no-deps --locked
 
+  s3-security:
+    name: Owned S3 transport and single-attempt deletion
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Require owned lost-response and trusted/untrusted HTTPS regressions
+        run: bash scripts/run-owned-s3-security-tests.sh
+      - name: Lint the supported storage target profile
+        run: cargo clippy -p graphql-orm-storage --locked --no-default-features --features local,s3,azure --all-targets -- -D warnings
+      - name: Document local and S3 storage with warnings denied
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-storage --locked --no-default-features --features local,s3 --no-deps
+      - name: Compile the backup adapter with the storage S3 provider
+        run: cargo check -p graphql-orm-backup --locked --features graphql-orm-storage/s3
+
   orm:
     name: ORM backend lanes
     needs: guard
@@ -333,6 +359,7 @@ jobs:
       - guard
       - workspace-integrity
       - neutral-packages
+      - s3-security
       - orm
       - ai-provider-matrix
       - ai-provider-lanes
