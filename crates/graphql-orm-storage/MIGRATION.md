@@ -10,6 +10,20 @@ supersedes: []
 
 # Migration Guide
 
+## 0.7.2 to 0.7.3: corrected S3 credential cache dependency
+
+Regenerate the consuming application's lockfile after updating its reviewed
+workspace revision. The S3 SDK minimum is now 1.144.0, which replaces its affected
+LRU cache dependency and requires corresponding compatible Smithy runtime
+updates. This minimum requires Rust 1.94.1; the workspace release toolchain
+already exceeds that minimum. The explicit modern HTTPS client, certificate
+validation, signing and Tokio features are preserved.
+
+No API, provider configuration, object key or persisted-data migration is
+required. Exercise your S3-compatible endpoint and credential configuration
+before deployment. This updates the storage provider's SDK graph; it does not
+resolve independent LRU dependencies in GraphQL or router dependencies.
+
 ## 0.7.1 to 0.7.2: modern S3 transport selection
 
 The `s3` feature now disables the AWS SDK's defaults and explicitly retains
