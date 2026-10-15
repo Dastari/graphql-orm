@@ -116,7 +116,8 @@ pub use planner::{FullBackupPlan, plan_full_backup};
 pub use prune::{DeleteSnapshotResult, KeepPolicy, PruneResult, delete_snapshot, prune};
 pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
-    BlobStoreRestoreObjectSink, RestoreContext, RestoreMode, RestoreObjectSink, RestoreResult,
+    BlobStoreRestoreObjectSink, RestoreContext, RestoreFailurePhase, RestoreFailureProgress,
+    RestoreMode, RestoreObjectSink, RestoreResult,
     ensure_empty_restore_target, restore_objects, restore_snapshot,
 };
 pub use verify::{

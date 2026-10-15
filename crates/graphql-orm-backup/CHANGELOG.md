@@ -10,6 +10,19 @@ supersedes: []
 
 # Changelog
 
+## 0.9.0 - 2026-10-15
+
+- Added typed snapshot-restore failure progress for validation, preparation and
+  apply phases, preserving the original error as a source with a safe primary
+  display. Earlier reported-complete stages and a possibly partial failed apply
+  are explicit; progress is not an automatic resume checkpoint.
+- Breaking: `restore_snapshot` failures now return `RestoreStageFailed` around
+  the original cause. Update error matches and exhaustive `BackupError` matches.
+- Documented disposable staging-target recovery and the separate database/object
+  restore boundaries. Whole-chain atomicity or rollback is not promised.
+- Added later-stage parse and partial-adapter fault regressions, including dry
+  run, rejection of retry into a dirty target and recovery into a fresh target.
+
 ## 0.8.0 - 2026-10-14
 
 - Fixed S-005 writer exclusion: existing locks never expire automatically,

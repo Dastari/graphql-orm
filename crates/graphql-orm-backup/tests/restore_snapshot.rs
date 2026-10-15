@@ -6,7 +6,8 @@ use bytes::Bytes;
 use graphql_orm_backup::{
     BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef, BackupRepository,
     BackupRow, BackupTableExport, FullBackupRequest, GraphqlOrmBackupAdapter,
-    GraphqlOrmBackupSchema, LocalBackupRepository, RestoreContext, RestoreObjectSink,
+    GraphqlOrmBackupSchema, LocalBackupRepository, RestoreContext, RestoreFailurePhase,
+    RestoreObjectSink,
     bytes_sha256_hex, create_full_backup, object_content_key, restore_objects, restore_snapshot,
 };
 use serde_json::{Map, Value};
@@ -105,7 +106,7 @@ async fn restore_snapshot_refuses_non_empty_empty_database_target() {
     .await
     .expect_err("non-empty target rejected");
 
-    assert!(matches!(err, BackupError::RestoreTargetNotEmpty));
+    assert!(matches!(validation_source(err), BackupError::RestoreTargetNotEmpty));
     assert!(target.restored_full().is_empty());
 }
 
@@ -133,7 +134,7 @@ async fn restore_snapshot_rejects_schema_hash_mismatch_before_target_checks_or_w
     .expect_err("schema mismatch rejected");
 
     assert!(matches!(
-        err,
+        validation_source(err),
         BackupError::RestoreSchemaMismatch {
             backup_backend,
             backup_schema_hash,
@@ -171,7 +172,7 @@ async fn restore_snapshot_rejects_backend_mismatch_during_dry_run() {
     .await
     .expect_err("backend mismatch rejected");
 
-    assert!(matches!(err, BackupError::RestoreSchemaMismatch { .. }));
+    assert!(matches!(validation_source(err), BackupError::RestoreSchemaMismatch { .. }));
     assert!(target.restored_full().is_empty());
 }
 
@@ -411,4 +412,14 @@ impl RestoreObjectSink for RecordingObjectSink {
             .push((object, bytes));
         Ok(())
     }
+}
+
+fn validation_source(error: BackupError) -> BackupError {
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("restore errors must identify their failure boundary");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Validation);
+    assert!(progress.completed_manifest_ids.is_empty());
+    assert!(!progress.target_may_have_changed());
+    *source
 }

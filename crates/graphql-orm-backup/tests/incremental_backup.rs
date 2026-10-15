@@ -2,11 +2,11 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use graphql_orm_backup::{
-    BackupChangeAction, BackupChangeExport, BackupError, BackupKind, BackupObjectIndex,
+    BackupChangeAction, BackupChangeExport, BackupCompression, BackupError, BackupKind, BackupObjectIndex,
     BackupObjectRef, BackupRepository, BackupRow, BackupTableExport, CompactChainRequest,
     FullBackupRequest, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema, IncrementalBackupRequest,
-    LocalBackupRepository, RestoreContext, bytes_sha256_hex, compact_chain, create_full_backup,
-    create_incremental_backup, database_changes_key, load_manifest, restore_snapshot,
+    LocalBackupRepository, RestoreContext, RestoreFailurePhase, bytes_sha256_hex, compact_chain, create_full_backup,
+    create_incremental_backup, database_changes_key, load_manifest, restore_snapshot, write_manifest,
 };
 use serde_json::{Map, Value};
 use tempfile::TempDir;
@@ -255,6 +255,7 @@ struct MockDatabase {
     incremental_export_calls: Arc<Mutex<u64>>,
     restored_full: Arc<Mutex<Vec<BackupTableExport>>>,
     restored_incremental: Arc<Mutex<Vec<BackupChangeExport>>>,
+    fail_incremental_after_one: bool,
 }
 
 impl MockDatabase {
@@ -265,6 +266,7 @@ impl MockDatabase {
             incremental_export_calls: Arc::default(),
             restored_full: Arc::default(),
             restored_incremental: Arc::default(),
+            fail_incremental_after_one: false,
         }
     }
 
@@ -275,6 +277,7 @@ impl MockDatabase {
             incremental_export_calls: Arc::default(),
             restored_full: Arc::default(),
             restored_incremental: Arc::default(),
+            fail_incremental_after_one: false,
         }
     }
 
@@ -315,7 +318,7 @@ impl GraphqlOrmBackupAdapter for MockDatabase {
     }
 
     async fn restore_target_is_empty(&self) -> Result<bool, BackupError> {
-        Ok(true)
+        Ok(self.restored_full().is_empty() && self.restored_incremental().is_empty())
     }
 
     async fn export_full(&self) -> Result<Vec<BackupTableExport>, BackupError> {
@@ -351,10 +354,108 @@ impl GraphqlOrmBackupAdapter for MockDatabase {
         changes: Vec<BackupChangeExport>,
         _context: RestoreContext,
     ) -> Result<(), BackupError> {
+        if self.fail_incremental_after_one {
+            self.restored_incremental.lock().expect("restored incremental lock")
+                .extend(changes.into_iter().take(1));
+            return Err(BackupError::Database {
+                message: "injected-private-adapter-detail".to_string(),
+            });
+        }
         self.restored_incremental
             .lock()
             .expect("restored incremental lock")
             .extend(changes);
         Ok(())
     }
+}
+
+async fn create_restore_fault_fixture(repository: &LocalBackupRepository) {
+    let source = MockDatabase::with_full(vec![BackupTableExport {
+        table_name: "users".to_string(),
+        rows: vec![backup_row("users", "1", "Ada")],
+    }]);
+    create_full_backup(repository, &source, &MockObjectIndex, full_request())
+        .await.expect("full fixture");
+    let incremental_source = MockDatabase::with_incremental(sample_changes());
+    create_incremental_backup(repository, &incremental_source, &MockObjectIndex,
+        incremental_request(full_id())).await.expect("incremental fixture");
+}
+
+#[tokio::test]
+async fn later_preparation_failure_reports_prior_stages_without_applying_failed_stage() {
+    let temp = TempDir::new().expect("owned repository");
+    let repository = LocalBackupRepository::new(temp.path());
+    create_restore_fault_fixture(&repository).await;
+    let mut manifest = load_manifest(&repository, incremental_id()).await.expect("manifest");
+    manifest.database.compression = BackupCompression::None;
+    let malformed = bytes::Bytes::from_static(b"{invalid-json}\n");
+    let entry = &mut manifest.database.changes[0];
+    entry.sha256_hex = bytes_sha256_hex(&malformed);
+    repository.put_blob(&entry.content_key, malformed).await.expect("malformed owned payload");
+    write_manifest(&repository, &mut manifest).await.expect("valid checksum for malformed payload");
+
+    let target = MockDatabase::empty_restore_target();
+    let error = restore_snapshot(&repository, &target, incremental_id(), RestoreContext::empty_database())
+        .await.expect_err("later JSON preparation fails");
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("typed restore progress");
+    };
+    assert_eq!(progress.requested_snapshot_id, incremental_id());
+    assert_eq!(progress.failed_manifest_id, Some(incremental_id()));
+    assert_eq!(progress.phase, RestoreFailurePhase::Preparation);
+    assert_eq!(progress.completed_manifest_ids, vec![full_id()]);
+    assert!(progress.target_may_have_changed());
+    assert!(matches!(*source, BackupError::Serialization(_)));
+    assert_eq!(target.restored_full().len(), 1);
+    assert!(target.restored_incremental().is_empty());
+
+    let dry_target = MockDatabase::empty_restore_target();
+    let error = restore_snapshot(&repository, &dry_target, incremental_id(), RestoreContext::dry_run())
+        .await.expect_err("dry run also parses the failing stage");
+    let BackupError::RestoreStageFailed { progress, .. } = error else {
+        panic!("typed dry-run progress");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Preparation);
+    assert!(progress.completed_manifest_ids.is_empty());
+    assert!(!progress.target_may_have_changed());
+    assert!(dry_target.restored_full().is_empty());
+    assert!(dry_target.restored_incremental().is_empty());
+}
+
+#[tokio::test]
+async fn partially_applied_stage_reports_uncertainty_and_requires_fresh_target_recovery() {
+    let temp = TempDir::new().expect("owned repository");
+    let repository = LocalBackupRepository::new(temp.path());
+    create_restore_fault_fixture(&repository).await;
+    let mut target = MockDatabase::empty_restore_target();
+    target.fail_incremental_after_one = true;
+    let error = restore_snapshot(&repository, &target, incremental_id(), RestoreContext::empty_database())
+        .await.expect_err("adapter fails after one applied change");
+    assert!(!error.to_string().contains("injected-private-adapter-detail"));
+    let BackupError::RestoreStageFailed { progress, source } = error else {
+        panic!("typed restore progress");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Apply);
+    assert_eq!(progress.failed_manifest_id, Some(incremental_id()));
+    assert_eq!(progress.completed_manifest_ids, vec![full_id()]);
+    assert!(progress.target_may_have_changed());
+    assert!(matches!(*source, BackupError::Database { message } if message == "injected-private-adapter-detail"));
+    assert_eq!(target.restored_full().len(), 1);
+    assert_eq!(target.restored_incremental().len(), 1);
+
+    let retry_error = restore_snapshot(&repository, &target, incremental_id(), RestoreContext::empty_database())
+        .await.expect_err("cannot resume into the partially populated target");
+    let BackupError::RestoreStageFailed { progress, source } = retry_error else {
+        panic!("typed validation progress");
+    };
+    assert_eq!(progress.phase, RestoreFailurePhase::Validation);
+    assert!(!progress.target_may_have_changed(), "this retry performed no writes");
+    assert!(matches!(*source, BackupError::RestoreTargetNotEmpty));
+    assert_eq!(target.restored_incremental().len(), 1);
+
+    let recovered = MockDatabase::empty_restore_target();
+    restore_snapshot(&repository, &recovered, incremental_id(), RestoreContext::empty_database())
+        .await.expect("restart in a fresh disposable target");
+    assert_eq!(recovered.restored_full().len(), 1);
+    assert_eq!(recovered.restored_incremental(), sample_changes());
 }
