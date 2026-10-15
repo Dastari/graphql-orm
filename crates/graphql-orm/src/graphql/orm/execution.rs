@@ -2,7 +2,8 @@ use super::core::{
     AppliedMigrationRecord, DbAuthContext, MigrationApplicationMetadata, PlannedSchemaStage,
     SchemaPolicy, SchemaStage, SqlValue, record_executed_query,
 };
-use super::migrations::build_migration_plan;
+use super::migrations::{build_migration_plan, validate_migration_step_capabilities};
+use super::owned_schema::StepRef;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::runtime_migration::{OwnedPlannedMigration, RuntimeMigrationError};
 use super::{MigrationBackend, OrmBackend, SqlxBackend, WriteBackend};
@@ -106,6 +107,7 @@ where
             }
 
             let plan = build_migration_plan(B::DIALECT, &current_schema, &stage.target_schema);
+            validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
             planned.push(PlannedSchemaStage {
                 version: stage.version.clone(),
                 description: stage.description.clone(),

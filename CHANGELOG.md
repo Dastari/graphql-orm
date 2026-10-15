@@ -16,6 +16,9 @@ for historical context.
 
 ## 0.49.0 (unreleased)
 
+- Include the 0.48.1–0.48.3 PostgreSQL migration corrections and SQLite CHECK
+  introspection correction described below; those sections retain their separate
+  migration and repair requirements.
 - Add checked owned-runtime complete-key reads with an explicit required row
   restriction, exact projection and bounded multiplicity detection. Nonfilterable
   keys remain internal identity rather than a public Filter grant. SQLite and
@@ -23,6 +26,31 @@ for historical context.
 - Align ORM/macros at 0.49.0. Hosts still authenticate current authority, authorize
   fields/key-read intent and bind the current trusted catalog before each call.
   No filter-matching API, schema change or stored-data migration is introduced.
+
+## 0.48.3 (unreleased)
+
+- Fail closed before managed PostgreSQL target DDL or history rows for unsupported
+  primary-key flags, constraint-backed unique flags and same-type spatial
+  metadata alterations. Explicit standalone unique indexes with unchanged flags
+  and changed SQL type expressions retain their existing renderer paths.
+
+## 0.48.2 (unreleased)
+
+- PostgreSQL static/owned migration plans now apply real SET, replacement and
+  DROP DEFAULT changes, preserve existing row values, and detach old defaults
+  before actual type conversion. Unchanged type/nullability/default properties
+  emit no unnecessary DDL; canonical schema/hash formats are unchanged.
+
+## 0.48.1 (unreleased)
+
+- Compare complete PostgreSQL TEXT literal defaults with their deparsed `::text`
+  spelling without creating a spurious column alteration or rejecting an
+  unchanged runtime mutation environment. Preserve exact string values,
+  physical/plan hashes, guarded baselines and migration history identities.
+- Align ORM/macros at 0.48.1; generated macros and datetime/timestamp contracts
+  are unchanged.
+- Avoid a SQLite CHECK introspection panic when Unicode appears before the
+  constraint, retaining the complete CHECK expression.
 
 ## 0.48.0 (unreleased)
 

@@ -10,6 +10,18 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+The paired 0.48.3 release rejects unsupported PostgreSQL column constraint-flag
+or spatial-metadata-only alterations before managed target DDL/history rows.
+Legacy staged planning may initialize empty bookkeeping; direct/owned paths
+reject before runtime preparation. Infallible previews remain structural views;
+see the root migration guide for the supported boundary.
+
+PostgreSQL migration default alterations are corrected in the paired 0.48.2
+runtime/macros release: future omitted-value inserts use the changed default;
+existing rows and recorded migration history are not rewritten. See the root
+migration guide for guarded repair of previously incomplete applications.
+
+
 This is the procedural-macro implementation for `graphql-orm`. Applications
 normally depend on the runtime crate and import its prelude; that keeps the
 macro/runtime versions aligned:
@@ -31,6 +43,9 @@ not connect to a database, run migrations, host GraphQL, or authorize requests.
 
 Version 0.39.1 aligns with the runtime string/binding correction; generated
 static fragment rebasing, inputs, GraphQL SDL and timestamp behavior are unchanged.
+
+Version 0.48.1 aligns with the runtime PostgreSQL TEXT default-comparison fix;
+macro generation is unchanged.
 
 Version 0.46.0 requires explicit finite scan budgets for generated residual-policy
 offset lists and all generated fallback search, including database-RLS-only

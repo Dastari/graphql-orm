@@ -640,3 +640,143 @@ fn postgres_timestamp_aliases_share_planning_without_rewriting_hashes_or_real_ty
         .is_empty()
     );
 }
+
+#[test]
+fn postgres_text_literal_deparse_shares_planning_without_rewriting_hashes() {
+    fn model(default: &str) -> SchemaModel {
+        let mut table = users_v1();
+        table.columns[1].default = Some(default.into());
+        SchemaModel {
+            extensions: vec![],
+            tables: vec![table],
+        }
+    }
+    let plain = model("'O''Reilly::text'");
+    let deparsed = model("'O''Reilly::text'::text");
+    let plain_hash = plain.stable_hash();
+    let deparsed_hash = deparsed.stable_hash();
+    assert_ne!(
+        plain_hash, deparsed_hash,
+        "legacy representation hashes remain distinct"
+    );
+    for (before, after) in [(&plain, &deparsed), (&deparsed, &plain)] {
+        let plan = build_migration_plan(DatabaseBackend::Postgres, before, after);
+        assert!(plan.steps.is_empty());
+        assert!(plan.statements.is_empty());
+        for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Mssql] {
+            assert!(
+                !build_migration_plan(backend, before, after)
+                    .steps
+                    .is_empty()
+            );
+        }
+    }
+    assert_eq!(plain.stable_hash(), plain_hash);
+    assert_eq!(deparsed.stable_hash(), deparsed_hash);
+    let changed = build_migration_plan(DatabaseBackend::Postgres, &deparsed, &model("'different'"));
+    assert!(
+        changed
+            .steps
+            .iter()
+            .any(|step| matches!(step, MigrationStep::AlterColumn { .. }))
+    );
+}
+
+#[test]
+fn postgres_alter_column_renders_real_default_changes_without_unrelated_ddl() {
+    let model = |default: Option<&str>| {
+        let mut table = users_v1();
+        table.columns[1].default = default.map(str::to_owned);
+        SchemaModel {
+            extensions: vec![],
+            tables: vec![table],
+        }
+    };
+    for (before, after, expected) in [
+        (None, Some("'old'"), "SET DEFAULT 'old'"),
+        (
+            Some("'old'"),
+            Some("'O''Brien 雪'"),
+            "SET DEFAULT 'O''Brien 雪'",
+        ),
+        (Some("'old'"), None, "DROP DEFAULT"),
+    ] {
+        let plan = build_migration_plan(DatabaseBackend::Postgres, &model(before), &model(after));
+        assert_eq!(plan.steps.len(), 1);
+        assert_eq!(
+            plan.statements,
+            [format!("ALTER TABLE users ALTER COLUMN name {expected}")]
+        );
+        assert_ne!(model(before).stable_hash(), model(after).stable_hash());
+    }
+}
+
+#[test]
+fn postgres_alter_type_detaches_old_default_then_restores_desired_expression() {
+    for (desired, restore) in [
+        (Some("'new'"), Some("SET DEFAULT 'new'")),
+        (Some("'old'"), Some("SET DEFAULT 'old'")),
+        (None, None),
+    ] {
+        let mut current = users_v1();
+        current.columns[1].default = Some("'old'".into());
+        let mut target = current.clone();
+        target.columns[1].sql_type = "VARCHAR(255)".into();
+        target.columns[1].default = desired.map(str::to_owned);
+        let plan = build_migration_plan(
+            DatabaseBackend::Postgres,
+            &SchemaModel {
+                extensions: vec![],
+                tables: vec![current],
+            },
+            &SchemaModel {
+                extensions: vec![],
+                tables: vec![target],
+            },
+        );
+        let mut expected = vec![
+            "ALTER TABLE users ALTER COLUMN name DROP DEFAULT".to_owned(),
+            "ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(255)".to_owned(),
+        ];
+        if let Some(restore) = restore {
+            expected.push(format!("ALTER TABLE users ALTER COLUMN name {restore}"));
+        }
+        assert_eq!(plan.statements, expected);
+    }
+}
+
+#[test]
+fn postgres_nullability_only_preserves_equivalent_defaults_and_type_aliases() {
+    for (before_type, after_type, before_default, after_default) in [
+        ("TEXT", "TEXT", "'same'::text", "'same'"),
+        (
+            "TIMESTAMPTZ",
+            "timestamp with time zone",
+            "CURRENT_TIMESTAMP",
+            "CURRENT_TIMESTAMP",
+        ),
+    ] {
+        let mut current = users_v1();
+        current.columns[1].sql_type = before_type.into();
+        current.columns[1].default = Some(before_default.into());
+        let mut target = current.clone();
+        target.columns[1].sql_type = after_type.into();
+        target.columns[1].default = Some(after_default.into());
+        target.columns[1].nullable = true;
+        let plan = build_migration_plan(
+            DatabaseBackend::Postgres,
+            &SchemaModel {
+                extensions: vec![],
+                tables: vec![current],
+            },
+            &SchemaModel {
+                extensions: vec![],
+                tables: vec![target],
+            },
+        );
+        assert_eq!(
+            plan.statements,
+            ["ALTER TABLE users ALTER COLUMN name DROP NOT NULL"]
+        );
+    }
+}

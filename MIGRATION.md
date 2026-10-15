@@ -18,8 +18,9 @@ neither the runtime nor macros crate is published to crates.io.
 Upgrade ORM/macros together. The additive `runtime_key_read_request` and
 `execute_runtime_key_read` API reuses `RuntimeKey`, checked projections and
 ordinary predicates. Existing reads, mutations, static subscriptions, GraphQL
-names and record/schema formats are unchanged. No data/schema migration is
-required.
+names and record/schema formats are unchanged. Adopting this read API requires
+no data/schema migration. The separate default-change and guarded-repair
+obligations in the corrective migration sections below still apply.
 
 Authenticate and reauthorize current host authority, requested fields and
 key-read intent before constructing a request. Supply a mandatory row predicate
@@ -40,6 +41,78 @@ cross-call snapshot guarantee. MSSQL runtime decoding remains unsupported.
 
 See [runtime query trust and point reads](docs/reference/graphql-orm/runtime-queries.md)
 and the [host boundary example](crates/graphql-orm/examples/runtime_key_read.rs).
+
+## 0.48.2 to 0.48.3: unsupported PostgreSQL alterations fail closed
+
+Upgrade ORM/macros together. Existing fallible managed planning and application
+now reject unsupported changes to per-column primary-key or constraint-backed
+unique flags, and spatial metadata changes with the same SQL type expression.
+Owned paths return `InvalidPhysicalContract`; static managers return a fixed
+`Protocol` error. Direct/owned rejection occurs before runtime/history
+preparation. Legacy staged/ABI planning may initialize an empty validated history
+table, but rejects the complete stage sequence before target DDL or history
+rows. `allow_destructive` cannot bypass capability admission. No new constraint DDL, public API signature or automatic postapply contract is added.
+
+PostgreSQL introspection obtains column uniqueness from unique constraints,
+not standalone unique indexes. An explicit standalone unique index with unchanged
+column flags remains supported; it does not repair an unsupported flag change.
+Same-type means the existing case-insensitive expression comparison or exact
+`TIMESTAMPTZ`/`timestamp with time zone` aliases. Changed SQL type expressions
+retain the existing renderer path; this does not prove semantic type difference
+or correspondence between `sql_type` and spatial metadata. Whitespace, other
+aliases and incoherent host metadata remain outside this bounded guard. Trusted
+direct `SchemaModel`/`OwnedSchemaModel` hosts own that coherence; the runtime IR
+rejects all spatial metadata. The geometry positive test proves planning/rendering,
+not a live conversion or target certification. Real owned primary-key vector
+transitions were already rejected. SQLite/MSSQL behavior is unchanged.
+
+Low-level infallible diff/render/build functions remain structural previews,
+not certification that every requested step can execute. Do not bypass the
+managed preflight by converting an unsupported preview to trusted raw SQL.
+Review already recorded ineffective alterations against actual physical state;
+remaining-work version reuse fails closed. Use a fresh reviewed supported repair
+version or host-managed DDL, without rewriting historical records.
+
+## 0.48.1 to 0.48.2: PostgreSQL default alterations
+
+Upgrade ORM/macros together. PostgreSQL plans now execute real default changes
+on existing columns rather than recording their target while leaving the old
+physical default. The change affects future inserts that omit the column; it
+never backfills or rewrites existing values. Static and owned targets share the
+renderer. SQLite and MSSQL behavior, public API signatures and physical/hash
+formats are unchanged. No automatic data migration is introduced.
+
+Review pending plans before applying them: SET/replace/DROP DEFAULT is now
+effective. Actual type changes remove an attached old default before conversion
+and restore the target expression afterward; unsupported data conversions still
+fail and roll back atomically. Existing guards, ownership/RLS boundaries and
+explicit migration policy remain required.
+
+If an older version recorded a default-only migration without reaching its
+physical target, introspect and review the actual default. A fresh replan under
+the same recorded version fails closed when work remains; it is not treated as
+already applied. Do not edit/delete history or silently reuse that version.
+Create a fresh unique migration version for the reviewed guarded repair, apply
+it and confirm introspected default, omitted-value insert behavior, empty replan
+and owned mutation certification. Retain the original history as evidence.
+
+## 0.48.0 to 0.48.1: PostgreSQL string default round trips
+
+Upgrade ORM/macros together. PostgreSQL TEXT literal defaults now compare equal
+to the same complete literal with PostgreSQL's deparsed `::text` cast. This fixes
+unchanged owned-migration replans and runtime mutation certification after a
+successful apply. Different literal values and unsupported SQL/casts remain
+distinct; this does not interpret arbitrary default expressions.
+
+No stored-data, SQL schema, GraphQL SDL or migration-history rewrite is required.
+Default SQL and physical/plan hash representations remain unchanged. Existing
+guarded baselines still detect physical drift; regenerate plans only when the
+actual live baseline changes. Runtime string rendering continues to use standard
+SQL string semantics (`standard_conforming_strings=on` on PostgreSQL).
+Legacy epoch-second DateTime rejection and host-managed Integer timestamps are
+unchanged. The macros patch version keeps the paired packages aligned.
+SQLite CHECK introspection also handles preceding Unicode defaults without a
+UTF-8 boundary panic and retains the original constraint semantics.
 
 ## 0.47.0 to 0.48.0: SQL Server platform TLS
 
