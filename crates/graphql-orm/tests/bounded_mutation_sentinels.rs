@@ -144,6 +144,26 @@ impl EntityPolicy<TestBackend> for AllowSentinelPolicies {
 // This fixture declares a write policy: the strict default requires both an
 // entity provider and an explicit row provider, independently of mutation bounds.
 impl RowPolicy<TestBackend> for AllowSentinelPolicies {
+    fn read_visibility<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database<TestBackend>,
+        entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async move {
+            // These synthetic rows are deliberately all visible. Retain their
+            // original SQL count/exists contract while testing mutation bounds.
+            Ok(match entity_name {
+                "BoundedSentinelSingle"
+                | "BoundedSentinelComposite"
+                | "BoundedSentinelRetained" => ReadVisibility::Unrestricted,
+                _ => ReadVisibility::CallbackOnly,
+            })
+        })
+    }
+
     fn can_read_row<'a>(
         &'a self,
         _ctx: Option<&'a async_graphql::Context<'_>>,

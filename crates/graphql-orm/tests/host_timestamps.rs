@@ -178,6 +178,7 @@ impl RowPolicy<Backend> for ClockRows {
                 ("ImplicitClock", None) => row.is::<ImplicitClock>(),
                 ("LegacyImplicitClock", None) => row.is::<LegacyImplicitClock>(),
                 ("ClockJournal", None) => row.is::<ClockJournal>(),
+                ("LegacyPublicClock", None) => row.is::<LegacyPublicClock>(),
                 _ => false,
             })
         })
