@@ -12,6 +12,7 @@ supersedes: []
 
 ## Active
 
+- [Security assurance remediation](active/security-assurance-remediation/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [Documentation experience](active/documentation-experience/README.md)
 
