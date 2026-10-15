@@ -71,6 +71,14 @@ reuses or deletes a pre-existing fixed-name fixture. Cleanup selects only its
 random run label, rechecks ownership and removes exact container IDs plus its
 owned volume; failures and interrupts use the same cleanup path.
 
+The daemon-free ownership regression suite substitutes private fake Docker/Cargo
+executables and checks startup collisions, exact-ID cleanup, ownership changes
+and a lost create response. Run it with:
+
+```bash
+python3 crates/graphql-orm-storage/tests/samba/test_run.py
+```
+
 Local execution defaults to `SMB_TEST_PULL_POLICY=never`: provision and review a
 cached image beforehand. `SMB_TEST_IMAGE` selects the reviewed image reference.
 Disposable hosted CI explicitly uses `SMB_TEST_PULL_POLICY=missing`. The script
