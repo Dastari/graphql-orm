@@ -116,6 +116,42 @@ impl graphql_orm::graphql::orm::EntityPolicy for RecordingEntityPolicy {
     }
 }
 
+// Entity-policy assertions are independent of the declared row-policy provider.
+struct CollectionRows;
+impl RowPolicy for CollectionRows {
+    fn can_read_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity_name == "Collection"
+                && policy_key == Some("collection.read")
+                && row.is::<Collection>())
+        })
+    }
+
+    fn can_write_row<'a>(
+        &'a self,
+        _ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a Database,
+        entity_name: &'static str,
+        policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+        row: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity_name == "Collection"
+                && policy_key == Some("collection.write")
+                && row.is::<Collection>())
+        })
+    }
+}
+
 #[cfg(feature = "sqlite")]
 type TestPool = sqlx::SqlitePool;
 #[cfg(feature = "postgres")]
@@ -168,7 +204,8 @@ async fn host_declared_entity_policy_gates_generated_surfaces()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
     let policy = RecordingEntityPolicy::default();
-    let database = graphql_orm::db::Database::with_entity_policy(pool.clone(), policy.clone());
+    let mut database = graphql_orm::db::Database::with_entity_policy(pool.clone(), policy.clone());
+    database.set_row_policy(CollectionRows);
     let schema = schema_builder(database.clone())
         .data("test-user".to_string())
         .finish();
@@ -269,6 +306,7 @@ async fn orm_transaction_preserves_generated_entity_policy()
     let policy = RecordingEntityPolicy::default();
     let mut database = graphql_orm::db::Database::new(pool);
     database.set_entity_policy(policy.clone());
+    database.set_row_policy(CollectionRows);
 
     let denied = database
         .transaction(TransactionMode::Default, |tx| {
