@@ -32,6 +32,10 @@ for historical context.
 
 ## 0.44.1 (unreleased)
 
+- Refresh compatible TLS/QUIC dependencies and yanked patch releases. Require
+  the Decimal release that removes its old optional rkyv bridge; consumers of
+  that upstream archival feature must migrate it as described in MIGRATION.md.
+  Other unresolved transitive advisories retain explicit reachability review.
 - Route generated query, search, keyset, mutation and Federation backend failures
   through the public error sanitizer. Relationship/Federation loaders retain
   safe public categories in a code-only String transport; SQL/schema/record diagnostics stay private.
@@ -57,6 +61,16 @@ for historical context.
   remain covered by cross-crate policy, preload, cache and pagination regressions.
 
 ## 0.43.1 (unreleased)
+
+- Require test-owned disposable PostgreSQL/PostGIS/SQL Server infrastructure in
+  legacy integration fixtures. Remove ambient URL/default-port access and silent
+  no-URL passes; add explicit container opt-in and pool-lifetime cleanup checks.
+  Make the operation-catalog example use the selected backend. Library APIs and
+  package versions are unchanged by these development-only changes.
+
+- Refresh compatible TLS/QUIC lockfile dependencies to address published
+  advisories. Dependency review remains required for unresolved transitive
+  packages; this maintenance changes no library API or data format.
 
 - Pin external CI/release actions to full revisions and restrict workflow tokens
   to read-only contents outside the publication job. No library API or migration

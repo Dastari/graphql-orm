@@ -1,5 +1,9 @@
 #![cfg(feature = "mssql")]
 
+#[allow(dead_code)]
+#[path = "support/owned_mssql.rs"]
+mod owned_mssql;
+
 use async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
 use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
@@ -134,11 +138,10 @@ async fn setup_database(connection_string: &str) -> Result<(), Box<dyn std::erro
 }
 
 #[tokio::test]
+#[ignore = "requires test-owned SQL Server container"]
 async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn std::error::Error>> {
-    let Ok(connection_string) = std::env::var("MSSQL_TEST_DATABASE_URL") else {
-        eprintln!("skipping MSSQL integration test; set MSSQL_TEST_DATABASE_URL");
-        return Ok(());
-    };
+    let owned = owned_mssql::OwnedSqlServer::start().await?;
+    let connection_string = owned.connection_string.clone();
 
     setup_database(&connection_string).await?;
 

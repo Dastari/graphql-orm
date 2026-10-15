@@ -10,6 +10,50 @@ supersedes: []
 
 # Changelog
 
+## 0.10.0 - 2026-10-15
+
+- Breaking: compatibility stream buffering and buffered repository reads default
+  to 64 MiB per body; database decoding defaults to 256 MiB per payload and
+  512 MiB aggregate decoded bytes per manifest stage. Large legitimate inputs
+  require reviewed finite overrides or an explicit unbounded opt-in.
+- Added typed capacity failures, bounded incremental zstd decoding and native
+  local stream delegation. These byte limits do not guarantee bounded RSS for
+  buffered providers, parsed data or accumulated application state.
+- Optional ORM object-index metadata backfill now hashes/counts native streams
+  without whole-blob collection. Its direct buffered loader has a configurable
+  finite cap; native object streaming remains supported beyond that cap.
+- New/deduplicated and compacted object entries use observed verified byte sizes.
+  Historical sizes remain advisory; restore streams a checksum/count preflight
+  and normalizes sink metadata without rewriting existing manifests.
+
+## 0.9.0 - 2026-10-15
+
+- Added typed snapshot-restore failure progress for validation, preparation and
+  apply phases, preserving the original error as a source with a safe primary
+  display. Earlier reported-complete stages and a possibly partial failed apply
+  are explicit; progress is not an automatic resume checkpoint.
+- Breaking: `restore_snapshot` failures now return `RestoreStageFailed` around
+  the original cause. Update error matches and exhaustive `BackupError` matches.
+- Documented disposable staging-target recovery and the separate database/object
+  restore boundaries. Whole-chain atomicity or rollback is not promised.
+- Added later-stage parse and partial-adapter fault regressions, including dry
+  run, rejection of retry into a dirty target and recovery into a fresh target.
+
+## 0.8.0 - 2026-10-14
+
+- Fixed S-005 writer exclusion: existing locks never expire automatically,
+  preventing stale takeover from removing a running writer's lock.
+- Breaking: lock handles borrow their repository, are no longer cloneable or
+  comparable, and release through `release()` with no repository argument.
+- Lock release requires explicit single-attempt deletion; custom defaults fail
+  closed, S3 disables SDK operation retries and SMB avoids reopening a lock path
+  after a possibly applied mutation. Ambiguous failures require offline recovery.
+- Uses storage 0.7.0 so custom `BlobStore` conditional creation also fails closed.
+- Custom repository conditional creation now fails closed unless an atomic
+  implementation is supplied. Built-in local, SMB and S3 creation is retained.
+- Documented coordinated upgrade and offline lock recovery in the migration
+  guide; snapshot formats and restore preflight are unchanged.
+
 ## 0.7.2 - 2026-08-31
 
 - Refreshed the package's maintained workspace handoff to the current ORM,

@@ -7,6 +7,11 @@ on:
       - main
   workflow_dispatch:
 
+# Superseded PR heads share a group; main and manual runs are never canceled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # The companions job relinks every graphql-orm-ai test binary once per provider
 # feature combination. With full debug info that exhausted the runner disk and
 # the linker died with SIGBUS mid-link. `line-tables-only` keeps file and line
@@ -51,6 +56,29 @@ jobs:
       - run: cargo test -p graphql-orm-backup --features orm-sqlite
       - run: cargo test -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles
 
+  s3-security:
+    name: Owned S3 transport and single-attempt deletion
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Require owned lost-response and trusted/untrusted HTTPS regressions
+        run: bash scripts/run-owned-s3-security-tests.sh
+      - name: Lint the supported storage target profile
+        run: cargo clippy -p graphql-orm-storage --locked --no-default-features --features local,s3,azure --all-targets -- -D warnings
+      - name: Document local and S3 storage with warnings denied
+        run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-storage --locked --no-default-features --features local,s3 --no-deps
+      - name: Compile the backup adapter with the storage S3 provider
+        run: cargo check -p graphql-orm-backup --locked --features graphql-orm-storage/s3
+
   orm:
     runs-on: ubuntu-latest
     steps:
@@ -64,6 +92,10 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - run: cargo check -p graphql-orm --no-default-features --features postgres
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
+      - name: Verify owned PostgreSQL lifetime and non-bypass RLS
+        env:
+          CARGO_BUILD_JOBS: "1"
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls -- --include-ignored --test-threads=1
       - name: Execute runtime strings and binding identity on owned PostgreSQL
         env:
           CARGO_BUILD_JOBS: "2"

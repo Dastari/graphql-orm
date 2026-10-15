@@ -2,6 +2,23 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
+    /// A configured buffering or decoding byte limit was exceeded.
+    #[error("backup payload exceeds configured byte limit {limit_bytes}")]
+    CapacityExceeded {
+        /// Maximum accepted bytes.
+        limit_bytes: u64,
+    },
+
+    /// A snapshot-chain restore failed; progress describes possible target effects.
+    #[error("{progress}")]
+    RestoreStageFailed {
+        /// Reported completed stages and the boundary that failed.
+        progress: crate::restore::RestoreFailureProgress,
+        /// Original failure, retained as an error source without public display.
+        #[source]
+        source: Box<BackupError>,
+    },
+
     #[error("unsupported backup provider: {provider}")]
     UnsupportedProvider { provider: String },
 
@@ -88,6 +105,9 @@ impl BackupError {
 impl From<graphql_orm_storage::StorageError> for BackupError {
     fn from(source: graphql_orm_storage::StorageError) -> Self {
         match source {
+            graphql_orm_storage::StorageError::UnsupportedOperation { operation } => {
+                Self::UnsupportedOperation { operation }
+            }
             graphql_orm_storage::StorageError::UnsupportedBackend { backend } => {
                 Self::UnsupportedProvider { provider: backend }
             }

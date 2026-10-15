@@ -10,6 +10,49 @@ supersedes: []
 
 # Changelog
 
+## 0.7.3 - 2026-10-15
+
+- Require the S3 SDK release that adopts the corrected S3 Express credential
+  cache dependency. Preserve the modern HTTPS transport and explicit signing
+  features introduced in 0.7.2.
+- No public API, object format or provider configuration changes. Other packages'
+  independent transitive advisories still require separate reachability review.
+
+## 0.7.2 - 2026-10-15
+
+- Select the S3 SDK's modern HTTPS client explicitly without its legacy
+  `rustls` feature, removing Hyper 0.14/H2 0.3 and the obsolete TLS branch
+  from this package's S3 feature graph. Signing, Tokio and HTTPS remain enabled.
+- Added a disposable HTTPS transport fixture with trusted-CA success and
+  untrusted-CA rejection; retained the owned HTTP release-replay regression.
+- No public API, provider configuration, storage key or data format changes.
+
+## 0.7.1 - 2026-10-14
+
+- Hardened local temporary-file sweeping to skip symbolic links, directory
+  cycles and non-file/non-directory entries (R-004).
+- Documented the required trusted, exclusively managed filesystem tree and
+  restrictive permissions, including mounted shares. Ordinary path operations
+  do not provide confinement against hostile local filesystem writers.
+- Added an owned-directory regression covering linked files, outside-root
+  directories, broken links, cycles and a linked sweep root.
+
+## 0.7.0 - 2026-10-14
+
+- Fixed the S-005 custom-provider path: inherited conditional creation now
+  fails closed instead of performing an existence check followed by a write.
+- Breaking: added non-retryable `StorageError::UnsupportedOperation`; custom
+  providers must implement atomic `BlobStore::put_blob_if_not_exists`.
+- SMB conditional-create failure/cancellation cleanup closes only its original
+  handle and never removes a replacement object by reopening the shared key.
+- Added non-retryable `SingleAttemptFailed` errors preserving the original cause
+  without advertising unsafe retries after an ambiguous deletion.
+- Added explicit `delete_blob_once` capability for lock release, defaulting to
+  unsupported. Native local uses one removal; S3 disables SDK operation retries
+  and SMB does not reopen paths after a possibly applied deletion.
+- Native local, SMB and S3 overrides and Azure unsupported behavior are retained;
+  provider configuration and persisted data are unchanged.
+
 ## 0.6.2 - 2026-08-31
 
 - Refreshed the package's maintained workspace handoff to the current ORM,

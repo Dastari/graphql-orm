@@ -1,3 +1,8 @@
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use async_graphql::SimpleObject;
 #[cfg(feature = "change-journal")]
 use graphql_orm::graphql::orm::{BackupChangeAction, ChangeWindow};
@@ -18,6 +23,10 @@ struct BackupProfile {
 
 #[cfg(feature = "change-journal")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn change_journal_records_generated_repository_writes()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = setup_pool().await?;
@@ -183,10 +192,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("backup-roundtrip", 5).await?;
     sqlx::query("DROP TABLE IF EXISTS backup_rt_notes")
         .execute(&pool)
         .await?;
@@ -237,6 +243,10 @@ async fn apply_schema(
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dyn std::error::Error>>
 {
     let source_pool = setup_pool().await?;

@@ -10,6 +10,174 @@ supersedes: []
 
 # Migration Guide
 
+## 0.9.0 to 0.10.0: explicit buffer and decompression limits
+
+This is a breaking pre-1.0 capacity-policy change. Previously accepted large
+buffered payloads can now fail with `BackupError::CapacityExceeded`; snapshot
+format and stored data are unchanged. Update exhaustive error matches.
+
+Defaults are 64 MiB for each buffered repository body or compatibility stream
+fallback, 256 MiB for each decoded database payload, and 512 MiB of decoded
+payloads across one full/incremental manifest stage. Limits are inclusive.
+Stored payloads are limited before decoding; compressed expansion is checked
+incrementally before appending output. Before reading frame input, a finite
+output cap also sets zstd's maximum history-window size: round down to the next
+power of two, with a 1 KiB minimum and a portable 1 GiB maximum. This may reject
+otherwise small output encoded with a larger window; the error is `Compression`.
+An unbounded override retains the zstd library's default window policy. Decoder
+metadata and other overhead still require a separate resource budget.
+
+Each payload's output limit is further clamped to the remaining stage budget,
+and aggregate decoded limits are checked before parsing each next payload. They do not limit the whole chain or row count.
+
+For legitimate larger backups, set reviewed finite `BackupCapacityLimits` via
+`LocalBackupRepository::with_capacity_limits` or
+`BlobStoreBackupRepository::with_capacity_limits`; custom repositories override
+`BackupRepository::capacity_limits`. Indexes and sinks override
+`buffered_byte_limit` for their buffered compatibility defaults. The built-in
+optional `OrmBackupObjectIndex` also defaults its direct buffered
+`load_object` to 64 MiB; configure it with `with_buffered_byte_limit`. Missing or
+invalid checksum/size metadata is backfilled by incremental hashing and checked
+byte counting, without collecting the object or reserving a provider size hint.
+Its native `load_object_stream` bypasses that buffered cap so large object streams
+remain supported. Recorded sizes cannot constrain buffered allocation; actual
+buffered byte checks apply regardless of recorded size. New and deduplicated
+backup entries record the byte count observed alongside SHA-256 verification;
+compaction normalizes output sizes from verified stored content as well.
+Historical manifest `size_bytes` remains advisory for compatibility: valid
+content is not rejected solely for a stale size. Object restore performs a
+streaming checksum/count preflight and supplies the observed verified size to
+the sink, then streams again with the existing checksum guard. This adds a read
+pass without whole-object buffering or a transaction guarantee. Existing
+historical manifests are not rewritten. Changes between preflight and sink
+streaming remain subject to final checksum verification; use staging namespaces
+and the existing partial-object recovery rules.
+Direct zstd callers use `decompress_payload_with_limit`. `BackupByteLimit::Unbounded` is an
+explicit opt-in accepting the associated allocation risk; it is not recommended
+for untrusted input. Do not retry capacity errors without changing the relevant
+limit or input. Restore errors retain the Q003 stage/progress boundary.
+
+Native streaming implementations bypass compatibility collection. Local repository
+stream methods now delegate directly to the storage stream API. This is not a
+bounded-RSS guarantee: a custom buffered provider or index may allocate before
+returning; a stream's current chunk already exists; parsed JSON, manifests,
+adapter exports, accumulated restored/compacted rows and application state may
+use additional memory. Streaming source metadata is only an early rejection
+hint; actual collected bytes are checked independently. Audit native provider
+and adapter behavior and apply process resource limits for hostile input.
+
+## 0.8.0 to 0.9.0: restore failure progress
+
+This is a breaking pre-1.0 error-contract change. `restore_snapshot` returns
+`BackupError::RestoreStageFailed { progress, source }` for failures, including
+validation and schema/empty-target failures. Update exhaustive `BackupError`
+matches and inspect `source` for the original error category, such as
+`RestoreSchemaMismatch` or `RestoreTargetNotEmpty`. Direct adapter calls and
+`ensure_empty_restore_target` retain their own error boundaries.
+
+`RestoreFailureProgress` identifies the requested snapshot, the failing manifest
+when known, the phase and the manifests whose adapter apply calls reported
+success. `Validation` runs before apply calls; `Preparation` does not apply the
+failing stage, but earlier completed stages can remain. `Apply` has an unknown
+outcome and may be partial even when no earlier stage completed. The primary
+display contains only phase/progress; the original cause remains available for
+trusted diagnostics through the error source chain.
+
+`target_may_have_changed()` describes changes by this attempt, not data that
+already existed in the target. Dry run never records completed apply stages or
+calls adapter apply methods. Backend/schema validation still occurs before
+checking target emptiness or applying rows.
+
+Progress is not permission to resume from the next manifest or retry in place.
+Orchestration does not roll back earlier stages or provide a transaction across
+the chain. Restore into a disposable empty staging database; if an apply fails,
+or later preparation fails after earlier stages applied, quarantine/discard that
+staging target through its owner and restart from a fresh empty target after
+resolving the failure. An empty-target retry rejects a partially populated target. Cancellation or
+dropping the future cannot return progress or roll back an active adapter call;
+treat cancellation during apply as an unknown outcome requiring the same recovery.
+
+Object restore is a separate operation and consistency boundary. Earlier objects
+may remain after failure, and custom sinks may partially write a failing object;
+checksum failure can be reported after writes. Use an isolated staging object
+namespace and publish the database/object set only after every required restore
+and verification step succeeds. There is no cross-store rollback guarantee.
+
+The snapshot format and stored data need no migration. Keep workspace packages
+on one reviewed revision and regenerate `Cargo.lock`.
+
+## 0.7.2 to 0.8.0: fail-closed writer locks
+
+This is a breaking pre-1.0 release. Upgrade all writers sharing a repository
+at once; older clients can still delete active locks through stale takeover.
+Do not run mixed old/new clients against the same repository.
+
+`RepositoryLock` now borrows its acquisition repository and cannot be cloned
+or compared. Replace `lock.release(&repository).await` with
+`lock.release().await`. Public signatures naming the handle require its
+lifetime, for example `RepositoryLock<'_>`.
+
+Automatic stale takeover is disabled. `RepositoryLockOptions::stale_after_seconds`
+and its default constant remain available for source compatibility but have no
+effect: old, malformed, and unreadable existing locks all block acquisition.
+A slow writer retains exclusion indefinitely. A crashed, cancelled, or timed-out
+operation may leave a lock; there is no automatic Drop release or lease expiry.
+For deliberate offline recovery, stop and quiesce **all** repository writers,
+including older processes, pending tasks and in-flight provider requests, and
+ensure no lock handles remain.
+Only then remove `locks/repository.lock` using provider administration, and
+restart upgraded writers. An ambiguous remote failure requires establishing that
+its request has finished before recovery. Never clear a lock based on elapsed
+time alone.
+Deleting or replacing lock blobs during live operation invalidates exclusion;
+this design does not provide fencing against administrative storage mutation.
+
+Custom `BackupRepository` implementations must override `put_blob_if_absent`
+with atomic create-if-absent across all writers. The inherited default now
+returns `BackupError::UnsupportedOperation` without checking or writing storage;
+its streaming default delegates to that fail-closed method. An existence check
+followed by a write does not satisfy this contract. Local, SMB and S3 adapters
+retain their native atomic conditional creation.
+
+Storage advances independently to 0.7.0 so custom `BlobStore` providers also
+fail closed when inheriting conditional creation. Override that method atomically
+when using `BlobStoreBackupRepository`; backup maps its unsupported-operation
+error to `BackupError::UnsupportedOperation`. Update exhaustive storage error
+matches for the new variant.
+
+Lock release now requires explicit `BackupRepository::delete_blob_once` and,
+for storage adapters, `BlobStore::delete_blob_once`. Both default to unsupported
+without I/O. Custom providers must implement a single-attempt deletion that never
+replays by key after a mutation may have reached the server, including after
+cancellation or a lost response. Do not delegate to an ordinary delete method
+that may retry. Acquisition can succeed while release is unsupported; implement
+and verify both capabilities before enabling a custom repository for writers.
+Release consumes the handle on success or failure. Failed/cancelled release has
+an unknown outcome: never retry by key or reclaim while any request can remain.
+Native local release issues one filesystem removal. Native S3 disables SDK
+operation retries for lock release. Native SMB never reopens the path after a
+possibly applied disposition/close. Ordinary blob deletion retains its existing
+provider behavior.
+SMB conditional-create failures and cancellation close only the original handle;
+there is no shared-key fallback cleanup after that handle closes. Ambiguous
+cleanup/disarm may leave an orphan lock until offline recovery.
+
+The snapshot format, repository layout and restore preflight are unchanged. No snapshot/data migration is required. Regenerate `Cargo.lock`
+after updating the reviewed monorepo revision.
+
+
+### Single-attempt error classification
+
+`StorageError::SingleAttemptFailed` preserves the underlying failure in its
+source chain and always reports `is_retryable() == false`. Update exhaustive
+storage error matches for this added variant as well as `UnsupportedOperation`.
+Native single-attempt deletion and the backup adapter never advertise retrying
+by key, even when the underlying ordinary I/O/provider failure was retryable.
+Non-retryable here does **not** mean the operation had no effect: a request can
+have succeeded remotely while its response was lost. Establish quiescence
+before offline recovery; never infer that the lock is safe to reclaim from this
+flag. Ordinary deletion retains its prior error taxonomy.
+
 ## 0.7.1 to 0.7.2
 
 Version 0.7.2 refreshes maintained workspace guidance and establishes a new

@@ -135,9 +135,51 @@ async fn create_full_backup_deduplicates_existing_object_blob() {
     assert!(!repository.write_order().contains(&object_key));
     assert_eq!(
         repository.get_count(&object_key),
-        0,
-        "existing content-addressed object blobs must not be re-read"
+        1,
+        "existing content must be verified before reuse and size normalization"
     );
+}
+
+#[tokio::test]
+async fn deduplication_verifies_current_source_and_existing_repository_content() {
+    let expected = Bytes::from_static(b"expected");
+    let different = Bytes::from_static(b"different");
+    let expected_hash = bytes_sha256_hex(&expected);
+    let object_key = object_content_key(&expected_hash);
+    for (source_bytes, stored_bytes) in [
+        (different.clone(), expected.clone()),
+        (expected.clone(), different.clone()),
+    ] {
+        let repository = RecordingRepository::default();
+        repository
+            .put_blob(&object_key, stored_bytes.clone())
+            .await
+            .expect("owned existing content fixture");
+        repository.clear_write_order();
+        let database = MockDatabase::new(Vec::new());
+        let objects = MockObjectIndex::new(vec![object_ref(&expected_hash)], vec![source_bytes]);
+
+        let error = create_full_backup(&repository, &database, &objects, backup_request())
+            .await
+            .expect_err("both independent content checks must pass before reuse");
+
+        assert!(matches!(error, BackupError::ChecksumMismatch { .. }));
+        assert!(
+            !repository
+                .blob_exists(&snapshot_manifest_key(snapshot_id()))
+                .await
+                .expect("manifest existence")
+        );
+        assert!(!repository.write_order().contains(&object_key));
+        assert_eq!(
+            repository
+                .get_blob(&object_key)
+                .await
+                .expect("existing content retained"),
+            stored_bytes,
+            "failure must not delete or replace existing repository content"
+        );
+    }
 }
 
 #[tokio::test]
@@ -293,6 +335,23 @@ impl RecordingRepository {
 
 #[async_trait]
 impl BackupRepository for RecordingRepository {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.delete_blob(key).await
+    }
+
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        let mut blobs = self.blobs.lock().expect("blobs lock");
+        if blobs.contains_key(key) {
+            return Ok(false);
+        }
+        blobs.insert(key.to_string(), body);
+        self.writes
+            .lock()
+            .expect("writes lock")
+            .push(key.to_string());
+        Ok(true)
+    }
+
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.blobs
             .lock()
@@ -354,6 +413,14 @@ struct StreamingProbeRepository {
 
 #[async_trait]
 impl BackupRepository for StreamingProbeRepository {
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob_once(key).await
+    }
+
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        self.inner.put_blob_if_absent(key, body).await
+    }
+
     async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
         self.inner.put_blob(key, body).await
     }

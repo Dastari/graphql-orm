@@ -1,5 +1,10 @@
 #![cfg(feature = "postgres")]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use sqlx::Row;
@@ -172,10 +177,7 @@ fn test_mutex() -> &'static tokio::sync::Mutex<()> {
 }
 
 async fn setup_pool() -> Result<sqlx::PgPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("postgres-compat", 5).await?;
 
     sqlx::query("DROP TABLE IF EXISTS posts")
         .execute(&pool)
@@ -287,6 +289,10 @@ fn postgres_schema_model_covers_types_and_generated_indexes() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
 {
     let _guard = test_mutex().lock().await;
@@ -402,6 +408,10 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn relation_resolvers_batch_for_pages_of_parents() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
@@ -555,6 +565,10 @@ async fn relation_resolvers_batch_for_pages_of_parents() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -660,12 +674,15 @@ async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn postgres_introspection_uses_active_schema_search_path()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
+    let owned = owned_postgres::OwnedPostgres::start("postgres-introspection")?;
+    let database_url = owned.url.clone();
     let admin_pool = sqlx::PgPool::connect(&database_url).await?;
     let schema_name = format!(
         "gom_active_{}",

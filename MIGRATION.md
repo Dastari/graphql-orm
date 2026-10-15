@@ -72,7 +72,24 @@ Remove `filter.dummy`: supplying it is rejected as `INVALID_INPUT`. No schema or
 data migration is needed. AI consumers of generated operations inherit the same
 current authorization; this change does not add subscriptions to AI tool APIs.
 
+## Test runner migration: owned database fixtures
+
+For repository contributors, unset `DATABASE_URL`, `TEST_DATABASE_URL`, and
+`MSSQL_TEST_DATABASE_URL`; legacy tests no longer connect to supplied endpoints.
+Install local Docker and run `scripts/run-owned-database-lanes.sh postgres-legacy`
+or `mssql` to explicitly execute container-backed cases. Ordinary unit runs
+report those cases as ignored rather than silently passing. Application data,
+public library APIs, and persisted formats are unaffected.
+
 ## 0.44.0 to 0.44.1: generated resolver public errors
+
+The workspace also raises its compatible `rust_decimal` minimum to 1.43.0,
+which removes the upstream optional rkyv 0.7 bridge. ORM SQL/JSON decimal values
+and public ORM signatures are unchanged. Applications separately enabling that
+Decimal archival feature must migrate their archive integration using the
+[upstream 1.43 migration notes](https://github.com/paupino/rust-decimal/releases/tag/1.43.0); do not assume persisted rkyv bytes can be read using another format
+version. The ORM does not persist Decimal through rkyv. TLS/QUIC and yanked
+dependency patch refreshes require no ORM data migration.
 
 Upgrade runtime/macros together. Generated SQL and Federation failures now use
 stable safe GraphQL messages and `extensions.code` instead of backend diagnostic

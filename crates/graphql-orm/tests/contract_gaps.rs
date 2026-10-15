@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+
 use graphql_orm::prelude::*;
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -214,10 +219,7 @@ async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
 
 #[cfg(feature = "postgres")]
 async fn setup_pool() -> Result<TestPool, Box<dyn std::error::Error>> {
-    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://graphql_orm:graphql_orm@127.0.0.1:55433/graphql_orm_test".to_string()
-    });
-    let pool = sqlx::PgPool::connect(&database_url).await?;
+    let pool = owned_postgres::OwnedPostgres::pool("contract-gaps", 5).await?;
     for table in [
         "external_records",
         "credentials",
@@ -336,6 +338,10 @@ impl graphql_orm::graphql::orm::WriteInputTransform for SyncProfileTransform {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn hidden_primary_key_is_excluded_from_graphql_input_but_settable_via_repo_insert()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -375,6 +381,10 @@ async fn hidden_primary_key_is_excluded_from_graphql_input_but_settable_via_repo
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn skip_input_fields_remain_publicly_readable_but_stay_out_of_graphql_write_inputs()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -511,6 +521,10 @@ async fn skip_input_fields_remain_publicly_readable_but_stay_out_of_graphql_writ
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn private_fields_stay_out_of_graphql_inputs_but_are_writable_in_trusted_code()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -553,6 +567,10 @@ async fn private_fields_stay_out_of_graphql_inputs_but_are_writable_in_trusted_c
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn bytes_blob_fields_round_trip_through_generated_repo_helpers()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -590,6 +608,10 @@ async fn bytes_blob_fields_round_trip_through_generated_repo_helpers()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn repo_inserts_use_server_managed_defaults_when_graphql_inputs_omit_fields()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -617,6 +639,10 @@ async fn repo_inserts_use_server_managed_defaults_when_graphql_inputs_omit_field
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn relation_metadata_can_disable_physical_foreign_key_emission()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -659,6 +685,10 @@ async fn relation_metadata_can_disable_physical_foreign_key_emission()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn relation_metadata_emits_physical_foreign_key_by_default()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -701,6 +731,10 @@ async fn relation_metadata_emits_physical_foreign_key_by_default()
 }
 
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn inverse_multiple_relations_do_not_emit_physical_foreign_keys_by_default()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
@@ -759,6 +793,10 @@ async fn inverse_multiple_relations_do_not_emit_physical_foreign_keys_by_default
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
 async fn sqlite_sql_expression_defaults_survive_schema_stage_generation()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
