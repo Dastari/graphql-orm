@@ -7,8 +7,8 @@ use graphql_orm_backup::{
     BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef, BackupRepository,
     BackupRow, BackupTableExport, FullBackupRequest, GraphqlOrmBackupAdapter,
     GraphqlOrmBackupSchema, LocalBackupRepository, RestoreContext, RestoreFailurePhase,
-    RestoreObjectSink,
-    bytes_sha256_hex, create_full_backup, object_content_key, restore_objects, restore_snapshot,
+    RestoreObjectSink, bytes_sha256_hex, create_full_backup, object_content_key, restore_objects,
+    restore_snapshot,
 };
 use serde_json::{Map, Value};
 use tempfile::TempDir;
@@ -106,7 +106,10 @@ async fn restore_snapshot_refuses_non_empty_empty_database_target() {
     .await
     .expect_err("non-empty target rejected");
 
-    assert!(matches!(validation_source(err), BackupError::RestoreTargetNotEmpty));
+    assert!(matches!(
+        validation_source(err),
+        BackupError::RestoreTargetNotEmpty
+    ));
     assert!(target.restored_full().is_empty());
 }
 
@@ -172,7 +175,10 @@ async fn restore_snapshot_rejects_backend_mismatch_during_dry_run() {
     .await
     .expect_err("backend mismatch rejected");
 
-    assert!(matches!(validation_source(err), BackupError::RestoreSchemaMismatch { .. }));
+    assert!(matches!(
+        validation_source(err),
+        BackupError::RestoreSchemaMismatch { .. }
+    ));
     assert!(target.restored_full().is_empty());
 }
 

@@ -84,12 +84,16 @@ impl fmt::Display for RestoreFailureProgress {
             RestoreFailurePhase::Preparation if self.completed_manifest_ids.is_empty() => {
                 formatter.write_str("restore preparation failed before any writes were attempted")
             }
-            RestoreFailurePhase::Preparation => write!(formatter,
+            RestoreFailurePhase::Preparation => write!(
+                formatter,
                 "restore preparation failed after {} completed stages; target may contain earlier restored stages",
-                self.completed_manifest_ids.len()),
-            RestoreFailurePhase::Apply => write!(formatter,
+                self.completed_manifest_ids.len()
+            ),
+            RestoreFailurePhase::Apply => write!(
+                formatter,
                 "restore apply failed after {} completed stages; failing stage may be partially applied",
-                self.completed_manifest_ids.len()),
+                self.completed_manifest_ids.len()
+            ),
         }
     }
 }
@@ -279,57 +283,139 @@ pub async fn restore_snapshot(
     snapshot_id: Uuid,
     context: RestoreContext,
 ) -> Result<RestoreResult, BackupError> {
-    let chain = load_manifest_chain(repository, snapshot_id).await.map_err(|source| {
-        restore_stage_error(snapshot_id, None, RestoreFailurePhase::Validation, &[], source)
-    })?;
-    for manifest in &chain {
-        verify_manifest_and_objects(repository, manifest).await.map_err(|source| {
-            restore_stage_error(snapshot_id, Some(manifest.snapshot_id), RestoreFailurePhase::Validation, &[], source)
+    let chain = load_manifest_chain(repository, snapshot_id)
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                None,
+                RestoreFailurePhase::Validation,
+                &[],
+                source,
+            )
         })?;
+    for manifest in &chain {
+        verify_manifest_and_objects(repository, manifest)
+            .await
+            .map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(manifest.snapshot_id),
+                    RestoreFailurePhase::Validation,
+                    &[],
+                    source,
+                )
+            })?;
     }
 
     let full_manifest = chain.first().ok_or_else(|| {
-        restore_stage_error(snapshot_id, None, RestoreFailurePhase::Validation, &[],
-            BackupError::InvalidManifestChain { reason: "manifest chain is empty".to_string() })
+        restore_stage_error(
+            snapshot_id,
+            None,
+            RestoreFailurePhase::Validation,
+            &[],
+            BackupError::InvalidManifestChain {
+                reason: "manifest chain is empty".to_string(),
+            },
+        )
     })?;
     let full_id = full_manifest.snapshot_id;
-    let backup_schema = verify_restore_schema(database, full_manifest).await.map_err(|source| {
-        restore_stage_error(snapshot_id, Some(full_id), RestoreFailurePhase::Validation, &[], source)
-    })?;
+    let backup_schema = verify_restore_schema(database, full_manifest)
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                Some(full_id),
+                RestoreFailurePhase::Validation,
+                &[],
+                source,
+            )
+        })?;
 
     let target_is_empty = match context.mode {
         RestoreMode::DryRun => true,
-        RestoreMode::EmptyDatabase => database.restore_target_is_empty().await.map_err(|source| {
-            restore_stage_error(snapshot_id, Some(full_id), RestoreFailurePhase::Validation, &[], source)
-        })?,
+        RestoreMode::EmptyDatabase => {
+            database.restore_target_is_empty().await.map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(full_id),
+                    RestoreFailurePhase::Validation,
+                    &[],
+                    source,
+                )
+            })?
+        }
     };
     ensure_empty_restore_target(target_is_empty, &context).map_err(|source| {
-        restore_stage_error(snapshot_id, Some(full_id), RestoreFailurePhase::Validation, &[], source)
+        restore_stage_error(
+            snapshot_id,
+            Some(full_id),
+            RestoreFailurePhase::Validation,
+            &[],
+            source,
+        )
     })?;
 
-    let full_export = load_table_exports(repository, full_manifest).await.map_err(|source| {
-        restore_stage_error(snapshot_id, Some(full_id), RestoreFailurePhase::Preparation, &[], source)
-    })?;
+    let full_export = load_table_exports(repository, full_manifest)
+        .await
+        .map_err(|source| {
+            restore_stage_error(
+                snapshot_id,
+                Some(full_id),
+                RestoreFailurePhase::Preparation,
+                &[],
+                source,
+            )
+        })?;
     let full_table_count = full_export.len() as u64;
-    let full_row_count = full_export.iter().map(|table| table.rows.len() as u64).sum::<u64>();
+    let full_row_count = full_export
+        .iter()
+        .map(|table| table.rows.len() as u64)
+        .sum::<u64>();
     let mut completed = Vec::new();
     if !matches!(context.mode, RestoreMode::DryRun) {
-        database.restore_full(backup_schema, full_export, context.clone()).await.map_err(|source| {
-            restore_stage_error(snapshot_id, Some(full_id), RestoreFailurePhase::Apply, &completed, source)
-        })?;
+        database
+            .restore_full(backup_schema, full_export, context.clone())
+            .await
+            .map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(full_id),
+                    RestoreFailurePhase::Apply,
+                    &completed,
+                    source,
+                )
+            })?;
         completed.push(full_id);
     }
 
     let mut incremental_change_count = 0_u64;
     for manifest in chain.iter().skip(1) {
-        let changes = load_change_exports(repository, manifest).await.map_err(|source| {
-            restore_stage_error(snapshot_id, Some(manifest.snapshot_id), RestoreFailurePhase::Preparation, &completed, source)
-        })?;
+        let changes = load_change_exports(repository, manifest)
+            .await
+            .map_err(|source| {
+                restore_stage_error(
+                    snapshot_id,
+                    Some(manifest.snapshot_id),
+                    RestoreFailurePhase::Preparation,
+                    &completed,
+                    source,
+                )
+            })?;
         incremental_change_count += changes.len() as u64;
         if !matches!(context.mode, RestoreMode::DryRun) {
-            database.restore_incremental(changes, context.clone()).await.map_err(|source| {
-                restore_stage_error(snapshot_id, Some(manifest.snapshot_id), RestoreFailurePhase::Apply, &completed, source)
-            })?;
+            database
+                .restore_incremental(changes, context.clone())
+                .await
+                .map_err(|source| {
+                    restore_stage_error(
+                        snapshot_id,
+                        Some(manifest.snapshot_id),
+                        RestoreFailurePhase::Apply,
+                        &completed,
+                        source,
+                    )
+                })?;
             completed.push(manifest.snapshot_id);
         }
     }

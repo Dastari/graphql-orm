@@ -117,8 +117,8 @@ pub use prune::{DeleteSnapshotResult, KeepPolicy, PruneResult, delete_snapshot, 
 pub use repository::{BackupRepository, BlobStoreBackupRepository};
 pub use restore::{
     BlobStoreRestoreObjectSink, RestoreContext, RestoreFailurePhase, RestoreFailureProgress,
-    RestoreMode, RestoreObjectSink, RestoreResult,
-    ensure_empty_restore_target, restore_objects, restore_snapshot,
+    RestoreMode, RestoreObjectSink, RestoreResult, ensure_empty_restore_target, restore_objects,
+    restore_snapshot,
 };
 pub use verify::{
     VerificationOptions, verify_manifest_and_objects, verify_manifest_and_objects_with_options,
