@@ -14,6 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.50.0 (unreleased)
+
+- Add owned checked filter construction, complete value-free original Boolean and
+  field/operator intent, and explicit-profile immutable RuntimeRecord matching.
+  GraphQL lowering shares the checked construction path; existing canonical
+  error codes, configured scalar limits and null-skip execution semantics remain.
+- Conservative SQLite/PostgreSQL profiles use SQL three-valued logic and reject
+  unsupported semantics before evaluation; all original dependencies must be
+  loaded even when SQL constant folding removed them. No data/schema migration,
+  raw JSON parser, native-RLS proof or new automatic authorization is introduced.
+
 ## 0.49.0 (unreleased)
 
 - Add checked owned-runtime complete-key reads with an explicit required row

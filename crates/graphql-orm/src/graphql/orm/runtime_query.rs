@@ -15,6 +15,9 @@ use super::{
     SqlDialect, SqlValue, ValidatedRuntimeSchema,
 };
 
+mod checked;
+pub use checked::*;
+
 const RUNTIME_CURSOR_PREFIX: &str = "gormrq1.";
 
 /// Stable category for runtime query validation, cursor, decoding, and execution failures.

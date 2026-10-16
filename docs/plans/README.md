@@ -12,8 +12,6 @@ supersedes: []
 
 ## Active
 
-- [Runtime key reads and filter matching interface review](active/runtime-key-read-filter-capabilities/README.md)
-
 - [Security assurance remediation](active/security-assurance-remediation/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [Documentation experience](active/documentation-experience/README.md)
@@ -25,6 +23,8 @@ supersedes: []
 - [Storage providers](backlog/storage-providers/README.md)
 
 ## Completed
+
+- [Runtime key reads and filter matching interface review](completed/runtime-key-read-filter-capabilities/README.md)
 
 - [Bounded runtime platform capability contract](completed/runtime-platform-capabilities/README.md)
 

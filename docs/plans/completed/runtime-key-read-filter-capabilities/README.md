@@ -1,7 +1,7 @@
 ---
 title: Runtime key reads and filter matching interface review
 kind: plan
-status: active
+status: accepted
 owner: workspace-maintainers
 last_reviewed: 2026-10-15
 review_by: 2026-11-15
@@ -12,19 +12,21 @@ supersedes: []
 
 Requirement A received explicit implementation approval on 2026-10-15. Its
 implementation and scoped validation are complete; final stack integration and
-release acceptance remain pending. Requirement B remains an interface proposal
-under review and has no implementation approval. This plan addresses only A and B in the [immutable consumer
+release acceptance remain pending. Requirement B also received explicit
+implementation approval, using the validated structural Value prerequisite and
+excluding the optional raw JSON parser. Its separate implementation and scoped
+validation are complete; coherent release acceptance remains separate. This plan addresses only A and B in the [immutable consumer
 request](https://github.com/Dastari/digibase/blob/0d26ab1af68b80985cafa4a621fa850eda5afee4/docs/coordination/prompts/0020-graphql-orm-runtime-key-reads-and-record-filter-matching.md).
 The reviewed ORM baseline is `4059d10026b9b8d1e9a2be0f4f556df807f77794`,
-version0.48.0. Remote main was independently resolved to that commit.
+version 0.48.0. Remote main was independently resolved to that commit.
 
 ## Outcome and current boundary
 
 The completed first checkpoint established whether public APIs satisfy each requirement, using
 compiled external consumer controls and narrowly scoped expected compile
-failures. The separate A approval authorizes only the checked point-read
-implementation below. B's proposed interfaces and semantics remain subject to
-owner review; no filter-lowering/matching API is included in A.
+failures. Separate approvals now authorize A point reads and B checked intent/
+matching under the bounded profiles below. B is a distinct additive implementation
+on exact A4c; no raw JSON parser or wire-duplicate guarantee is approved.
 
 At the reviewed baseline, owned APIs provided checked complete mutation keys,
 projection/row codecs, bounded SQL reads, relation anchor capture, backend auth
@@ -126,7 +128,7 @@ SQLite and PostgreSQL use existing runtime row decoding. MSSQL must fail its
 existing unsupported decoding capability before I/O; A adds no live
 MSSQL runtime decoding support.
 
-## B: proposed checked intent and record semantics
+## B: approved checked intent and record semantics
 
 Review as smaller pieces: canonical lowering plus preserved intent; independently
 reviewed structural matching. Exposing lowering alone does not solve matching.
@@ -161,7 +163,7 @@ expose private predicate AST or values. The host must authorize all intent befor
 protected SQL or record disclosure. No public deserialize/unchecked constructor
 or wrapper around an already-folded predicate may fabricate missing intent.
 
-Concrete proposed core construction (no GraphQL feature required):
+Core construction (no GraphQL feature required):
 
 ```text
 ValidatedRuntimeSchema::runtime_filter_builder(
@@ -210,7 +212,7 @@ second interpretation engine. Duplicate field/operator keys in one input object
 and repeated occurrences in distinct Boolean children are different: the latter
 are valid and must remain in intent.
 
-**Unresolved B contract decision:** a prebuilt async-graphql Value has unique map
+**Approved B input boundary:** a prebuilt async-graphql Value has unique map
 keys and cannot reveal duplicates erased by an earlier parser. The proposed
 Value entry therefore requires an explicitly validated GraphQL coercion
 prerequisite: the host/integration supplies a structural value whose original
@@ -235,9 +237,9 @@ prepare_runtime_filter_json(
 
 That optional entry must reject duplicate object keys before erasure and feed
 the same canonical lowering, not a second SQL evaluator. It is not included
-implicitly in the Value signature. Owner review must choose whether the
-validated-coercion prerequisite suffices or raw input is in scope. This unresolved
-boundary is another reason to review B independently; it does not block A.
+implicitly in the Value signature. The owner selected the validated-coercion
+prerequisite; the raw-input entry remains excluded and requires a separate future
+contract review. Existing wire duplicate erasure remains an integration limitation.
  Existing RuntimePredicate APIs stay compatible
 and cannot fabricate original intent they never retained.
 
@@ -261,7 +263,7 @@ Use a new safe RuntimeFilterError with invalid_input, invalid_handle,
 limit_exceeded, missing_loaded_field, wrong_value_kind, unsupported_semantics
 and schema_mismatch categories. Debug/Display must not include filter literals
 or record values. Existing predicates, query wire forms, hashes, names and codecs
-remain unchanged. No package version is bumped for an unimplemented proposal.
+remain unchanged. The implementation uses paired ORM/macros 0.50.0.
 
 A trusted authoritative immutable record is still only host-supplied evidence.
 Neither matching nor a record codec establishes provenance, principal authority,
@@ -277,13 +279,13 @@ No sibling changes, event/journal/replay product, transport, auth store, raw SQL
 escape hatch or static API rewrite is included. No Actions dispatch, merge or
 publication is authorized here; proposal commits use `[skip ci]`.
 
-Before interface approval: compile the existing public consumer controls and
+The completed pre-approval checkpoint compiled the existing public consumer controls and
 confirm each expected diagnostic; review the actual nearest alternatives and
 publish exact source/features/compiler/lock provenance. Documentation checks and
 formatting run only in an assigned constrained lane. Then stop for owner contract
 review; no new API implementation proceeds automatically.
 
-After separate approval, A tests cover complete single/composite nonfilterable
+Following separate approval, A tests cover complete single/composite nonfilterable
 keys, exact projection, host denial before I/O, required restrictions, malformed
 and stale/cross-schema inputs, hidden/missing equivalence, multiplicity, owned
 non-superuser PostgreSQL RLS/auth isolation, cancellation and concurrent changes.
@@ -370,5 +372,30 @@ passed under a minor-release override to check additive compatibility.
 ORM/macros 0.49.0, all seven existing locks and the generated inventory are
 reconciled on this proposal-based stack. Before release, integrate the reviewed
 0.48.x correctness fixes and validate the coherent final stack. No merge,
-Actions or publication follows from these implementation gates. B remains
-unapproved, including its duplicate-wire/coercion and matching-semantics decisions.
+Actions or publication follows from these implementation gates.
+
+B was separately approved with the host-validated coercion/duplicate
+prerequisite for structural Value input; the optional raw JSON parser remains
+excluded. The implementation is based on A4c0502e with paired ORM/macros 0.50.0.
+Scoped SQLite and owned PostgreSQL matching tests passed at 2bcc5628, including
+83 SQL cases across eight records on each backend. Its test-initializer-only
+descendant 008764bd passed four selected backend quality profiles and two
+explicit native minor-release API comparisons (196 checks each). External
+public consumer tests passed at 008764bd: core 1, SQLite 2, PostgreSQL 2 and
+MSSQL 2, without database services. The exact reviewed consumer lock was adopted
+with locked metadata; the initial strict optional-edge rejection remains a
+retained failed preparation, not a test pass.
+
+The separate unpublished coherent preview 01b73b00 (paired 0.50.1, including
+Q019 and the reviewed 0.48.x corrections) passed generator/policy gates and nine
+finite canonical/parity phases: 54 tests, zero failed or ignored. Both SQLite
+and owned PostgreSQL completed 83 SQL matching cases across eight records;
+owned service cleanup was verified. Those are actual preview results, not
+execution of the B-only commit or whole-workspace release acceptance.
+
+This completes the scoped capability plan. Final release-wide integration,
+feature/provider gates and publication remain under the separate release plan.
+Offline matching establishes neither principal authority nor current native
+RLS or deleted-record provenance. Duplicate wire keys must be checked before
+Value construction; existing parser erasure is not repaired by this API.
+No Actions, merge or publication follows from this plan's completion.
