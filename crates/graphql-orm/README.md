@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.51.0 aligns ORM/macros for post-await current-authority revalidation
+and owned custom release checks. Policies remain read-only admission callbacks;
+resource ownership, deleted-preimage and commit fences remain host-owned. No
+generated code, SDL or schema migration is added. See
+[the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
+
 Version 0.50.2 aligns the paired runtime/macros release with published
 `agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag
 selector for direct Auth dependencies as well; refresh the lockfile and verify

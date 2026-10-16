@@ -9,6 +9,8 @@
 //! mint tokens, infer MFA, or own product authorization policy.
 
 mod current_authority;
+mod owned_operation;
+pub use owned_operation::{AgqlOperationTarget, AgqlOwnedOperation, AgqlOwnedOperationAuthorizer};
 pub use current_authority::{
     AgqlAcceptedRequest, AgqlBindingAuthorizer, AgqlCurrentAuthorityEnforcement,
     AgqlCurrentAuthorityGuard, AgqlCurrentAuthorityPolicy,

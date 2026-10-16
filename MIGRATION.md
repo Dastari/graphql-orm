@@ -15,6 +15,27 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.50.2 to 0.51.0: post-await and owned release checks
+
+Upgrade ORM/macros together. Successful sensitive checks now re-read original
+status/current authority after binding and business-policy awaits. Callbacks run
+once per invocation and must perform only admission work: protected effects
+belong after final success. Business denial stays denied. An earlier, shorter
+current expiry still bounds the invocation even if a later read extends it.
+Parallel fields keep immutable accepted identity; narrowing denies rather than
+rewriting their shared context. These are read-observation checks, not atomic
+fences against remote revocation after the final read.
+
+Custom streams returning owned futures can capture `AgqlOwnedOperation<T>` from
+a real context and check every release with mandatory owned binding/business
+policy, including after queue/owner awaits. There is no fabricated Context or
+reusable allow permit. Preserve host ownership/filter/row/field/deleted-preimage
+and commit/revision fences. See [the bridge guide](docs/reference/graphql-orm/agql-auth-bridge.md#owned-custom-release-checks).
+No SDL, wire, database or stored-record migration is required. This source slice
+retains published Auth v0.21.3 and its strict legacy resolver contract; adoption
+of an explicit current-session proof API requires a verified published Auth
+successor and a separate reviewed tag/lock update before using that path.
+
 ## 0.50.1 to 0.50.2: published Auth source alignment
 
 Upgrade ORM/macros together. The workspace now selects the published

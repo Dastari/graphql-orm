@@ -14,6 +14,17 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.51.0 (unreleased)
+
+- Re-read original status and current authority after binding and successful
+  business-policy awaits, retaining every observed expiry ceiling and denying
+  any grant narrowing without changing the accepted request.
+- Add owned custom operation/release checks with mandatory owned binding and
+  business policies, for streams/effects that outlive GraphQL Context.
+- Align ORM/macros at 0.51.0. No generated code, SDL, stored-data or schema change.
+  This source slice retains published Auth v0.21.3; current-session proof adoption
+  requires a separately verified published Auth successor and lock update.
+
 ## 0.50.2 (unreleased)
 
 - Select the published `agql-auth` `v0.21.3` tag in the shared dependency and
