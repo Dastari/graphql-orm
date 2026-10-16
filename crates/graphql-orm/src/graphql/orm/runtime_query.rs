@@ -1826,7 +1826,7 @@ mod tests {
             .resolve_field(&collection, &field_id("note"))
             .unwrap();
         let projection = schema
-            .resolve_projection(&collection, &[name.clone()])
+            .resolve_projection(&collection, std::slice::from_ref(&name))
             .unwrap();
         let limits = RuntimeQueryLimits::default();
         let suffix = schema
