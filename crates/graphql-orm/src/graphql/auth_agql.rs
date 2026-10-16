@@ -10,11 +10,11 @@
 
 mod current_authority;
 mod owned_operation;
-pub use owned_operation::{AgqlOperationTarget, AgqlOwnedOperation, AgqlOwnedOperationAuthorizer};
 pub use current_authority::{
     AgqlAcceptedRequest, AgqlBindingAuthorizer, AgqlCurrentAuthorityEnforcement,
     AgqlCurrentAuthorityGuard, AgqlCurrentAuthorityPolicy,
 };
+pub use owned_operation::{AgqlOperationTarget, AgqlOwnedOperation, AgqlOwnedOperationAuthorizer};
 
 use std::fmt;
 use std::sync::Arc;

@@ -274,7 +274,14 @@ impl AgqlCurrentAuthorityEnforcement {
         let deadline = self.revalidate(accepted).await?;
         let authorized = self
             .bindings
-            .authorize(ctx, &accepted.principal, entity_name, policy_key, kind, surface)
+            .authorize(
+                ctx,
+                &accepted.principal,
+                entity_name,
+                policy_key,
+                kind,
+                surface,
+            )
             .await
             .map_err(|error| error.extend())?;
         self.check_deadline(deadline)?;

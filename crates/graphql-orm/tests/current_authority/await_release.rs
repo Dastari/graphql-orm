@@ -95,7 +95,9 @@ async fn issued_fixture() -> (AppSchema, Arc<Host>, AgqlAcceptedRequest) {
         )
         .await
         .unwrap();
-    let accepted = auth.authenticate_access_token(&issued.access_token).unwrap();
+    let accepted = auth
+        .authenticate_access_token(&issued.access_token)
+        .unwrap();
     let fixture = fixture_for(AuthPrincipal::User(accepted), None, false).await;
     fixture.1.clock.set(OffsetDateTime::now_utc());
     fixture
