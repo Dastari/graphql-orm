@@ -13,6 +13,19 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.50.0 to 0.50.1: rendered read bind budgets
+
+Upgrade ORM/macros together. No stored-data/schema migration is required.
+Ordinary runtime row and optional count queries now reject actual emitted bind
+slots above `RuntimeQueryLimits::max_bind_parameters` before database I/O, using
+existing `resource_limit`. SQLite suffix comparisons consume two slots; cursor
+lexicographic branches may repeat earlier values on either backend. Requests
+previously admitted by logical operand counts may now reject. Size the configured
+cap for the rendered query within the backend's supported limits, or simplify the
+filter/order. SQL, cursor wire forms, authorization and RLS semantics are unchanged.
+The 0.50.0 canonical logical-construction compatibility below remains; execution
+now independently applies the corrected emitted-slot check.
+
 ## 0.49.0 to 0.50.0: checked filter intent and offline matching
 
 Upgrade ORM/macros together. This additive API requires no stored-data/schema

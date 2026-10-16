@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.50.0 adds checked original filter intent and conservative offline
+Version 0.50.1 adds checked original filter intent and conservative offline
 runtime-record matching in the core runtime. Upgrade ORM/macros together; no
 stored-data or schema migration is required. Matching does not authorize a row,
 prove snapshot provenance or establish native RLS for a deleted record. See
@@ -52,7 +52,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.1", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
