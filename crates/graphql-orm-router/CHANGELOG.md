@@ -3,12 +3,19 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.6.1 - 2026-10-16
+
+- Select the published `agql-auth` `v0.21.3` tag for `auth-agql`, retaining
+  reviewed commit `59c0a38f82e8c75459474238799a81f29d4ffa58`. Hosts using Auth
+  directly must select the same tag so validator types agree. No authentication
+  clock, token, routing or subscription behavior changes.
 
 ## 0.6.0 - 2026-10-15
 

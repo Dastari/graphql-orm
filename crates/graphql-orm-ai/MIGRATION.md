@@ -3,21 +3,33 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-`graphql-orm-ai` is not yet published. This guide is still mandatory so early
-Git consumers and disposable test deployments can track schema and API changes
-without guessing.
+`graphql-orm-ai` is Git-distributed and is not published to crates.io. This guide
+is mandatory so Git consumers and disposable test deployments can track schema
+and API changes without guessing.
 
 Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.107.1 to 0.107.2: published Auth selector
+
+Select the same successor workspace release for AI, ORM and other chosen
+workspace packages. Update direct `agql-auth` dependencies to
+`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.21.3", version = "0.21.3"`.
+The tag retains reviewed commit `59c0a38f82e8c75459474238799a81f29d4ffa58`.
+Refresh the lockfile and verify one Auth source across the selected graph;
+mixing a revision and tag can create incompatible Rust types at the same commit.
+See the [workspace source migration](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
+There is no Rust API, GraphQL SDL, token, stored-data or schema migration in
+this patch. AI schema module remains 0.72.0; earlier Auth migrations still apply.
 
 ## 0.107.0 to 0.107.1
 

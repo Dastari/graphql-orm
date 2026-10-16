@@ -3,12 +3,17 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
+
+Version 0.6.1 selects published Auth `v0.21.3` for `auth-agql`, retaining the
+same reviewed commit. Direct Auth dependencies must use that tag too; refresh
+the lockfile and verify one Auth source. Existing clock and authorization
+contracts remain unchanged. See [MIGRATION.md](MIGRATION.md).
 
 A project-neutral Federation router for statically configured and explicitly
 registered GraphQL subgraphs. It composes a complete candidate graph before
@@ -26,7 +31,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.1" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql

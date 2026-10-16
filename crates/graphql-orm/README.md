@@ -3,12 +3,18 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.50.2 aligns the paired runtime/macros release with published
+`agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag
+selector for direct Auth dependencies as well; refresh the lockfile and verify
+one Auth source. No runtime behavior, generated code or schema migration is
+added. See [source alignment](../../MIGRATION.md#0501-to-0502-published-auth-source-alignment).
 
 Version 0.50.1 adds checked original filter intent and conservative offline
 runtime-record matching in the core runtime. Upgrade ORM/macros together; no
@@ -67,7 +73,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.1", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.2", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the
