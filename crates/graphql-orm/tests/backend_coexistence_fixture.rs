@@ -32,10 +32,10 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
         .expect("run backend coexistence fixture cargo check");
 
     assert!(status.success());
-    assert_direct_host_dependency_resolves_one_exact_agql_auth_universe();
 }
 
-fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
+#[test]
+fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
     let manifest = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/backend-coexistence/Cargo.toml"
