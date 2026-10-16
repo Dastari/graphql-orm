@@ -115,6 +115,35 @@ history-rewritten. A recorded version with remaining planned work fails closed.
 Use a fresh reviewed repair version, retain history and confirm physical default,
 omitted-value behavior and replan. See [the migration guide](../../../MIGRATION.md#0481-to-0482-postgresql-default-alterations).
 
+## Unsupported PostgreSQL column alterations
+
+In 0.48.3, existing fallible managed planning/application rejects unsupported
+changes to per-column primary-key or constraint-backed unique flags, and spatial
+metadata changes with the same SQL type expression. Same-type uses the existing
+case-insensitive comparison or exact `TIMESTAMPTZ`/`timestamp with time zone`
+aliases. Direct/owned rejection precedes managed runtime/history preparation;
+`allow_destructive` cannot bypass capability admission. Owned paths use
+`InvalidPhysicalContract`; static managers use a fixed `Protocol` error. Legacy
+staged/ABI planning may initialize an empty validated bookkeeping table while
+reading versions, but admits the complete stage sequence before target DDL or
+migration history rows.
+
+Changed SQL type expressions retain the existing renderer path. This comparison
+does not prove semantic type difference or `sql_type`/spatial metadata coherence:
+whitespace, other aliases and incoherent host declarations remain outside this
+bounded guard. Trusted direct `SchemaModel`/`OwnedSchemaModel` hosts own that
+coherence; the runtime IR rejects all spatial metadata. The geometry positive
+regression proves planning/rendering, not live conversion or target certification.
+This adds no new DDL or automatic postapply contract.
+
+PostgreSQL column uniqueness is introspected from unique constraints, not
+standalone unique indexes. Explicit standalone unique index operations with
+unchanged column flags remain supported and do not repair a flag alteration.
+Low-level infallible diff/render/build functions remain structural previews, not
+executable capability certificates. Trusted raw SQL does not gain this managed
+preflight. For existing recorded ineffective work, retain history and use a fresh
+reviewed supported repair; see [the migration guide](../../../MIGRATION.md#0482-to-0483-unsupported-postgresql-alterations-fail-closed).
+
 ## Ownership, composition and dependencies
 
 `ManagedTableSet` is trusted host state. Its portable table identifiers are unique,
