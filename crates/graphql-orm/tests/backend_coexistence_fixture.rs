@@ -32,10 +32,10 @@ fn sqlite_and_mssql_services_can_share_one_graphql_orm_build() {
         .expect("run backend coexistence fixture cargo check");
 
     assert!(status.success());
-    assert_direct_host_dependency_resolves_one_exact_agql_auth_universe();
 }
 
-fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
+#[test]
+fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
     let manifest = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/backend-coexistence/Cargo.toml"
@@ -81,16 +81,18 @@ fn assert_direct_host_dependency_resolves_one_exact_agql_auth_universe() {
             .map(|(value, _)| value)
             .expect("reviewed auth dependency field")
     };
-    let revision = field("rev");
-    assert_eq!(revision.len(), 40, "auth must use a reviewed full revision");
-    assert!(revision.bytes().all(|value| value.is_ascii_hexdigit()));
+    let tag = field("tag");
+    assert_eq!(tag, format!("v{}", field("version")));
+    // The published v0.21.3 tag retains this reviewed full commit. Require
+    // both the published selector and its locked identity in the host graph.
+    let revision = "59c0a38f82e8c75459474238799a81f29d4ffa58";
     assert_eq!(agql_auth[0]["version"], field("version"));
     let source = agql_auth[0]["source"]
         .as_str()
         .expect("agql-auth source must be present");
     assert_eq!(
         source,
-        format!("git+{}?rev={revision}#{revision}", field("git")),
+        format!("git+{}?tag={tag}#{revision}", field("git")),
         "unexpected agql-auth source",
     );
 }

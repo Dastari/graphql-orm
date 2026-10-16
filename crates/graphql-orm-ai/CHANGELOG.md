@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,6 +17,16 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## [0.107.2] - 2026-10-16
+
+### Changed
+
+- Select published `agql-auth` `v0.21.3` through the workspace dependency and
+  ORM 0.50.2. Auth remains locked to the same reviewed 59c0a38f82e8c75459474238799a81f29d4ffa58
+  commit. Direct host Auth dependencies must use the same tag selector to share
+  principal types. No runtime, GraphQL or persistence behavior changes;
+  AI schema module remains 0.72.0.
 
 ## [0.107.1] - 2026-10-14
 

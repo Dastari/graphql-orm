@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,15 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.50.2 (unreleased)
+
+- Select the published `agql-auth` `v0.21.3` tag in the shared dependency and
+  direct-auth compatibility fixture. The locked source remains
+  `59c0a38f82e8c75459474238799a81f29d4ffa58`; authentication behavior is unchanged.
+- Align ORM/macros at 0.50.2. Consumers declaring Auth directly must use the
+  same tag selector, since Cargo distinguishes a tag from a revision even when
+  they resolve to the same commit. No stored-data or schema migration is added.
 
 ## 0.50.1 (unreleased)
 

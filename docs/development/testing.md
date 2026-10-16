@@ -3,7 +3,7 @@ title: "Testing and verification"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -275,7 +275,8 @@ cargo test -p graphql-orm-router --locked --features auth-agql
 cargo tree -p graphql-orm-router --locked --features auth-agql
 ```
 
-The graph must resolve a single `agql-auth` revision and one
+The graph must resolve one `agql-auth` tag selector with its reviewed locked
+commit (not separate tag/revision sources), and one
 `graphql-orm`/macro universe. The router lane exercises only the one-way
 resource-server validator and matcher adapters; it must not instantiate
 issuer-side or storage services.

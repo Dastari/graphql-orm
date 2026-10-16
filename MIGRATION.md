@@ -3,15 +3,40 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-`graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
-neither the runtime nor macros crate is published to crates.io.
+`graphql-orm` is distributed from GitHub only. Select one published immutable
+workspace release tag for every chosen workspace package and record its full
+commit from the release manifest. Neither the runtime nor macros crate is
+published to crates.io.
+
+## 0.50.1 to 0.50.2: published Auth source alignment
+
+Upgrade ORM/macros together. The workspace now selects the published
+`agql-auth` `v0.21.3` tag, which peels to the same reviewed commit
+`59c0a38f82e8c75459474238799a81f29d4ffa58` used by 0.50.1. No authentication
+behavior, Rust API, token wire, stored-data or database-schema change is added.
+
+Update every direct Auth dependency to the same selector:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.21.3", version = "0.21.3" }
+```
+
+Refresh the application's lockfile deliberately and inspect its selected
+dependency graph. It must contain one `agql-auth` package source,
+`git+https://github.com/Dastari/agql-auth.git?tag=v0.21.3`, locked to the commit
+above. A `rev` selector is a different Cargo source even at the same commit;
+mixing the two can produce incompatible principal/validator types. Update the
+workspace release selector and direct Auth selector together, then recompile
+the host's bridge, AI and router integrations. Do not move existing release tags.
+Consumers upgrading from Auth 0.19.1 still need its refresh-provenance and atomic
+challenge-store migrations; this patch does not remove those requirements.
 
 ## 0.50.0 to 0.50.1: rendered read bind budgets
 

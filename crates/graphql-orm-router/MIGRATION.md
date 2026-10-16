@@ -3,12 +3,23 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.6.0 to 0.6.1: published Auth selector
+
+When enabling `auth-agql`, use `tag = "v0.21.3"` for every direct
+`agql-auth` dependency from `https://github.com/Dastari/agql-auth.git`.
+The shared dependency retains the same reviewed commit
+`59c0a38f82e8c75459474238799a81f29d4ffa58`. Refresh the lockfile and check that
+the selected graph contains one Auth source. A revision and a tag are distinct
+Cargo sources even at the same commit, which can split validator types.
+No Rust API, clock, token, GraphQL, descriptor or stored-data migration is added.
+The fallible-clock contract and host migrations from 0.6.0 remain required.
 
 ## 0.5.4 to 0.6.0: coherent fallible authentication clocks
 

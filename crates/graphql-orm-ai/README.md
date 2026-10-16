@@ -3,12 +3,17 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-15
+last_reviewed: 2026-10-16
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-ai
+
+Version `0.107.2` selects published Auth `v0.21.3` at the same reviewed commit.
+Align direct Auth dependencies to that tag, refresh the lockfile and verify one
+Auth source. No runtime or schema migration is added; schema module stays
+`0.72.0`. See [MIGRATION.md](MIGRATION.md).
 
 Version `0.107.1` adds read-only continuation task-context classification.
 Hosts preserve ordinary broker continuations, attach context only to verified
@@ -167,7 +172,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.102.3", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.2", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
