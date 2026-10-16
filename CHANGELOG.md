@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.48.2 (unreleased)
+
+- PostgreSQL static/owned migration plans now apply real SET, replacement and
+  DROP DEFAULT changes, preserve existing row values, and detach old defaults
+  before actual type conversion. Unchanged type/nullability/default properties
+  emit no unnecessary DDL; canonical schema/hash formats are unchanged.
+
 ## 0.48.1 (unreleased)
 
 - Compare complete PostgreSQL TEXT literal defaults with their deparsed `::text`

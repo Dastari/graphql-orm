@@ -2218,3 +2218,220 @@ async fn postgres_owned_string_literal_defaults_round_trip_exact_values()
     owned.cleanup()?;
     Ok(())
 }
+
+#[cfg(all(feature = "postgres", not(feature = "sqlite")))]
+#[tokio::test]
+async fn postgres_owned_real_text_defaults_apply_certify_and_rollback_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut owned = owned_postgres::OwnedPostgres::start("owned-default-alter")?;
+    let db = Database::<PostgresBackend>::connect_postgres(&owned.url).await?;
+    let manager = db.schema();
+    let managed = ownership();
+    let make_schema = |value: Option<&str>| {
+        let mut raw = schema().schema().clone();
+        raw.collections[0]
+            .fields
+            .iter_mut()
+            .find(|f| f.physical_column == "label")
+            .unwrap()
+            .default = value.map(|value| RuntimeDefault::Literal(value.into()));
+        raw.validate().unwrap()
+    };
+    let initial_schema = make_schema(None);
+    let initial_target = initial_schema.physical_schema::<PostgresBackend>(Default::default())?;
+    let initial = manager
+        .plan_owned_migration(
+            "default-initial",
+            "create",
+            &initial_target,
+            &managed,
+            PlanOptions::strict(),
+        )
+        .await?;
+    manager
+        .apply_owned_migration(&initial, Default::default())
+        .await?;
+    sqlx::query("INSERT INTO owned_notes(id,label) VALUES ('existing','preserved')")
+        .execute(db.pool())
+        .await?;
+    let mut last_hash = initial.plan_hash().to_owned();
+    let mut last_target_hash = initial.target_schema_hash().to_owned();
+    for (index, value) in [Some("old"), Some("O'Brien 雪"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let runtime = make_schema(value);
+        let target = runtime.physical_schema::<PostgresBackend>(Default::default())?;
+        let version = format!("default-{index}");
+        let plan = manager
+            .plan_owned_migration(
+                &version,
+                "change default",
+                &target,
+                &managed,
+                PlanOptions::strict(),
+            )
+            .await?;
+        assert!(!plan.steps().is_empty());
+        assert_ne!(plan.plan_hash(), last_hash);
+        last_hash = plan.plan_hash().to_owned();
+        assert_ne!(plan.target_schema_hash(), last_target_hash);
+        last_target_hash = plan.target_schema_hash().to_owned();
+        assert!(
+            plan.statements()
+                .iter()
+                .any(|s| s.contains(if value.is_some() {
+                    "SET DEFAULT"
+                } else {
+                    "DROP DEFAULT"
+                }))
+        );
+        manager
+            .apply_owned_migration(&plan, Default::default())
+            .await?;
+        let id = format!("insert-{index}");
+        if let Some(expected) = value {
+            let actual: String =
+                sqlx::query_scalar("INSERT INTO owned_notes(id) VALUES ($1) RETURNING label")
+                    .bind(&id)
+                    .fetch_one(db.pool())
+                    .await?;
+            assert_eq!(actual, expected);
+        } else {
+            let error = sqlx::query("INSERT INTO owned_notes(id) VALUES ($1)")
+                .bind(&id)
+                .execute(db.pool())
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.as_database_error().and_then(|e| e.code()).as_deref(),
+                Some("23502")
+            );
+            let default: Option<String> = sqlx::query_scalar("SELECT column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='owned_notes' AND column_name='label'")
+                .fetch_one(db.pool()).await?;
+            assert!(default.is_none());
+        }
+        let preserved: String =
+            sqlx::query_scalar("SELECT label FROM owned_notes WHERE id='existing'")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(preserved, "preserved");
+        let recorded: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_migrations WHERE version=$1")
+                .bind(&version)
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(recorded, 1);
+        let no_op = manager
+            .plan_owned_migration(&version, "replan", &target, &managed, PlanOptions::strict())
+            .await?;
+        assert!(no_op.steps().is_empty(), "{no_op:?}");
+        assert!(no_op.statements().is_empty());
+        assert!(
+            manager
+                .apply_owned_migration(&no_op, Default::default())
+                .await?
+                .already_applied
+        );
+        manager
+            .runtime_mutation_environment(std::sync::Arc::new(runtime), &target, &managed)
+            .await?;
+    }
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id,label FROM owned_notes ORDER BY id")
+            .fetch_all(db.pool())
+            .await?;
+    assert_eq!(
+        rows,
+        [
+            ("existing".into(), "preserved".into()),
+            ("insert-0".into(), "old".into()),
+            ("insert-1".into(), "O'Brien 雪".into())
+        ]
+    );
+    let rows_before: Vec<(String, String, i64, Option<String>)> =
+        sqlx::query_as("SELECT id,label,score,optional FROM owned_notes ORDER BY id")
+            .fetch_all(db.pool())
+            .await?;
+    let history_before: Vec<String> = sqlx::query_scalar(
+        "SELECT row_to_json(h)::text FROM __graphql_orm_migrations h ORDER BY version",
+    )
+    .fetch_all(db.pool())
+    .await?;
+    // A later failing nullability alteration must roll back the earlier SET
+    // DEFAULT and must not record a successful version.
+    let mut invalid = make_schema(Some("must roll back")).schema().clone();
+    invalid.collections[0]
+        .fields
+        .iter_mut()
+        .find(|f| f.physical_column == "optional")
+        .unwrap()
+        .nullable = false;
+    let invalid = invalid
+        .validate()
+        .unwrap()
+        .physical_schema::<PostgresBackend>(Default::default())?;
+    let plan = manager
+        .plan_owned_migration(
+            "default-rollback",
+            "fail after default",
+            &invalid,
+            &managed,
+            PlanOptions::strict(),
+        )
+        .await?;
+    let default_position = plan
+        .statements()
+        .iter()
+        .position(|s| s.contains("label SET DEFAULT"))
+        .unwrap();
+    let failing_position = plan
+        .statements()
+        .iter()
+        .position(|s| s.contains("optional SET NOT NULL"))
+        .unwrap();
+    assert!(default_position < failing_position);
+    let error = manager
+        .apply_owned_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    match error {
+        RuntimeMigrationError::Database(error) => assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("23502")
+        ),
+        other => panic!("expected PostgreSQL NOT NULL failure, got {other:?}"),
+    }
+    let default: Option<String> = sqlx::query_scalar("SELECT column_default FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='owned_notes' AND column_name='label'").fetch_one(db.pool()).await?;
+    assert!(default.is_none());
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM __graphql_orm_migrations WHERE version='default-rollback'",
+    )
+    .fetch_one(db.pool())
+    .await?;
+    assert_eq!(recorded, 0);
+    let after: Vec<(String, String, i64, Option<String>)> =
+        sqlx::query_as("SELECT id,label,score,optional FROM owned_notes ORDER BY id")
+            .fetch_all(db.pool())
+            .await?;
+    assert_eq!(after, rows_before);
+    let history_after: Vec<String> = sqlx::query_scalar(
+        "SELECT row_to_json(h)::text FROM __graphql_orm_migrations h ORDER BY version",
+    )
+    .fetch_all(db.pool())
+    .await?;
+    assert_eq!(history_after, history_before);
+    let history_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM __graphql_orm_migrations")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(history_count, 4);
+    db.pool().close().await;
+    owned.cleanup()?;
+    Ok(())
+}

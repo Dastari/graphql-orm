@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+PostgreSQL migration default alterations are corrected in the paired 0.48.2
+runtime/macros release: future omitted-value inserts use the changed default;
+existing rows and recorded migration history are not rewritten. See the root
+migration guide for guarded repair of previously incomplete applications.
+
+
 This is the procedural-macro implementation for `graphql-orm`. Applications
 normally depend on the runtime crate and import its prelude; that keeps the
 macro/runtime versions aligned:

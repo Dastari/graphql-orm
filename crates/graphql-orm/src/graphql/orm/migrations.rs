@@ -2019,26 +2019,59 @@ pub(super) fn render_migration_step_view(
         },
         StepRef::AlterColumn {
             table_name,
-            before: _,
+            before,
             after,
         } => match backend {
-            DatabaseBackend::Postgres => vec![
-                format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                    table_name, after.name, after.sql_type
-                ),
-                if after.nullable {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                        table_name, after.name
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        table_name, after.name
-                    )
-                },
-            ],
+            DatabaseBackend::Postgres => {
+                let type_changed = !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+                    && !(postgres_timestamptz_alias(&before.sql_type)
+                        && postgres_timestamptz_alias(&after.sql_type));
+                // Reuse the planner's backend comparison, including narrow
+                // PostgreSQL deparse equivalences, without changing hash inputs.
+                let mut default_target = (**before).clone();
+                default_target.default = after.default.clone();
+                let default_changed =
+                    column_changed_for_backend(DatabaseBackend::Postgres, before, &default_target);
+                let mut statements = Vec::new();
+                // PostgreSQL may reject a type conversion while its old default
+                // remains attached, even when the desired new default is valid.
+                if type_changed && before.default.is_some() {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                        table_name, before.name
+                    ));
+                }
+                if type_changed {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                        table_name, after.name, after.sql_type
+                    ));
+                }
+                if before.nullable != after.nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
+                        table_name,
+                        after.name,
+                        if after.nullable { "DROP" } else { "SET" }
+                    ));
+                }
+                if default_changed || type_changed {
+                    if let Some(default) = &after.default {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                            table_name,
+                            after.name,
+                            render_default_clause(backend, default)
+                        ));
+                    } else if before.default.is_some() && !type_changed {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                            table_name, after.name
+                        ));
+                    }
+                }
+                statements
+            }
             DatabaseBackend::Sqlite => vec![format!(
                 "-- sqlite requires table rebuild to alter column {} on {}",
                 after.name, table_name

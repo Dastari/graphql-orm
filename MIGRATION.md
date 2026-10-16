@@ -13,6 +13,29 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.48.1 to 0.48.2: PostgreSQL default alterations
+
+Upgrade ORM/macros together. PostgreSQL plans now execute real default changes
+on existing columns rather than recording their target while leaving the old
+physical default. The change affects future inserts that omit the column; it
+never backfills or rewrites existing values. Static and owned targets share the
+renderer. SQLite and MSSQL behavior, public API signatures and physical/hash
+formats are unchanged. No automatic data migration is introduced.
+
+Review pending plans before applying them: SET/replace/DROP DEFAULT is now
+effective. Actual type changes remove an attached old default before conversion
+and restore the target expression afterward; unsupported data conversions still
+fail and roll back atomically. Existing guards, ownership/RLS boundaries and
+explicit migration policy remain required.
+
+If an older version recorded a default-only migration without reaching its
+physical target, introspect and review the actual default. A fresh replan under
+the same recorded version fails closed when work remains; it is not treated as
+already applied. Do not edit/delete history or silently reuse that version.
+Create a fresh unique migration version for the reviewed guarded repair, apply
+it and confirm introspected default, omitted-value insert behavior, empty replan
+and owned mutation certification. Retain the original history as evidence.
+
 ## 0.48.0 to 0.48.1: PostgreSQL string default round trips
 
 Upgrade ORM/macros together. PostgreSQL TEXT literal defaults now compare equal
