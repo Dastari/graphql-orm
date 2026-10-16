@@ -1,9 +1,9 @@
 ---
 title: Security assurance remediation
 kind: plan
-status: active
+status: accepted
 owner: workspace-maintainers
-last_reviewed: 2026-10-14
+last_reviewed: 2026-10-16
 review_by: 2026-11-14
 supersedes: []
 ---
@@ -12,14 +12,15 @@ supersedes: []
 
 ## Outcome
 
-Close the defensive audit findings against current source through independently
-reviewable pull requests, with executable regressions, explicit compatibility
-changes, and evidence for every supported database and affected companion lane.
+Complete the independently reviewed source remediations and bounded acceptance
+for the defensive audit findings, retaining executable regressions, explicit
+compatibility changes and the actual scope of each backend/companion result.
 The original audit examined ORM commit
 `e5023b5c29b097f1c07ebc66057ebb50731a6330` and authentication commit
-`674f19bc0d1a2ea3c0ca0c4f96bb7a56b366319b`; findings must be revalidated against
-current main before implementation because subsequent changes can already close
-them. Preserve the original evidence rather than rewriting its historical result.
+`674f19bc0d1a2ea3c0ca0c4f96bb7a56b366319b`; findings were revalidated against
+the implementation baseline before changes; later relationship-policy work
+already addressed part of the original scope. Original reports remain historical
+evidence and are not rewritten as post-remediation results.
 
 Sensitive operations require an authoritative current-principal and revocation
 decision at the operation boundary. Unavailable status fails closed. This is a
@@ -78,26 +79,42 @@ and repository work.
 - Run the inventory generator after manifest changes. Governed documentation
   keeps metadata, canonical topic ownership and index links; accepted ADRs are
   immutable. Every PR declares documentation impact and passes the checker.
-- An independent challenge of each implementation precedes merge. Review the
-  exact final commit and CI result; do not merge merely because a draft exists.
+- An independent challenge of each implementation precedes merge. Review exact
+  source and applicable retained local/CI evidence; held CI execution and release
+  actions require their separate authorization. A draft PR is not acceptance.
 - Final integration uses one reviewed external authentication revision and
   verifies permission removal, immediate sensitive-operation revocation,
   relationships, concurrent contexts, rollback and missing-context denial.
 
-## Current checkpoint
+## Acceptance checkpoint
 
-Focused security remediations and the reviewed correctness/capability follow-ups
-are implemented with independently retained source and regression evidence.
-The external authentication revision is reviewed and pinned; consuming-host
-migration and authority responsibilities remain explicit. Individual execution
-results retain their actual source revisions and scope, including owned backend,
-provider and platform limitations.
+The reviewed implementation set at `836be12f69be8a66d66860881dbf6eb7ec05d917` closes the
+revalidated source-remediation work, including the already-fixed relationship
+route and the subsequently confirmed subscription and one-time-code findings.
+The confirmed scope remains eight security findings (three High, four Medium,
+one Low); engineering correctness/capability follow-ups add no vulnerability
+count. Approved complete-key reads, checked original filter intent/matching and
+Q014–Q020 follow-ups retain their own source, migration and acceptance evidence.
+The independently reviewed local acceptance record is
+the owner-retained packet `IMPLEMENTATION_ACCEPTANCE.json` (SHA256 `c290c18a6eb834b1fbbb551dccd726e768d073dc272c41cd0a4ab3effcc97e3a`), including the completed bounded AI phase ledger
+`FINAL_AI_ACCEPTANCE_33.json` (SHA256 `6a5001ca1b972fc71bcd6e1e8352859f095caa8045107a06158687311601ea11`). Original historical reports and native failure
+artifacts remain preserved; later applicability never changes their actual
+execution revisions, features, compilers or counts.
 
-Final coherent feature/backend/companion evidence reconciliation and release-wide
-acceptance remain in progress. Completion of a focused test or implementation
-is not a whole-workspace production-readiness claim. Existing publication,
-Actions and merge holds remain in effect; this plan grants no release authority.
+Acceptance is scoped to those recorded implementations and explicit selected
+configurations, not a whole-application security or production-readiness claim.
+Dependency review remains complete **with findings** under its frozen advisory
+boundary; see the [canonical disposition](../../../reference/dependency-security-disposition.md).
+The [security upgrade guide](../../../how-to/upgrade-security-remediation.md) and
+owning migration guides govern consumer rollout. Full-principal PG/MSSQL,
+Windows/macOS, real-provider, deep AI/router audit and performance/fuzz coverage
+limits remain as recorded. Custom resolver/raw/runtime host boundaries, tenant
+policy, authoritative store availability, immutable snapshot provenance and
+transactional fencing against concurrent revocation remain host obligations.
+Offline matching cannot prove a removed row's native RLS visibility.
 
-Temporary coordination and command logs remain outside the authoritative docs
-namespace. Replace this checkpoint as work advances; archive the completed plan
-with final evidence when all acceptance gates are satisfied.
+This completed implementation plan grants no Actions, merge, tag or publication
+authority. Held remote/release steps remain separately governed by the
+[release process](../../../operations/release/process.md). The eventual final
+source/tag/manifest must bind the post-archive commit; no unpublished preview or
+local source assembly is called a published release.
