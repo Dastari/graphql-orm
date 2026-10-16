@@ -13,6 +13,34 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.48.x to 0.49.0: checked owned complete-key reads
+
+Upgrade ORM/macros together. The additive `runtime_key_read_request` and
+`execute_runtime_key_read` API reuses `RuntimeKey`, checked projections and
+ordinary predicates. Existing reads, mutations, static subscriptions, GraphQL
+names and record/schema formats are unchanged. No data/schema migration is
+required.
+
+Authenticate and reauthorize current host authority, requested fields and
+key-read intent before constructing a request. Supply a mandatory row predicate
+and coherent `DbAuthContext`; an explicitly true predicate is a trusted host
+choice, not authorization evidence. Do not infer complete filter intent from
+`referenced_fields`: constant folding may erase dependencies. No new filter
+matching/lowering capability is included.
+
+Requests own the checked schema/key/projection/predicates and may be retained,
+but the executor cannot discover a later host catalog revision. Rebuild and
+authorize against the current trusted schema before each sensitive call.
+Node/depth/list/projection/bind budgets are rechecked under the request limits;
+hosts retain responsibility for inbound byte budgets. Missing and policy-hidden
+rows return the same `None`. Unexpected physical multiplicity fails without a
+record; a fixed two-row lookahead is retained even with a page-size limit of one.
+Cancellation follows existing backend cleanup without automatic retry or a
+cross-call snapshot guarantee. MSSQL runtime decoding remains unsupported.
+
+See [runtime query trust and point reads](docs/reference/graphql-orm/runtime-queries.md)
+and the [host boundary example](crates/graphql-orm/examples/runtime_key_read.rs).
+
 ## 0.47.0 to 0.48.0: SQL Server platform TLS
 
 Upgrade ORM/macros together. The `mssql` feature now selects Tiberius native TLS

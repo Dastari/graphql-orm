@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.49.0 (unreleased)
+
+- Add checked owned-runtime complete-key reads with an explicit required row
+  restriction, exact projection and bounded multiplicity detection. Nonfilterable
+  keys remain internal identity rather than a public Filter grant. SQLite and
+  PostgreSQL reuse current read/auth-context paths; MSSQL rejects before I/O.
+- Align ORM/macros at 0.49.0. Hosts still authenticate current authority, authorize
+  fields/key-read intent and bind the current trusted catalog before each call.
+  No filter-matching API, schema change or stored-data migration is introduced.
+
 ## 0.48.0 (unreleased)
 
 - Use the maintained native TLS transport for SQL Server while retaining the

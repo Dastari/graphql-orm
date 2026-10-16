@@ -10,27 +10,29 @@ supersedes: []
 
 # Runtime key reads and filter matching interface review
 
-This is an interface proposal, not an implemented capability or implementation
-approval. It addresses only requirements A and B in the [immutable consumer
+Requirement A received explicit implementation approval on 2026-10-15. Its
+implementation and scoped validation are complete; final stack integration and
+release acceptance remain pending. Requirement B remains an interface proposal
+under review and has no implementation approval. This plan addresses only A and B in the [immutable consumer
 request](https://github.com/Dastari/digibase/blob/0d26ab1af68b80985cafa4a621fa850eda5afee4/docs/coordination/prompts/0020-graphql-orm-runtime-key-reads-and-record-filter-matching.md).
 The reviewed ORM baseline is `4059d10026b9b8d1e9a2be0f4f556df807f77794`,
 version0.48.0. Remote main was independently resolved to that commit.
 
 ## Outcome and current boundary
 
-First establish whether public APIs already satisfy each requirement, using
+The completed first checkpoint established whether public APIs satisfy each requirement, using
 compiled external consumer controls and narrowly scoped expected compile
-failures. No new API implementation is authorized by this plan. The proposed
-interfaces below remain subject to owner review; A may proceed independently
-of B only after explicit approval.
+failures. The separate A approval authorizes only the checked point-read
+implementation below. B's proposed interfaces and semantics remain subject to
+owner review; no filter-lowering/matching API is included in A.
 
-Existing owned APIs provide checked complete mutation keys, projection/row
-codecs, bounded SQL reads, relation anchor capture, backend auth context and
-GraphQL request authority. They do not automatically grant principal authority.
+At the reviewed baseline, owned APIs provided checked complete mutation keys,
+projection/row codecs, bounded SQL reads, relation anchor capture, backend auth
+context and GraphQL request authority. They do not automatically grant principal authority.
 
 - `ValidatedRuntimeSchema::runtime_key` validates complete key members and
   preserves declared order independently of filterability. `RuntimeKey` retains
-  its schema and exposes checked members, but existing public consumers are
+  its schema and exposes checked members, but baseline public consumers were
   mutation requests. `runtime_read_request` accepts a `RuntimePredicate`, not a
   key; `runtime_compare` rejects a nonfilterable key field.
 - `runtime_read_request_with_relation_keys` captures relation anchors for a
@@ -63,10 +65,10 @@ Expected failures establish specific boundaries, not proof that every possible
 API composition is absent. Actual compiler diagnostics and controls are a
 required checkpoint before requesting interface approval.
 
-## A: proposed checked point read
+## A: approved and implemented checked point read
 
-Conceptual public signatures, owned by core `graphql::orm` and independently
-usable without `runtime-graphql` or a direct async-graphql dependency:
+Public constructor and asynchronous executor, owned by core `graphql::orm` and
+independently usable without `runtime-graphql` or a direct async-graphql dependency:
 
 ```text
 ValidatedRuntimeSchema::runtime_key_read_request(
@@ -78,7 +80,7 @@ ValidatedRuntimeSchema::runtime_key_read_request(
     limits: RuntimeQueryLimits,
 ) -> Result<RuntimeKeyReadRequest, RuntimeKeyReadError>
 
-Database<B: RuntimeReadBackend>::execute_runtime_key_read(
+Database<B: OrmBackend + RuntimeRowDecoder>::execute_runtime_key_read(
     &self,
     request: &RuntimeKeyReadRequest,
     auth: Option<&DbAuthContext>,
@@ -107,7 +109,7 @@ is exact; key columns needed internally are not silently disclosed. No paging
 scan, mutation-as-read, retry, write, journal or migration is introduced.
 
 Use a new bounded error wrapper rather than changing an existing exhaustive
-public enum without a separate compatibility decision. Proposed safe categories:
+public enum without a separate compatibility decision. Safe categories:
 invalid_handle, invalid_key, invalid_predicate, invalid_projection, limit_exceeded,
 unsupported_backend, unexpected_multiplicity, backend_failure. Backend detail and
 values remain redacted; preserve current safe sources for server diagnostics.
@@ -121,7 +123,7 @@ context. A failed/missing authority must deny before calling the executor.
 The low-level API cannot infer tenant or entity policy from an owned schema.
 Static current-authority wrappers remain separate, unchanged host integration.
 SQLite and PostgreSQL use existing runtime row decoding. MSSQL must fail its
-existing unsupported decoding capability before I/O; this proposal adds no live
+existing unsupported decoding capability before I/O; A adds no live
 MSSQL runtime decoding support.
 
 ## B: proposed checked intent and record semantics
@@ -335,11 +337,38 @@ only one backend and one GAP per negative check. The example manifest changes
 only source layout/path from the actual external probe; the Rust files are the
 same reviewed public consumer sources.
 
+The A-only [consumer manifest](probes/Cargo.key-read.example) and
+[construction/exhaustive-enum controls](probes/key_read.rs) are separate
+sources for the new implementation. They use only a core ORM dependency with
+one explicit backend and no `runtime-graphql` or direct GraphQL dependency. Copy
+to a scratch consumer, adjust the path to the reviewed source, then reconcile a
+reviewed lock in an assigned lane before running its two tests. Both controls
+passed on SQLite, PostgreSQL and MSSQL without adding GraphQL dependencies;
+the historical gap probes remain unchanged.
+
 ## Current checkpoint
 
-SQLite and PostgreSQL controls and expected diagnostics passed. A and B have
-separate current public-surface gaps; no new API implementation was made.
-Documentation validation (197 governed files), workspace formatting, inventory
-check and exact compiled-probe source comparisons passed. Pause for owner
-interface review after the documentation-only PR is prepared. A may be approved
-independently; B's duplicate-wire/coercion boundary remains an explicit decision.
+The historical SQLite/PostgreSQL current-boundary controls and expected
+diagnostics passed at 4059d1; documentation validation (197 governed files),
+formatting, inventory and compiled-probe source comparisons belong to that
+proposal checkpoint. They are not validation of the new implementation.
+
+A-only source work is based on approved PR143 full head
+`a52b6224750298d3b9d7ad5f03edc4f02aacec51` (production source 4059d1).
+The A-only implementation reuses the key's retained schema, complete-key
+validation, predicate rendering, exact projection decoder and native read/auth
+path; a new bounded error wrapper leaves existing exhaustive enums unchanged.
+SQLite and owned PostgreSQL key-read tests passed, including real non-superuser
+RLS isolation, cancellation and subsequent safe pool reuse. Host-boundary,
+current-authority, existing read/mutation/subscription, public consumer and
+selected backend feature regressions passed. SQLite/PostgreSQL all-target
+quality and focused supported MSSQL quality passed; MSSQL key reads reject
+before pool I/O. A package build without any backend remains unsupported by the
+unchanged macro guard. The explicit package-selected native API comparison
+passed under a minor-release override to check additive compatibility.
+
+ORM/macros 0.49.0, all seven existing locks and the generated inventory are
+reconciled on this proposal-based stack. Before release, integrate the reviewed
+0.48.x correctness fixes and validate the coherent final stack. No merge,
+Actions or publication follows from these implementation gates. B remains
+unapproved, including its duplicate-wire/coercion and matching-semantics decisions.
