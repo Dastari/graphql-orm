@@ -13,6 +13,175 @@ supersedes: []
 `graphql-orm` is distributed from GitHub only. Use a reviewed full 40-character commit in `rev`;
 neither the runtime nor macros crate is published to crates.io.
 
+## 0.50.0 to 0.50.1: rendered read bind budgets
+
+Upgrade ORM/macros together. No stored-data/schema migration is required.
+Ordinary runtime row and optional count queries now reject actual emitted bind
+slots above `RuntimeQueryLimits::max_bind_parameters` before database I/O, using
+existing `resource_limit`. SQLite suffix comparisons consume two slots; cursor
+lexicographic branches may repeat earlier values on either backend. Requests
+previously admitted by logical operand counts may now reject. Size the configured
+cap for the rendered query within the backend's supported limits, or simplify the
+filter/order. SQL, cursor wire forms, authorization and RLS semantics are unchanged.
+The 0.50.0 canonical logical-construction compatibility below remains; execution
+now independently applies the corrected emitted-slot check.
+
+## 0.49.0 to 0.50.0: checked filter intent and offline matching
+
+Upgrade ORM/macros together. This additive API requires no stored-data/schema
+migration; existing predicates, key reads, record codecs and wire forms remain
+compatible. Use the core `runtime_filter_builder` to construct private checked
+nodes and `finish` them, or opt into `runtime-graphql` for
+`prepare_runtime_filter(schema, collection, &Value, limits)`.
+
+A Value map cannot recover duplicate wire keys. The caller must validate GraphQL
+coercion and duplicate input keys **before** conversion to Value/Variables. The
+current upstream parser and JSON Value decoder erase duplicate object keys
+before runtime validation; this change does not repair or certify that wire
+boundary. It preserves every occurrence present in the supplied structural Value,
+including repeated Boolean children and null/empty entries. No raw JSON entry is
+added. Construct trusted Values or supply a separately validated transport seam.
+
+Authorize the complete `visit_intent` tree before protected SQL or matching:
+`referenced_fields` alone still omits constant-lowered intent. Implicit object
+conjunctions emit `ImplicitAnd`, distinct from explicit logical operators. Existing
+flat RuntimeReadCheck authorization ignores implicit conjunction permissions and
+retains its prior public behavior. Public checked null operators validate
+filterability and operator/kind admission; existing canonical null skips remain
+private compatibility behavior. Existing configured GraphQL scalar limits and
+legacy logical bind admission remain unchanged; the new public checked artifact
+reserves worst-case emitted binds, including SQLite suffix duplication. Existing
+canonical execution is not upgraded to a new actual-bind policy by this change. The core builder has
+fixed text/binary literal caps of 64 KiB/32 KiB and counts SQLite suffix binds twice;
+imported/reused nodes revalidate full bounds on each composition/finalization.
+
+`prepare_match` validates the full original operator profile; `matches` validates
+all original loaded dependencies before evaluation. Missing is an error, never
+NULL; SQL UNKNOWN remains UNKNOWN under NOT, and only TRUE selects. JSON
+comparisons remain unsupported. Even JSON IS NULL, which can be a valid checked
+SQL filter, is outside the first conservative offline profiles. MSSQL returns
+`UnsupportedSemantics` before matching. Safe errors/Debug include no literals or
+record values.
+
+Profile selection is a trusted physical-storage assertion, not inferred from a
+backend or decoded record. SQLite requires String TEXT/BINARY UTF-8, booleans
+INTEGER 0/1, exact i64 INTEGER, finite REAL, bytes BLOB, lowercase canonical UUID
+TEXT and microsecond UTC timestamp TEXT. PostgreSQL requires UTF-8/C String TEXT
+(or proven equivalent VARCHAR, never fixed CHAR/bpchar), native typed values and
+finite floats. Date-times are restricted to canonical years 0001–9999 without
+leap seconds; control/NUL strings are rejected. Foreign storage spelling/classes
+can be normalized by row decoding, so the matcher cannot detect prior violations
+(e.g. SQLite integer 7 decoded as true or uppercase UUID text). Unsupported
+profiles must fail closed; do not guess Rust comparison equivalence.
+
+An authoritative immutable image remains a host premise. Matching supplies no
+principal/tenant/field policy, snapshot authenticity, current authority or native
+RLS proof. In particular it cannot establish a deleted row's current SELECT
+visibility or bypass default-deny deleted-preimage release. See the canonical
+[runtime query reference](docs/reference/graphql-orm/runtime-queries.md#checked-original-intent-and-offline-matching)
+and host-neutral `examples/runtime_filter_match.rs`.
+
+## 0.48.x to 0.49.0: checked owned complete-key reads
+
+Upgrade ORM/macros together. The additive `runtime_key_read_request` and
+`execute_runtime_key_read` API reuses `RuntimeKey`, checked projections and
+ordinary predicates. Existing reads, mutations, static subscriptions, GraphQL
+names and record/schema formats are unchanged. Adopting this read API requires
+no data/schema migration. The separate default-change and guarded-repair
+obligations in the corrective migration sections below still apply.
+
+Authenticate and reauthorize current host authority, requested fields and
+key-read intent before constructing a request. Supply a mandatory row predicate
+and coherent `DbAuthContext`; an explicitly true predicate is a trusted host
+choice, not authorization evidence. Do not infer complete filter intent from
+`referenced_fields`: constant folding may erase dependencies. No new filter
+matching/lowering capability is included.
+
+Requests own the checked schema/key/projection/predicates and may be retained,
+but the executor cannot discover a later host catalog revision. Rebuild and
+authorize against the current trusted schema before each sensitive call.
+Node/depth/list/projection/bind budgets are rechecked under the request limits;
+hosts retain responsibility for inbound byte budgets. Missing and policy-hidden
+rows return the same `None`. Unexpected physical multiplicity fails without a
+record; a fixed two-row lookahead is retained even with a page-size limit of one.
+Cancellation follows existing backend cleanup without automatic retry or a
+cross-call snapshot guarantee. MSSQL runtime decoding remains unsupported.
+
+See [runtime query trust and point reads](docs/reference/graphql-orm/runtime-queries.md)
+and the [host boundary example](crates/graphql-orm/examples/runtime_key_read.rs).
+
+## 0.48.2 to 0.48.3: unsupported PostgreSQL alterations fail closed
+
+Upgrade ORM/macros together. Existing fallible managed planning and application
+now reject unsupported changes to per-column primary-key or constraint-backed
+unique flags, and spatial metadata changes with the same SQL type expression.
+Owned paths return `InvalidPhysicalContract`; static managers return a fixed
+`Protocol` error. Direct/owned rejection occurs before runtime/history
+preparation. Legacy staged/ABI planning may initialize an empty validated history
+table, but rejects the complete stage sequence before target DDL or history
+rows. `allow_destructive` cannot bypass capability admission. No new constraint DDL, public API signature or automatic postapply contract is added.
+
+PostgreSQL introspection obtains column uniqueness from unique constraints,
+not standalone unique indexes. An explicit standalone unique index with unchanged
+column flags remains supported; it does not repair an unsupported flag change.
+Same-type means the existing case-insensitive expression comparison or exact
+`TIMESTAMPTZ`/`timestamp with time zone` aliases. Changed SQL type expressions
+retain the existing renderer path; this does not prove semantic type difference
+or correspondence between `sql_type` and spatial metadata. Whitespace, other
+aliases and incoherent host metadata remain outside this bounded guard. Trusted
+direct `SchemaModel`/`OwnedSchemaModel` hosts own that coherence; the runtime IR
+rejects all spatial metadata. The geometry positive test proves planning/rendering,
+not a live conversion or target certification. Real owned primary-key vector
+transitions were already rejected. SQLite/MSSQL behavior is unchanged.
+
+Low-level infallible diff/render/build functions remain structural previews,
+not certification that every requested step can execute. Do not bypass the
+managed preflight by converting an unsupported preview to trusted raw SQL.
+Review already recorded ineffective alterations against actual physical state;
+remaining-work version reuse fails closed. Use a fresh reviewed supported repair
+version or host-managed DDL, without rewriting historical records.
+
+## 0.48.1 to 0.48.2: PostgreSQL default alterations
+
+Upgrade ORM/macros together. PostgreSQL plans now execute real default changes
+on existing columns rather than recording their target while leaving the old
+physical default. The change affects future inserts that omit the column; it
+never backfills or rewrites existing values. Static and owned targets share the
+renderer. SQLite and MSSQL behavior, public API signatures and physical/hash
+formats are unchanged. No automatic data migration is introduced.
+
+Review pending plans before applying them: SET/replace/DROP DEFAULT is now
+effective. Actual type changes remove an attached old default before conversion
+and restore the target expression afterward; unsupported data conversions still
+fail and roll back atomically. Existing guards, ownership/RLS boundaries and
+explicit migration policy remain required.
+
+If an older version recorded a default-only migration without reaching its
+physical target, introspect and review the actual default. A fresh replan under
+the same recorded version fails closed when work remains; it is not treated as
+already applied. Do not edit/delete history or silently reuse that version.
+Create a fresh unique migration version for the reviewed guarded repair, apply
+it and confirm introspected default, omitted-value insert behavior, empty replan
+and owned mutation certification. Retain the original history as evidence.
+
+## 0.48.0 to 0.48.1: PostgreSQL string default round trips
+
+Upgrade ORM/macros together. PostgreSQL TEXT literal defaults now compare equal
+to the same complete literal with PostgreSQL's deparsed `::text` cast. This fixes
+unchanged owned-migration replans and runtime mutation certification after a
+successful apply. Different literal values and unsupported SQL/casts remain
+distinct; this does not interpret arbitrary default expressions.
+
+No stored-data, SQL schema, GraphQL SDL or migration-history rewrite is required.
+Default SQL and physical/plan hash representations remain unchanged. Existing
+guarded baselines still detect physical drift; regenerate plans only when the
+actual live baseline changes. Runtime string rendering continues to use standard
+SQL string semantics (`standard_conforming_strings=on` on PostgreSQL).
+Legacy epoch-second DateTime rejection and host-managed Integer timestamps are
+unchanged. The macros patch version keeps the paired packages aligned.
+SQLite CHECK introspection also handles preceding Unicode defaults without a
+UTF-8 boundary panic and retains the original constraint semantics.
+
 ## 0.47.0 to 0.48.0: SQL Server platform TLS
 
 Upgrade ORM/macros together. The `mssql` feature now selects Tiberius native TLS

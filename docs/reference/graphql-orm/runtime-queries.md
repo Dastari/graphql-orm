@@ -3,7 +3,7 @@ title: "Runtime select, filter, order, and keyset reads"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-06
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -79,6 +79,54 @@ let total = connection.total_count;
 The same calls work with SQLite and PostgreSQL. MSSQL returns
 `unsupported_backend` before I/O because its exact runtime row decoder remains
 unsupported; static MSSQL reads are unchanged.
+
+## Checked complete-key reads
+
+Version 0.49 adds `ValidatedRuntimeSchema::runtime_key_read_request` and
+`Database::execute_runtime_key_read` for an owned schema with complete identity.
+Select `sqlite` or `postgres`; `runtime-graphql` and a direct async-graphql
+consumer dependency are not required. Construct `RuntimeKey` using `runtime_key`,
+resolve an exact nonempty projection, and supply an explicit required
+`RuntimePredicate`. An optional additional filter intersects the key and required
+restriction in SQL. Keys may be nonfilterable and nonsortable; identity does not
+grant public Filter permission. Required/optional predicates keep ordinary
+filterability checks.
+
+The constructor checks complete non-null typed keys, declared member ordering,
+schema/collection coherence, projection handles and the supplied query budgets.
+Predicates built under looser limits are rechecked, including list size. Node,
+depth and bind bounds include internal identity/conjunctions. Hosts retain
+input byte-budget responsibility; `RuntimeQueryLimits` adds no byte-limit field.
+Projection is exact: key/tenant columns are not silently returned. One SELECT
+combines every key member and restriction, fetching at most two rows; duplicate
+physical identities return `unexpected_multiplicity` before any record release.
+Paging/cursor knobs are unused and cannot reduce detection to one row. Missing
+and policy-hidden records both return `Ok(None)`.
+
+The immutable Send+Sync request owns checked values and its key's retained schema
+reference, with no principal or GraphQL-context borrow. Fingerprints reject
+mixed/stale handles at construction. They cannot reveal the host's later active
+catalog revision: before each sensitive call, reauthorize and rebuild against
+the current trusted schema. The executor uses existing backend auth-context/native
+RLS and row decoding. SQLite/PostgreSQL are supported; MSSQL returns
+`unsupported_backend` before I/O. No write, journal, retry or stronger transactional
+snapshot is added. Cancellation inherits existing read/connection cleanup.
+
+The new nonexhaustive `RuntimeKeyReadErrorCode` has `invalid_handle`, `invalid_key`,
+`invalid_predicate`, `invalid_projection`, `limit_exceeded`, `unsupported_backend`,
+`unexpected_multiplicity` and `backend_failure`. Public Debug/Display redact SQL,
+values and backend detail; standard error sources are for trusted logs only.
+Existing error enums and record codecs are unchanged.
+
+This is a low-level structural read, not a static entity/field/row-policy wrapper.
+Authenticate and validate current authority, exact projected fields and key-read
+intent first, then supply a required row restriction and coherent database auth.
+Do not authorize a filter solely from `referenced_fields`: folded predicates do
+not retain complete original intent. The [host-neutral example](../../../crates/graphql-orm/examples/runtime_key_read.rs)
+accepts no optional caller filter and denies absent authority before protected
+I/O. Hosts adding filters must authorize original intent before constructing
+predicates. For reusable caller filters, follow the separately checked
+[original intent and offline matching contract](#checked-original-intent-and-offline-matching).
 
 ## Operator and logical semantics
 
@@ -198,3 +246,54 @@ authenticated pages/counts and absence of transaction-local identity leakage.
 MSSQL evidence is compilation/rendering/capability rejection, not live execution.
 Separate page requests still do not pin a snapshot under concurrent writes;
 this correction changes no existing pagination or authorization guarantee.
+
+## Checked original intent and offline matching
+
+Version 0.50 adds `CheckedRuntimeFilter`, owned `RuntimeFilterBuilder`/private nodes,
+value-free `RuntimeFilterIntentVisitor` and explicit-profile `RuntimeRecordMatcher`.
+Core construction needs no GraphQL feature. `graphql::runtime::prepare_runtime_filter`
+requires `runtime-graphql` and reuses canonical lowering rather than another parser.
+All original Boolean grouping (including implicit object AND), field/operator
+occurrences and null/empty entries remain available before optimized SQL folding.
+The artifact does not authorize its own intent. Always visit and authorize the
+entire tree before protected I/O or record disclosure; dependency lists alone
+remain insufficient. See the [migration contract](../../../MIGRATION.md#0490-to-0500-checked-filter-intent-and-offline-matching)
+for exact methods, limits, host prerequisites and compatibility.
+
+The Value entry assumes prior coercion and duplicate-key validation. Existing
+GraphQL parsing and JSON Variables maps can erase wire duplicates before schema
+validation. No argument type or checked artifact proves that upstream validation
+occurred, and no raw parser was added. Repeated occurrences in separate Boolean
+children remain distinct and supported. Tests explicitly separate these cases.
+
+Matching is SQL selection over a host-attested immutable RuntimeRecord, with
+TRUE/FALSE/UNKNOWN and only TRUE selected. It validates every original dependency,
+including fields folded out of empty membership, before any evaluation. Missing
+fields, schema/collection mismatch, invalid kinds and unsupported semantics fail
+safely. Neither short-circuit branches nor constant predicates skip preflight.
+
+The conservative storage profiles are explicit host assertions. SQLite requires
+String TEXT with BINARY UTF-8 comparisons; canonical booleans 0/1, exact i64 INTEGER,
+finite REAL, bytes BLOB, lowercase UUID TEXT and canonical microsecond UTC TEXT.
+PostgreSQL requires UTF-8/C String TEXT or proven VARCHAR, excluding CHAR/bpchar,
+and native typed values. Date-time years 0001–9999 only, no leap seconds; control/NUL
+strings and JSON offline operations are unsupported. MSSQL is unsupported. Row
+decoding may normalize foreign physical storage, so logical kinds alone cannot
+prove these premises. Literal string functions are exact and do not interpret
+percent/underscore as wildcards; owned SQLite/PG conformance compares actual SQL
+selected IDs with matches across empty/long/Unicode operands, NULL logic and
+canonical scalar storage.
+
+Offline matching proves no provenance, current principal/tenant policy or native
+RLS. It cannot establish current SELECT visibility for a deleted image. Existing
+deleted-preimage policy remains default-deny. The host-neutral example explicitly
+authorizes all intent and requires host snapshot/profile premises.
+
+## Emitted bind budgets
+
+Since 0.50.1, ordinary row reads and optional total counts independently enforce
+`RuntimeQueryLimits::max_bind_parameters` against emitted slots before database
+I/O. Logical constructor bounds remain an early check. SQLite suffix comparisons
+emit two slots; lexicographic cursor branches repeat prior equality values on
+SQLite and PostgreSQL. Exceeding the cap returns existing `resource_limit` before
+either query is submitted. SQL and cursor wire forms are unchanged.

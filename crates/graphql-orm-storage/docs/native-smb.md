@@ -3,7 +3,7 @@ title: "Native SMB2/SMB3 Blob Storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,10 +16,46 @@ container, C library, or FFI.
 
 ## Client selection
 
-The backend uses the MIT-licensed pure-Rust `smb` (smb-rs) client. Version
-0.10.2 is pinned with compatible protocol/auth crates because 0.11's
-release-candidate crypto graph conflicts with this crate's optional AWS SDK.
-Re-evaluate the pin when those upstream dependency graphs converge.
+The backend uses the MIT-licensed pure-Rust `smb` (smb-rs) client. Storage
+0.7.4 owns a direct-path copy of registry version 0.10.2 under `vendor/smb`.
+Only the directory-stream runtime hunks from upstream commit
+`f4524d032c8951cc288e1c8231ad68588583abda` are backported: retained notification
+permits avoid a lost wake, and an idle producer observes receiver closure.
+An already in-flight request is not promised immediate cancellation.
+The protocol/authentication companions, cryptographic versions and feature
+selection remain pinned to the existing 0.10.2 family; this is not an adoption
+of the newer SDK's crypto graph.
+
+[Provenance](../vendor/smb/PROVENANCE.json) records the registry archive checksum,
+original file hashes, immutable patch and MIT-license source. The exact upstream
+license is retained as [LICENSE](../vendor/smb/LICENSE). The archive's original
+`Cargo.lock` is preserved as `Cargo.lock.upstream` for provenance only; the
+workspace lockfile governs builds. The six original upstream Markdown files
+remain verbatim under the narrow documentation exception in
+[ADR-0012](../../../docs/decisions/ADR-0012-owner-local-third-party-source-documentation.md).
+The root exclusion and the dependency manifest's empty `[workspace]` isolate
+this third-party package; it does not add a tenth workspace member. Cargo 1.97
+treats literal parent members as overriding nested exclusions, so the root uses
+the exact-set member pattern `crates/graphql-orm-storag[e]`: it matches the same
+single storage directory while allowing the vendor exclusion to take effect.
+
+This workspace is consumed from Git: Cargo resolves the direct relative path
+inside the same reviewed Git source, without a root-only `[patch]` requirement.
+A future crates.io packaging flow needs a separate dependency review; do not let
+Cargo's registry fallback silently replace this backport with unpatched 0.10.2.
+
+`cargo audit` does not audit non-default-registry dependencies, including
+workspace path dependencies and downstream Git-origin dependencies. Preserve normal selected-graph
+audits, and separately look up the original registry `smb` 0.10.2 identity and
+archive checksum against the **same frozen advisory database**. Retain that raw
+result and explicitly assess each advisory against the backported source and
+selected features. Neither this supplemental lookup nor the two-hunk patch is a
+clean audit result or an advisory waiver. Re-run this review for any vendor update.
+
+A future update must review the archive, patch applicability, license and selected
+dependency graph again. Remove this backport when a compatible maintained
+upstream release contains the fix and passes the owned consumer and Samba lanes;
+do not silently substitute an unpatched registry dependency.
 
 It supplies SMB 2.0.2 through 3.1.1 (never SMB1), pure-Rust NTLM credentials
 with optional domain/workgroup, signing, SMB3 encryption, explicit

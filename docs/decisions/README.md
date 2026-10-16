@@ -3,7 +3,7 @@ title: Architecture decision record index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -25,6 +25,8 @@ unchanged and discoverable.
 - [ADR-0009: Nine-package backend-neutral discovery boundaries](ADR-0009-nine-package-backend-neutral-discovery-boundaries.md)
 - [ADR-0010: Independent package and workspace release identities](ADR-0010-independent-package-and-workspace-release-identities.md)
 - [ADR-0011: Generated Federation entity keys](ADR-0011-generated-federation-entity-keys.md)
+
+- [ADR-0012: Owner-local third-party source documentation](ADR-0012-owner-local-third-party-source-documentation.md)
 
 Use the [ADR template](../templates/adr.md) for a genuinely durable decision,
 not for feature chronology or implementation status.

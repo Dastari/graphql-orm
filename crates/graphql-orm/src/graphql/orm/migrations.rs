@@ -45,6 +45,145 @@ fn defaults_equivalent(before: &Option<String>, after: &Option<String>) -> bool 
     }
 }
 
+// PostgreSQL adds ::text when deparsing a TEXT literal default. Compare only
+// complete literals here: changing the shared canonicalizer would change
+// persisted physical/plan hash identities. E-strings emitted by PostgreSQL's
+// deparser escape backslashes and quotes; unsupported escape syntax stays
+// distinct rather than being interpreted as arbitrary SQL.
+fn postgres_text_default_literal(default: &str) -> Option<String> {
+    let expression = super::dialect::canonicalize_column_default_expression(default);
+    let bytes = expression.as_bytes();
+    let escaped = matches!(bytes.first(), Some(b'e' | b'E'));
+    let mut index = usize::from(escaped);
+    if bytes.get(index) != Some(&b'\'') {
+        return None;
+    }
+    index += 1;
+    let mut value = String::new();
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                index += 1;
+                if bytes.get(index) == Some(&b'\'') {
+                    value.push('\'');
+                    index += 1;
+                } else {
+                    let suffix = expression[index..].trim();
+                    return (suffix.is_empty() || suffix.eq_ignore_ascii_case("::text"))
+                        .then_some(value);
+                }
+            }
+            b'\\' if escaped => {
+                index += 1;
+                match bytes.get(index) {
+                    Some(b'\\') => value.push('\\'),
+                    Some(b'\'') => value.push('\''),
+                    _ => return None,
+                }
+                index += 1;
+            }
+            _ => {
+                let character = expression[index..].chars().next()?;
+                value.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod postgres_text_default_tests {
+    use super::*;
+
+    fn column(default: &str) -> ColumnModel {
+        ColumnModel {
+            name: "label".into(),
+            sql_type: "TEXT".into(),
+            spatial: None,
+            nullable: false,
+            is_primary_key: false,
+            is_unique: false,
+            default: Some(default.into()),
+        }
+    }
+
+    #[test]
+    fn compares_complete_text_literals_without_changing_hash_inputs() {
+        for (plain, deparsed) in [
+            ("''", "''::text"),
+            ("'O''Reilly'", "'O''Reilly'::text"),
+            ("'雪🦀'", "'雪🦀'::text"),
+            ("'x::text'", "'x::text'::text"),
+            ("'line\n\tend'", "'line\n\tend'::text"),
+            (r"'path\file'", r"E'path\\file'::text"),
+            ("'quote'''", r"E'quote\''::text"),
+        ] {
+            let before = column(deparsed);
+            let after = column(plain);
+            assert!(!column_changed_for_backend(
+                DatabaseBackend::Postgres,
+                &before,
+                &after
+            ));
+            assert!(!column_changed_for_backend(
+                DatabaseBackend::Postgres,
+                &after,
+                &before
+            ));
+            assert!(column_changed_for_backend(
+                DatabaseBackend::Sqlite,
+                &before,
+                &after
+            ));
+            assert_eq!(before.default.as_deref(), Some(deparsed));
+            assert_eq!(after.default.as_deref(), Some(plain));
+            assert_eq!(
+                super::super::dialect::canonicalize_column_default_expression(deparsed),
+                deparsed
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_different_values_types_and_unsupported_sql() {
+        for expression in [
+            "'other'::text",
+            "'x'::varchar",
+            "'x'::name",
+            "'x'::text || ''",
+            "lower('x')",
+            "'x'::text::text",
+            "'x",
+            r"E'\x78'::text",
+            r"E'\n'::text",
+        ] {
+            assert!(
+                column_changed_for_backend(
+                    DatabaseBackend::Postgres,
+                    &column(expression),
+                    &column("'x'")
+                ),
+                "{expression}"
+            );
+        }
+        let mut nontext = column("'x'::text");
+        nontext.sql_type = "VARCHAR".into();
+        let mut target = nontext.clone();
+        target.default = Some("'x'".into());
+        assert!(column_changed_for_backend(
+            DatabaseBackend::Postgres,
+            &nontext,
+            &target
+        ));
+        assert!(column_changed_for_backend(
+            DatabaseBackend::Postgres,
+            &column("'x::text'"),
+            &column("'x'")
+        ));
+    }
+}
+
 #[cfg(feature = "sqlite")]
 fn parse_sqlite_check_constraints(
     create_sql: &str,
@@ -108,7 +247,7 @@ fn parse_sqlite_check_constraints(
                 index = (index + 2).min(bytes.len());
             }
             _ if index + 5 <= bytes.len()
-                && create_sql[index..index + 5].eq_ignore_ascii_case("check")
+                && bytes[index..index + 5].eq_ignore_ascii_case(b"check")
                 && (index == 0 || !identifier_byte(bytes[index - 1]))
                 && (index + 5 == bytes.len() || !identifier_byte(bytes[index + 5])) =>
             {
@@ -179,6 +318,19 @@ fn parse_sqlite_check_constraints(
     }
     constraints.sort();
     Ok(constraints)
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod sqlite_unicode_check_tests {
+    #[test]
+    fn unicode_default_before_check_retains_the_constraint() {
+        let checks = super::parse_sqlite_check_constraints(
+            "CREATE TABLE notes (label TEXT DEFAULT '雪🦀', score INTEGER CONSTRAINT positive CHECK (score >= 0))",
+        ).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].name, "positive");
+        assert_eq!(checks[0].expression, "score >= 0");
+    }
 }
 
 pub(crate) fn canonical_check_tokens(expression: &str) -> Option<Vec<String>> {
@@ -592,6 +744,35 @@ fn postgres_timestamptz_alias(sql_type: &str) -> bool {
         || sql_type.eq_ignore_ascii_case("timestamp with time zone")
 }
 
+// Constraint-backed column flags are not implemented by ALTER TYPE/nullability.
+// A standalone unique index is separate metadata and never repairs these flags.
+pub(super) fn postgres_alter_metadata_supported(before: &ColumnModel, after: &ColumnModel) -> bool {
+    let same_type = before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+        || (postgres_timestamptz_alias(&before.sql_type)
+            && postgres_timestamptz_alias(&after.sql_type));
+    before.is_primary_key == after.is_primary_key
+        && before.is_unique == after.is_unique
+        && (before.spatial == after.spatial || !same_type)
+}
+
+pub(super) fn validate_migration_step_capabilities<'a>(
+    backend: DatabaseBackend,
+    steps: impl Iterator<Item = StepRef<'a>>,
+) -> crate::Result<()> {
+    if backend == DatabaseBackend::Postgres {
+        for step in steps {
+            if let StepRef::AlterColumn { before, after, .. } = step {
+                if !postgres_alter_metadata_supported(before, after) {
+                    return Err(sqlx::Error::Protocol(
+                        "unsupported PostgreSQL column metadata alteration".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
     before: &ColumnModel,
@@ -624,7 +805,21 @@ pub(super) fn column_changed_for_backend(
         return true;
     }
 
-    !defaults_equivalent(&before.default, &after.default)
+    if defaults_equivalent(&before.default, &after.default) {
+        return false;
+    }
+    if backend == DatabaseBackend::Postgres
+        && before.sql_type.eq_ignore_ascii_case("TEXT")
+        && after.sql_type.eq_ignore_ascii_case("TEXT")
+        && let (Some(before), Some(after)) = (&before.default, &after.default)
+        && let (Some(before), Some(after)) = (
+            postgres_text_default_literal(before),
+            postgres_text_default_literal(after),
+        )
+    {
+        return before != after;
+    }
+    true
 }
 
 fn order_tables_by_foreign_keys<'a>(
@@ -1853,26 +2048,59 @@ pub(super) fn render_migration_step_view(
         },
         StepRef::AlterColumn {
             table_name,
-            before: _,
+            before,
             after,
         } => match backend {
-            DatabaseBackend::Postgres => vec![
-                format!(
-                    "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                    table_name, after.name, after.sql_type
-                ),
-                if after.nullable {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                        table_name, after.name
-                    )
-                } else {
-                    format!(
-                        "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                        table_name, after.name
-                    )
-                },
-            ],
+            DatabaseBackend::Postgres => {
+                let type_changed = !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+                    && !(postgres_timestamptz_alias(&before.sql_type)
+                        && postgres_timestamptz_alias(&after.sql_type));
+                // Reuse the planner's backend comparison, including narrow
+                // PostgreSQL deparse equivalences, without changing hash inputs.
+                let mut default_target = (**before).clone();
+                default_target.default = after.default.clone();
+                let default_changed =
+                    column_changed_for_backend(DatabaseBackend::Postgres, before, &default_target);
+                let mut statements = Vec::new();
+                // PostgreSQL may reject a type conversion while its old default
+                // remains attached, even when the desired new default is valid.
+                if type_changed && before.default.is_some() {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                        table_name, before.name
+                    ));
+                }
+                if type_changed {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
+                        table_name, after.name, after.sql_type
+                    ));
+                }
+                if before.nullable != after.nullable {
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
+                        table_name,
+                        after.name,
+                        if after.nullable { "DROP" } else { "SET" }
+                    ));
+                }
+                if default_changed || type_changed {
+                    if let Some(default) = &after.default {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
+                            table_name,
+                            after.name,
+                            render_default_clause(backend, default)
+                        ));
+                    } else if before.default.is_some() && !type_changed {
+                        statements.push(format!(
+                            "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                            table_name, after.name
+                        ));
+                    }
+                }
+                statements
+            }
             DatabaseBackend::Sqlite => vec![format!(
                 "-- sqlite requires table rebuild to alter column {} on {}",
                 after.name, table_name

@@ -10,11 +10,33 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.50.1 adds checked original filter intent and conservative offline
+runtime-record matching in the core runtime. Upgrade ORM/macros together; no
+stored-data or schema migration is required. Matching does not authorize a row,
+prove snapshot provenance or establish native RLS for a deleted record. See
+[the filter migration guide](../../MIGRATION.md#0490-to-0500-checked-filter-intent-and-offline-matching).
+
+The paired 0.48.3 release rejects unsupported PostgreSQL column constraint-flag
+or spatial-metadata-only alterations before managed target DDL/history rows.
+Legacy staged planning may initialize empty bookkeeping; direct/owned paths
+reject before runtime preparation. Infallible previews remain structural views;
+see the root migration guide for the supported boundary.
+
+PostgreSQL migration default alterations are corrected in the paired 0.48.2
+runtime/macros release: future omitted-value inserts use the changed default;
+existing rows and recorded migration history are not rewritten. See the root
+migration guide for guarded repair of previously incomplete applications.
+
+
 `graphql-orm` turns annotated Rust structs into typed database metadata,
 `async-graphql` objects, query/filter/order inputs, and—when requested—CRUD
 resolver types. It supports managed SQLite and PostgreSQL schemas plus
 read-only or deliberately `ExternalWritable` SQL Server integration for
 externally owned tables.
+
+Version 0.48.1 fixes PostgreSQL TEXT literal-default replanning and owned runtime
+certification while retaining physical hashes, migration history and timestamp
+contracts. See the [migration guide](../../MIGRATION.md).
 
 It is not a database server, migration runner, HTTP framework, authorization
 system, or a promise that a generated field is safe to expose. Applications
@@ -45,7 +67,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.48.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.1", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

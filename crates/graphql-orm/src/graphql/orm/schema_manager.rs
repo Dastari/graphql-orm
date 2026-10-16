@@ -8,7 +8,9 @@ use super::core::{
 use super::execution::{
     applied_migration_records, applied_version_set, ensure_managed_policy, ensure_planning_policy,
 };
-use super::migrations::{build_migration_plan, classify_migration_steps};
+use super::migrations::{
+    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
+};
 use super::owned_schema::{SchemaRef, StepRef};
 use super::rls::{build_rls_policy_plan, validate_rls_models};
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
@@ -128,14 +130,14 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         ensure_planning_policy(self.policy(), "plan schema migration")?;
         target.validate_physical_contract()?;
         let planned_current = schema_current_for_plan(current, target, options);
-        Ok(plan_migration_for_backend::<B>(
+        plan_migration_for_backend::<B>(
             version.into(),
             description.into(),
             Some(current.stable_hash()),
             target.stable_hash(),
             &planned_current,
             target,
-        ))
+        )
     }
 
     /// Introspect the live database and plan a migration to generated entity metadata.
@@ -214,7 +216,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             target.schema.stable_hash(),
             &planned_current,
             &target.schema,
-        );
+        )?;
         let rls = build_rls_policy_plan(B::DIALECT, self.policy(), &target.rls);
         let mut statements = migration.statements.clone();
         statements.extend(rls.statements.clone());
@@ -258,7 +260,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         B: MigrationBackend,
     {
         ensure_managed_policy(self.policy(), "apply schema migration")?;
-        reject_disallowed_risks(plan, &options)?;
+        reject_disallowed_risks(B::DIALECT, plan, &options)?;
         if let Some(expected) = &options.expected_current_schema_hash {
             if plan.source_schema_hash.as_ref() != Some(expected) {
                 return Err(sqlx::Error::Protocol(format!(
@@ -330,7 +332,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         B: MigrationBackend,
     {
         ensure_managed_policy(self.policy(), "apply schema target")?;
-        reject_disallowed_risks(&plan.migration, &options)?;
+        reject_disallowed_risks(B::DIALECT, &plan.migration, &options)?;
         if let Some(expected) = &options.expected_current_schema_hash {
             if plan.source_schema_hash.as_ref() != Some(expected) {
                 return Err(sqlx::Error::Protocol(format!(
@@ -420,7 +422,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
                 stage.target_schema_hash.clone(),
                 &current_schema,
                 &stage.target_schema,
-            );
+            )?;
             current_schema = stage.target_schema.clone();
             stages.push(planned);
         }
@@ -806,11 +808,12 @@ fn plan_migration_for_backend<B: OrmBackend>(
     target_schema_hash: String,
     current: &SchemaModel,
     target: &SchemaModel,
-) -> PlannedMigration {
+) -> crate::Result<PlannedMigration> {
     let plan = build_migration_plan(B::DIALECT, current, target);
+    validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
     let steps = classify_migration_steps(&plan.steps);
     let plan_hash = stable_plan_hash(B::DIALECT.name(), &steps, &plan.statements);
-    PlannedMigration {
+    Ok(PlannedMigration {
         version,
         description,
         backend: B::DIALECT.name(),
@@ -819,10 +822,18 @@ fn plan_migration_for_backend<B: OrmBackend>(
         plan_hash,
         steps,
         statements: plan.statements,
-    }
+    })
 }
 
-fn reject_disallowed_risks(plan: &PlannedMigration, options: &ApplyOptions) -> crate::Result<()> {
+fn reject_disallowed_risks(
+    backend: super::DatabaseBackend,
+    plan: &PlannedMigration,
+    options: &ApplyOptions,
+) -> crate::Result<()> {
+    validate_migration_step_capabilities(
+        backend,
+        plan.steps.iter().map(|step| StepRef::from(&step.step)),
+    )?;
     reject_migration_risks(
         &plan.version,
         plan.steps

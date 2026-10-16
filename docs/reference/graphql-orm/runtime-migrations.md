@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-01
+last_reviewed: 2026-10-15
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -91,6 +91,58 @@ equivalent, including required/nullable fields with no default or
 spellings. Timezone-free timestamps and precision changes remain distinct.
 This comparison does not reinterpret storage or relax legacy DateTime default
 conversion checks.
+
+## PostgreSQL default alteration boundary
+
+In 0.48.2, shared static/owned PostgreSQL plans execute supported real default
+changes on existing columns: SET, replacement and DROP DEFAULT. A default-only
+change does not reissue unchanged TYPE or nullability DDL. Actual type conversion
+first detaches an attached old default and restores the desired expression
+afterward. Equivalent built-in type aliases and reviewed TEXT literal deparse
+spellings do not trigger default rewrites during a nullability-only alteration.
+Existing rendering/quoting and physical/hash formats remain unchanged.
+
+This changes future omitted-value inserts, not existing row values. Failed DDL
+rolls back with history; successful supported changes should produce empty fresh
+replans and permit explicit owned mutation certification. This is not a new
+generic automatic postapply certification contract or support for every metadata
+transition. Constraint-backed uniqueness/primary-key flags and spatial-only
+metadata require separately supported operations; do not infer they are repaired
+by default rendering.
+
+Previously recorded ineffective default changes are not silently repaired or
+history-rewritten. A recorded version with remaining planned work fails closed.
+Use a fresh reviewed repair version, retain history and confirm physical default,
+omitted-value behavior and replan. See [the migration guide](../../../MIGRATION.md#0481-to-0482-postgresql-default-alterations).
+
+## Unsupported PostgreSQL column alterations
+
+In 0.48.3, existing fallible managed planning/application rejects unsupported
+changes to per-column primary-key or constraint-backed unique flags, and spatial
+metadata changes with the same SQL type expression. Same-type uses the existing
+case-insensitive comparison or exact `TIMESTAMPTZ`/`timestamp with time zone`
+aliases. Direct/owned rejection precedes managed runtime/history preparation;
+`allow_destructive` cannot bypass capability admission. Owned paths use
+`InvalidPhysicalContract`; static managers use a fixed `Protocol` error. Legacy
+staged/ABI planning may initialize an empty validated bookkeeping table while
+reading versions, but admits the complete stage sequence before target DDL or
+migration history rows.
+
+Changed SQL type expressions retain the existing renderer path. This comparison
+does not prove semantic type difference or `sql_type`/spatial metadata coherence:
+whitespace, other aliases and incoherent host declarations remain outside this
+bounded guard. Trusted direct `SchemaModel`/`OwnedSchemaModel` hosts own that
+coherence; the runtime IR rejects all spatial metadata. The geometry positive
+regression proves planning/rendering, not live conversion or target certification.
+This adds no new DDL or automatic postapply contract.
+
+PostgreSQL column uniqueness is introspected from unique constraints, not
+standalone unique indexes. Explicit standalone unique index operations with
+unchanged column flags remain supported and do not repair a flag alteration.
+Low-level infallible diff/render/build functions remain structural previews, not
+executable capability certificates. Trusted raw SQL does not gain this managed
+preflight. For existing recorded ineffective work, retain history and use a fresh
+reviewed supported repair; see [the migration guide](../../../MIGRATION.md#0482-to-0483-unsupported-postgresql-alterations-fail-closed).
 
 ## Ownership, composition and dependencies
 
@@ -204,6 +256,15 @@ Integer `CurrentTimestamp` uses backend epoch seconds. SQLite datetime defaults
 emit UTC RFC 3339 with six fractional digits (`strftime` has millisecond resolution,
 so the final three are zero); PostgreSQL uses its native timestamp default. SQL
 NULL and JSON null semantics remain those of the runtime record API.
+
+PostgreSQL TEXT string defaults compare complete quoted literals with the same
+literal deparsed with `::text`, including doubled quotes, Unicode and the
+deparser's E-string backslash/quote escaping. Cast-looking text inside a literal
+is data. This comparison does not rewrite the target, introspected expression,
+physical/plan hashes or history; genuinely different literals and unsupported
+casts/expressions remain distinct. Runtime literal SQL assumes PostgreSQL's
+standard string mode (`standard_conforming_strings=on`); nonstandard session
+escape modes are not newly supported. SQLite default behavior is unchanged.
 
 Static-to-runtime conversion rejects legacy epoch-second defaults on fields
 marked DateTime with a scoped `RuntimeSchemaDiagnosticCode::UnsupportedDefault`.

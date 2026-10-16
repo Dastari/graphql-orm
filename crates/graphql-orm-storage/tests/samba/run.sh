@@ -115,46 +115,84 @@ for port in map(int, sys.argv[1:]):
         raise SystemExit('owned Samba fixture did not become ready')
 PYREADY
 
+# Cargo exit zero can mean zero matching tests. Require the exact native case
+# and completion; restart diagnostics may split the test-start/ok line.
+run_test() {
+  local expected=$1 output status
+  shift
+  if output=$("$@" 2>&1); then status=0; else status=$?; fi
+  printf '%s\n' "$output"
+  if (( status != 0 )); then return "$status"; fi
+  printf '%s\n' "$output" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+summaries = re.findall(r"^test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;", text, re.M)
+if summaries != [("1", "0", "0")] or not re.search(r"^test " + re.escape(sys.argv[1]) + r" \.\.\.", text, re.M):
+    raise SystemExit("expected exactly one completed native test: " + sys.argv[1])
+' "$expected"
+}
+
 cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --locked --features smb --test smb_integration \
-  samba_rejects_invalid_password -- --ignored --nocapture
+  run_test samba_rejects_invalid_password cargo test --locked --features smb --test smb_integration \
+  samba_rejects_invalid_password -- --ignored --exact --nocapture
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --locked --features smb --test smb_integration \
-  samba_round_trip_streaming_listing_and_atomic_create -- --ignored --nocapture
+  run_test samba_round_trip_streaming_listing_and_atomic_create cargo test --locked --features smb --test smb_integration \
+  samba_round_trip_streaming_listing_and_atomic_create -- --ignored --exact --nocapture
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --locked --features smb --test smb_integration \
-  samba_oversized_chunk_cancellation_and_concurrency_matrix -- --ignored --nocapture
+  run_test samba_oversized_chunk_cancellation_and_concurrency_matrix cargo test --locked --features smb --test smb_integration \
+  samba_oversized_chunk_cancellation_and_concurrency_matrix -- --ignored --exact --nocapture
 
-if docker exec "$NORMAL_ID" sh -c 'find /share -path /share/.deleted -prune -o -type f -name "*.uploading" -print -quit | grep -q .'; then
-  echo "cancelled or failed upload left an SMB temporary file" >&2
-  exit 1
+# Empty output from a successful find is clean; Docker/find failures are not.
+if uploading=$(docker exec "$NORMAL_ID" find /share -path /share/.deleted -prune -o -type f -name '*.uploading' -print -quit); then
+  if [[ -n $uploading ]]; then
+    echo "cancelled or failed upload left an SMB temporary file" >&2
+    exit 1
+  fi
+else
+  status=$?
+  echo "could not inspect owned Samba temporary-file cleanup" >&2
+  exit "$status"
 fi
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$ENCRYPTED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_REQUIRE_ENCRYPTION=1 \
-  cargo test --locked --features smb --test smb_integration \
-  samba_round_trip_streaming_listing_and_atomic_create -- --ignored --nocapture
+  run_test samba_round_trip_streaming_listing_and_atomic_create cargo test --locked --features smb --test smb_integration \
+  samba_round_trip_streaming_listing_and_atomic_create -- --ignored --exact --nocapture
 
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_EXPECT_MAX_WRITE=65536 \
-  cargo test --locked --features smb --test smb_integration \
-  samba_constrained_max_write_handles_oversized_input_chunk -- --ignored --nocapture
+  run_test samba_constrained_max_write_handles_oversized_input_chunk cargo test --locked --features smb --test smb_integration \
+  samba_constrained_max_write_handles_oversized_input_chunk -- --ignored --exact --nocapture
 
 cd "$WORKSPACE_ROOT/crates/graphql-orm-backup"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
-  cargo test --locked --no-default-features --features smb --test smb_repository -- --ignored --nocapture
+  run_test full_smb_snapshot_lifecycle_and_locking cargo test --locked --no-default-features --features smb --test smb_repository full_smb_snapshot_lifecycle_and_locking -- --ignored --exact --nocapture
 
 cd "$STORAGE_ROOT"
 SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
 SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
 SMB_TEST_CONTAINER_NAME="$NORMAL_ID" SMB_TEST_FIXTURE_RUN="$RUN_ID" \
-  cargo test --locked --features smb --test smb_integration \
-  samba_reconnects_after_server_restart -- --ignored --nocapture
+  run_test samba_reconnects_after_server_restart cargo test --locked --features smb --test smb_integration \
+  samba_reconnects_after_server_restart -- --ignored --exact --nocapture
+
+
+# Actual SDK directory-stream regressions; the original seven cases above stay intact.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test sdk_directory_multibatch_eof_exact_names cargo test --locked --features smb --test smb_directory_stream \
+  sdk_directory_multibatch_eof_exact_names -- --ignored --exact --nocapture
+
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test sdk_directory_drop_releases_directory_arc cargo test --locked --features smb --test smb_directory_stream \
+  sdk_directory_drop_releases_directory_arc -- --ignored --exact --nocapture

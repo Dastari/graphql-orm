@@ -17,6 +17,8 @@ mod owned_foreign_keys;
 mod owned_schema;
 mod query;
 mod rls;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod runtime_key_read;
 mod runtime_migration;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod runtime_mutation;
@@ -48,6 +50,8 @@ pub use operation_metadata::*;
 pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
 pub use query::*;
 pub use rls::*;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub use runtime_key_read::*;
 pub use runtime_migration::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use runtime_mutation::*;

@@ -60,16 +60,38 @@ if args[0] == 'rm':
 if args[0] == 'port':
     assert args[1] in state['containers']
     print('127.0.0.1:' + state['containers'][args[1]]['port']); sys.exit(0)
-if args[0] == 'exec': sys.exit(1)  # no leftover upload file
+if args[0] == 'exec':
+    assert args[1] == 'immutable-fixture-id-1'
+    assert args[2:] == ['find', '/share', '-path', '/share/.deleted', '-prune', '-o', '-type', 'f', '-name', '*.uploading', '-print', '-quit']
+    if mode == 'exec_failure': sys.exit(37)
+    if mode == 'find_failure': sys.exit(38)
+    if mode == 'leftover_upload': print('/share/test.uploading')
+    sys.exit(0)
 raise AssertionError('Unexpected Docker invocation: ' + repr(args))
 '''
 FAKE_CARGO = r'''
 import json, os, sys
 from pathlib import Path
+args = sys.argv[1:]
+mode = os.environ.get('FAKE_MODE', '')
 with (Path(os.environ['FAKE_ROOT']) / 'cargo-calls.jsonl').open('a') as log:
-    log.write(json.dumps({'args': sys.argv[1:], 'port': os.environ.get('SMB_TEST_PORT'),
+    log.write(json.dumps({'args': args, 'port': os.environ.get('SMB_TEST_PORT'),
                          'container': os.environ.get('SMB_TEST_CONTAINER_NAME'),
                          'fixture_run': os.environ.get('SMB_TEST_FIXTURE_RUN')}) + '\n')
+assert '--exact' in args and '--ignored' in args
+if mode == 'cargo_failure': sys.exit(74)
+name = args[args.index('--') - 1]
+if mode == 'zero_tests':
+    print('test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;')
+elif mode == 'wrong_test':
+    print('test unrelated_case ... ok')
+    print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;')
+else:
+    if name == 'samba_reconnects_after_server_restart':
+        print('test ' + name + ' ... server restart diagnostic\nok')
+    else:
+        print('test ' + name + ' ... ok')
+    print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;')
 '''
 
 
@@ -107,12 +129,13 @@ class FixtureOwnershipTests(unittest.TestCase):
                 self.assertIsNone(state)
                 self.assertEqual(cargo, [])
 
-    def test_success_preserves_seven_cases_and_deletes_only_owned_ids(self):
+    def test_success_preserves_seven_cases_adds_sdk_cases_and_deletes_only_owned_ids(self):
         result, calls, state, cargo = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(cargo), 7)
+        self.assertEqual(len(cargo), 9)
         self.assertTrue(all(item["port"].isdigit() for item in cargo))
-        self.assertEqual(cargo[-1]["container"], "immutable-fixture-id-1")
+        self.assertEqual(cargo[6]["container"], "immutable-fixture-id-1")
+        self.assertTrue(all(item["container"] is None for item in cargo[7:]))
         runs = [args for args in calls if args[0] == "run"]
         self.assertEqual(len(runs), 3)
         mappings = [args[args.index("-p") + 1] for args in runs]
@@ -121,19 +144,47 @@ class FixtureOwnershipTests(unittest.TestCase):
         self.assertEqual(len(set(mappings)), 3)
         self.assertTrue(all("--pull=never" in args for args in runs))
         expected_run = runs[0][runs[0].index("--label") + 1].split("=", 1)[1]
-        self.assertEqual(cargo[-1]["fixture_run"], expected_run)
+        self.assertTrue(all(item["fixture_run"] == expected_run for item in cargo[6:]))
         self.assertEqual(len(expected_run), 32)
-        self.assertTrue(all(item["fixture_run"] is None for item in cargo[:-1]))
+        self.assertTrue(all(item["fixture_run"] is None for item in cargo[:6]))
         normal_port = mappings[0].split(":")[1]
-        self.assertEqual(cargo[-1]["port"], normal_port)
+        self.assertTrue(all(item["port"] == normal_port for item in cargo[6:]))
+        expected_names = [
+            "samba_rejects_invalid_password",
+            "samba_round_trip_streaming_listing_and_atomic_create",
+            "samba_oversized_chunk_cancellation_and_concurrency_matrix",
+            "samba_round_trip_streaming_listing_and_atomic_create",
+            "samba_constrained_max_write_handles_oversized_input_chunk",
+            "full_smb_snapshot_lifecycle_and_locking",
+            "samba_reconnects_after_server_restart",
+            "sdk_directory_multibatch_eof_exact_names",
+            "sdk_directory_drop_releases_directory_arc",
+        ]
+        self.assertEqual([item["args"][item["args"].index("--") - 1] for item in cargo], expected_names)
         self.assertEqual(state, {"containers": {}, "volume": None})
         removals = [args[-1] for args in calls if args[0] == "rm"]
         self.assertEqual(set(removals), {"immutable-fixture-id-1", "immutable-fixture-id-2", "immutable-fixture-id-3"})
 
+    def test_inspection_errors_and_leftovers_fail_closed_and_cleanup(self):
+        for mode, expected in [("exec_failure", 37), ("find_failure", 38), ("leftover_upload", 1)]:
+            with self.subTest(mode=mode):
+                result, calls, state, cargo = self.run_fixture(mode)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(len(cargo), 3)
+                self.assertEqual(state, {"containers": {}, "volume": None})
+
+    def test_zero_or_wrong_native_test_and_cargo_failure_are_not_success(self):
+        for mode, expected in [("zero_tests", 1), ("wrong_test", 1), ("cargo_failure", 74)]:
+            with self.subTest(mode=mode):
+                result, calls, state, cargo = self.run_fixture(mode)
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(len(cargo), 1)
+                self.assertEqual(state, {"containers": {}, "volume": None})
+
     def test_changed_ownership_is_not_deleted(self):
         result, calls, state, cargo = self.run_fixture("ownership_mismatch")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len(cargo), 7)
+        self.assertEqual(len(cargo), 9)
         removals = [args[-1] for args in calls if args[0] == "rm"]
         self.assertNotIn("immutable-fixture-id-1", removals)
         self.assertEqual(set(state["containers"]), {"immutable-fixture-id-1"})

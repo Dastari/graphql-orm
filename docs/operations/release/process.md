@@ -3,7 +3,7 @@ title: Workspace release process
 kind: runbook
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-13
+last_reviewed: 2026-10-15
 review_by: 2026-11-11
 supersedes: []
 ---
@@ -106,6 +106,20 @@ the documented package support contracts.
    cargo fmt --all -- --check
    ```
 
+   The SemVer runner explicitly selects private packages and retains native
+   per-package check counts. A successful tool exit without those records is
+   not accepted. It preserves the tool's inferred release type: an intentionally
+   breaking version increment can permit every lint and produce zero checks.
+   Such a lane is reported separately as version-policy permission, never as
+   API compatibility proof. For an independently approved additive-only gate,
+   run an explicit package check with `--release-type minor --verbose` and
+   require positive native check counts. Default features remain enabled;
+   backend and provider compatibility still require their separate lanes. The
+   hosted SemVer steps likewise explicitly select each package, enable verbose
+   output and use Rust1.97.1. The pinned action still downloads the latest native
+   tool unless one is already installed; retain its actual tool identity and
+   native check output when assessing a hosted result.
+
 8. Run every package, backend, provider, Clippy, Rustdoc, SemVer, migration,
    restore, and release-policy lane required by the root and package-local
    instructions. `scripts/check-ai-provider-lanes.sh` exercises each provider
@@ -115,6 +129,11 @@ the documented package support contracts.
    hosted workflow success alone is insufficient.
 9. Review the complete diff, dependency trees, generated schema/manifest
    changes, documentation links, and migration statements.
+   Reconcile unsuppressed dependency scans with the
+   [dependency security disposition](../../reference/dependency-security-disposition.md)
+   for the exact release source, unified features and advisory snapshot. Preserve
+   nonzero findings and changed applicability conditions; an earlier frozen scan
+   or excluded call path does not establish a clean graph or runtime acceptance.
 10. In the pull request, select exactly one documentation-impact option from
     the repository template. Release changes normally select
     `Documentation updated`; CI rejects missing or ambiguous declarations.

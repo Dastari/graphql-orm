@@ -1,0 +1,2965 @@
+{
+  "advisory_db": {
+    "commit_time": "2026-10-14T22:18:32+02:00",
+    "fresh_clone_record": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/clone.json",
+    "frozen_during_scans": true,
+    "latest_advisory_claim": false,
+    "revision": "edb58f5974b83eb8302332821cb6d389777aa351"
+  },
+  "archive_scope": "Exact eight raw audit outputs are bundled unchanged; large full metadata and tree outputs remain external and are bound by selectors, statuses and SHA256. This historical record is not current release authorization or a latest-advisory claim.",
+  "auth": {
+    "origin_main_at_start": "59c0a38f82e8c75459474238799a81f29d4ffa58",
+    "package_version": "0.21.3",
+    "source_commit": "59c0a38f82e8c75459474238799a81f29d4ffa58",
+    "source_tree": "76c3ff964b512e4f477fea1a7a0ec64848a8f065",
+    "worktree": "/home/toby/dev/security-remediation-worktrees/auth-release-final"
+  },
+  "clean_audit": false,
+  "collection_complete": true,
+  "core_macros_version": "0.50.1",
+  "delta_vs_4059": {
+    "advisory_db": "edb58f5974b83eb8302332821cb6d389777aa351",
+    "advisory_delta": {
+      "auth": {
+        "added": [],
+        "removed": []
+      },
+      "backend-coexistence": {
+        "added": [],
+        "removed": []
+      },
+      "cross-crate-relations": {
+        "added": [],
+        "removed": []
+      },
+      "federation-end-to-end": {
+        "added": [],
+        "removed": [
+          {
+            "advisory": null,
+            "category": "yanked",
+            "package": "yoke-derive",
+            "version": "0.8.3"
+          }
+        ]
+      },
+      "migration-api-compatibility": {
+        "added": [],
+        "removed": [
+          {
+            "advisory": null,
+            "category": "yanked",
+            "package": "yoke-derive",
+            "version": "0.8.3"
+          }
+        ]
+      },
+      "relationship-capability": {
+        "added": [],
+        "removed": []
+      },
+      "repository-aggregate-consumer": {
+        "added": [],
+        "removed": [
+          {
+            "advisory": null,
+            "category": "yanked",
+            "package": "yoke-derive",
+            "version": "0.8.3"
+          }
+        ]
+      },
+      "root": {
+        "added": [],
+        "removed": []
+      }
+    },
+    "artifact_hashes": {
+      "artifact-sha256.json": "0e6f7494dc3a49531ded6b85814d5922e5a2f43ec0633a868047b2b80562a5d7",
+      "provenance.json": "49326564522cbeca0a2a7b6371a1aa92c3fc4a02dd3d4d2d07a8b1f93071bf14",
+      "summary.json": "7c841a016620b959e7d2cc290d9eef895ed3b5d5cee7c552d3b2630ddf870ce8"
+    },
+    "audit_inputs": 8,
+    "auth_revision": "59c0a38f82e8c75459474238799a81f29d4ffa58",
+    "baseline_packet": "/home/toby/dev/audit-results/remediation/final-dependencies/4059d10026b9-20261015T095224Z-qx_hm9ea",
+    "clean_audit": false,
+    "cleanup_evidence_limit": "Wrapper END records aggregate status1 from collector findings; cleanup exit is not separately logged. Launcher log has no cleanup diagnostic; this collector creates no services. Do not label END1 as independent cleanup0.",
+    "collection_complete": true,
+    "collector_exit": 1,
+    "errors": [],
+    "final_packet": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq",
+    "lock_changes": {
+      "auth": [],
+      "backend-coexistence": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        }
+      ],
+      "cross-crate-relations": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        }
+      ],
+      "federation-end-to-end": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        },
+        {
+          "fields": {
+            "checksum": {
+              "after": "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71",
+              "before": "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+            },
+            "version": {
+              "after": "0.8.4",
+              "before": "0.8.3"
+            }
+          },
+          "package": "yoke-derive",
+          "source": "registry+https://github.com/rust-lang/crates.io-index"
+        }
+      ],
+      "migration-api-compatibility": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        },
+        {
+          "fields": {
+            "checksum": {
+              "after": "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71",
+              "before": "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+            },
+            "version": {
+              "after": "0.8.4",
+              "before": "0.8.3"
+            }
+          },
+          "package": "yoke-derive",
+          "source": "registry+https://github.com/rust-lang/crates.io-index"
+        }
+      ],
+      "relationship-capability": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        }
+      ],
+      "repository-aggregate-consumer": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        },
+        {
+          "fields": {
+            "checksum": {
+              "after": "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71",
+              "before": "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+            },
+            "version": {
+              "after": "0.8.4",
+              "before": "0.8.3"
+            }
+          },
+          "package": "yoke-derive",
+          "source": "registry+https://github.com/rust-lang/crates.io-index"
+        }
+      ],
+      "root": [
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm",
+          "source": null
+        },
+        {
+          "fields": {
+            "version": {
+              "after": "0.50.1",
+              "before": "0.48.0"
+            }
+          },
+          "package": "graphql-orm-macros",
+          "source": null
+        }
+      ]
+    },
+    "metadata_inputs": 8,
+    "resource_run": "d6a39a6a739548529cb48006b6a6f0ad",
+    "retained_findings": {
+      "auth": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        }
+      ],
+      "backend-coexistence": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.4"
+        }
+      ],
+      "cross-crate-relations": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.4"
+        }
+      ],
+      "federation-end-to-end": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2024-0449",
+          "category": "unmaintained",
+          "package": "unsafe-libyaml",
+          "version": "0.2.11"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0194",
+          "category": "vulnerability",
+          "package": "quick-xml",
+          "version": "0.39.4"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0195",
+          "category": "vulnerability",
+          "package": "quick-xml",
+          "version": "0.39.4"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.4"
+        }
+      ],
+      "migration-api-compatibility": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.4"
+        }
+      ],
+      "relationship-capability": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.3"
+        }
+      ],
+      "repository-aggregate-consumer": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.4"
+        }
+      ],
+      "root": [
+        {
+          "advisory": "RUSTSEC-2023-0071",
+          "category": "vulnerability",
+          "package": "rsa",
+          "version": "0.9.10"
+        },
+        {
+          "advisory": "RUSTSEC-2023-0089",
+          "category": "unmaintained",
+          "package": "atomic-polyfill",
+          "version": "1.0.3"
+        },
+        {
+          "advisory": "RUSTSEC-2024-0449",
+          "category": "unmaintained",
+          "package": "unsafe-libyaml",
+          "version": "0.2.11"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0194",
+          "category": "vulnerability",
+          "package": "quick-xml",
+          "version": "0.39.4"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0195",
+          "category": "vulnerability",
+          "package": "quick-xml",
+          "version": "0.39.4"
+        },
+        {
+          "advisory": "RUSTSEC-2026-0253",
+          "category": "unsound",
+          "package": "lru",
+          "version": "0.16.3"
+        }
+      ]
+    },
+    "scope": "Actual locked collection; complete WITH findings, never a clean audit or release acceptance",
+    "selected_profiles": 67,
+    "source": "84e7d0b0542da7c4425f3875ab9547f26d24dbb8",
+    "tree": "5d90d9f178e05b0c972162c17c8b29c793485e69",
+    "version": "0.50.1",
+    "wrapper_terminal_status": 1
+  },
+  "external_packet": {
+    "artifact_manifest_sha256": "0e6f7494dc3a49531ded6b85814d5922e5a2f43ec0633a868047b2b80562a5d7",
+    "availability": "Full metadata, selected tree outputs, tool/raw source snapshots, helper bytes and resource records are retained in the maintainer remediation evidence packet. They are not bundled here; request the exact packet ID when independently reviewing this snapshot.",
+    "id": "84e7d0b0542d-20261015T211815Z-fww78snq"
+  },
+  "locked_metadata": [
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "root-locked-metadata",
+      "started": "2026-10-15T21:18:15.897622+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "8833f2f74ce42cc002c7a615a1fad8d65b4ea7b5b3e0705510d7f7499509aa4a"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/cross-crate-relations",
+      "exit_code": 0,
+      "label": "cross-crate-relations-locked-metadata",
+      "started": "2026-10-15T21:18:17.089408+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "4b78c7c7fff5b072718d5251482bd37906c6a3f9b23592cd02cd930767b5bf30"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/relationship-capability",
+      "exit_code": 0,
+      "label": "relationship-capability-locked-metadata",
+      "started": "2026-10-15T21:18:17.439544+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "fe71cd3acfa12254fd43e5e05ed9a92488f66b78b3b48c6a2bd7aaa2e80b68e4"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/backend-coexistence",
+      "exit_code": 0,
+      "label": "backend-coexistence-locked-metadata",
+      "started": "2026-10-15T21:18:17.780996+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "c39cae3cb1d9f2645d7446e1304b58a5fe3406ca9b09cec57d2d53ae867dd69e"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/federation-end-to-end/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/federation-end-to-end",
+      "exit_code": 0,
+      "label": "federation-end-to-end-locked-metadata",
+      "started": "2026-10-15T21:18:18.122875+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "66b81d86869123879dd2794649d116baa37e51fd1fb9a1e0e8aba0640721a60e"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/migration-api-compatibility",
+      "exit_code": 0,
+      "label": "migration-api-compatibility-locked-metadata",
+      "started": "2026-10-15T21:18:19.294056+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "53ba7bd45790ff4666e70283c3261de457cd4b1c2f4bc92f3b4a1516f19bff6f"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer",
+      "exit_code": 0,
+      "label": "repository-aggregate-consumer-locked-metadata",
+      "started": "2026-10-15T21:18:19.624247+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "1ffac4ce5d9ee42e4d6372e49e118023a8fe8456a3cef9507b431a862d2bac73"
+    },
+    {
+      "argv": [
+        "cargo",
+        "metadata",
+        "--offline",
+        "--locked",
+        "--format-version",
+        "1",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/auth-release-final/Cargo.toml"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/auth-release-final",
+      "exit_code": 0,
+      "label": "auth-locked-metadata",
+      "started": "2026-10-15T21:18:19.916688+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "0987f1c4dd268bf4a3567d142afbad62c481138f7b3cec5fe7f7596ed262b516"
+    }
+  ],
+  "locks": {
+    "auth": {
+      "local_package": "agql-auth",
+      "path": "/home/toby/dev/security-remediation-worktrees/auth-release-final/Cargo.lock",
+      "sha256": "da49279c42e833c831c63b15d69dc678a857d93f661e672aac66c577478dd704",
+      "source_commit": "59c0a38f82e8c75459474238799a81f29d4ffa58"
+    },
+    "backend-coexistence": {
+      "auth": {
+        "revision": "59c0a38f82e8c75459474238799a81f29d4ffa58",
+        "source": "git+https://github.com/Dastari/agql-auth.git?rev=59c0a38f82e8c75459474238799a81f29d4ffa58#59c0a38f82e8c75459474238799a81f29d4ffa58",
+        "version": "0.21.3"
+      },
+      "path": "crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.lock",
+      "sha256": "9fc48d3da4ff5b647606a5a5db0db38e411ed71d8410ac62aa83d3e5ca891e09"
+    },
+    "cross-crate-relations": {
+      "auth": null,
+      "path": "crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.lock",
+      "sha256": "91f7072a28c291c857cd3367c2027eeb1274f121788615d0b705ec92ce545587"
+    },
+    "federation-end-to-end": {
+      "auth": null,
+      "path": "crates/graphql-orm/tests/fixtures/federation-end-to-end/Cargo.lock",
+      "sha256": "011ea07a7e81a9f27f4f48c7ce3705803fc1c1deb235eba80378976e77be7249"
+    },
+    "migration-api-compatibility": {
+      "auth": null,
+      "path": "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.lock",
+      "sha256": "c82d07aace5a2367df0883520465d0eef3fe8baddf3380abe9ff7c8fd00db7e7"
+    },
+    "relationship-capability": {
+      "auth": null,
+      "path": "crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.lock",
+      "sha256": "59a7ef76abaf76479601dcbb3d4b69ac07b18079ae776fae41910a1feed2db1e"
+    },
+    "repository-aggregate-consumer": {
+      "auth": null,
+      "path": "crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.lock",
+      "sha256": "22523c75d17f97a76167bd8283f40e6c06a55346ea5648437e9db108c515b211"
+    },
+    "root": {
+      "auth": {
+        "revision": "59c0a38f82e8c75459474238799a81f29d4ffa58",
+        "source": "git+https://github.com/Dastari/agql-auth.git?rev=59c0a38f82e8c75459474238799a81f29d4ffa58#59c0a38f82e8c75459474238799a81f29d4ffa58",
+        "version": "0.21.3"
+      },
+      "path": "Cargo.lock",
+      "sha256": "10395b5fde4189e2f8b62494f5c611e8b5be0c6983f8c44a86abca995b01abbd"
+    }
+  },
+  "metadata_inputs": 8,
+  "native_audits": {
+    "auth": {
+      "advisories": [
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 3894,
+      "path": "raw-audits/auth.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "06c4bdcb03faf9919e903721e578586a7d075a63745b5d4aa7f588629f9d3dd5",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 1,
+      "warning_counts": {}
+    },
+    "backend-coexistence": {
+      "advisories": [
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 7248,
+      "path": "raw-audits/backend-coexistence.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "6289d90f723e3ad1036ba184f1c43375a85130988da2f2ed16046082142950f2",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 1,
+      "warning_counts": {
+        "unmaintained": 1,
+        "unsound": 1
+      }
+    },
+    "cross-crate-relations": {
+      "advisories": [
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 7248,
+      "path": "raw-audits/cross-crate-relations.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "bc37e1cdad0888ef3ae1206ba4c7536bef3c4c5b62df00e925b9805bd17966bf",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 1,
+      "warning_counts": {
+        "unmaintained": 1,
+        "unsound": 1
+      }
+    },
+    "federation-end-to-end": {
+      "advisories": [
+        "RUSTSEC-2026-0195",
+        "RUSTSEC-2026-0194",
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 15790,
+      "path": "raw-audits/federation-end-to-end.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "e5b4fc07aea63c7255d5fc9c09c88bdba91af1271d21479d4789462e9617d772",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 3,
+      "warning_counts": {
+        "unmaintained": 2,
+        "unsound": 1
+      }
+    },
+    "migration-api-compatibility": {
+      "advisories": [
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 7248,
+      "path": "raw-audits/migration-api-compatibility.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "2f441670dadb12fbeb26a31cd7e9a4e63f7f70319a99e05990edcf805b94ac51",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 1,
+      "warning_counts": {
+        "unmaintained": 1,
+        "unsound": 1
+      }
+    },
+    "relationship-capability": {
+      "advisories": [
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 7248,
+      "path": "raw-audits/relationship-capability.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "0c902868cd8f7bb99ec91abe39756cdbff39ed382bfab098b6d2c958580de1b9",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 1,
+      "warning_counts": {
+        "unmaintained": 1,
+        "unsound": 1
+      }
+    },
+    "repository-aggregate-consumer": {
+      "advisories": [
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 7248,
+      "path": "raw-audits/repository-aggregate-consumer.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "dcfbc0957363ca09e8ecd425bdf9f68c6fd8ec6d4a11a4248d8d9682a8578709",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 1,
+      "warning_counts": {
+        "unmaintained": 1,
+        "unsound": 1
+      }
+    },
+    "root": {
+      "advisories": [
+        "RUSTSEC-2026-0195",
+        "RUSTSEC-2026-0194",
+        "RUSTSEC-2023-0071"
+      ],
+      "bytes": 15890,
+      "path": "raw-audits/root.json",
+      "reported_database_revision": null,
+      "scanner_exit_code": 1,
+      "sha256": "fa0e46f7381c3be72e8185d84fa303b8fd006fe21a080ea1dd897463365ab42e",
+      "verified_database_revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+      "vulnerability_count": 3,
+      "warning_counts": {
+        "unmaintained": 2,
+        "unsound": 1
+      }
+    }
+  },
+  "native_tool_outputs": {
+    "audit-version.stdout": "cargo-audit-audit 0.22.2\n",
+    "cargo-version.stdout": "cargo 1.97.1 (c980f4866 2026-06-30)\n",
+    "rustc-version.stdout": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.97.1\nLLVM version: 22.1.6\n"
+  },
+  "official_clone_record": {
+    "argv": [
+      "git",
+      "-c",
+      "credential.helper=",
+      "clone",
+      "--no-hardlinks",
+      "--",
+      "https://github.com/RustSec/advisory-db.git",
+      "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db"
+    ],
+    "clone_exit": 0,
+    "commit_time": "2026-10-14T22:18:32+02:00",
+    "complete": true,
+    "completed_utc": "2026-10-15T20:55:23.567842+00:00",
+    "database": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+    "git_version": "git version 2.53.0\n",
+    "helper_sha256": "0ec478f89c57447b729c70a0750a2718c9b40cbe34b1962176525a619ab19337",
+    "official_url": "https://github.com/RustSec/advisory-db.git",
+    "resource_run": "73c6ad2fb2524509856f8c4136cb17b6",
+    "revision": "edb58f5974b83eb8302332821cb6d389777aa351",
+    "started_utc": "2026-10-15T20:55:16.032373+00:00",
+    "tree": "9cadd9fc13d75527fa5fd3f14376ed3a1a5e3b63"
+  },
+  "packet_hashes": {
+    "artifact-sha256.json": "0e6f7494dc3a49531ded6b85814d5922e5a2f43ec0633a868047b2b80562a5d7",
+    "provenance.json": "49326564522cbeca0a2a7b6371a1aa92c3fc4a02dd3d4d2d07a8b1f93071bf14",
+    "summary.json": "7c841a016620b959e7d2cc290d9eef895ed3b5d5cee7c552d3b2630ddf870ce8"
+  },
+  "raw_artifact_hashes": {
+    "audit-version.stdout": "db7ec1f5601bae24da672cbd457db9538250e50b4d2f9b5ae8135fb852ef5e20",
+    "cargo-version.stdout": "1aedaa9cce116919d39b1eb303a58865771582bc24fc259aa8e26cb212e0f59e",
+    "commands.jsonl": "89c93e2831101edb481266861fb78cfa9324a02b74b1ef1822178c02a25e6e01",
+    "rustc-version.stdout": "b2bdf493bcf6d1dc55181a0efc2774b6d9cf7bf5c8dcc5bed592c994b2ad38c4"
+  },
+  "raw_audit_commands": [
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "root-raw-audit",
+      "started": "2026-10-15T21:18:20.235222+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "cross-crate-relations-raw-audit",
+      "started": "2026-10-15T21:18:21.100576+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "relationship-capability-raw-audit",
+      "started": "2026-10-15T21:18:21.529302+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "backend-coexistence-raw-audit",
+      "started": "2026-10-15T21:18:21.902384+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/federation-end-to-end/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "federation-end-to-end-raw-audit",
+      "started": "2026-10-15T21:18:22.493634+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "migration-api-compatibility-raw-audit",
+      "started": "2026-10-15T21:18:23.172367+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "repository-aggregate-consumer-raw-audit",
+      "started": "2026-10-15T21:18:23.691829+00:00"
+    },
+    {
+      "argv": [
+        "/home/toby/.cargo/bin/cargo-audit",
+        "audit",
+        "--json",
+        "--color",
+        "never",
+        "--db",
+        "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/advisory-databases/official-rustsec-577b_76h/advisory-db",
+        "--file",
+        "/home/toby/dev/security-remediation-worktrees/auth-release-final/Cargo.lock",
+        "--no-fetch"
+      ],
+      "cwd": "/home/toby/dev/audit-results/remediation/final-candidate-acceptance/collections/84e7d0b0542d-20261015T211815Z-fww78snq/audit-workdir",
+      "exit_code": 1,
+      "label": "auth-raw-audit",
+      "started": "2026-10-15T21:18:24.114022+00:00"
+    }
+  ],
+  "registry_freshness_limit": "Yank observations reflect the scanner local registry/index data available during these eight native scans. No independently refreshed registry snapshot or future yank status is certified.",
+  "remediation_primary_references": {
+    "AWS_LRU_owning_update": "https://github.com/awslabs/aws-sdk-rust/issues/1451",
+    "RUSTSEC-2025-0134": "https://rustsec.org/advisories/RUSTSEC-2025-0134.html",
+    "RUSTSEC-2026-0098": "https://rustsec.org/advisories/RUSTSEC-2026-0098.html",
+    "RUSTSEC-2026-0099": "https://rustsec.org/advisories/RUSTSEC-2026-0099.html",
+    "RUSTSEC-2026-0104": "https://rustsec.org/advisories/RUSTSEC-2026-0104.html",
+    "RUSTSEC-2026-0235": "https://rustsec.org/advisories/RUSTSEC-2026-0235.html",
+    "RUSTSEC-2026-0258": "https://rustsec.org/advisories/RUSTSEC-2026-0258.html",
+    "RUSTSEC-2026-0338": "https://rustsec.org/advisories/RUSTSEC-2026-0338.html",
+    "RUSTSEC-2026-0339": "https://rustsec.org/advisories/RUSTSEC-2026-0339.html",
+    "RUSTSEC-2026-0340": "https://rustsec.org/advisories/RUSTSEC-2026-0340.html",
+    "RUSTSEC-2026-0341": "https://rustsec.org/advisories/RUSTSEC-2026-0341.html",
+    "RUSTSEC-2026-0342": "https://rustsec.org/advisories/RUSTSEC-2026-0342.html",
+    "RUSTSEC-2026-0346": "https://rustsec.org/advisories/RUSTSEC-2026-0346.html",
+    "RUSTSEC-2026-0347": "https://rustsec.org/advisories/RUSTSEC-2026-0347.html",
+    "RUSTSEC-2026-0348": "https://rustsec.org/advisories/RUSTSEC-2026-0348.html",
+    "RUSTSEC-2026-0349": "https://rustsec.org/advisories/RUSTSEC-2026-0349.html"
+  },
+  "scanner_binary": {
+    "path": "/home/toby/.cargo/bin/cargo-audit",
+    "sha256": "318d4ebb98a3cfdc8758fef2bb36f8ff18a89f47db172befa477c854f1231295"
+  },
+  "scanner_version": "cargo-audit-audit 0.22.2",
+  "scope": "Actual final unpublished-preview collection WITH findings; no publication/clean-audit/runtime acceptance claim",
+  "selected_graphs": [
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:24.446998+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "67197161e9610b6b3dc1ca3b0d03b6a40139400719ca3e585e0b8c06cd530a8d"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-sqlite-auth-selected-tree",
+      "started": "2026-10-15T21:18:25.067550+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "d12ef91e0bd19cbf4fee30f8422558a0da39c8935c38d51220c30a885ce37ebf"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:25.528330+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "2e7d7923102cbca7a7c8eafd2268a19198508df32805e77fe2d736d4b379c80d"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-postgres-selected-tree",
+      "started": "2026-10-15T21:18:26.029459+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "cf441e5c2f6d69b474a2b09e61c2edad2d44ccf12653d61688ff05bf7281599a"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "postgres,auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-postgres-auth-selected-tree",
+      "started": "2026-10-15T21:18:26.517439+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "0ae36997a3bb829d3cace7ec86a6d5f91e4d241c288ae71af06db8f45056f092"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-postgres-selected-tree",
+      "started": "2026-10-15T21:18:27.192647+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "24dcdc84f89bc0ea7c741e7060f08d569e442f08105484315103c29a4b3065d5"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-mssql-selected-tree",
+      "started": "2026-10-15T21:18:27.890860+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6e0de8439fdae5a1319fda104918232fb7eea826ff98c12aeb562e0e4646e203"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "mssql,auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-mssql-auth-selected-tree",
+      "started": "2026-10-15T21:18:28.447550+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "0efadd93206479cafc649a01a7049daddd54737600d82e0711f056da37df7d62"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-mssql-selected-tree",
+      "started": "2026-10-15T21:18:29.145717+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "96db1a32f629d5402cf1ad9782ab13d7f0b4def7913297f8208a7977aef4a1fd"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-openai"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-openai-selected-tree",
+      "started": "2026-10-15T21:18:29.732196+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "c77ef980900ec89297f3a09f62802c8d388f5b9f1bd22dd38b2a30f381580c85"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-anthropic"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-anthropic-selected-tree",
+      "started": "2026-10-15T21:18:30.385034+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "578965876770484ec40b34da83655bb93bbc0b30646293b80717b82951205fa5"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-xai"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-xai-selected-tree",
+      "started": "2026-10-15T21:18:30.899107+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6a00755b806d80d84212cbe12f1e4ec43c42908236a7832c3c32aa6d23bdcff4"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-ollama"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-ollama-selected-tree",
+      "started": "2026-10-15T21:18:31.391460+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "8e2b801ebb13a9e61759aafb4b3b23400d6e59f60382cad1ff32a52aaa311968"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-openai-compatible"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-openai-compatible-selected-tree",
+      "started": "2026-10-15T21:18:31.930930+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "f6338dbcdc421ecd0627c87d0fb9905b179d9012587afbd6eb3bb713b153de74"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,local-harness"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-local-harness-selected-tree",
+      "started": "2026-10-15T21:18:32.520229+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "461c6c0a87bc66e9835a9d7877608c6f7fd7663cb239c8b5832b13ffea20e27a"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-codex-app-server"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-codex-app-server-selected-tree",
+      "started": "2026-10-15T21:18:33.197687+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "678ac3f55f93466ff17e1141f0a3906abea3a92b327faddee97583ea3aea040d"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-ai",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "sqlite,provider-grok-acp"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "ai-provider-grok-acp-selected-tree",
+      "started": "2026-10-15T21:18:33.916125+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "f0367e79361b8b4cebbbdc971289d5f6e2486928ae28d2714998ef31700a681a"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-router",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "router-selected-tree",
+      "started": "2026-10-15T21:18:34.503383+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "5d4d285a0fabe14863f485900a9d2819c7978e848bd59107b4ef9fd89b1fa2c6"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-router",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "router-auth-selected-tree",
+      "started": "2026-10-15T21:18:35.305293+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "3e3a979aff8a491cb99608356e29cf9bd95a2042d5f954dbbb7fde16dbd096fa"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-storage",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "local"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-local-selected-tree",
+      "started": "2026-10-15T21:18:36.211025+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "338f16dbb04a6d03c471542c63be8e7336f668fcaca0fb611d43bc60b0a3dae8"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-storage",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "s3"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-s3-selected-tree",
+      "started": "2026-10-15T21:18:36.984892+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "90716d27b94fbe9356e21ff398164e75b17dba9e979ce67b5cc4a07cf7f747f9"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-storage",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "smb"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-smb-selected-tree",
+      "started": "2026-10-15T21:18:37.864147+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6c5c83f9f655d448fd73a54511086254e0d78e532ac1a58b615a874487f269cd"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-storage",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "azure"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-azure-selected-tree",
+      "started": "2026-10-15T21:18:38.553644+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "88c0560a1d4291c22617c706a236f963835e7c157c41e74f420168ebba47d72a"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-storage",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "local,s3,azure"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-local-s3-azure-selected-tree",
+      "started": "2026-10-15T21:18:39.027350+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "1cc5dd1d94a23c03d9db61696c20dd3bcf67cfc0cfb3762c6b7e4a0523409ffa"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-backup",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "local"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-local-selected-tree",
+      "started": "2026-10-15T21:18:39.546484+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "b68525bf8993141f2696bdc7f1995569de36079420baddce69fb420ae7678ffd"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-backup",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "orm-sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-orm-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:39.978077+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "eae5cfbeb4d8ca46b3a9cfd76899e0190bc0cbe777e65126c77731e2155b2a01"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-backup",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "orm-postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-orm-postgres-selected-tree",
+      "started": "2026-10-15T21:18:40.436817+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "86e4ae965eceafd2ad31be7b51dd0539bc3637ba4ec345d190f9c8b269e805a5"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-backup",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "smb"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-smb-selected-tree",
+      "started": "2026-10-15T21:18:40.889493+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6aac0dbd5ea5901b59fbc627499336b83a5f505844512a35dda1bc7c262a9fa8"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "graphql-orm-backup",
+        "--no-default-features",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--features",
+        "local,graphql-orm-storage/s3"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-storage-s3-selected-tree",
+      "started": "2026-10-15T21:18:41.352458+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "699417d7b424fd7291cc57d57e4db091b90c362cb79948da58577b7205cffe14"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "agql-auth",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/auth-release-final",
+      "exit_code": 0,
+      "label": "auth-default-selected-tree",
+      "started": "2026-10-15T21:18:41.801046+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "effc89815607b5f15be2ae94b05a432b946f7606bb82d2b33475e23b68f5b0e3"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "-p",
+        "agql-auth",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "--no-default-features"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/auth-release-final",
+      "exit_code": 0,
+      "label": "auth-no-default-selected-tree",
+      "started": "2026-10-15T21:18:42.019678+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "effc89815607b5f15be2ae94b05a432b946f7606bb82d2b33475e23b68f5b0e3"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-operation-catalog",
+        "-p",
+        "graphql-orm-ai-tool-profiles"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "neutral-default-selected-tree",
+      "started": "2026-10-15T21:18:42.210086+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "17cd9757c910db5ae1db008919d6e8d87873c93376d7a2d90454f97195c300ba"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-macros"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "macros-default-selected-tree",
+      "started": "2026-10-15T21:18:42.629996+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "1b8ebfab9b0897c51fbdc35fb9e562cf6f54bd67abf6fd0931afe8e577d5bc53"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-storage"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-default-selected-tree",
+      "started": "2026-10-15T21:18:43.030650+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "9d76bcdceb3479bbab8d7fd3c218352a066e747b41c23b35c10de77a56e057f7"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-backup",
+        "--features",
+        "orm-sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-orm-sqlite-default-selected-tree",
+      "started": "2026-10-15T21:18:43.504340+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "a28d78cd88486bfd2cd0cae95cdb24026d6517c0464ca074e57f61b8e4210b38"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-backup",
+        "--features",
+        "graphql-orm-storage/s3"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "backup-storage-s3-default-selected-tree",
+      "started": "2026-10-15T21:18:44.177971+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "878f296ab7efb87cfb8eb52895244a994f25c6e0d2ac6c7e1ae94536ad40ef7f"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-storage",
+        "--no-default-features",
+        "--features",
+        "local,s3"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "storage-local-s3-selected-tree",
+      "started": "2026-10-15T21:18:44.683328+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "fdb86a4d3533eb72d71da26466d23f251db70fb9a72546584ca3eaea6f2e95b5"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "-p",
+        "graphql-orm-macros",
+        "--no-default-features",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-macros-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:45.095749+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "906410d78cb83010a0416043a8ff825e24f2dc22e20b397bd38f0c6d394f9fc4"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "sqlite,runtime-graphql,auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-sqlite-runtime-graphql-auth-selected-tree",
+      "started": "2026-10-15T21:18:45.591165+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e5b1199a3358a3fa967f3c08ba4b5a1b519c99c57f9ddb7061c52de48441263f"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "-p",
+        "graphql-orm-macros",
+        "--no-default-features",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-macros-postgres-selected-tree",
+      "started": "2026-10-15T21:18:46.030877+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "bfe4b03019d9c1926473d7f8e82840be7623d8994b2c121bc41351c26441ff64"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "postgres,runtime-graphql,auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-postgres-runtime-graphql-auth-selected-tree",
+      "started": "2026-10-15T21:18:46.509826+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "3889ac7155edf9ae182894de678534b6607d3b2818a9bfbfc4986d991f3fe523"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "-p",
+        "graphql-orm-macros",
+        "--no-default-features",
+        "--features",
+        "mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-macros-mssql-selected-tree",
+      "started": "2026-10-15T21:18:47.151469+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "d73b5a5287d6bc72f915c9f9b8cb9c92a5d1e95963d54630b5cf31e54d34337b"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "mssql,runtime-graphql,auth-agql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-mssql-runtime-graphql-auth-selected-tree",
+      "started": "2026-10-15T21:18:47.724475+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "19f8a033e9b020b704de33d5916cc42904b6341664ebbf596b5ea13f343753c7"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "sqlite,router-protocol"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-federation-contract-selected-tree",
+      "started": "2026-10-15T21:18:48.239432+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "9d4a857a5cae64b626ecba45a51faf2056f518878b19dd8dc4d5116e71765674"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "sqlite,field-case-pascal,argument-case-snake"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-federation-case-selected-tree",
+      "started": "2026-10-15T21:18:48.787231+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "b257ff5420988ee783baf628f6fa711c8ff5d42bfb1eaaa3597448636178af4e"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "cross-crate-source-models",
+        "--no-default-features",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-cross-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:49.387745+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "ceb9c3528e793d1ddb649343e94f3ac61e81794a106efe757d3eb6faae097625"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/cross-crate-relations/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "cross-crate-source-models",
+        "--no-default-features",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-cross-postgres-selected-tree",
+      "started": "2026-10-15T21:18:49.685011+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "51655ed17aa3034d41bc8d7dfbe8c977426b5420f6afdc16128fabab86bff1bc"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "relationship-capability-fixture",
+        "--no-default-features",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-relationships-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:49.923419+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "4903bab3c295f027ce68a235f756501cf8b465a2056aa6a3937da457810758fc"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "migration-api-compatibility",
+        "--no-default-features",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-migrations-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:50.219335+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "f9bfb0085eb3523c72a13ded041d0d9ca9c4f56f9e68dbd44130cbd216258ccb"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "repository-aggregate-consumer",
+        "--no-default-features",
+        "--features",
+        "sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-consumer-sqlite-selected-tree",
+      "started": "2026-10-15T21:18:50.493942+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "997e2b4c3215fc8afe3e77e904c6c374b4f8ad1a22a7c6c9dced5b369cb7753f"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "relationship-capability-fixture",
+        "--no-default-features",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-relationships-postgres-selected-tree",
+      "started": "2026-10-15T21:18:50.722396+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "134d58bbc8b9224f917eb45a866e9a3cd33397105566ae9252cc1b1b491d1c76"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "migration-api-compatibility",
+        "--no-default-features",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-migrations-postgres-selected-tree",
+      "started": "2026-10-15T21:18:51.016769+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "5bad56d466b9d8cefeed8d3be76dca708f16506ede69421ed465357a4dce706c"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "repository-aggregate-consumer",
+        "--no-default-features",
+        "--features",
+        "postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-consumer-postgres-selected-tree",
+      "started": "2026-10-15T21:18:51.308614+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "eb358345537df1da820c49f49bf900f3ea2f38577506cfea9331baedd71a9138"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "relationship-capability-fixture",
+        "--no-default-features",
+        "--features",
+        "mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-relationships-mssql-selected-tree",
+      "started": "2026-10-15T21:18:51.582985+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "f1a622a52771878f3ec1ca1a7e51925ae54aa2559aa476655c898a68e32e1942"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "migration-api-compatibility",
+        "--no-default-features",
+        "--features",
+        "mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-migrations-mssql-selected-tree",
+      "started": "2026-10-15T21:18:51.828336+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "2ee4191846e2dec7fcbe4f6aa18de6c2b19e01903e3e50860f1504327c1f40a3"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "repository-aggregate-consumer",
+        "--no-default-features",
+        "--features",
+        "mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-consumer-mssql-selected-tree",
+      "started": "2026-10-15T21:18:52.267441+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "e2a3d861d959a2c78365fd01dd8710e6cd8364ee695b2885e4f8fb2c8b266bb1"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/federation-end-to-end/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "federation-e2e",
+        "-p",
+        "readings-subgraph",
+        "-p",
+        "subgraph-http",
+        "-p",
+        "zones-subgraph"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-federation-selected-tree",
+      "started": "2026-10-15T21:18:52.522966+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "95c171a32bf28e3d1838f53e38216534deadb6b847710242db194b907b0b1ca9"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/crates/graphql-orm/tests/fixtures/backend-coexistence/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "auth-service",
+        "-p",
+        "coordinated-service",
+        "-p",
+        "legacy-service",
+        "-p",
+        "ai-runtime",
+        "--features",
+        "legacy-service/graphql-orm-mssql-poc"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "fixture-coexistence-selected-tree",
+      "started": "2026-10-15T21:18:53.505322+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "bb83e988f5f8bf5d6b85e15b4b0e5053653195f4d4d24029fdc92cca54f3b677"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "sqlite,runtime-graphql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-sqlite-runtime-graphql-noauth-selected-tree",
+      "started": "2026-10-15T21:18:53.999098+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "ad18237bba856c2f802d9f431bd99f386f754cde182db2a63d09e35a5dd78b96"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "postgres,runtime-graphql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-postgres-runtime-graphql-noauth-selected-tree",
+      "started": "2026-10-15T21:18:54.631646+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "38cf4a3ce997539a719095710fde16c202e19b3ccf116e3415e36bdc41f2e953"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--no-default-features",
+        "--features",
+        "mssql,runtime-graphql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-mssql-runtime-graphql-noauth-selected-tree",
+      "started": "2026-10-15T21:18:55.189581+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "997d9763bbf56542439691d77cadc03ce8503a351df0a91b104df227e7fae7c3"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "-p",
+        "graphql-orm-macros",
+        "--no-default-features",
+        "--features",
+        "graphql-orm/sqlite,graphql-orm/runtime-graphql,graphql-orm-macros/sqlite"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-macros-sqlite-runtime-graphql-noauth-selected-tree",
+      "started": "2026-10-15T21:18:55.687927+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "feae6d6e38122723e0b279f403afe25d303c127e9fa029f3bc39a2ee10ea7b59"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "-p",
+        "graphql-orm-macros",
+        "--no-default-features",
+        "--features",
+        "graphql-orm/postgres,graphql-orm/runtime-graphql,graphql-orm-macros/postgres"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-macros-postgres-runtime-graphql-noauth-selected-tree",
+      "started": "2026-10-15T21:18:56.119751+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "006a03f515c55dfd10b5099b1512149a95dd68360de1e8a8bf6468943ccd0a1e"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "-p",
+        "graphql-orm-macros",
+        "--no-default-features",
+        "--features",
+        "graphql-orm/mssql,graphql-orm/runtime-graphql,graphql-orm-macros/mssql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-macros-mssql-runtime-graphql-noauth-selected-tree",
+      "started": "2026-10-15T21:18:56.583196+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "29b86738ea164387a838079ffe5d6485a008889288a4187b0c7a2b6ca9016f3c"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-default-selected-tree",
+      "started": "2026-10-15T21:18:57.104022+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "350bc19f7e7c8fa54405d4f9cded2bbac68439a7755de057b58055b8f9849dc9"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm",
+        "--features",
+        "runtime-graphql"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "orm-default-runtime-graphql-selected-tree",
+      "started": "2026-10-15T21:18:57.695561+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "03e96051ba47b7a3eeba94f9ff838c4522532f6775e5373947c8022193c5dfef"
+    },
+    {
+      "argv": [
+        "cargo",
+        "tree",
+        "--offline",
+        "--locked",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "--manifest-path",
+        "/home/toby/dev/security-remediation-worktrees/release-candidate-preview/Cargo.toml",
+        "--edges",
+        "normal,build,dev,features",
+        "--prefix",
+        "depth",
+        "--format",
+        "{p} features=[{f}]",
+        "-p",
+        "graphql-orm-router-protocol"
+      ],
+      "cwd": "/home/toby/dev/security-remediation-worktrees/release-candidate-preview",
+      "exit_code": 0,
+      "label": "router-protocol-default-selected-tree",
+      "started": "2026-10-15T21:18:58.223023+00:00",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_sha256": "6c4febf32945486a40acca94b0902d78e3a365b1409e7ff02613cd55be916a01"
+    }
+  ],
+  "selected_profile_exclusions": {
+    "atomic-polyfill v": [],
+    "rkyv v": [],
+    "rustls-pemfile v": [],
+    "sqlx-mysql v": [],
+    "unsafe-libyaml v": [
+      "fixture-federation",
+      "router-auth",
+      "router"
+    ]
+  },
+  "selected_profiles": 67,
+  "source_commit": "84e7d0b0542da7c4425f3875ab9547f26d24dbb8",
+  "source_condition_blobs": {
+    "crates/graphql-orm-macros/src/schema_roots.rs": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "44405ae7d3a94c26aa6934fa4761e8e0891c8d7b",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "44405ae7d3a94c26aa6934fa4761e8e0891c8d7b"
+    },
+    "crates/graphql-orm-router/src/bin/graphql-orm-router.rs": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "2be812e004dcf4d691bc996f60e72bbc5cfd3e65",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "2be812e004dcf4d691bc996f60e72bbc5cfd3e65"
+    },
+    "crates/graphql-orm-router/src/config.rs": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "1aaaae7dc8e91855960decd1d81247a19e5dabac",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "1aaaae7dc8e91855960decd1d81247a19e5dabac"
+    },
+    "crates/graphql-orm-router/src/file_config.rs": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "07d8983df2a9dd321a9dc55558c7331edbb58b9f",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "07d8983df2a9dd321a9dc55558c7331edbb58b9f"
+    },
+    "crates/graphql-orm-router/src/server.rs": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "97c9fafc9bc1d50098740ee16c1dbd2f19503838",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "97c9fafc9bc1d50098740ee16c1dbd2f19503838"
+    },
+    "crates/graphql-orm-storage/Cargo.toml": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "cefab879c21dbcf95524e000e954f3fca1d7e25c",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "cefab879c21dbcf95524e000e954f3fca1d7e25c"
+    },
+    "crates/graphql-orm-storage/src/smb.rs": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "08b4e2c17af74727a0c67b84dbcb7bc48bc3b0cd",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "08b4e2c17af74727a0c67b84dbcb7bc48bc3b0cd"
+    }
+  },
+  "source_condition_subtrees": {
+    "crates/graphql-orm-router": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "5ed44c68790a939617eb0adeedd893a2e301374c",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "5ed44c68790a939617eb0adeedd893a2e301374c"
+    },
+    "crates/graphql-orm-storage": {
+      "4059d10026b9b8d1e9a2be0f4f556df807f77794": "9f920dfe18fddacea328a015c1203eebc3fb9965",
+      "84e7d0b0542da7c4425f3875ab9547f26d24dbb8": "9f920dfe18fddacea328a015c1203eebc3fb9965"
+    }
+  },
+  "source_tree": "5d90d9f178e05b0c972162c17c8b29c793485e69",
+  "wrapper_status_limit": "Aggregate END1 preserves collector findings; independent cleanup0 not separately logged. Collector creates no services."
+}

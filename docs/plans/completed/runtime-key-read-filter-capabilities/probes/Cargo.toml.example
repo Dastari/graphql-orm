@@ -1,0 +1,23 @@
+[package]
+name = "runtime-public-api-boundary-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+graphql-orm = { path = "../../../../../crates/graphql-orm", default-features = false, features = ["runtime-graphql"] }
+[features]
+default = []
+sqlite = ["graphql-orm/sqlite"]
+postgres = ["graphql-orm/postgres"]
+gap-key-read = []
+gap-record-match = []
+gap-lowering = []
+gap-static-record = []
+
+[lib]
+path = "lib.rs"
+
+[[test]]
+name = "current_boundary"
+path = "current_boundary.rs"

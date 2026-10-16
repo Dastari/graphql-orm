@@ -713,6 +713,13 @@ impl OwnedPlannedMigration {
         {
             return Err(rejection(RuntimeMigrationDiagnosticCode::BaselineMismatch).into());
         }
+        if backend == "postgres" {
+            super::migrations::validate_migration_step_capabilities(
+                DatabaseBackend::Postgres,
+                self.steps.iter().map(|step| StepRef::from(&step.step)),
+            )
+            .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
+        }
         reject_migration_risks(
             &self.version,
             self.steps
@@ -1177,6 +1184,21 @@ fn validate_owned_effects(
             .iter()
             .find(|t| t.table_name == table.table_name)
         {
+            if backend == DatabaseBackend::Postgres {
+                for before in &table.columns {
+                    if let Some(after) = wanted
+                        .columns
+                        .iter()
+                        .find(|column| column.name == before.name)
+                    {
+                        if !super::migrations::postgres_alter_metadata_supported(before, after) {
+                            return Err(rejection(
+                                RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+                            ));
+                        }
+                    }
+                }
+            }
             if table.primary_keys != wanted.primary_keys {
                 return Err(rejection(
                     RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,

@@ -14,6 +14,63 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.50.1 (unreleased)
+
+- Enforce ordinary runtime read/count bind budgets against actual emitted slots
+  before database I/O, including SQLite suffix duplication and lexicographic
+  cursor expansion on SQLite/PostgreSQL. Preserve SQL and cursor semantics;
+  over-budget reads now return the existing `resource_limit` error.
+- Align ORM/macros at 0.50.1; no public API or stored-data/schema change.
+
+## 0.50.0 (unreleased)
+
+- Add owned checked filter construction, complete value-free original Boolean and
+  field/operator intent, and explicit-profile immutable RuntimeRecord matching.
+  GraphQL lowering shares the checked construction path; existing canonical
+  error codes, configured scalar limits and null-skip execution semantics remain.
+- Conservative SQLite/PostgreSQL profiles use SQL three-valued logic and reject
+  unsupported semantics before evaluation; all original dependencies must be
+  loaded even when SQL constant folding removed them. No data/schema migration,
+  raw JSON parser, native-RLS proof or new automatic authorization is introduced.
+
+## 0.49.0 (unreleased)
+
+- Include the 0.48.1–0.48.3 PostgreSQL migration corrections and SQLite CHECK
+  introspection correction described below; those sections retain their separate
+  migration and repair requirements.
+- Add checked owned-runtime complete-key reads with an explicit required row
+  restriction, exact projection and bounded multiplicity detection. Nonfilterable
+  keys remain internal identity rather than a public Filter grant. SQLite and
+  PostgreSQL reuse current read/auth-context paths; MSSQL rejects before I/O.
+- Align ORM/macros at 0.49.0. Hosts still authenticate current authority, authorize
+  fields/key-read intent and bind the current trusted catalog before each call.
+  No filter-matching API, schema change or stored-data migration is introduced.
+
+## 0.48.3 (unreleased)
+
+- Fail closed before managed PostgreSQL target DDL or history rows for unsupported
+  primary-key flags, constraint-backed unique flags and same-type spatial
+  metadata alterations. Explicit standalone unique indexes with unchanged flags
+  and changed SQL type expressions retain their existing renderer paths.
+
+## 0.48.2 (unreleased)
+
+- PostgreSQL static/owned migration plans now apply real SET, replacement and
+  DROP DEFAULT changes, preserve existing row values, and detach old defaults
+  before actual type conversion. Unchanged type/nullability/default properties
+  emit no unnecessary DDL; canonical schema/hash formats are unchanged.
+
+## 0.48.1 (unreleased)
+
+- Compare complete PostgreSQL TEXT literal defaults with their deparsed `::text`
+  spelling without creating a spurious column alteration or rejecting an
+  unchanged runtime mutation environment. Preserve exact string values,
+  physical/plan hashes, guarded baselines and migration history identities.
+- Align ORM/macros at 0.48.1; generated macros and datetime/timestamp contracts
+  are unchanged.
+- Avoid a SQLite CHECK introspection panic when Unicode appears before the
+  constraint, retaining the complete CHECK expression.
+
 ## 0.48.0 (unreleased)
 
 - Use the maintained native TLS transport for SQL Server while retaining the

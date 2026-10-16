@@ -1,5 +1,6 @@
 //! Framework-neutral host timestamp inputs, including a physical updated_at alias.
 use graphql_orm::prelude::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 use repository_aggregate_consumer::Backend;
 
 #[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]

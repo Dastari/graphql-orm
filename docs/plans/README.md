@@ -3,7 +3,7 @@ title: Plans index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-12
+last_reviewed: 2026-10-16
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -12,7 +12,6 @@ supersedes: []
 
 ## Active
 
-- [Security assurance remediation](active/security-assurance-remediation/README.md)
 - [AI production readiness](active/ai-production-readiness/README.md)
 - [Documentation experience](active/documentation-experience/README.md)
 
@@ -23,6 +22,10 @@ supersedes: []
 - [Storage providers](backlog/storage-providers/README.md)
 
 ## Completed
+
+- [Security assurance remediation](completed/security-assurance-remediation/README.md)
+
+- [Runtime key reads and filter matching interface review](completed/runtime-key-read-filter-capabilities/README.md)
 
 - [Bounded runtime platform capability contract](completed/runtime-platform-capabilities/README.md)
 

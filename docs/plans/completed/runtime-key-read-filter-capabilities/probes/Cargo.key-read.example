@@ -1,0 +1,16 @@
+[package]
+name = "runtime-key-read-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[workspace]
+[dependencies]
+graphql-orm = { path = "../../../../../crates/graphql-orm", default-features = false }
+[features]
+default = []
+sqlite = ["graphql-orm/sqlite"]
+postgres = ["graphql-orm/postgres"]
+mssql = ["graphql-orm/mssql"]
+[[test]]
+name = "key_read"
+path = "key_read.rs"
