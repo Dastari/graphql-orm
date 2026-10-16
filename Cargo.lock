@@ -3272,7 +3272,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-storage"
-version = "0.7.3"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "aws-credential-types",
@@ -8500,8 +8500,6 @@ dependencies = [
 [[package]]
 name = "smb"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1315ec423faffdc9715f518c5cab5660b26484df42adaa87a3325f70c73417b"
 dependencies = [
  "aead",
  "aes 0.8.4",
