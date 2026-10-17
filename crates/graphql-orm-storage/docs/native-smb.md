@@ -168,6 +168,23 @@ authentication, security negotiation, missing share, permission, missing path,
 capacity, collision, timeout, connection loss, and protocol failures. Never put
 runtime configuration or credentials in support bundles.
 
+## Managed Samba tests
+
+Run `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root for
+the owned Samba protocol and complete backup lifecycle suite. It uses `cargo`
+by default. Set `SMB_TEST_CARGO` to an executable path to run all nine unchanged
+Cargo/test invocations through a host's resource-controlled Cargo runner:
+
+```sh
+SMB_TEST_CARGO=/absolute/path/to/run-cargo-bounded.sh \
+  crates/graphql-orm-storage/tests/samba/run.sh
+```
+
+The setting accepts one executable, including a path containing spaces, rather
+than a shell command with arguments. The host supplies the runner's toolchain
+and resource environment; the suite retains its owned fixture lifecycle and
+cleanup.
+
 ## Manual compatibility plan
 
 For each target, create/verify/restore/delete/prune a full backup with a

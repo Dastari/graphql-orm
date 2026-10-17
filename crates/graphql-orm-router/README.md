@@ -3,12 +3,18 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router
+
+The current workspace selects published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99`. Direct Auth consumers must match
+that tag and refresh their locks to one source; see the
+[workspace migration](../../MIGRATION.md#0502-to-0510-post-await-and-owned-release-checks).
+Version-specific notes below retain their historical dependency facts.
 
 Version 0.6.1 selects published Auth `v0.21.3` for `auth-agql`, retaining the
 same reviewed commit. Direct Auth dependencies must use that tag too; refresh

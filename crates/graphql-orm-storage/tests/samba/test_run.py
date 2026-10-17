@@ -75,7 +75,8 @@ from pathlib import Path
 args = sys.argv[1:]
 mode = os.environ.get('FAKE_MODE', '')
 with (Path(os.environ['FAKE_ROOT']) / 'cargo-calls.jsonl').open('a') as log:
-    log.write(json.dumps({'args': args, 'port': os.environ.get('SMB_TEST_PORT'),
+    log.write(json.dumps({'args': args, 'executable': str(Path(sys.argv[0]).resolve()),
+                         'port': os.environ.get('SMB_TEST_PORT'),
                          'container': os.environ.get('SMB_TEST_CONTAINER_NAME'),
                          'fixture_run': os.environ.get('SMB_TEST_FIXTURE_RUN')}) + '\n')
 assert '--exact' in args and '--ignored' in args
@@ -96,7 +97,7 @@ else:
 
 
 class FixtureOwnershipTests(unittest.TestCase):
-    def run_fixture(self, mode=""):
+    def run_fixture(self, mode="", absolute_cargo=False):
         with tempfile.TemporaryDirectory(prefix="owned-samba-harness-") as temporary:
             root = Path(temporary)
             for name, source in [("docker", FAKE_DOCKER), ("cargo", FAKE_CARGO)]:
@@ -111,6 +112,14 @@ class FixtureOwnershipTests(unittest.TestCase):
             python.chmod(0o700)
             environment = {"PATH": str(root) + os.pathsep + os.defpath,
                            "HOME": temporary, "FAKE_ROOT": temporary, "FAKE_MODE": mode}
+            if absolute_cargo:
+                cargo_runner = root / "explicit runner" / "bounded cargo"
+                cargo_runner.parent.mkdir()
+                cargo_runner.write_text("#!" + sys.executable + "\n" + FAKE_CARGO)
+                cargo_runner.chmod(0o700)
+                environment["SMB_TEST_CARGO"] = str(cargo_runner)
+                # A fallback to PATH must fail rather than satisfy this witness.
+                (root / "cargo").write_text("#!" + sys.executable + "\nraise SystemExit(91)\n")
             result = subprocess.run(["bash", str(RUNNER)], env=environment,
                                     text=True, capture_output=True, timeout=20)
             calls = [json.loads(line) for line in (root / "calls").read_text().splitlines()]
@@ -172,6 +181,19 @@ class FixtureOwnershipTests(unittest.TestCase):
                 self.assertEqual(result.returncode, expected, result.stderr)
                 self.assertEqual(len(cargo), 3)
                 self.assertEqual(state, {"containers": {}, "volume": None})
+
+    def test_absolute_cargo_runner_preserves_all_nine_invocations(self):
+        default_result, _, _, default_cargo = self.run_fixture()
+        self.assertEqual(default_result.returncode, 0, default_result.stderr)
+        result, _, state, cargo = self.run_fixture(absolute_cargo=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(cargo), 9)
+        self.assertTrue(all(Path(item["executable"]).is_absolute() for item in cargo))
+        self.assertTrue(all(item["executable"].endswith("/explicit runner/bounded cargo")
+                            for item in cargo))
+        self.assertEqual([item["args"] for item in cargo],
+                         [item["args"] for item in default_cargo])
+        self.assertEqual(state, {"containers": {}, "volume": None})
 
     def test_zero_or_wrong_native_test_and_cargo_failure_are_not_success(self):
         for mode, expected in [("zero_tests", 1), ("wrong_test", 1), ("cargo_failure", 74)]:

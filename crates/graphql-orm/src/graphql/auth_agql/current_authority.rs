@@ -220,6 +220,9 @@ pub trait AgqlBindingAuthorizer: Send + Sync {
 
 /// Mandatory online dependencies shared by sensitive policies and custom guards.
 /// All reads are performed anew per operation/event; no authorization result is cached.
+/// Status/authority are read again after binding and successful business awaits.
+/// This observes those reads; it cannot atomically fence later remote revocation.
+/// Callbacks must not perform protected effects before final admission.
 pub struct AgqlCurrentAuthorityEnforcement {
     resolver: Arc<dyn CurrentPrincipalResolver>,
     checker: Arc<dyn TokenStatusChecker>,
@@ -268,6 +271,34 @@ impl AgqlCurrentAuthorityEnforcement {
         surface: EntityAccessSurface,
     ) -> async_graphql::Result<i128> {
         let accepted = AgqlAcceptedRequest::from_context(ctx)?;
+        let deadline = self.revalidate(accepted).await?;
+        let authorized = self
+            .bindings
+            .authorize(
+                ctx,
+                &accepted.principal,
+                entity_name,
+                policy_key,
+                kind,
+                surface,
+            )
+            .await
+            .map_err(|error| error.extend())?;
+        self.check_deadline(deadline)?;
+        if !authorized {
+            return Err(forbidden());
+        }
+        // Re-read status and authority after the binding await. Do not rerun
+        // the callback (or its host reads) recursively.
+        let deadline = deadline.min(self.revalidate(accepted).await?);
+        self.check_deadline(deadline)?;
+        Ok(deadline)
+    }
+
+    pub(super) async fn revalidate(
+        &self,
+        accepted: &AgqlAcceptedRequest,
+    ) -> async_graphql::Result<i128> {
         let observed = ExpiryObservingResolver {
             inner: self.resolver.as_ref(),
             expiry: OnceLock::new(),
@@ -295,19 +326,10 @@ impl AgqlCurrentAuthorityEnforcement {
             // Require token refresh/reauthentication after grant removal instead.
             return Err(forbidden());
         }
-        let authorized = self
-            .bindings
-            .authorize(ctx, &current, entity_name, policy_key, kind, surface)
-            .await
-            .map_err(|error| error.extend())?;
-        self.check_deadline(deadline)?;
-        if !authorized {
-            return Err(forbidden());
-        }
         Ok(deadline)
     }
 
-    fn check_deadline(&self, deadline: i128) -> async_graphql::Result<()> {
+    pub(super) fn check_deadline(&self, deadline: i128) -> async_graphql::Result<()> {
         if deadline <= self.clock.now().unix_timestamp_nanos() {
             return Err(AuthError::AccessTokenExpired.extend());
         }
@@ -369,7 +391,13 @@ impl<B: OrmBackend, P: EntityPolicy<B>> EntityPolicy<B> for AgqlCurrentAuthority
                 .can_access_entity(Some(ctx), db, entity_name, policy_key, kind, surface)
                 .await?;
             self.enforcement.check_deadline(deadline)?;
-            Ok(allowed)
+            if !allowed {
+                return Ok(false);
+            }
+            let accepted = AgqlAcceptedRequest::from_context(ctx)?;
+            let deadline = deadline.min(self.enforcement.revalidate(accepted).await?);
+            self.enforcement.check_deadline(deadline)?;
+            Ok(true)
         })
     }
 }

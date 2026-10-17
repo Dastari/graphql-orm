@@ -9,10 +9,12 @@
 //! mint tokens, infer MFA, or own product authorization policy.
 
 mod current_authority;
+mod owned_operation;
 pub use current_authority::{
     AgqlAcceptedRequest, AgqlBindingAuthorizer, AgqlCurrentAuthorityEnforcement,
     AgqlCurrentAuthorityGuard, AgqlCurrentAuthorityPolicy,
 };
+pub use owned_operation::{AgqlOperationTarget, AgqlOwnedOperation, AgqlOwnedOperationAuthorizer};
 
 use std::fmt;
 use std::sync::Arc;

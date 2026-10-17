@@ -15,6 +15,9 @@ use std::sync::{
 };
 use time::OffsetDateTime;
 
+#[path = "current_authority/await_release.rs"]
+mod await_release;
+
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
@@ -77,6 +80,10 @@ impl BatchLoadEntity for SecureProject {
 struct CustomQuery;
 #[Object]
 impl CustomQuery {
+    async fn capture_owned(&self, ctx: &Context<'_>) -> graphql_orm::async_graphql::Result<bool> {
+        await_release::capture_owned(ctx)
+    }
+
     #[graphql(
         guard = "AgqlCurrentAuthorityGuard::new(\"SecureRecord\", Some(\"records.read\"), EntityAccessKind::Read, EntityAccessSurface::GraphqlQuery)"
     )]
@@ -128,10 +135,30 @@ struct Host {
     resolver_advance: AtomicI64,
     binding_advance: AtomicI64,
     business_advance: AtomicI64,
+    binding_pause: Mutex<Option<Arc<await_release::Pause>>>,
+    business_pause: Mutex<Option<Arc<await_release::Pause>>>,
+    business_calls: AtomicUsize,
+    current_owner: Mutex<Option<String>>,
+    current_session_proof: AtomicBool,
+    status_references: Mutex<Vec<PrincipalReference>>,
+    owned_callback_principals: Mutex<Vec<AuthPrincipal>>,
+    root_business_allowed: AtomicUsize,
+    revoke_on_relation: AtomicBool,
+    relation_binding_calls: AtomicUsize,
+    relation_revocations: AtomicUsize,
 }
 #[async_trait::async_trait]
 impl TokenStatusChecker for Host {
-    async fn check(&self, _: TokenStatusRequest<'_>) -> AuthResult<TokenStatus> {
+    async fn check(&self, request: TokenStatusRequest<'_>) -> AuthResult<TokenStatus> {
+        let reference = request.principal.reference();
+        assert_eq!(request.token_id, reference.token_id.as_deref());
+        assert_eq!(request.session_id, reference.session_id.as_deref());
+        assert_eq!(
+            request.session_family_id,
+            reference.session_family_id.as_deref()
+        );
+        assert_eq!(request.tenant_id, reference.tenant_id.as_deref());
+        self.status_references.lock().unwrap().push(reference);
         self.checks.fetch_add(1, Ordering::SeqCst);
         self.clock
             .advance_seconds(self.checker_advance.swap(0, Ordering::SeqCst));
@@ -174,7 +201,11 @@ impl CurrentPrincipalResolver for Host {
         }
         self.clock
             .advance_seconds(self.resolver_advance.swap(0, Ordering::SeqCst));
-        ResolvedPrincipal::new(reference.clone(), principal, self.clock.now())
+        if self.current_session_proof.load(Ordering::SeqCst) {
+            ResolvedPrincipal::from_current_session(reference.clone(), principal, self.clock.now())
+        } else {
+            ResolvedPrincipal::new(reference.clone(), principal, self.clock.now())
+        }
     }
 }
 impl AgqlBindingAuthorizer for Host {
@@ -188,6 +219,7 @@ impl AgqlBindingAuthorizer for Host {
         surface: EntityAccessSurface,
     ) -> BoxFuture<'a, AuthResult<bool>> {
         Box::pin(async move {
+            await_release::pause(&self.binding_pause).await;
             self.clock
                 .advance_seconds(self.binding_advance.swap(0, Ordering::SeqCst));
             if self.binding_error.load(Ordering::SeqCst) {
@@ -224,6 +256,14 @@ impl AgqlBindingAuthorizer for Host {
             {
                 self.revoked.store(true, Ordering::SeqCst);
             }
+            if entity == "SecureProject" && matches!(surface, EntityAccessSurface::GraphqlRelation)
+            {
+                self.relation_binding_calls.fetch_add(1, Ordering::SeqCst);
+                if self.revoke_on_relation.swap(false, Ordering::SeqCst) {
+                    self.relation_revocations.fetch_add(1, Ordering::SeqCst);
+                    self.revoked.store(true, Ordering::SeqCst);
+                }
+            }
             Ok(ctx.data_opt::<TransportAccepted>().is_some()
                 && matches!(entity, "SecureRecord" | "SecureProject")
                 && matches!(kind, EntityAccessKind::Read | EntityAccessKind::Write)
@@ -251,9 +291,17 @@ impl EntityPolicy for Business {
         surface: EntityAccessSurface,
     ) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
         Box::pin(async move {
+            self.0.business_calls.fetch_add(1, Ordering::SeqCst);
+            await_release::pause(&self.0.business_pause).await;
             let result = ScopeEntityPolicy::new(&["records.read"], &["records.write"])
                 .can_access_entity(ctx, db, entity, policy, kind, surface)
                 .await;
+            if entity == "SecureRecord"
+                && matches!(surface, EntityAccessSurface::GraphqlQuery)
+                && matches!(&result, Ok(true))
+            {
+                self.0.root_business_allowed.fetch_add(1, Ordering::SeqCst);
+            }
             self.0
                 .clock
                 .advance_seconds(self.0.business_advance.swap(0, Ordering::SeqCst));
@@ -312,6 +360,17 @@ async fn fixture_config(
         resolver_advance: AtomicI64::new(0),
         binding_advance: AtomicI64::new(0),
         business_advance: AtomicI64::new(0),
+        binding_pause: Mutex::new(None),
+        business_pause: Mutex::new(None),
+        business_calls: AtomicUsize::new(0),
+        current_owner: Mutex::new(Some("user-1".into())),
+        current_session_proof: AtomicBool::new(false),
+        status_references: Mutex::new(Vec::new()),
+        owned_callback_principals: Mutex::new(Vec::new()),
+        root_business_allowed: AtomicUsize::new(0),
+        revoke_on_relation: AtomicBool::new(false),
+        relation_binding_calls: AtomicUsize::new(0),
+        relation_revocations: AtomicUsize::new(0),
     });
     let enforcement = Arc::new(AgqlCurrentAuthorityEnforcement::new(
         host.clone(),
@@ -344,7 +403,10 @@ async fn fixture_config(
     if let Some(allowed) = deleted_grant {
         db.set_row_policy(DeletedRows { allowed });
     }
-    let mut builder = schema_builder(db).data(enforcement).data(host.clone());
+    let mut builder = schema_builder(db)
+        .data(enforcement)
+        .data(host.clone())
+        .data(await_release::Captured::default());
     if let Some(subject) = schema_subject {
         builder = builder.data(subject);
     }
@@ -376,7 +438,7 @@ async fn accepted_request_works_and_each_alias_revalidates() {
     let (schema, host, bundle) = fixture().await;
     let response = schema.execute(request(&bundle, "{ a: secureRecords { edges { node { id } } } b: secureRecords { edges { node { id } } } }")).await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
-    assert_eq!(host.checks.load(Ordering::SeqCst), 2);
+    assert_eq!(host.checks.load(Ordering::SeqCst), 6);
     assert_eq!(bundle.principal(), &principal());
 }
 #[tokio::test]
@@ -467,7 +529,7 @@ async fn sequential_mutation_observes_same_request_revocation() {
         .await;
     assert!(host.revoked.load(Ordering::SeqCst));
     assert!(!response.errors.is_empty(), "{:?}", response.data);
-    assert_eq!(host.checks.load(Ordering::SeqCst), 2);
+    assert_eq!(host.checks.load(Ordering::SeqCst), 3);
 }
 #[tokio::test]
 async fn binding_evidence_and_host_authorization_are_mandatory() {
@@ -622,7 +684,7 @@ async fn federation_rechecks_current_authority() {
     let data = accepted.data.into_json().unwrap();
     assert_eq!(data["_entities"][0]["id"], "record-1");
     assert_eq!(data["_entities"][0]["value"], "safe");
-    assert_eq!(host.checks.load(Ordering::SeqCst), 1);
+    assert_eq!(host.checks.load(Ordering::SeqCst), 3);
     host.revoked.store(true, Ordering::SeqCst);
     assert!(
         !schema
@@ -666,7 +728,7 @@ async fn concurrent_request_copies_remain_immutable() {
     );
     assert!(a.errors.is_empty(), "{:?}", a.errors);
     assert!(b.errors.is_empty(), "{:?}", b.errors);
-    assert_eq!(host.checks.load(Ordering::SeqCst), 2);
+    assert_eq!(host.checks.load(Ordering::SeqCst), 5);
     assert_eq!(bundle.principal(), &principal());
 }
 
