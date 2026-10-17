@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,10 +31,19 @@ a real context and check every release with mandatory owned binding/business
 policy, including after queue/owner awaits. There is no fabricated Context or
 reusable allow permit. Preserve host ownership/filter/row/field/deleted-preimage
 and commit/revision fences. See [the bridge guide](docs/reference/graphql-orm/agql-auth-bridge.md#owned-custom-release-checks).
-No SDL, wire, database or stored-record migration is required. This source slice
-retains published Auth v0.21.3 and its strict legacy resolver contract; adoption
-of an explicit current-session proof API requires a verified published Auth
-successor and a separate reviewed tag/lock update before using that path.
+No SDL, wire, database or stored-record migration is required. Select published
+Auth `v0.22.0` for every direct Auth dependency and refresh the lockfile to
+`997707e060bcf5fabf879a5f98146dc2732b1c99`, retaining one tag source across
+ORM, AI, router and direct consumers. For an authoritative ordinary-session
+projection with distinct access-token jti/correlation/expiry metadata, use
+`ResolvedPrincipal::from_current_session(original_reference, current_session, now)`.
+It validates identity, kind, session/family/tenant/bindings, security version and
+both deadlines. Preserve the original accepted principal and independently
+check its original token status; never copy original metadata onto the current
+session or replace the accepted carrier. Current grants only narrow the original
+ceilings, and a longer current lifetime cannot extend the accepted credential.
+The legacy `ResolvedPrincipal::new` sensitive path remains strict. Host binding,
+owner/current-row checks and transaction/revision fences remain mandatory.
 
 ## 0.50.1 to 0.50.2: published Auth source alignment
 

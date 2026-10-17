@@ -3,7 +3,7 @@ title: "agql-auth Bridge Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,9 +16,10 @@ supersedes: []
 ## Accepted request and current authority
 
 Enable `auth-agql` and use the same `agql-auth` selector as the workspace:
-`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.21.3", version = "0.21.3"`.
-The published tag is locked to reviewed commit
-`59c0a38f82e8c75459474238799a81f29d4ffa58`. Matching only the commit is not
+`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.22.0", version = "0.22.0"`.
+The published tag peels to reviewed commit
+`997707e060bcf5fabf879a5f98146dc2732b1c99`; the lockfile must select that commit.
+Matching only the commit is not
 enough: Cargo treats a revision and a tag as different sources, which can split
 principal types. Refresh the host lockfile and verify one Auth source across
 the selected graph. Both projects are Git-distributed; the release manifest
@@ -266,8 +267,21 @@ Ownership may change after a host owner read, just as revocation may race after
 the final Auth read: retain host transaction/revision/resource fences for the
 actual commit or release. Recheck after any further protected-path await.
 
-This source slice still selects published Auth v0.21.3. Its strict legacy
-sensitive resolver requires an exact credential projection. Do not normalize
-current-session metadata to satisfy that equality: first adopt a separately
-reviewed, verified published Auth release supporting explicit current-session
-proof. No unpublished dependency selector is implied by this API.
+Published Auth v0.22.0 supports
+`ResolvedPrincipal::from_current_session(original_reference, current_session, now)`
+for an enabled ordinary session read from authoritative host storage. Keep the
+exact immutable original reference separately from that current principal: its
+access-token jti, correlation and expiry need not appear on the session. The
+constructor validates ordinary user-session kinds, identity, session/family,
+tenant and other bindings, a current security version, any accepted version,
+and live original/current deadlines. It does not authenticate a credential or
+establish that a host read was authoritative.
+
+The host status checker must still check the original token/session/family,
+including its original jti and expiry. An always-active placeholder is not proof.
+ORM preserves the original accepted bundle and intersects scopes, scalar roles
+and typed authorization roles without widening; removal denies the operation.
+The shorter original/current/observed deadline bounds each check. Do not replace
+the accepted carrier or normalize its metadata onto the current session to
+force equality. The legacy `ResolvedPrincipal::new` sensitive path still
+requires an exact credential projection; delegation remains a separate contract.

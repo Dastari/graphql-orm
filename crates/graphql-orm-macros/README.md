@@ -3,7 +3,7 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,13 @@ and owned custom release checks. Policies remain read-only admission callbacks;
 resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
+
+The current workspace selects published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99`. Use that tag for direct Auth
+dependencies and refresh the lockfile to one source. The
+[0.51 migration](../../MIGRATION.md#0502-to-0510-post-await-and-owned-release-checks)
+describes validated current-session proofs; earlier version notes below retain
+their historical selectors.
 
 Version 0.50.2 aligns the paired runtime/macros release with published
 `agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag

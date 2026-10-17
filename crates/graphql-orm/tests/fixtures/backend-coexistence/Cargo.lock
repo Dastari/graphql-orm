@@ -26,8 +26,8 @@ dependencies = [
 
 [[package]]
 name = "agql-auth"
-version = "0.21.3"
-source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.21.3#59c0a38f82e8c75459474238799a81f29d4ffa58"
+version = "0.22.0"
+source = "git+https://github.com/Dastari/agql-auth.git?tag=v0.22.0#997707e060bcf5fabf879a5f98146dc2732b1c99"
 dependencies = [
  "argon2",
  "async-graphql",

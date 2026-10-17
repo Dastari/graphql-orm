@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,9 +21,10 @@ for historical context.
   any grant narrowing without changing the accepted request.
 - Add owned custom operation/release checks with mandatory owned binding and
   business policies, for streams/effects that outlive GraphQL Context.
+- Select published Auth v0.22.0 at
+  `997707e060bcf5fabf879a5f98146dc2732b1c99` for explicit validated
+  current-session proofs that retain the exact original credential reference.
 - Align ORM/macros at 0.51.0. No generated code, SDL, stored-data or schema change.
-  This source slice retains published Auth v0.21.3; current-session proof adoption
-  requires a separately verified published Auth successor and lock update.
 
 ## 0.50.2 (unreleased)
 

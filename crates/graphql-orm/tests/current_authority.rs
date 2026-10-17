@@ -139,10 +139,26 @@ struct Host {
     business_pause: Mutex<Option<Arc<await_release::Pause>>>,
     business_calls: AtomicUsize,
     current_owner: Mutex<Option<String>>,
+    current_session_proof: AtomicBool,
+    status_references: Mutex<Vec<PrincipalReference>>,
+    owned_callback_principals: Mutex<Vec<AuthPrincipal>>,
+    root_business_allowed: AtomicUsize,
+    revoke_on_relation: AtomicBool,
+    relation_binding_calls: AtomicUsize,
+    relation_revocations: AtomicUsize,
 }
 #[async_trait::async_trait]
 impl TokenStatusChecker for Host {
-    async fn check(&self, _: TokenStatusRequest<'_>) -> AuthResult<TokenStatus> {
+    async fn check(&self, request: TokenStatusRequest<'_>) -> AuthResult<TokenStatus> {
+        let reference = request.principal.reference();
+        assert_eq!(request.token_id, reference.token_id.as_deref());
+        assert_eq!(request.session_id, reference.session_id.as_deref());
+        assert_eq!(
+            request.session_family_id,
+            reference.session_family_id.as_deref()
+        );
+        assert_eq!(request.tenant_id, reference.tenant_id.as_deref());
+        self.status_references.lock().unwrap().push(reference);
         self.checks.fetch_add(1, Ordering::SeqCst);
         self.clock
             .advance_seconds(self.checker_advance.swap(0, Ordering::SeqCst));
@@ -185,7 +201,11 @@ impl CurrentPrincipalResolver for Host {
         }
         self.clock
             .advance_seconds(self.resolver_advance.swap(0, Ordering::SeqCst));
-        ResolvedPrincipal::new(reference.clone(), principal, self.clock.now())
+        if self.current_session_proof.load(Ordering::SeqCst) {
+            ResolvedPrincipal::from_current_session(reference.clone(), principal, self.clock.now())
+        } else {
+            ResolvedPrincipal::new(reference.clone(), principal, self.clock.now())
+        }
     }
 }
 impl AgqlBindingAuthorizer for Host {
@@ -236,6 +256,14 @@ impl AgqlBindingAuthorizer for Host {
             {
                 self.revoked.store(true, Ordering::SeqCst);
             }
+            if entity == "SecureProject" && matches!(surface, EntityAccessSurface::GraphqlRelation)
+            {
+                self.relation_binding_calls.fetch_add(1, Ordering::SeqCst);
+                if self.revoke_on_relation.swap(false, Ordering::SeqCst) {
+                    self.relation_revocations.fetch_add(1, Ordering::SeqCst);
+                    self.revoked.store(true, Ordering::SeqCst);
+                }
+            }
             Ok(ctx.data_opt::<TransportAccepted>().is_some()
                 && matches!(entity, "SecureRecord" | "SecureProject")
                 && matches!(kind, EntityAccessKind::Read | EntityAccessKind::Write)
@@ -268,6 +296,12 @@ impl EntityPolicy for Business {
             let result = ScopeEntityPolicy::new(&["records.read"], &["records.write"])
                 .can_access_entity(ctx, db, entity, policy, kind, surface)
                 .await;
+            if entity == "SecureRecord"
+                && matches!(surface, EntityAccessSurface::GraphqlQuery)
+                && matches!(&result, Ok(true))
+            {
+                self.0.root_business_allowed.fetch_add(1, Ordering::SeqCst);
+            }
             self.0
                 .clock
                 .advance_seconds(self.0.business_advance.swap(0, Ordering::SeqCst));
@@ -330,6 +364,13 @@ async fn fixture_config(
         business_pause: Mutex::new(None),
         business_calls: AtomicUsize::new(0),
         current_owner: Mutex::new(Some("user-1".into())),
+        current_session_proof: AtomicBool::new(false),
+        status_references: Mutex::new(Vec::new()),
+        owned_callback_principals: Mutex::new(Vec::new()),
+        root_business_allowed: AtomicUsize::new(0),
+        revoke_on_relation: AtomicBool::new(false),
+        relation_binding_calls: AtomicUsize::new(0),
+        relation_revocations: AtomicUsize::new(0),
     });
     let enforcement = Arc::new(AgqlCurrentAuthorityEnforcement::new(
         host.clone(),

@@ -3,12 +3,18 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-ai
+
+The current workspace selects published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99`. Direct Auth consumers must match
+that tag and refresh their locks to one source; see the
+[workspace migration](../../MIGRATION.md#0502-to-0510-post-await-and-owned-release-checks).
+Version-specific notes below retain their historical dependency facts.
 
 Version `0.107.2` selects published Auth `v0.21.3` at the same reviewed commit.
 Align direct Auth dependencies to that tag, refresh the lockfile and verify one
