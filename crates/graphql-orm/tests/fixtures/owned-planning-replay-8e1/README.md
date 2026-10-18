@@ -18,7 +18,8 @@ on x86_64 Linux. They were not reconstructed from the new verifier. The
 identities and SHA-256 values for the complete byte-sensitive fixtures and
 [instrumentation patch](instrumentation.patch).
 
-The patch adds a test-only observation hook immediately after the original live
+The recorded patch uses zero context to avoid whitespace-only blank context
+lines; apply it only to the exact source above. The patch adds a test-only observation hook immediately after the original live
 plan validation succeeds. It serializes the actual `current`, target, ownership,
 options and complete original output. It adds no introspection, changes no
 algorithm, and retains unowned metadata rather than deriving a source from a
@@ -36,7 +37,7 @@ Reproduce in an isolated checkout of the exact source, using the qualified
 compiler and its root lockfile:
 
 ```sh
-git apply /path/to/instrumentation.patch
+git apply --unidiff-zero /path/to/instrumentation.patch
 cargo test -p graphql-orm --offline --locked --no-default-features \
   --features sqlite --lib replay_fixture_positive_sqlite -- --nocapture
 cargo test -p graphql-orm --offline --locked --no-default-features \

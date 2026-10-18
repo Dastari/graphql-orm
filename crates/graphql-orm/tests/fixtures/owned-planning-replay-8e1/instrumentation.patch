@@ -388,19 +388,10 @@ diff --git a/crates/graphql-orm/src/graphql/orm/runtime_migration.rs b/crates/gr
 index c98913e..496dc9a 100644
 --- a/crates/graphql-orm/src/graphql/orm/runtime_migration.rs
 +++ b/crates/graphql-orm/src/graphql/orm/runtime_migration.rs
-@@ -1042,6 +1042,8 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
-         };
-         plan.plan_hash = plan.integrity_hash();
-         B::validate_owned_plan(self.database.pool(), &plan).await?;
+@@ -1044,0 +1045,2 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
 +        #[cfg(test)]
 +        replay_fixture_instrumentation::retain(&current, target, &plan, options);
-         Ok(plan)
-     }
-     /// Separate guarded application of an immutable owned plan; never reconciles RLS.
-@@ -1329,3 +1331,10 @@ impl fmt::Write for BoundedDefinitionWriter {
-         }
-     }
- }
+@@ -1331,0 +1334,7 @@ impl fmt::Write for BoundedDefinitionWriter {
 +
 +#[cfg(test)]
 +#[path="replay_fixture_instrumentation/mod.rs"]
@@ -412,8 +403,5 @@ diff --git a/crates/graphql-orm/tests/support/owned_postgres.rs b/crates/graphql
 index 47bf027..272a30d 100644
 --- a/crates/graphql-orm/tests/support/owned_postgres.rs
 +++ b/crates/graphql-orm/tests/support/owned_postgres.rs
-@@ -1,3 +1,4 @@
+@@ -0,0 +1 @@
 +use crate as graphql_orm;
- use std::process::Command;
- 
- const POSTGRES_IMAGE: &str = "postgres:17-alpine";
