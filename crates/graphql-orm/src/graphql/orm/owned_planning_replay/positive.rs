@@ -286,9 +286,51 @@ fn replay_positive_offline_original_fixtures() -> Result<(), Box<dyn std::error:
             )?;
             w.verify()?;
             assert_eq!(bytes, w.to_json(OwnedPlanningReplayLimits::default())?);
+            // Valid alternative object order, including nested compound FK
+            // payloads buffered before the internally tagged discriminant.
+            let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let kind_last = serde_json::to_vec(&KindLast(&value))?;
+            let reordered = OwnedPlanningReplayWitness::from_json(
+                &kind_last,
+                OwnedPlanningReplayLimits::default(),
+            )?;
+            reordered.verify()?;
+            assert_eq!(
+                bytes,
+                reordered.to_json(OwnedPlanningReplayLimits::default())?
+            );
         }
     }
     Ok(())
+}
+
+// Test-host serialization only: all objects/enum strings remain valid and the
+// actual historical facts are unchanged. No malformed/refusal case is executed.
+struct KindLast<'a>(&'a serde_json::Value);
+impl Serialize for KindLast<'_> {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self.0 {
+            serde_json::Value::Object(m) => {
+                let mut out = s.serialize_map(Some(m.len()))?;
+                for (k, v) in m.iter().filter(|(k, _)| k.as_str() != "kind") {
+                    out.serialize_entry(k, &KindLast(v))?;
+                }
+                if let Some(kind) = m.get("kind") {
+                    out.serialize_entry("kind", kind)?;
+                }
+                out.end()
+            }
+            serde_json::Value::Array(a) => {
+                let mut out = s.serialize_seq(Some(a.len()))?;
+                for v in a {
+                    out.serialize_element(&KindLast(v))?;
+                }
+                out.end()
+            }
+            value => value.serialize(s),
+        }
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]

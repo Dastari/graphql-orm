@@ -17,6 +17,14 @@ impl de::Error for FixedError {
     }
 }
 pub(super) struct Fixed<D>(pub D);
+// Internally tagged derives buffer payloads in serde's Content and restart with
+// ContentDeserializer, bypassing the outer Fixed wrapper. Re-enter at EVERY
+// payload field; FixedSeed then keeps all nested structs/enums strict as well.
+pub(super) fn payload<'de, D: de::Deserializer<'de>, T: serde::Deserialize<'de>>(
+    d: D,
+) -> Result<T, D::Error> {
+    T::deserialize(Fixed(d)).map_err(bridge)
+}
 struct FixedVisitor<V>(V);
 struct FixedSeed<S>(S);
 // Empty bridges prevent cumulative UTF-8 error text generation at recursive
@@ -89,6 +97,11 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for Fixed<D> {
             .deserialize_any(FixedVisitor(StringEnumOnly(v)))
             .map_err(|_| FixedError)
     }
+    fn deserialize_identifier<V: Visitor<'de>>(self, v: V) -> Result<V::Value, FixedError> {
+        self.0
+            .deserialize_any(FixedVisitor(StringOnly(v)))
+            .map_err(|_| FixedError)
+    }
     fn deserialize_struct<V: Visitor<'de>>(
         self,
         _: &'static str,
@@ -113,7 +126,7 @@ impl<'de, D: de::Deserializer<'de>> de::Deserializer<'de> for Fixed<D> {
             .deserialize_newtype_struct(name, FixedVisitor(v))
             .map_err(|_| FixedError)
     }
-    serde::forward_to_deserialize_any! {bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf unit unit_struct seq tuple tuple_struct identifier ignored_any}
+    serde::forward_to_deserialize_any! {bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf unit unit_struct seq tuple tuple_struct ignored_any}
     fn is_human_readable(&self) -> bool {
         self.0.is_human_readable()
     }
@@ -188,6 +201,24 @@ impl<'de, V: Visitor<'de>> Visitor<'de> for MapOnly<V> {
     }
     fn visit_map<A: MapAccess<'de>>(self, a: A) -> Result<Self::Value, A::Error> {
         self.0.visit_map(a)
+    }
+}
+// Includes the internally tagged step discriminant: derive's identifier visitor
+// otherwise also accepts numeric variant indices, even for a JSON wire format.
+struct StringOnly<V>(V);
+impl<'de, V: Visitor<'de>> Visitor<'de> for StringOnly<V> {
+    type Value = V::Value;
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("witness string")
+    }
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+        self.0.visit_str(s)
+    }
+    fn visit_borrowed_str<E: de::Error>(self, s: &'de str) -> Result<Self::Value, E> {
+        self.0.visit_borrowed_str(s)
+    }
+    fn visit_string<E: de::Error>(self, s: String) -> Result<Self::Value, E> {
+        self.0.visit_string(s)
     }
 }
 // Wire enum values are strings, without serde's externally-tagged object form.

@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -25,6 +25,10 @@ for historical context.
 - Add complete v1 JSON mapping, private checked limits, per-call custody consent,
   separate redacted errors and cumulative conservative work/text admission.
   Authentic 8e1 positive fixtures retain the actual original observation/output.
+- Enforce the qualified Rust/compiler/platform profile inside all replay library
+  operations before work begins. Preserve strict nested object/string wire
+  shapes after tagged-step buffering, including valid `kind`-last objects; prepay
+  their additional decoder work without changing ordinary planning or hashes.
 - Align ORM/macros at 0.51.0; generated code is unchanged. Security and failure
   properties have code inspection only, without runtime verification.
 

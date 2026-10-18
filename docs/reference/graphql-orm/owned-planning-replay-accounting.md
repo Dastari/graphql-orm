@@ -21,6 +21,11 @@ wire member names as extra slots/bytes, and never decide ownership or a diff.
 The implementation intentionally overbounds several schedule terms together:
 
 - Each ledger starts with 4096 work and 256 text for fixed entry/error overhead.
+  A constant-time library qualification guard precedes ledger creation and every
+  public capture/codec/replay operation. Its successful fixed work is included in
+  this entry allowance. Missing qualification returns LimitExceeded immediately,
+  without inspecting data or accessing the database. The build-time compiler
+  query is outside per-operation W/T and never occurs in runtime library code.
   Inventory slots reserve 64 work before visiting; strings additionally reserve
   128+4n before length aggregation. These include ledger/bookkeeping field visits,
   checked arithmetic and comparisons, not just the model's own fields.
@@ -67,7 +72,29 @@ The implementation intentionally overbounds several schedule terms together:
   unknown members; there is no `Value` tree. A private deserializer/visitor/seed
   adapter uses fixed errors before serde's default diagnostics can format input.
   Parser-boundary bridges have empty messages, without repeated diagnostic text
-  materialization; size hints are not propagated into typed allocations. Borrowed encoders preserve field and
+  materialization; size hints are not propagated into typed allocations.
+  Locked Serde 1.0.228 `src/private/de.rs` TaggedContentVisitor::visit_map
+  (835–886) buffers all non-tag members even when the tag appears last;
+  ContentDeserializer::deserialize_struct (1404–1418) accepts sequences and
+  deserialize_enum (1420–1461) accepts single-member objects. Therefore every one
+  of the 31 StepObject payload fields uses bounded_decode::payload to wrap that
+  ContentDeserializer in Fixed before typed decoding. FixedSeed/FixedVisitor
+  maintain the wrapper through every nested map, sequence, option and enum;
+  MapOnly and StringEnumOnly enforce the complete wire's shapes there as at the
+  original JSON boundary. StringOnly additionally guards identifiers, including
+  the tag, against derive's numeric variant-index alternative. Unknown/duplicate/
+  missing member errors still use FixedError before formatting. There is no
+  additional Content/Value tree or text copy from this re-entry.
+  Decoder admission now reserves 64 rather than 32 work per lexical node:
+  the additional 32 cover the re-entry, identifier gate and their visitor/seed
+  dispatches (one re-entry per payload field; each subsequent nested value/member
+  has at most one additional Fixed/visitor/seed layer, with <=32 logical visits/
+  moves/comparisons per node). These wrappers do not scan stored string bytes;
+  the original 32*encoded_bytes work still pays byte parsing/member comparisons.
+  Nodes <=2N in the wire inventory, so the capture certificate prepays 128N
+  rather than 64N for future decoder node work. This conservative correction
+  retains the fixed W/T ceilings and can refuse additional near-ceiling inputs.
+  Borrowed encoders preserve field and
   vector order; an admitted layout adapter adds exact quote/control escape
   lengths and decimal digit counts without emitting JSON, formatted integers or
   escape fragments. Capture performs this arithmetic, never automatic encoding.
@@ -94,8 +121,13 @@ crates/graphql-orm/src/graphql/orm/
 at that exact revision, not the owner's older dirty working checkout.
 
 Toolchain-library accounting is qualified to the reviewed Rust 1.97.1 standard
-library, compiler commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452, stock 32/64-bit
-profiles. Its installed source was inspected, including stable sort and BTree
+library, compiler commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452, stock
+x86_64-unknown-linux-gnu host/target, with no compiler wrappers. The std-only
+crate build.rs checks the exact compiler release/commit/host and Cargo target;
+only that match emits graphql_orm_replay_qualified_profile. A missing match
+fails closed in all four library entry points, rather than relying on the
+standalone inspection script. Ordinary planning has no profile gate.
+Its installed source was inspected, including stable sort and BTree
 collection implementations. Additional toolchains need their library accounting
 reviewed as well as recipe-conformance evidence; sharing a helper name proves
 neither accounting nor Debug/rendering compatibility.
@@ -619,7 +651,8 @@ other controls are the remaining U+0000-U+001F bytes. Combine those lengths,
 fixed member/tag spellings, separators and integer decimal digit lengths to
 compute canonical wire size without producing bytes or deciding a plan.
 Before decoding allocation, reserve a conservative base of
-32*encoded_bytes+256 work, then 32 work per admitted value/member, and at most
+32*encoded_bytes+256 work, then 64 work per admitted value/member (including
+32 for strict re-entry after tagged buffering, as detailed above), and at most
 2*encoded_bytes+256 text for decode scratch, owned strings and a fixed error
 frame. Member matching is against the closed
 <=15-field shapes; the base includes full key scans/comparisons. New codec

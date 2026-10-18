@@ -119,11 +119,24 @@ original live plan and every existing policy/baseline/backend/application check.
 
 Format 1 supports recipe `graphql-orm-owned-planning-8e1-v1`, qualified to
 `8e1e5698437d9ea5c0d6ff2c0f29cf7af58d45a0`, ORM 0.50.2 and Rust 1.97.1
-(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, x86_64 Linux). Recipe maintenance includes
+(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, host and target
+`x86_64-unknown-linux-gnu`, stock standard library, no compiler wrappers).
+The library enforces this profile: a dependency-free build script queries the
+opt-in build's compiler and checks Cargo's host/target, emitting a private
+qualification cfg only on an exact match. Nonempty `RUSTC_WRAPPER` or
+`RUSTC_WORKSPACE_WRAPPER` prevents qualification because the wrapper could select
+a different compiler. Absent qualification, capture, `from_json`, `to_json` and
+`verify` return `LimitExceeded` before ledger creation, input inspection,
+conversion, validation, codec allocation or database access. This is an unknown
+accounting-bound refusal; it does not prevent compilation or ordinary planning.
+No runtime environment, filesystem or process probe is used. Build inputs and
+toolchain provenance remain trusted caller/build-system responsibilities.
+Recipe maintenance includes
 Debug behavior, schema/scoping/diff/order/classification/rendering and FNV/wrapper
 bytes. Sharing helper names does not prove compatibility; source review and
 [authentic source-qualified fixtures](../../../crates/graphql-orm/tests/fixtures/owned-planning-replay-8e1/README.md)
-are required. Other toolchains have no replay/accounting conformance claim.
+are required. Other compiler/platform profiles cannot perform these replay
+operations until reviewed and qualified in the library.
 Unknown recipes are rejected, and old plans are never silently resealed. No
 missing historical baseline can be recovered. Historical consumer artifact
 adoption and release/pin changes require separate review.
@@ -133,8 +146,12 @@ adoption and release/pin changes require separate review.
 All members below are required, including explicit null options. Strings and
 vectors preserve exact bytes/order; there is no normalization or unknown-member
 extension bag. Ownership is the validated strictly sorted unique table list.
-Object input order/whitespace may vary; duplicates, unknowns and missing members
-are rejected. Integer fields use nonnegative checked machine-size values (except
+Object input order/whitespace may vary, including a step's `kind` appearing last;
+structs require objects and enum values require strings at every nested level.
+The strict decoder is re-entered at each internally buffered step payload field;
+Serde's positional structs and object-form enums are not wire alternatives.
+Duplicates, unknowns and missing members are rejected. Integer fields use
+nonnegative checked machine-size values (except
 signed i32 SRID), with overflow rejected. Hashes are 16 lowercase hex characters.
 
 Canonical output is compact UTF-8 without a BOM/newline. Fields follow the order
@@ -233,14 +250,15 @@ outside this bound, while their returned data is bounded before new engine work.
 | Source/API | Additive feature-gated methods/types; no new required trait methods, existing fields or exhaustive enum variants |
 | Behavior | Existing methods, defaults, limits, live observations and apply checks unchanged; capture is explicit per call |
 | Feature graph | Empty default-off feature, with no incoming edges from existing features |
-| Dependencies | No added or updated external dependency; reuse existing serde/serde_json |
+| Dependencies | No added or updated external dependency; reuse existing serde/serde_json; std-only build qualification |
 | Serialized formats | New complete v1 witness only; existing formats unchanged; external producer identity/custody remains host-owned |
 | Hashes | Existing schema/semantic/owned integrity bytes unchanged; complete recipe-qualified comparisons, no resealing |
-| Performance | Existing production paths have no accounting/retention cost; explicit capture/codec/replay pay bounded extra work |
+| Performance | Existing production paths have no accounting/retention cost; explicit capture/codec/replay pay bounded extra work; build script has fixed setup and queries rustc only for opt-in builds |
 | Semver/migration | ORM/macros 0.51.0 aligned additive release; no database or consumer migration required for existing APIs |
 
 Runtime conformance is limited to the documented normal positive gates. Malformed
-input, refusal/overflow, sensitive disclosure, failed live checks, authority,
+input (including rejected nested shapes), unsupported-profile refusal, resource
+refusal/overflow, sensitive disclosure, failed live checks, authority,
 concurrency and cancellation properties are **code-inspection-only and runtime
 unverified**. No adversarial/fuzz, negative-auth, fault/cancellation or security
 concurrency scenarios, or aggregate suites containing them, are part of this

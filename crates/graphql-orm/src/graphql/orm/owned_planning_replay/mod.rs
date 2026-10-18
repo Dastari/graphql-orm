@@ -1,4 +1,7 @@
 //! Explicit capture of sensitive complete schema evidence; pure, passive replay.
+//! Capture/codec/verification require the build-qualified Rust 1.97.1 compiler
+//! and x86_64-unknown-linux-gnu profile; other builds return LimitExceeded before
+//! those operations start. Ordinary planning is unaffected.
 use super::*;
 use serde::{Deserialize, Serialize};
 mod accounting;
@@ -12,6 +15,15 @@ type R<T> = Result<T, E>;
 const RECIPE: &str = "graphql-orm-owned-planning-8e1-v1";
 const FORMAT: u16 = 1;
 const MAX_ENCODED: usize = 67_108_864;
+// A missing build-time attestation fails closed, before even allocating a ledger.
+// No runtime environment/filesystem/process access participates in replay.
+fn qualified_profile() -> R<()> {
+    if cfg!(graphql_orm_replay_qualified_profile) {
+        Ok(())
+    } else {
+        Err(E::LimitExceeded)
+    }
+}
 // Frozen v1 ceilings do not follow a future change to ordinary ORM defaults.
 const PINNED_SCHEMA_LIMITS: RuntimeMigrationLimits = RuntimeMigrationLimits {
     max_collections: 512,
@@ -36,7 +48,7 @@ pub enum OwnedPlanningReplayError {
     UnsupportedRecipe,
     /// Capture/replay supports only SQLite and PostgreSQL.
     UnsupportedBackend,
-    /// A resource ceiling or conservative admission bound could not be met.
+    /// A resource ceiling, qualified build profile or admission bound is unmet.
     LimitExceeded,
     /// The complete typed witness is invalid.
     InvalidWitness,
@@ -625,7 +637,9 @@ fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -
     let mut future = Ledger::default();
     codec_admit(n, &mut future)?;
     let z = size(data, l, limits.max_encoded_bytes)?;
-    future.reserve(Cost::new(mul(64, z.n)?, 0))?;
+    // Lexical member/value nodes are at most twice the wire inventory slots.
+    // Includes the strict re-entry wrappers after tagged Content buffering.
+    future.reserve(Cost::new(mul(128, z.n)?, 0))?;
     // Only admission calculations run here. No extra engine observation or replay.
     let mut verify = Ledger::default();
     let a = size(&data.source, l, limits.max_encoded_bytes)?;
@@ -785,7 +799,7 @@ fn predecode(bytes: &[u8], limits: OwnedPlanningReplayLimits, l: &mut Ledger) ->
     if depth != 0 {
         return Err(E::InvalidWitness);
     }
-    l.reserve(Cost::new(mul(32, nodes)?, 0))
+    l.reserve(Cost::new(mul(64, nodes)?, 0))
 }
 impl OwnedPlanningReplayWitness {
     /// Decode a complete v1 witness without connecting to a database. All object
@@ -794,6 +808,7 @@ impl OwnedPlanningReplayWitness {
         bytes: &[u8],
         limits: OwnedPlanningReplayLimits,
     ) -> Result<Self, OwnedPlanningReplayError> {
+        qualified_profile()?;
         let mut l = Ledger::default();
         predecode(bytes, limits, &mut l)?;
         let mut parser = serde_json::Deserializer::from_slice(bytes);
@@ -858,6 +873,7 @@ impl OwnedPlanningReplayWitness {
         &self,
         limits: OwnedPlanningReplayLimits,
     ) -> Result<Vec<u8>, OwnedPlanningReplayError> {
+        qualified_profile()?;
         let limits = self.limits.intersect(limits);
         let mut l = Ledger::default();
         profile_check_once(&self.data.source, limits, &mut l)?;
@@ -880,6 +896,7 @@ impl OwnedPlanningReplayWitness {
     /// Reproduce exact engine facts purely in memory. This grants no authorization,
     /// present baseline, recovery or data-validity assurance.
     pub fn verify(&self) -> Result<VerifiedOwnedPlanningReplay, OwnedPlanningReplayError> {
+        qualified_profile()?;
         let mut l = Ledger::default();
         let facts = compute(&self.data, self.limits, &mut l)?;
         let z = size(&self.data.expected, &mut l, self.limits.max_encoded_bytes)?;
@@ -973,6 +990,7 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
         _consent: OwnedPlanningReplayCaptureConsent,
     ) -> Result<(OwnedPlannedMigration, OwnedPlanningReplayWitness), OwnedPlanningCaptureError>
     {
+        qualified_profile()?;
         backend(B::DIALECT)?;
         supported::<B>()?;
         if !self.policy().allows_planning() {

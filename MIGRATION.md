@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -29,7 +29,13 @@ keep it private and bind external cryptographic custody and producer identity.
 The new format is v1 and the supported recipe is
 `graphql-orm-owned-planning-8e1-v1`, qualified to Rust 1.97.1. Authentic fixtures
 prove the listed historical cases, not arbitrary historical receipt adoption or
-all toolchains. No missing historical baseline can be recovered. Unsupported
+all toolchains. Capture/codec/replay now enforce that exact compiler commit with
+stock `x86_64-unknown-linux-gnu` host/target and no compiler wrappers at build time;
+unqualified builds return `LimitExceeded` before those operations start. Ordinary
+planning is unaffected. Nested structs remain JSON objects and enum values remain
+strings, including buffered step payloads with `kind` last. The increased prepaid
+decoder allowance can refuse additional near-ceiling witnesses. No missing
+historical baseline can be recovered. Unsupported
 recipes are rejected; old plans are never silently resealed. MSSQL capture is
 unsupported before connection acquisition; ordinary MSSQL builds remain available.
 See [the replay reference](docs/reference/graphql-orm/owned-planning-replay.md)

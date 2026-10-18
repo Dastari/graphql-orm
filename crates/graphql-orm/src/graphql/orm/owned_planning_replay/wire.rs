@@ -1120,64 +1120,95 @@ impl Wire for OwnedPlannedMigrationStep {
 )]
 enum StepObject {
     EnableExtension {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         name: String,
     },
     CreateTable {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table: Table,
     },
     DropTable {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
     },
     AddColumn {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         column: Column,
     },
     DropColumn {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         column_name: String,
     },
     AlterColumn {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         before: Column,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         after: Column,
     },
     CreateIndex {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         index: Index,
     },
     DropIndex {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         index_name: String,
     },
     CreateSearchIndex {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         index: Search,
     },
     DropSearchIndex {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         index_name: String,
     },
     AlterSearchIndex {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         before: Search,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         after: Search,
     },
     AddForeignKey {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         foreign_key: ForeignKey,
     },
     DropForeignKey {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         foreign_key: ForeignKey,
     },
     SetAppendOnly {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         enabled: bool,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         retention_purge: bool,
     },
     SetCheckConstraints {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         before: Vec<Check>,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
         after: Vec<Check>,
     },
 }
