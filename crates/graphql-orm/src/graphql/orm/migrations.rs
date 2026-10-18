@@ -2386,7 +2386,21 @@ pub(super) fn build_migration_plan_views(
         target_for_backend.extensions = &empty_extensions;
     }
     let steps = diff_schema_views(backend, current, &target_for_backend);
-    let statements = match backend {
+    let statements = render_owned_plan_steps(backend, current, &target_for_backend, &steps);
+    OwnedMigrationPlan {
+        backend,
+        steps,
+        statements,
+    }
+}
+
+pub(super) fn render_owned_plan_steps(
+    backend: DatabaseBackend,
+    current: &SchemaRef<'_>,
+    target_for_backend: &SchemaRef<'_>,
+    steps: &[OwnedMigrationStep],
+) -> Vec<String> {
+    match backend {
         DatabaseBackend::Sqlite => {
             let current_tables = current
                 .tables
@@ -2410,7 +2424,7 @@ pub(super) fn build_migration_plan_views(
                 statements.push("PRAGMA foreign_keys = OFF".to_string());
             }
 
-            for step in &steps {
+            for step in steps {
                 let table_name = migration_step_table_name(&StepRef::from(step));
                 if let Some(table_name) = table_name {
                     if rebuild_tables.contains(table_name) {
@@ -2441,12 +2455,6 @@ pub(super) fn build_migration_plan_views(
             .iter()
             .flat_map(|step| render_migration_step_view(backend, &StepRef::from(step)))
             .collect::<Vec<_>>(),
-    };
-
-    OwnedMigrationPlan {
-        backend,
-        steps,
-        statements,
     }
 }
 
@@ -2546,6 +2554,9 @@ pub async fn introspect_sqlite_schema(
 pub(super) async fn introspect_owned_sqlite_schema(
     provider: &impl PoolProvider<super::SqliteBackend>,
 ) -> crate::Result<OwnedSchemaModel> {
+    #[cfg(all(test, feature = "owned-planning-replay"))]
+    super::runtime_migration::REPLAY_OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let mut connection = provider.pool().acquire().await?;
     introspect_owned_sqlite_connection(&mut connection).await
 }
@@ -2959,6 +2970,9 @@ pub async fn introspect_postgres_schema(
 pub(super) async fn introspect_owned_postgres_schema(
     provider: &impl PoolProvider<super::PostgresBackend>,
 ) -> crate::Result<OwnedSchemaModel> {
+    #[cfg(all(test, feature = "owned-planning-replay"))]
+    super::runtime_migration::REPLAY_OBSERVATIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let mut connection = provider.pool().acquire().await?;
     introspect_owned_postgres_connection(&mut connection).await
 }

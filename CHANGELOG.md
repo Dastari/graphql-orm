@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-18
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,24 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.51.0 (unreleased)
+
+- Add explicit sensitive-metadata capture and bounded offline verification of a
+  complete successful owned migration plan behind default-off
+  `owned-planning-replay`. SQLite/PostgreSQL share the existing engine and
+  source-qualified `graphql-orm-owned-planning-8e1-v1` recipe; replay returns
+  passive facts. Existing planning/apply behavior, hashes, limits and costs are
+  unchanged. No new dependencies, stored-data migration or automatic capture.
+- Add complete v1 JSON mapping, private checked limits, per-call custody consent,
+  separate redacted errors and cumulative conservative work/text admission.
+  Authentic 8e1 positive fixtures retain the actual original observation/output.
+- Enforce the qualified Rust/compiler/platform profile inside all replay library
+  operations before work begins. Preserve strict nested object/string wire
+  shapes after tagged-step buffering, including valid `kind`-last objects; prepay
+  their additional decoder work without changing ordinary planning or hashes.
+- Align ORM/macros at 0.51.0; generated code is unchanged. Security and failure
+  properties have code inspection only, without runtime verification.
 
 ## 0.50.2 (unreleased)
 

@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.51.0 adds the runtime's default-off `owned-planning-replay` capability.
+Upgrade ORM/macros together; generated code is unchanged. Explicit capture retains
+complete sensitive schema evidence; offline verification returns passive facts.
+See the [replay contract](../../docs/reference/graphql-orm/owned-planning-replay.md).
+
 Version 0.50.2 aligns the paired runtime/macros release with published
 `agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag
 selector for direct Auth dependencies as well; refresh the lockfile and verify
