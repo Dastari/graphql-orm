@@ -91,6 +91,14 @@ impl<'a> Inventory<'a> {
         }
         Ok(())
     }
+    pub fn ownership(&mut self, set: &ManagedTableSet) -> R<()> {
+        self.ledger.reserve(ownership_tree(set.0.len() as u64)?)?;
+        self.scalar()?;
+        for name in set.tables() {
+            self.string(name)?;
+        }
+        Ok(())
+    }
     pub fn member(&mut self, key: &str) -> R<()> {
         self.string(key)
     }
@@ -234,6 +242,8 @@ pub(super) fn effects(
         .iter()
         .map(|t| t.foreign_keys.len() as u64)
         .sum::<u64>();
+    // Each possible unmanaged incoming FK repeats the ownership lookup.
+    c = c.add(op(owners, key)?.times(edges)?)?;
     let mut columns = Cost::default();
     for t in a.tables.iter().chain(&b.tables) {
         let z = table_size(t, l, cap)?;
@@ -454,10 +464,11 @@ pub(super) fn integrity(
         p = add(p, add(s.len() as u64, 1)?)?;
     }
     let wrapper = add(256, identity.b)?;
-    Ok(Cost::new(
+    Cost::new(
         add(work, add(mul(4, p)?, mul(4, wrapper)?)?)?,
         add(add(lines, p)?, add(mul(2, wrapper)?, 32)?)?,
-    ))
+    )
+    .add(ownership_tree(identity.n)?)
 }
 
 pub(super) fn ownership_cost(n: u64, longest: u64, bytes: u64) -> R<Cost> {
@@ -476,4 +487,8 @@ pub(super) fn admit_ownership(names: &[String], l: &mut Ledger) -> R<()> {
         longest,
         names.iter().map(|s| s.len() as u64).sum(),
     )?)
+}
+
+pub(super) fn ownership_tree(n: u64) -> R<Cost> {
+    Ok(Cost::new(mul(64, add(n, 1)?)?, 0))
 }

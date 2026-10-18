@@ -46,13 +46,21 @@ The implementation intentionally overbounds several schedule terms together:
   unmatched data returns ReplayMismatch before the next expanding phase. This
   lets admission use retained actual steps without trusting a decoded claimed
   step list or running an extra engine pass. Separate actual/expected inventory,
-  early/final comparison and passive-result retention allowance is 64M(data)
+  early/final comparison and passive-result retention allowance is 512M(data)
   work plus the full-data clone envelope. The detailed schedule's single final
   exact comparison remains, with these additional prepaid short-circuit passes.
+- Ownership length uses the private constant-time tree length; every remaining
+  ownership iterator and cloned tree separately prepays 64(n+1) structural work.
+  Identity byte bounds use the constructor's fixed 63-byte identifier ceiling,
+  without extra uncharged tree passes. String-copy text remains separately paid.
 - Certificate calculations are charged to the current ledger. Their conservative
   reservation also prepays the same decoder calculation and dominates verify's
   smaller inventory walks. Future decode additionally pays byte/node admission,
-  ownership insertion, model/profile and target checks; future encode pays its
+  ownership insertion, model/profile and target checks. Decode additionally
+  reserves 2048N+32B work for its own descriptor/conversion walks and certificate
+  tail beyond the measured certificate prefix (model inventory <=192N+4B and
+  two target descriptor walks <=448N+4B each, plus remaining bookkeeping).
+  Future encode pays its
   own traversal/escaping/output. Certificate estimation performs no engine pass.
 - Fixed decoder admission precedes serde allocation; a nonallocating lexical scan
   checks depth/node/string ceilings. Typed adapters reject duplicate, missing and

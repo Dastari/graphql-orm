@@ -287,9 +287,7 @@ impl Wire for Data {
         i.string(self.backend.name())?;
         self.version.inventory(i)?;
         self.description.inventory(i)?;
-        for x in self.ownership.tables() {
-            i.string(x)?;
-        }
+        i.ownership(&self.ownership)?;
         self.options.inventory(i)?;
         self.source.inventory(i)?;
         self.target.inventory(i)?;
@@ -430,7 +428,7 @@ fn compute_after_target(
     l: &mut Ledger,
 ) -> Result<Facts, OwnedPlanningCaptureError> {
     let cap = limits.max_encoded_bytes;
-    let owners = ownership.tables().count() as u64;
+    let owners = ownership.0.len() as u64;
     let c = effects(current, target, a, b, owners, l, cap)?;
     l.reserve(c)?;
     validate_owned_effects(backend, current, target, ownership)?;
@@ -514,7 +512,7 @@ fn compute_after_target(
     let target_schema_hash = target.stable_hash();
     let id = Size {
         n: owners + 4,
-        b: ownership.tables().map(|x| x.len() as u64 + 1).sum::<u64>()
+        b: mul(add(MAX_PHYSICAL_IDENTIFIER_LEN as u64, 1)?, owners)?
             + version.len() as u64
             + description.len() as u64,
         longest: 0,
@@ -602,10 +600,10 @@ fn exact_step(a: &OwnedMigrationStep, b: &OwnedMigrationStep) -> bool {
 fn canonical_size(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -> R<usize> {
     let z = size(data, l, limits.max_encoded_bytes)?;
     let upper = add(mul(256, z.n)?, mul(6, z.b)?)?;
-    l.reserve(Cost::new(
-        add(mul(32, z.n)?, mul(16, z.b)?)?,
-        mul(2, upper)?,
-    ))?;
+    l.reserve(
+        Cost::new(add(mul(32, z.n)?, mul(16, z.b)?)?, mul(2, upper)?)
+            .add(ownership_tree(data.ownership.0.len() as u64)?)?,
+    )?;
     let mut count = encoded_size::Count {
         n: 0,
         maximum: limits.max_encoded_bytes,
@@ -640,7 +638,7 @@ fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -
         &data.target,
         a,
         b,
-        data.ownership.tables().count() as u64,
+        data.ownership.0.len() as u64,
         l,
         limits.max_encoded_bytes,
     )?;
@@ -690,7 +688,7 @@ fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -
     )?;
     verify.reserve(c)?;
     verify.reserve(z.copy()?.add(Cost::new(
-        mul(64, z.m()?)?,
+        mul(512, z.m()?)?,
         mul(128, data.expected.steps.len() as u64)?,
     ))?)?;
     // Certificate calculation is charged to this operation before its visits.
@@ -699,14 +697,14 @@ fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -
     let calculator = Cost::new(l.used.w - calculator_start.w, l.used.t - calculator_start.t);
     verify.reserve(calculator)?;
     future.reserve(calculator)?;
-    let owners = data.ownership.tables().count() as u64;
-    let longest = data
-        .ownership
-        .tables()
-        .map(|s| s.len() as u64)
-        .max()
-        .unwrap_or(0);
-    let bytes = data.ownership.tables().map(|s| s.len() as u64).sum();
+    // Decode's own profile inventories and target-accountant invocation, plus
+    // certificate tail bookkeeping, are additional to the measured certificate.
+    // 2048N+32B dominates their <=192N+4B model walk, two <=448N+4B
+    // target descriptor walks, conversion/field visits and fixed ledger work.
+    future.reserve(Cost::new(add(mul(2048, z.n)?, mul(32, z.b)?)?, 0))?;
+    let owners = data.ownership.0.len() as u64;
+    let longest = MAX_PHYSICAL_IDENTIFIER_LEN as u64;
+    let bytes = mul(longest, owners)?;
     future
         .reserve(ownership_cost(owners, longest, bytes)?.add(Cost::new(mul(128, owners)?, 0))?)?;
     // Decode additionally performs the once-only profile/target checks. This is
@@ -718,6 +716,7 @@ fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -
     let mut encode = Ledger::default();
     encode.reserve(calculator)?;
     encode.reserve(profile(a)?.add(profile(b)?)?)?;
+    encode.reserve(ownership_tree(owners)?)?;
     encode.reserve(Cost::new(
         add(mul(64, z.n)?, mul(32, z.b)?)?,
         mul(2, encode_upper)?,
@@ -870,10 +869,10 @@ impl OwnedPlanningReplayWitness {
         )?;
         let n = canonical_size(&self.data, limits, &mut l)?;
         let z = size(&self.data, &mut l, limits.max_encoded_bytes)?;
-        l.reserve(Cost::new(
-            add(mul(32, z.n)?, mul(16, z.b)?)?,
-            mul(2, n as u64)?,
-        ))?;
+        l.reserve(
+            Cost::new(add(mul(32, z.n)?, mul(16, z.b)?)?, mul(2, n as u64)?)
+                .add(ownership_tree(self.data.ownership.0.len() as u64)?)?,
+        )?;
         let mut result = Vec::with_capacity(n);
         serde_json::to_writer(&mut result, &Enc(&self.data)).map_err(|_| E::InvalidWitness)?;
         Ok(result)
@@ -892,11 +891,12 @@ impl OwnedPlanningReplayWitness {
         let mut id = Inventory::new(&mut l, self.limits.max_encoded_bytes);
         id.string(&self.data.version)?;
         id.string(&self.data.description)?;
-        for name in self.data.ownership.tables() {
-            id.string(name)?;
-        }
+        id.ownership(&self.data.ownership)?;
         let z = id.size;
-        l.reserve(z.copy()?)?;
+        l.reserve(
+            z.copy()?
+                .add(ownership_tree(self.data.ownership.0.len() as u64)?)?,
+        )?;
         Ok(VerifiedOwnedPlanningReplay {
             data: facts,
             backend: self.data.backend,
@@ -1008,10 +1008,10 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
             &mut l,
         )?;
         let id = Size {
-            n: ownership.tables().count() as u64 + 8,
+            n: ownership.0.len() as u64 + 8,
             b: version.len() as u64
                 + description.len() as u64
-                + ownership.tables().map(|x| x.len() as u64).sum::<u64>()
+                + mul(MAX_PHYSICAL_IDENTIFIER_LEN as u64, ownership.0.len() as u64)?
                 + 48,
             longest: 0,
         };
@@ -1022,6 +1022,7 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
                 .add(id.copy()?.times(2)?)?
                 .add(f.copy()?)?,
         )?;
+        l.reserve(ownership_tree(ownership.0.len() as u64)?.times(2)?)?;
         let plan = OwnedPlannedMigration {
             version: version.clone(),
             description: description.clone(),
