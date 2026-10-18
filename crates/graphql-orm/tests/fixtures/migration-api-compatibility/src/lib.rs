@@ -159,3 +159,17 @@ pub fn apply_method_pointer<'db, 'call>(
 fn existing_migration_api_is_source_compatible() {
     verify_legacy_surface();
 }
+
+#[cfg(feature = "replay")]
+#[test]
+fn additive_replay_surface_is_owned_and_bounded() {
+    use graphql_orm::graphql::orm::*;
+    fn owned<T: Send + Sync>() {}
+    owned::<OwnedPlanningReplayWitness>();
+    owned::<VerifiedOwnedPlanningReplay>();
+    let limits=OwnedPlanningReplayLimits::new(4096,RuntimeMigrationLimits::default()).unwrap();
+    assert_eq!(limits.max_encoded_bytes(),4096);
+    let _consent=OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody();
+    let _decode: fn(&[u8],OwnedPlanningReplayLimits)->Result<OwnedPlanningReplayWitness,OwnedPlanningReplayError>=OwnedPlanningReplayWitness::from_json;
+    let _verify: fn(&OwnedPlanningReplayWitness)->Result<VerifiedOwnedPlanningReplay,OwnedPlanningReplayError>=OwnedPlanningReplayWitness::verify;
+}

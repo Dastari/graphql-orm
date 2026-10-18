@@ -137,6 +137,18 @@ def parse_contracts(commit: str) -> list[dict[str, str]]:
             raise SystemExit(f"could not read {name} from {path}")
         version = ".".join(match.groups())
         values.append({"name": name, "version": version})
+    replay_path = "crates/graphql-orm/src/graphql/orm/owned_planning_replay/mod.rs"
+    # Earlier source revisions predate this optional contract.
+    if exists_at(commit, replay_path):
+        text = run("git", "show", f"{commit}:{replay_path}")
+        for name, pattern in (
+            ("graphql-orm-owned-planning-replay-format", r"FORMAT:\s*u16\s*=\s*(\d+)"),
+            ("graphql-orm-owned-planning-replay-recipe", r'RECIPE:\s*&str\s*=\s*"([^"]+)"'),
+        ):
+            match = re.search(pattern, text)
+            if match is None:
+                raise SystemExit(f"could not read {name} from {replay_path}")
+            values.append({"name": name, "version": match.group(1)})
     return sorted(values, key=lambda contract: contract["name"])
 
 

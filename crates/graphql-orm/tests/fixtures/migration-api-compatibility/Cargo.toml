@@ -12,6 +12,7 @@ default = ["sqlite"]
 sqlite = ["graphql-orm/sqlite"]
 postgres = ["graphql-orm/postgres"]
 mssql = ["graphql-orm/mssql"]
+replay = ["graphql-orm/owned-planning-replay"]
 
 [dependencies]
 graphql-orm = { path = "../../..", default-features = false }

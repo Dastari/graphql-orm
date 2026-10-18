@@ -304,6 +304,9 @@
 //! See the repository `README.md` and `docs/` directory for full examples,
 //! backend notes, relation batching, schema policies, and migration guidance.
 
+#[cfg(all(test, feature = "owned-planning-replay"))]
+extern crate self as graphql_orm;
+
 pub use async_graphql;
 #[doc(hidden)]
 pub use chrono;

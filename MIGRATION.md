@@ -15,6 +15,27 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.50.2 to 0.51.0: optional owned planning replay
+
+Upgrade ORM/macros together. Existing callers need no code, configuration,
+serialized-format or database migration. Enable `owned-planning-replay` explicitly
+alongside `sqlite` or `postgres`, then call
+`plan_owned_migration_with_replay_witness` with a checked limits profile and
+`OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody()`.
+The separate witness retains sensitive complete schema metadata; the caller must
+keep it private and bind external cryptographic custody and producer identity.
+`verify()` returns passive facts and does not replace any live apply check.
+
+The new format is v1 and the supported recipe is
+`graphql-orm-owned-planning-8e1-v1`, qualified to Rust 1.97.1. Authentic fixtures
+prove the listed historical cases, not arbitrary historical receipt adoption or
+all toolchains. No missing historical baseline can be recovered. Unsupported
+recipes are rejected; old plans are never silently resealed. MSSQL capture is
+unsupported before connection acquisition; ordinary MSSQL builds remain available.
+See [the replay reference](docs/reference/graphql-orm/owned-planning-replay.md)
+for limits, exact mapping, compatibility and remaining inspection-only obligations.
+Release/pin adoption remains a separate review; this branch does not publish.
+
 ## 0.50.1 to 0.50.2: published Auth source alignment
 
 Upgrade ORM/macros together. The workspace now selects the published
