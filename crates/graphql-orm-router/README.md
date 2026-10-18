@@ -16,6 +16,10 @@ that tag and refresh their locks to one source; see the
 [workspace migration](../../MIGRATION.md#0502-to-0510-post-await-and-owned-release-checks).
 Version-specific notes below retain their historical dependency facts.
 
+Version `0.6.2` refreshes the immutable package identity for the maintained
+workspace dependency guidance. The Rust implementation is unchanged; consuming
+applications must still review and qualify the coordinated companion revision.
+
 Version 0.6.1 selects published Auth `v0.21.3` for `auth-agql`, retaining the
 same reviewed commit. Direct Auth dependencies must use that tag too; refresh
 the lockfile and verify one Auth source. Existing clock and authorization
@@ -37,7 +41,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.1" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
