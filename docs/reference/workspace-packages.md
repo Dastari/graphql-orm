@@ -26,7 +26,7 @@ changes.
 | `graphql-orm-operation-catalog` | `0.4.0` | `crates/graphql-orm-operation-catalog` | none | `graphql-orm-router-protocol` (optional) |
 | `graphql-orm-router` | `0.6.1` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
 | `graphql-orm-router-protocol` | `0.2.1` | `crates/graphql-orm-router-protocol` | none | none |
-| `graphql-orm-storage` | `0.7.4` | `crates/graphql-orm-storage` | `local` | none |
+| `graphql-orm-storage` | `0.7.5` | `crates/graphql-orm-storage` | `local` | none |
 
 External Git dependency:
 
