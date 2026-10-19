@@ -21,7 +21,9 @@ Upgrade ORM/macros together. Existing generated schemas and stored data are
 unchanged; no automatic data migration is needed. New adopters register a
 service-owned status entity and implement `CacheSyncStore` with transaction-bound
 generated repositories. Use `CacheSync::{claim,promote,fail}` for fenced refresh
-and atomic generation promotion, and the status entity's generated `…Changed`
+and atomic generation promotion; pass a live clock such as
+`cache_sync::unix_time_seconds` so lease checks remain current across awaits.
+Use the status entity's generated `…Changed`
 subscription for authorized post-commit invalidation. Existing streams remain
 best-effort: clients must reconcile the initial subscription/query race and
 refetch unconditionally after reconnect or gaps. See the

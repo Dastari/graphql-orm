@@ -9,8 +9,8 @@
 use crate::db::Database;
 use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
 use crate::graphql::orm::{
-    DbAuthContext, MutationContext, TransactionBackend, TransactionError, TransactionMode,
-    WriteBackend,
+    DbAuthContext, FencedLeaseState, LeaseProof, MutationContext, TransactionBackend,
+    TransactionError, TransactionMode, WriteBackend,
 };
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -28,6 +28,34 @@ fn conflict() -> OrmPublicError {
         OrmErrorCode::Conflict,
         "Cache refresh claim is no longer current",
     )
+}
+
+/// Current UTC seconds for refresh lease checks.
+///
+/// Pass this function (not its result) to coordinator operations, so deadlines
+/// are re-read after repository and promotion awaits. A clock outside the
+/// supported range causes policy validation to fail closed.
+pub fn unix_time_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(i64::MAX)
+}
+
+fn check_deadline(now: i64, admitted: i64, expires_at: i64) -> Result<(), OrmPublicError> {
+    if now < admitted || now >= expires_at {
+        Err(conflict())
+    } else {
+        Ok(())
+    }
+}
+
+fn milliseconds(seconds: i64) -> Result<i64, OrmPublicError> {
+    seconds
+        .checked_mul(1000)
+        .filter(|value| *value >= 0)
+        .ok_or_else(invalid)
 }
 
 /// Complete host-defined dataset/security/source identity, never a display name.
@@ -109,6 +137,8 @@ impl RefreshPolicy {
         {
             return Err(invalid());
         }
+        milliseconds(now + self.lease_for)?;
+        milliseconds(self.lease_for)?;
         Ok(())
     }
 }
@@ -129,15 +159,11 @@ pub enum RefreshFailure {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct ActiveClaim {
-    token: Uuid,
-    base_generation: i64,
-    expires_at: i64,
-}
-
-impl std::fmt::Debug for ActiveClaim {
+#[serde(transparent)]
+struct CacheLease(FencedLeaseState);
+impl std::fmt::Debug for CacheLease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ActiveClaim([redacted])")
+        f.write_str("CacheLease([redacted])")
     }
 }
 
@@ -157,7 +183,7 @@ pub struct CacheState {
     consecutive_failures: u32,
     failure: Option<RefreshFailure>,
     rows: i64,
-    active: Option<ActiveClaim>,
+    lease: Option<CacheLease>,
 }
 impl CacheState {
     /// Last complete committed generation; monotonically increases per partition.
@@ -201,24 +227,37 @@ impl CacheState {
     /// Hosts may expose this under status policy so progress does not remain
     /// stuck after a worker crash; compare it with the current clock on reads.
     pub fn refresh_expires_at(&self) -> Option<i64> {
-        self.active.as_ref().map(|active| active.expires_at)
+        self.lease
+            .as_ref()
+            .and_then(|lease| lease.0.expires_at_ms)
+            .map(|ms| ms / 1000)
     }
     /// Whether a nonexpired durable refresh claim exists.
     pub fn refresh_in_progress(&self, now: i64) -> bool {
-        self.active.as_ref().is_some_and(|a| now < a.expires_at)
+        milliseconds(now).ok().is_some_and(|now_ms| {
+            self.lease
+                .as_ref()
+                .is_some_and(|lease| lease.0.is_active(now_ms))
+        })
     }
     fn check_claim(&self, claim: &RefreshClaim, now: i64) -> Result<(), OrmPublicError> {
-        if now < self.last_attempt.unwrap_or(0)
-            || !self.active.as_ref().is_some_and(|a| {
-                a.token == claim.token
-                    && a.base_generation == claim.base_generation
-                    && a.base_generation == self.generation
-                    && now < a.expires_at
-            })
-        {
+        if now < self.last_attempt.unwrap_or(0) || self.generation != claim.base_generation {
             return Err(conflict());
         }
-        Ok(())
+        self.lease
+            .as_ref()
+            .ok_or_else(conflict)?
+            .0
+            .validate(&claim.proof, milliseconds(now)?, claim.row_version)
+            .map_err(|_| conflict())
+    }
+    fn release_claim(&mut self, claim: &RefreshClaim, now: i64) -> Result<(), OrmPublicError> {
+        self.lease
+            .as_mut()
+            .ok_or_else(conflict)?
+            .0
+            .release(&claim.proof, milliseconds(now)?, claim.row_version)
+            .map_err(|_| conflict())
     }
 }
 
@@ -228,7 +267,8 @@ impl CacheState {
 #[derive(Clone)]
 pub struct RefreshClaim {
     key: CachePartitionKey,
-    token: Uuid,
+    proof: LeaseProof,
+    row_version: i64,
     base_generation: i64,
     policy: RefreshPolicy,
 }
@@ -296,16 +336,17 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     /// Atomically coalesce a refresh trigger and persist an expiring worker fence.
     ///
     /// `force` bypasses freshness only. Authenticate/authorize the trigger first.
+    /// Supply a live clock such as [`unix_time_seconds`], re-read after awaits.
     /// Missing/expired workers are reclaimable; the old token can never promote.
     ///
     /// # Errors
     /// Returns invalid policy, storage or transaction conflicts. Retry only the
     /// transaction admission, never repeat an uncertain external command.
-    pub async fn claim(
+    pub async fn claim<C: Fn() -> i64 + Send + 'static>(
         &self,
         key: CachePartitionKey,
         policy: RefreshPolicy,
-        now: i64,
+        clock: C,
         force: bool,
         auth: Option<&DbAuthContext>,
     ) -> Result<RefreshAdmission, TransactionError> {
@@ -313,9 +354,11 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
         self.db
             .transaction_with_auth(TransactionMode::StateMachine, auth, move |tx| {
                 Box::pin(async move {
-                    policy.validate(now)?;
+                    policy.validate(clock())?;
                     CachePartitionKey::new(key.dataset.clone(), key.partition.clone())?;
                     let mut state = store.load(tx, &key).await?;
+                    let now = clock();
+                    policy.validate(now)?;
                     if state.refresh_in_progress(now) {
                         return Ok(RefreshAdmission::InProgress);
                     }
@@ -325,19 +368,35 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
                     if state.generation < 0 || state.generation.checked_add(1).is_none() {
                         return Err(invalid());
                     }
-                    let token = Uuid::new_v4();
-                    let base_generation = state.generation;
-                    state.active = Some(ActiveClaim {
-                        token,
-                        base_generation,
-                        expires_at: now + policy.lease_for,
+                    let resource_id = serde_json::to_string(&(key.dataset(), key.partition()))
+                        .map_err(|_| invalid())?;
+                    let lease = state.lease.get_or_insert_with(|| {
+                        CacheLease(FencedLeaseState::new(resource_id.clone(), 0))
                     });
+                    if lease.0.resource_id != resource_id {
+                        return Err(conflict());
+                    }
+                    let attempt = Uuid::new_v4();
+                    let proof = lease
+                        .0
+                        .claim(
+                            attempt.to_string(),
+                            attempt,
+                            milliseconds(now)?,
+                            milliseconds(policy.lease_for)?,
+                            lease.0.row_version,
+                        )
+                        .map_err(|_| conflict())?;
+                    let row_version = lease.0.row_version;
+                    let base_generation = state.generation;
                     state.last_attempt = Some(now);
                     state.next_attempt = now + policy.cooldown;
                     store.save(tx, &key, &state).await?;
+                    check_deadline(clock(), now, now + policy.lease_for)?;
                     Ok(RefreshAdmission::Claimed(RefreshClaim {
                         key,
-                        token,
+                        proof,
+                        row_version,
                         base_generation,
                         policy,
                     }))
@@ -352,15 +411,17 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     /// delta writes and the status save share one transaction; prior data survives
     /// callback/commit failure. Generated events emit after commit. Readers must
     /// bind pagination to the returned generation and refetch after reconnect.
+    /// The live clock is rechecked after `apply` and status persistence; a lease
+    /// that expires while those futures run causes rollback, not promotion.
     ///
     /// # Errors
     /// Rejects expired/replaced claims, invalid counts/times, generation overflow,
     /// authorization, callback or commit failures. Never announce success on error.
     #[allow(clippy::too_many_arguments)]
-    pub async fn promote<T: Send + 'static, F>(
+    pub async fn promote<T: Send + 'static, F, C: Fn() -> i64 + Send + 'static>(
         &self,
         claim: RefreshClaim,
-        now: i64,
+        clock: C,
         rows: i64,
         source_observed_at: Option<i64>,
         auth: Option<&DbAuthContext>,
@@ -378,23 +439,31 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
         self.db
             .transaction_with_auth(TransactionMode::StateMachine, auth, move |tx| {
                 Box::pin(async move {
+                    claim.policy.validate(clock())?;
+                    let mut state = store.load(tx, &claim.key).await?;
+                    let now = clock();
                     claim.policy.validate(now)?;
                     if rows < 0 || source_observed_at.is_some_and(|t| t < 0 || t > now) {
                         return Err(invalid());
                     }
-                    let mut state = store.load(tx, &claim.key).await?;
                     state.check_claim(&claim, now)?;
                     let generation = state.generation.checked_add(1).ok_or_else(invalid)?;
+                    let expires_at = state.refresh_expires_at().ok_or_else(conflict)?;
                     let value = apply(tx, generation).await?;
+                    let completed = clock();
+                    claim.policy.validate(completed)?;
+                    check_deadline(completed, now, expires_at)?;
+                    state.check_claim(&claim, completed)?;
                     state.generation = generation;
                     state.rows = rows;
-                    state.last_success = Some(now);
+                    state.last_success = Some(completed);
                     state.source_observed_at = source_observed_at;
-                    state.fresh_until = Some(now + claim.policy.fresh_for);
-                    state.active = None;
+                    state.fresh_until = Some(completed + claim.policy.fresh_for);
+                    state.release_claim(&claim, completed)?;
                     state.failure = None;
                     state.consecutive_failures = 0;
                     store.save(tx, &claim.key, &state).await?;
+                    check_deadline(clock(), completed, expires_at)?;
                     Ok(value)
                 })
             })
@@ -405,10 +474,10 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     ///
     /// # Errors
     /// Rejects expired/replaced claims and storage/transaction errors.
-    pub async fn fail(
+    pub async fn fail<C: Fn() -> i64 + Send + 'static>(
         &self,
         claim: RefreshClaim,
-        now: i64,
+        clock: C,
         failure: RefreshFailure,
         auth: Option<&DbAuthContext>,
     ) -> Result<(), TransactionError> {
@@ -416,10 +485,13 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
         self.db
             .transaction_with_auth(TransactionMode::StateMachine, auth, move |tx| {
                 Box::pin(async move {
-                    claim.policy.validate(now)?;
+                    claim.policy.validate(clock())?;
                     let mut state = store.load(tx, &claim.key).await?;
+                    let now = clock();
+                    claim.policy.validate(now)?;
                     state.check_claim(&claim, now)?;
-                    state.active = None;
+                    let expires_at = state.refresh_expires_at().ok_or_else(conflict)?;
+                    state.release_claim(&claim, now)?;
                     state.failure = Some(failure);
                     state.consecutive_failures = state.consecutive_failures.saturating_add(1);
                     let backoff = claim
@@ -432,7 +504,8 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
                         )
                         .min(claim.policy.max_backoff);
                     state.next_attempt = state.next_attempt.max(now + backoff);
-                    store.save(tx, &claim.key, &state).await
+                    store.save(tx, &claim.key, &state).await?;
+                    check_deadline(clock(), now, expires_at)
                 })
             })
             .await

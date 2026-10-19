@@ -129,7 +129,7 @@ async fn claimed(
     now: i64,
 ) -> RefreshClaim {
     match sync
-        .claim(key(partition), policy(), now, false, None)
+        .claim(key(partition), policy(), move || now, false, None)
         .await
         .unwrap()
     {
@@ -170,17 +170,24 @@ async fn promotion_is_atomic_and_generated_subscription_is_post_commit() {
     ));
     registered(&mut stream).await;
     // Candidate writes are invisible until status and data both commit.
-    sync.promote(claim, 101, 1, Some(90), None, |tx, generation| {
-        Box::pin(async move {
-            tx.insert::<CacheItem>(CreateCacheItemInput {
-                id: "one".into(),
-                generation,
-                value: "complete".into(),
+    sync.promote(
+        claim,
+        move || 101,
+        1,
+        Some(90),
+        None,
+        |tx, generation| {
+            Box::pin(async move {
+                tx.insert::<CacheItem>(CreateCacheItemInput {
+                    id: "one".into(),
+                    generation,
+                    value: "complete".into(),
+                })
+                .await?;
+                Ok(())
             })
-            .await?;
-            Ok(())
-        })
-    })
+        },
+    )
     .await
     .unwrap();
     let event = timeout(Duration::from_secs(2), stream.next())
@@ -206,13 +213,13 @@ async fn promotion_is_atomic_and_generated_subscription_is_post_commit() {
     assert!(state.is_fresh(102));
     assert!(!state.refresh_in_progress(102));
     assert!(matches!(
-        sync.claim(key("tenant-a"), policy(), 102, true, None)
+        sync.claim(key("tenant-a"), policy(), move || 102, true, None)
             .await
             .unwrap(),
         RefreshAdmission::NotDue
     ));
     assert!(matches!(
-        sync.claim(key("tenant-a"), policy(), 106, false, None)
+        sync.claim(key("tenant-a"), policy(), move || 106, false, None)
             .await
             .unwrap(),
         RefreshAdmission::NotDue
@@ -221,16 +228,23 @@ async fn promotion_is_atomic_and_generated_subscription_is_post_commit() {
     // still sees the committed generation and lets the host refetch its projection.
     drop(stream);
     let next = match sync
-        .claim(key("tenant-a"), policy(), 106, true, None)
+        .claim(key("tenant-a"), policy(), move || 106, true, None)
         .await
         .unwrap()
     {
         RefreshAdmission::Claimed(c) => c,
         x => panic!("{x:?}"),
     };
-    sync.promote(next, 107, 1, None, None, |_, _| Box::pin(async { Ok(()) }))
-        .await
-        .unwrap();
+    sync.promote(
+        next,
+        move || 107,
+        1,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
     assert_eq!(read_state(&db, "tenant-a").await.generation(), 2);
 }
 
@@ -247,17 +261,24 @@ async fn rollback_retains_old_projection_and_emits_no_success() {
     ));
     registered(&mut stream).await;
     let result = sync
-        .promote(claim.clone(), 101, 1, None, None, |tx, generation| {
-            Box::pin(async move {
-                tx.insert::<CacheItem>(CreateCacheItemInput {
-                    id: "rejected".into(),
-                    generation,
-                    value: "partial".into(),
+        .promote(
+            claim.clone(),
+            move || 101,
+            1,
+            None,
+            None,
+            |tx, generation| {
+                Box::pin(async move {
+                    tx.insert::<CacheItem>(CreateCacheItemInput {
+                        id: "rejected".into(),
+                        generation,
+                        value: "partial".into(),
+                    })
+                    .await?;
+                    Err::<(), _>(OrmPublicError::new(OrmErrorCode::Conflict))
                 })
-                .await?;
-                Err::<(), _>(OrmPublicError::new(OrmErrorCode::Conflict))
-            })
-        })
+            },
+        )
         .await;
     assert!(result.is_err());
     assert_eq!(CacheItem::count_all(&db).await.unwrap(), 0);
@@ -267,7 +288,7 @@ async fn rollback_retains_old_projection_and_emits_no_success() {
             .await
             .is_err()
     );
-    sync.fail(claim, 102, RefreshFailure::InvalidCandidate, None)
+    sync.fail(claim, move || 102, RefreshFailure::InvalidCandidate, None)
         .await
         .unwrap();
     let state = read_state(&db, "tenant-a").await;
@@ -286,24 +307,45 @@ async fn durable_claim_coalesces_and_restart_reclaims_without_old_worker_promoti
     let restarted = CacheSync::new(db.clone(), Arc::new(Store));
     assert!(matches!(
         restarted
-            .claim(key("tenant-a"), policy(), 101, true, None)
+            .claim(key("tenant-a"), policy(), move || 101, true, None)
             .await
             .unwrap(),
         RefreshAdmission::InProgress
     ));
     let other = claimed(&restarted, "tenant-b", 101).await;
     restarted
-        .promote(other, 102, 0, None, None, |_, _| Box::pin(async { Ok(()) }))
+        .promote(
+            other,
+            move || 102,
+            0,
+            None,
+            None,
+            |_, _| Box::pin(async { Ok(()) }),
+        )
         .await
         .unwrap();
     let new = claimed(&restarted, "tenant-a", 130).await;
     assert!(
-        sync.promote(old, 131, 9, None, None, |_, _| Box::pin(async { Ok(()) }))
-            .await
-            .is_err()
+        sync.promote(
+            old,
+            move || 131,
+            9,
+            None,
+            None,
+            |_, _| Box::pin(async { Ok(()) })
+        )
+        .await
+        .is_err()
     );
     restarted
-        .promote(new, 131, 0, None, None, |_, _| Box::pin(async { Ok(()) }))
+        .promote(
+            new,
+            move || 131,
+            0,
+            None,
+            None,
+            |_, _| Box::pin(async { Ok(()) }),
+        )
         .await
         .unwrap();
     assert_eq!(read_state(&db, "tenant-a").await.generation(), 1);
@@ -315,20 +357,25 @@ async fn failure_preserves_success_and_backoff_survives_another_coordinator() {
     let db = fixture().await;
     let sync = CacheSync::new(db.clone(), Arc::new(Store));
     let claim = claimed(&sync, "tenant-a", 100).await;
-    sync.promote(claim, 101, 5, Some(90), None, |_, _| {
-        Box::pin(async { Ok(()) })
-    })
+    sync.promote(
+        claim,
+        move || 101,
+        5,
+        Some(90),
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
     .await
     .unwrap();
     let claim = match sync
-        .claim(key("tenant-a"), policy(), 106, true, None)
+        .claim(key("tenant-a"), policy(), move || 106, true, None)
         .await
         .unwrap()
     {
         RefreshAdmission::Claimed(c) => c,
         x => panic!("{x:?}"),
     };
-    sync.fail(claim, 107, RefreshFailure::Unavailable, None)
+    sync.fail(claim, move || 107, RefreshFailure::Unavailable, None)
         .await
         .unwrap();
     let state = read_state(&db, "tenant-a").await;
@@ -341,13 +388,13 @@ async fn failure_preserves_success_and_backoff_survives_another_coordinator() {
     let restarted = CacheSync::new(db.clone(), Arc::new(Store));
     assert!(matches!(
         restarted
-            .claim(key("tenant-a"), policy(), 116, true, None)
+            .claim(key("tenant-a"), policy(), move || 116, true, None)
             .await
             .unwrap(),
         RefreshAdmission::NotDue
     ));
     let claim = match restarted
-        .claim(key("tenant-a"), policy(), 117, true, None)
+        .claim(key("tenant-a"), policy(), move || 117, true, None)
         .await
         .unwrap()
     {
@@ -355,7 +402,7 @@ async fn failure_preserves_success_and_backoff_survives_another_coordinator() {
         x => panic!("{x:?}"),
     };
     restarted
-        .fail(claim, 118, RefreshFailure::Throttled, None)
+        .fail(claim, move || 118, RefreshFailure::Throttled, None)
         .await
         .unwrap();
     assert_eq!(read_state(&db, "tenant-a").await.next_attempt(), 138);
@@ -428,17 +475,31 @@ async fn generated_cache_notification_rechecks_tenant_and_revoked_row_policy() {
         "subscription { datasetCacheStatusChanged { id datasetCacheStatus { generation rows } } }",
     ));
     registered(&mut stream).await;
-    sync.promote(b, 101, 7, None, None, |_, _| Box::pin(async { Ok(()) }))
-        .await
-        .unwrap();
+    sync.promote(
+        b,
+        move || 101,
+        7,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
     assert!(
         timeout(Duration::from_millis(50), stream.next())
             .await
             .is_err()
     );
-    sync.promote(a, 101, 1, None, None, |_, _| Box::pin(async { Ok(()) }))
-        .await
-        .unwrap();
+    sync.promote(
+        a,
+        move || 101,
+        1,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
     let response = timeout(Duration::from_secs(2), stream.next())
         .await
         .unwrap()
@@ -450,16 +511,72 @@ async fn generated_cache_notification_rechecks_tenant_and_revoked_row_policy() {
     );
     authority.store(false, std::sync::atomic::Ordering::SeqCst);
     let a = match sync
-        .claim(key("tenant-a"), policy(), 106, true, None)
+        .claim(key("tenant-a"), policy(), move || 106, true, None)
         .await
         .unwrap()
     {
         RefreshAdmission::Claimed(c) => c,
         x => panic!("{x:?}"),
     };
-    sync.promote(a, 107, 1, None, None, |_, _| Box::pin(async { Ok(()) }))
-        .await
-        .unwrap();
+    sync.promote(
+        a,
+        move || 107,
+        1,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn lease_expiring_during_projection_await_rolls_back_without_notification() {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    let db = fixture().await;
+    let sync = CacheSync::new(db.clone(), Arc::new(Store));
+    let claim = claimed(&sync, "tenant-a", 100).await;
+    let schema = schema_builder(db.clone())
+        .data(AuthSubject::new("reader"))
+        .finish();
+    let mut stream = Box::pin(schema.execute_stream(
+        "subscription { datasetCacheStatusChanged { datasetCacheStatus { generation } } }",
+    ));
+    registered(&mut stream).await;
+    let clock = Arc::new(AtomicI64::new(129));
+    let current_clock = clock.clone();
+    let result = sync
+        .promote(
+            claim,
+            move || current_clock.load(Ordering::SeqCst),
+            1,
+            None,
+            None,
+            move |tx, generation| {
+                Box::pin(async move {
+                    tx.insert::<CacheItem>(CreateCacheItemInput {
+                        id: "expired".into(),
+                        generation,
+                        value: "candidate".into(),
+                    })
+                    .await?;
+                    clock.store(130, Ordering::SeqCst);
+                    Ok(())
+                })
+            },
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(CacheItem::count_all(&db).await.unwrap(), 0);
+    let state = read_state(&db, "tenant-a").await;
+    assert_eq!(state.generation(), 0);
+    assert_eq!(state.refresh_expires_at(), Some(130));
+    assert!(!state.refresh_in_progress(130));
     assert!(
         timeout(Duration::from_millis(50), stream.next())
             .await

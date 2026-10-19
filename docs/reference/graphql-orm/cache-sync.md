@@ -26,7 +26,8 @@ current entity, row, selected field and source-provenance authorization.
 
 These are not a provider scheduler or a durable entity event log. The cache
 module adds reusable freshness/generation state, durable trigger coalescing,
-expiring worker fences, atomic successful promotion and sanitized failure
+expiring worker fences using the existing `FencedLeaseState` / `LeaseProof`,
+atomic successful promotion and sanitized failure
 backoff. Applications still own provider protocols, configured trigger policy,
 current authority, clock, global worker concurrency, schema registration and
 retention. The AI package's durable job machinery remains AI-specific.
@@ -74,7 +75,7 @@ managed source's ownership or migration policy. Prefer a separate owned store.
    manual, on-read-when-due and/or provider-event triggers per dataset. Reads
    return the last complete local projection immediately. They may signal a
    worker, but never become provider passthrough queries.
-2. Call `claim(key, policy, now, force, auth)`. It commits an expiring durable
+2. Call `claim(key, policy, clock, force, auth)`. It commits an expiring durable
    token before returning `Claimed`, or returns `InProgress` / `NotDue`.
    `force` bypasses freshness only; cooldown and retry backoff still apply.
    Empty state starts at generation zero. An expired claim can be replaced
@@ -83,7 +84,7 @@ managed source's ownership or migration policy. Prefer a separate owned store.
    cumulative page/row/byte acceptance. Enforce body limits before buffering,
    total and request deadlines, retries, continuation-origin checks and global
    concurrency separately. Validate complete snapshots or idempotent deltas.
-4. Call `promote(claim, now, rows, source_observed_at, auth, apply)`. The
+4. Call `promote(claim, clock, rows, source_observed_at, auth, apply)`. The
    callback receives the next generation and the same state-machine transaction
    used to save successful status. Perform only bounded ORM projection writes;
    for large snapshots, validate inactive staging first and atomically switch
@@ -99,11 +100,14 @@ managed source's ownership or migration policy. Prefer a separate owned store.
 Each call takes its current database auth context separately; the coordinator
 does not retain a principal snapshot. Hosts rehydrate current user/workload
 and source authority before admission and inside protected write callbacks.
-A claim is a worker fence, never an authorization grant. The host supplies
-nonnegative UTC seconds and must not move its clock backwards. Lease admission
-uses the supplied promotion time; hosts enforce total collection/transaction
-and current-authority deadlines through completion. No independent remote
-revocation can be made atomic merely by checking status before a write.
+A claim is a worker fence, never an authorization grant. Pass a live clock function
+such as `cache_sync::unix_time_seconds`, not an earlier captured timestamp.
+The coordinator re-reads nonnegative UTC seconds after store reads, projection
+writes and status persistence, and rolls back a claim/promotion/failure write
+when its lease expires across those awaits. Backwards clock observations fail
+closed. Hosts still enforce total collection/transaction and current-authority
+deadlines. The final clock/authority reads cannot atomically fence time passing
+or independent remote revocation during the later database commit await.
 
 `last_success` is collection completion. `source_observed_at` remains distinct;
 a successful fetch cannot make an old source observation current. `fresh_until`

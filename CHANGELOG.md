@@ -17,7 +17,8 @@ for historical context.
 ## 0.54.0 (unreleased)
 
 - Add backend-neutral `cache_sync` durable generation/freshness metadata, refresh
-  policy, bounded collection budgets, expiring/coalesced worker claims and atomic
+  policy, bounded collection budgets, existing fenced-lease transitions with
+  live clock rechecks after awaits, coalesced worker claims and atomic
   ORM projection/status promotion. Generated status-entity subscriptions reuse
   post-commit delivery and current row/field/entity authorization. Document the
   required subscribe/query and reconnect refetch protocol; no durable replay is
