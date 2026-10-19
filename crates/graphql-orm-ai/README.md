@@ -3,12 +3,22 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-ai
+
+The current workspace selects published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99`. Direct Auth consumers must match
+that tag and refresh their locks to one source; see the
+[workspace migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks).
+Version-specific notes below retain their historical dependency facts.
+
+Version `0.107.3` refreshes the immutable package identity for the maintained
+workspace dependency guidance. The Rust implementation is unchanged; consuming
+applications must still review and qualify the coordinated companion revision.
 
 Version `0.107.2` selects published Auth `v0.21.3` at the same reviewed commit.
 Align direct Auth dependencies to that tag, refresh the lockfile and verify one
@@ -172,7 +182,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.2", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.3", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

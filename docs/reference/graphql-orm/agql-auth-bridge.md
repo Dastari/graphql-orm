@@ -3,7 +3,7 @@ title: "agql-auth Bridge Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-17
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,9 +16,10 @@ supersedes: []
 ## Accepted request and current authority
 
 Enable `auth-agql` and use the same `agql-auth` selector as the workspace:
-`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.21.3", version = "0.21.3"`.
-The published tag is locked to reviewed commit
-`59c0a38f82e8c75459474238799a81f29d4ffa58`. Matching only the commit is not
+`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.22.0", version = "0.22.0"`.
+The published tag peels to reviewed commit
+`997707e060bcf5fabf879a5f98146dc2732b1c99`; the lockfile must select that commit.
+Matching only the commit is not
 enough: Cargo treats a revision and a tag as different sources, which can split
 principal types. Refresh the host lockfile and verify one Auth source across
 the selected graph. Both projects are Git-distributed; the release manifest
@@ -84,10 +85,13 @@ client arguments for verified sender proof or transport evidence. Coarse entity
 checks cannot establish row/resource fencing for list results: install host row
 policies or deny such bound credentials on unsupported routes.
 
-The wrapper checks expiry with its trusted clock after asynchronous status and
-resolver calls, after binding authorization and after the inner business policy.
-A delegated credential also retains the authoritative parent expiry deadline.
-Each decision observes authoritative state at evaluation. Revocation racing a
+The wrapper re-reads original status/current authority after awaited binding
+work and after a successful inner business policy. Callbacks run once; a business
+denial remains denied. Every observed original/current expiry ceiling is retained
+and checked with the trusted clock, including the delegated parent deadline.
+No shared accepted context is changed after narrowing. Callbacks must not perform
+protected effects before final admission. Each decision observes those reads;
+it does not promise an atomic cross-store snapshot or a remote revocation fence. Revocation racing a
 later committed write cannot be atomically undone by this adapter; hosts requiring
 that guarantee must fence the database write using their authoritative session
 version/transaction policy.
@@ -231,3 +235,53 @@ The bridge maps accepted identity and evaluates only explicitly declared
 assurance requirements. Scope hierarchies, application scopes, and business
 authorization remain in host policies or `agql-auth` guards. `ScopeEntityPolicy`
 in `graphql-orm` continues to use exact string matching.
+
+## Owned custom release checks
+
+For a custom `BoxStream<'static>` or effect that outlives its GraphQL context,
+capture `AgqlOwnedOperation<T>::from_context` while the real context is available.
+Supply trusted `Arc<AgqlCurrentAuthorityEnforcement>`, host-selected
+`AgqlOperationTarget` constants and an `Arc<dyn AgqlOwnedOperationAuthorizer<T>>`.
+The operation owns the coherent accepted bundle and trusted dependencies, without
+extending a context lifetime. Construction does not authorize a release.
+
+`T` is the host's release input (for example an event/resource identity).
+Implement both `authorize_bindings` and `authorize_business`: retain verified
+transport evidence in the owned authorizer and enforce complete original-token
+bindings plus current business, owner, tenant, row and field visibility. Client
+arguments are not trusted evidence. There is no default-allow authorizer.
+
+After queue, owner, body or signer awaits, call `check_release(&input).await?`
+immediately before every initial/live/gap release or protected effect. Each call
+reads original status/current grants before policy, after binding, and after
+successful business admission, retaining the shortest observed deadline. It
+never reruns a callback recursively, rewrites identity, emits an event or returns
+a reusable allow permit. Missing authority/status proof or grant narrowing denies.
+No protected effect may happen inside an admission callback.
+
+These checks do not implement subscription filters, event provenance, current
+row lookup, resource locking or deleted-preimage grants. A deleted/missing row
+must remain denied without a separately authorized preimage contract; do not
+replace generated default-deny preimage policy or expose raw queued data.
+Ownership may change after a host owner read, just as revocation may race after
+the final Auth read: retain host transaction/revision/resource fences for the
+actual commit or release. Recheck after any further protected-path await.
+
+Published Auth v0.22.0 supports
+`ResolvedPrincipal::from_current_session(original_reference, current_session, now)`
+for an enabled ordinary session read from authoritative host storage. Keep the
+exact immutable original reference separately from that current principal: its
+access-token jti, correlation and expiry need not appear on the session. The
+constructor validates ordinary user-session kinds, identity, session/family,
+tenant and other bindings, a current security version, any accepted version,
+and live original/current deadlines. It does not authenticate a credential or
+establish that a host read was authoritative.
+
+The host status checker must still check the original token/session/family,
+including its original jti and expiry. An always-active placeholder is not proof.
+ORM preserves the original accepted bundle and intersects scopes, scalar roles
+and typed authorization roles without widening; removal denies the operation.
+The shorter original/current/observed deadline bounds each check. Do not replace
+the accepted carrier or normalize its metadata onto the current session to
+force equality. The legacy `ResolvedPrincipal::new` sensitive path still
+requires an exact credential projection; delegation remains a separate contract.

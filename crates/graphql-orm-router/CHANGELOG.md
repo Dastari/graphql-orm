@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## 0.6.2 - 2026-10-18
+
+- Allocate a new immutable package identity for maintained README guidance
+  selecting the coordinated workspace and published Auth 0.22.0 revision.
+- Rust implementation and feature selection are unchanged. Consumer API
+  compatibility still requires native checks against its chosen baseline;
+  no stored-data or schema migration is added.
+
 ## 0.6.1 - 2026-10-16
 
 - Select the published `agql-auth` `v0.21.3` tag for `auth-agql`, retaining

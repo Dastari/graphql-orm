@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## 0.7.5 - 2026-10-18
+
+- Refresh package identity for the maintained Samba fixture and protocol
+  validation scripts included after 0.7.4. Preserve the existing Rust code,
+  public API, provider behavior, feature selection and dependency graph.
+- No storage key, object format, schema or persisted-data migration is required.
+
 ## 0.7.4 - 2026-10-15
 
 - Backport the upstream SMB directory-stream notification and idle-drop fixes

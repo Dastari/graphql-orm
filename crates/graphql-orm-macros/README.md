@@ -10,6 +10,20 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.53.0 aligns ORM/macros for post-await current-authority revalidation
+and owned custom release checks. Policies remain read-only admission callbacks;
+resource ownership, deleted-preimage and commit fences remain host-owned. No
+generated code, SDL or schema migration is added. See
+[the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
+
+The current workspace selects published Auth `v0.22.0` at
+`997707e060bcf5fabf879a5f98146dc2732b1c99`. Use that tag for direct Auth
+dependencies and refresh the lockfile to one source. The
+[0.53 migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks)
+describes validated current-session proofs; earlier version notes below retain
+their historical selectors.
+
+
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
 Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
 preserve compiler-native hashes and have separate admission; format 1, default-off

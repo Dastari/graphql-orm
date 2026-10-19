@@ -19,6 +19,15 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.107.2 to 0.107.3: maintained workspace package identity
+
+Select the reviewed coordinated workspace revision for all companion packages,
+regenerate the consuming lockfile and align direct Auth dependencies with
+published `v0.22.0`. This patch gives maintained dependency guidance a new
+immutable package identity; the Rust implementation and feature selection are
+unchanged. Native compatibility checks remain required for the complete
+consumer graph. No stored-data or schema migration is added.
+
 ## 0.107.1 to 0.107.2: published Auth selector
 
 Select the same successor workspace release for AI, ORM and other chosen

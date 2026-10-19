@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.7.4 to 0.7.5: maintained protocol-validation package identity
+
+Update the reviewed workspace Git revision and regenerate the consuming
+application's lockfile. This patch gives the maintained Samba fixtures and
+protocol-validation scripts a new immutable package identity; Rust code, public
+APIs, provider behavior, features and external dependencies are unchanged.
+No provider configuration, object key, schema or persisted-data migration is
+required. Keep all companion packages on the same reviewed revision.
+
 ## 0.7.3 to 0.7.4: narrow SMB directory-stream backport
 
 Update the reviewed workspace Git revision and regenerate the consuming

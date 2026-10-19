@@ -14,6 +14,19 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.53.0 (unreleased)
+
+- Re-read original status and current authority after binding and successful
+  business-policy awaits, retaining every observed expiry ceiling and denying
+  any grant narrowing without changing the accepted request.
+- Add owned custom operation/release checks with mandatory owned binding and
+  business policies, for streams/effects that outlive GraphQL Context.
+- Select published Auth v0.22.0 at
+  `997707e060bcf5fabf879a5f98146dc2732b1c99` for explicit validated
+  current-session proofs that retain the exact original credential reference.
+- Align ORM/macros at 0.53.0. No generated code, SDL, stored-data or schema change.
+
+
 ## 0.52.0 (unreleased)
 
 - Add an explicit source-only `replay-scoped-positive-v1` release profile with

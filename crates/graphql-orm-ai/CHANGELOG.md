@@ -18,6 +18,14 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.107.3 - 2026-10-18
+
+- Allocate a new immutable package identity for maintained README guidance
+  selecting the coordinated workspace and published Auth 0.22.0 revision.
+- Rust implementation and feature selection are unchanged. Consumer API
+  compatibility still requires native checks against its chosen baseline;
+  no stored-data or schema migration is added.
+
 ## [0.107.2] - 2026-10-16
 
 ### Changed

@@ -10,6 +10,15 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.6.1 to 0.6.2: maintained workspace package identity
+
+Select the reviewed coordinated workspace revision for all companion packages,
+regenerate the consuming lockfile and align direct Auth dependencies with
+published `v0.22.0`. This patch gives maintained dependency guidance a new
+immutable package identity; the Rust implementation and feature selection are
+unchanged. Native compatibility checks remain required for the complete
+consumer graph. No stored-data or schema migration is added.
+
 ## 0.6.0 to 0.6.1: published Auth selector
 
 When enabling `auth-agql`, use `tag = "v0.21.3"` for every direct
