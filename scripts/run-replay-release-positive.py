@@ -68,12 +68,16 @@ def main():
         else:
             trees = {}
             for backend in ["sqlite", "postgres", "mssql"]:
-                # Cargo's package-cache lock wait is status text, not a graph node.
+                # Keep complete logs, but exclude Cargo's cache/download status
+                # rows from graph equality. No dependency-tree row is normalized.
                 def tree(replay):
                     label = "tree-" + backend + (",owned-planning-replay" if replay else "")
                     row = next(r for r in record["results"] if r["label"] == label)
                     return "\n".join(line for line in (output / row["logFile"]).read_text().splitlines()
-                                     if "Blocking waiting for file lock" not in line)
+                                     if "Blocking waiting for file lock" not in line
+                                     and not re.fullmatch(
+                                         r"\s*(?:Downloading crates \.\.\.|Downloaded \S+ v\S+)\s*",
+                                         re.sub(r"\x1b\[[0-9;]*m", "", line)))
                 trees[backend] = tree(False) == tree(True)
             require(all(trees.values()), "replay changed dependency graph")
             record["treeEquality"] = trees
