@@ -116,48 +116,69 @@ source's own observation age and maximum-staleness contract.
 
 ## Notifications and missed-event recovery
 
-Expose the generated status `…Changed` subscription with only safe persisted
-scalars, plus the normal authorized status query. Include committed generation,
-last attempt/success, source observation, freshness, refresh-in-progress,
-sanitized failure and policy-approved counts. Expose the policy-approved
-`refresh_expires_at` deadline and derive progress against the current clock,
-so a crashed worker cannot leave a permanently true progress flag. Register the ordinary current
-principal, tenant, row, field, scope and assurance checks; registration and
-router metadata never substitute for authorization on each release.
+`CacheSync::changes` is the reusable cache invalidation stream for a native
+async-graphql subscription root. It returns the Federation-shareable
+`CacheSyncChange` object (`Generation: String`, `RefetchRequired: Boolean!`).
+Generation strings are lossless opaque decimal identities. The stream:
 
-A successful `save` queues its generated event until the transaction commits.
-Update the status row once per snapshot promotion to coalesce invalidation.
-Claim/progress/failure writes may notify, but keep the prior successful
-generation. The generated stream reads current authorized rows, so multiple
-queued hints may coalesce to the latest visible generation; event count is not
-audit evidence and clients must not interpret one event as one exact snapshot.
-The database's raw event bus is server-only and cannot replace generated
+- registers its bounded process-local receiver immediately, before any initial
+  authorization await;
+- sends an initial `RefetchRequired: true` signal after authorization, allowing
+  the client to refetch an earlier query or perform its initial query while
+  concurrent commits are already queued;
+- sends one generation hint per successful promotion, queued until commit;
+- sends an explicit authorized refetch signal after receiver lag; and
+- reauthorizes initial, committed and gap signals and ends without metadata on
+  denial/error. Reconnect starts a new receiver and initial signal.
+
+The mandatory callback is a trusted host policy boundary: rehydrate current
+principal/source authority and enforce complete partition, owner, row, field,
+scope and assurance restrictions. Do not pass a cached allow decision or retain
+raw bearer credentials. With `auth-agql`, prefer `changes_with_agql` with an
+`AgqlOwnedOperation<CachePartitionKey>` captured from a coherent request context
+and mandatory owned binding/business authorizers. It reuses the existing
+post-await original-status/current-grant checks rather than fabricating context.
+No registration or callback type alone grants authority. The
+[SQL-free integration fixture](../../../crates/graphql-orm/tests/cache_sync.rs)
+shows native GraphQL initial/committed delivery, denied signals, racing commits,
+rollback silence and authorized lag recovery. Declare the host's custom root
+and equivalent authorization in its operation/router metadata.
+
+Generated status-entity `…Changed` subscriptions remain available for status
+and progress. Update that row once per promotion to coalesce invalidation;
+claim/failure updates retain the prior successful generation. Public status can
+include generation, attempt/success, source observation, freshness, sanitized
+failure and policy-approved counts. Expose `refresh_expires_at` under policy and
+derive progress against the current clock so crashed workers cannot leave a
+permanently true progress flag. Keep claim tokens private. Generated events read
+current authorized rows, so hints may coalesce to the latest generation and are
+not an audit log. The raw database event bus is server-only and cannot replace
 subscription authorization.
 
-Generated entity notifications are **best-effort invalidation**, with no durable
-cursor or replay promise. The supported recovery protocol is:
+A WebSocket `connection_ack` acknowledges the connection, **not operation
+registration**. For an existing generated best-effort stream without an initial
+ready/refetch signal, subscribe before the query and perform finite periodic
+authorized generation reconciliation; a single refetch at connection time does
+not by itself prove the initial race closed. Refetch affected active queries
+when generation differs, bind page sequences to a generation, and restart them
+after promotion. Refetch unconditionally on reconnect or uncertain gaps. The
+new cache stream's authorized initial signal supplies the registration barrier;
+its lag signal supplies explicit recovery while the connection remains open.
 
-1. Subscribe before the initial query, or repeat the status query when the
-   subscription is established and reconcile its generation with initial data.
-2. Refetch affected active queries on any changed generation. Bind page cursors
-   to a committed generation; restart a page sequence if it changed.
-3. After every reconnect, lag indication, server restart or uncertain gap,
-   unconditionally refetch authorized status and projection. Do not wait for a
-   future event to discover a missed generation. A bounded durable application
-   event log may replace this refetch only with its own tested cursor contract.
-
-A process-local broadcast is not durable scheduling, replay or cross-replica
-notification transport. Deployments using multiple GraphQL processes must
-route committed invalidations through a host-owned shared transport, or bound
-client refetch intervals as an additional recovery mechanism. The durable
-status remains authoritative after any lost notification.
+Neither stream promises durable cursor/replay or cross-process delivery.
+Replicated deployments must supply a host-owned shared invalidation transport
+or finite periodic authorized generation reconciliation. The coordinator and
+its stream share one `Database` event runtime for immediate in-process delivery.
+The durable status remains authoritative after any lost notification. A durable
+application event log can replace refetch only with its own bounded, tested
+cursor contract.
 
 ## Verification and migration
 
 The SQL-free integration fixture exercises post-commit generated GraphQL
 delivery, rollback silence, cooldown/freshness, durable reclaim, replaced-worker
-refusal, partition isolation, missed-event status recovery and revoked row
-policy. Existing subscription authorization suites remain the contract for
+refusal, partition isolation, missed-event status recovery revoked row policy, native initial/committed GraphQL signals,
+operation-registration races and authorized lag recovery. Existing subscription authorization suites remain the contract for
 entity/field/current-authority checks.
 
 No existing schema is automatically migrated. Hosts add/register their own

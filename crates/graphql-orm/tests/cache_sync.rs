@@ -583,3 +583,252 @@ async fn lease_expiring_during_projection_await_rolls_back_without_notification(
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn cache_stream_registers_before_initial_signal_and_preserves_racing_commit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let db = fixture().await;
+    let sync = CacheSync::new(db.clone(), Arc::new(Store));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let checks = calls.clone();
+    let mut stream = Box::pin(sync.changes(key("tenant-a"), move |partition| {
+        checks.fetch_add(1, Ordering::SeqCst);
+        async move {
+            assert_eq!(partition, key("tenant-a"));
+            Ok(())
+        }
+    }));
+    // No stream polling yet: a concurrent commit must already be queued.
+    let claim = claimed(&sync, "tenant-a", 100).await;
+    sync.promote(
+        claim,
+        || 101,
+        0,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
+    let initial = stream.next().await.unwrap().unwrap();
+    assert!(initial.refetch_required);
+    assert_eq!(initial.generation, None);
+    assert_eq!(read_state(&db, "tenant-a").await.generation(), 1);
+    let committed = stream.next().await.unwrap().unwrap();
+    assert_eq!(committed.generation.as_deref(), Some("1"));
+    assert!(!committed.refetch_required);
+    let other = claimed(&sync, "tenant-b", 100).await;
+    sync.promote(
+        other,
+        || 101,
+        0,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err()
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cache_stream_denies_initial_and_live_metadata_after_current_authority_loss() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let db = fixture().await;
+    let sync = CacheSync::new(db.clone(), Arc::new(Store));
+    let mut denied = Box::pin(sync.changes(key("tenant-a"), |_| async {
+        Err(async_graphql::Error::new("private-authority-detail"))
+    }));
+    let error = denied.next().await.unwrap().unwrap_err();
+    assert!(!error.message.contains("private-authority-detail"));
+    assert!(denied.next().await.is_none());
+    let allowed = Arc::new(AtomicBool::new(true));
+    let current = allowed.clone();
+    let mut stream = Box::pin(sync.changes(key("tenant-a"), move |_| {
+        let current = current.clone();
+        async move {
+            if current.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(async_graphql::Error::new("revoked"))
+            }
+        }
+    }));
+    assert!(stream.next().await.unwrap().unwrap().refetch_required);
+    allowed.store(false, Ordering::SeqCst);
+    let claim = claimed(&sync, "tenant-a", 100).await;
+    sync.promote(
+        claim,
+        || 101,
+        0,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
+    assert!(stream.next().await.unwrap().is_err());
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn cache_stream_lag_requests_refetch_and_reauthorizes_gap_signals() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let db = fixture().await;
+    let sync = CacheSync::new(db.clone(), Arc::new(Store));
+    let mut stream = Box::pin(sync.changes(key("tenant-a"), |_| async { Ok(()) }));
+    assert!(stream.next().await.unwrap().unwrap().refetch_required);
+    let allowed = Arc::new(AtomicBool::new(true));
+    let current = allowed.clone();
+    let mut denied_gap = Box::pin(sync.changes(key("tenant-a"), move |_| {
+        let current = current.clone();
+        async move {
+            if current.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(async_graphql::Error::new("revoked"))
+            }
+        }
+    }));
+    assert!(denied_gap.next().await.unwrap().unwrap().refetch_required);
+    // Exceed the runtime's bounded 256-event channel using actual commits.
+    for index in 0..257 {
+        let now = 100 + index * 10;
+        let claim = match sync
+            .claim(key("tenant-a"), policy(), move || now, true, None)
+            .await
+            .unwrap()
+        {
+            RefreshAdmission::Claimed(c) => c,
+            x => panic!("{x:?}"),
+        };
+        sync.promote(
+            claim,
+            move || now + 1,
+            0,
+            None,
+            None,
+            |_, _| Box::pin(async { Ok(()) }),
+        )
+        .await
+        .unwrap();
+    }
+    let gap = stream.next().await.unwrap().unwrap();
+    assert!(gap.refetch_required);
+    assert_eq!(gap.generation, None);
+    assert_eq!(read_state(&db, "tenant-a").await.generation(), 257);
+    allowed.store(false, Ordering::SeqCst);
+    assert!(denied_gap.next().await.unwrap().is_err());
+    assert!(denied_gap.next().await.is_none());
+}
+
+struct NativeCacheSubscription;
+#[async_graphql::Subscription]
+impl NativeCacheSubscription {
+    #[graphql(name = "DatasetChanged")]
+    async fn dataset_changed(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<CacheSyncChange>>> {
+        let sync = ctx.data::<Arc<CacheSync<SqliteBackend, Store>>>()?;
+        let current = ctx.data::<Arc<std::sync::atomic::AtomicBool>>()?.clone();
+        let principal = ctx
+            .auth_subject_opt()
+            .ok_or_else(|| async_graphql::Error::new("unauthenticated"))?
+            .id
+            .clone();
+        Ok(sync.changes(key("tenant-a"), move |partition| {
+            let current = current.clone();
+            let principal = principal.clone();
+            async move {
+                if current.load(std::sync::atomic::Ordering::SeqCst)
+                    && principal == "reader"
+                    && partition == key("tenant-a")
+                {
+                    Ok(())
+                } else {
+                    Err(async_graphql::Error::new("forbidden"))
+                }
+            }
+        }))
+    }
+}
+
+#[tokio::test]
+async fn native_graphql_stream_delivers_authorized_initial_and_committed_signals() {
+    let db = fixture().await;
+    let sync = Arc::new(CacheSync::new(db.clone(), Arc::new(Store)));
+    let schema = async_graphql::Schema::build(
+        QueryRoot::default(),
+        MutationRoot::default(),
+        NativeCacheSubscription,
+    )
+    .data(db.clone())
+    .data(sync.clone())
+    .data(Arc::new(std::sync::atomic::AtomicBool::new(true)))
+    .data(AuthSubject::new("reader"))
+    .enable_federation()
+    .enable_subscription_in_federation()
+    .finish();
+    assert!(
+        schema
+            .sdl_with_options(async_graphql::SDLExportOptions::new().federation())
+            .contains("type CacheSyncChange @shareable")
+    );
+    let mut stream = Box::pin(
+        schema.execute_stream("subscription { DatasetChanged { Generation RefetchRequired } }"),
+    );
+    let initial = stream.next().await.unwrap();
+    assert!(initial.errors.is_empty(), "{:?}", initial.errors);
+    assert_eq!(
+        initial.data.into_json().unwrap()["DatasetChanged"]["RefetchRequired"],
+        true
+    );
+    let claim = claimed(&sync, "tenant-a", 100).await;
+    sync.promote(
+        claim,
+        || 101,
+        0,
+        None,
+        None,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+    .unwrap();
+    let committed = stream.next().await.unwrap();
+    assert!(committed.errors.is_empty(), "{:?}", committed.errors);
+    assert_eq!(
+        committed.data.into_json().unwrap()["DatasetChanged"]["Generation"],
+        "1"
+    );
+    let claim = match sync
+        .claim(key("tenant-a"), policy(), || 106, true, None)
+        .await
+        .unwrap()
+    {
+        RefreshAdmission::Claimed(c) => c,
+        x => panic!("{x:?}"),
+    };
+    assert!(
+        sync.promote(
+            claim,
+            || 107,
+            0,
+            None,
+            None,
+            |_, _| Box::pin(async { Err::<(), _>(OrmPublicError::new(OrmErrorCode::Conflict)) })
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        timeout(Duration::from_millis(50), stream.next())
+            .await
+            .is_err()
+    );
+}

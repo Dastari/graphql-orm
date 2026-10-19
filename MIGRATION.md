@@ -24,7 +24,12 @@ generated repositories. Use `CacheSync::{claim,promote,fail}` for fenced refresh
 and atomic generation promotion; pass a live clock such as
 `cache_sync::unix_time_seconds` so lease checks remain current across awaits.
 Use the status entity's generated `…Changed`
-subscription for authorized post-commit invalidation. Existing streams remain
+subscription for authorized post-commit status invalidation. For an explicit
+initial registration barrier and lag recovery, expose `CacheSync::changes` in a
+native subscription with a current-authority callback, or use
+`changes_with_agql` with the existing owned Auth bridge. `CacheSyncChange` uses
+lossless decimal generation strings and explicit `RefetchRequired` signals.
+Existing generated streams remain
 best-effort: clients must reconcile the initial subscription/query race and
 refetch unconditionally after reconnect or gaps. See the
 [cache coordination reference](docs/reference/graphql-orm/cache-sync.md).

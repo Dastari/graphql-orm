@@ -22,7 +22,9 @@ for historical context.
   ORM projection/status promotion. Generated status-entity subscriptions reuse
   post-commit delivery and current row/field/entity authorization. Document the
   required subscribe/query and reconnect refetch protocol; no durable replay is
-  claimed. Align ORM/macros at 0.54.0; no automatic database migration.
+  claimed. Add mandatory-authorizer cache streams with initial registration
+  barriers, explicit lag/refetch signals and an owned Auth bridge adapter.
+  Align ORM/macros at 0.54.0; no automatic database migration.
 
 
 ## 0.53.0 (unreleased)

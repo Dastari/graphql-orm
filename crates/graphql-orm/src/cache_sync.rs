@@ -322,6 +322,33 @@ pub trait CacheSyncStore<B: WriteBackend>: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<(), OrmPublicError>>;
 }
 
+/// Authorized cache invalidation delivered by a native GraphQL subscription.
+///
+/// The initial/gap signal has no generation and requires an authorized refetch.
+/// Committed generations use lossless decimal strings; treat them as opaque
+/// identities rather than JavaScript numbers. This is not a durable event cursor.
+#[derive(Clone, Debug, async_graphql::SimpleObject)]
+#[graphql(rename_fields = "PascalCase", shareable)]
+pub struct CacheSyncChange {
+    /// Last observed committed generation, absent for initial/gap reconciliation.
+    pub generation: Option<String>,
+    /// Refetch even if no generation change has been observed by the client.
+    pub refetch_required: bool,
+}
+
+#[derive(Clone)]
+struct CommittedCacheChange {
+    key: CachePartitionKey,
+    generation: i64,
+}
+struct CacheChangeStream<A> {
+    receiver: tokio::sync::broadcast::Receiver<CommittedCacheChange>,
+    key: CachePartitionKey,
+    authorize: A,
+    initial: bool,
+    terminated: bool,
+}
+
 /// Generic refresh coordinator; all durable state remains service-owned.
 pub struct CacheSync<B: WriteBackend, S: CacheSyncStore<B>> {
     db: Database<B>,
@@ -331,6 +358,104 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     /// Bind the owning database and generated-repository adapter.
     pub fn new(db: Database<B>, store: Arc<S>) -> Self {
         Self { db, store }
+    }
+
+    /// Register an authorized initial/live/gap cache invalidation stream.
+    ///
+    /// Registration happens immediately, before the initial signal's authority
+    /// await. Query after receiving that signal (or refetch an earlier result):
+    /// any concurrent committed generation is already queued. Broadcast lag
+    /// produces an explicit refetch signal; reconnect creates a new initial one.
+    /// The channel is process-local, not durable replay or replica transport.
+    ///
+    /// The mandatory host callback runs before **every** signal, including
+    /// initial and gap signals, after queue waits. It must rehydrate current
+    /// authority and enforce the complete partition, resource/row/field, scope,
+    /// assurance and source-owner policy. It grants no provider write authority.
+    /// Prefer `changes_with_agql` when using the owned Auth bridge.
+    ///
+    /// # Errors
+    /// The stream emits one sanitized forbidden error and ends when the callback
+    /// denies/fails. No generation or partition metadata is released on denial.
+    pub fn changes<A, F>(
+        &self,
+        key: CachePartitionKey,
+        authorize: A,
+    ) -> impl futures::Stream<Item = async_graphql::Result<CacheSyncChange>> + Send + 'static
+    where
+        A: FnMut(CachePartitionKey) -> F + Send + 'static,
+        F: std::future::Future<Output = async_graphql::Result<()>> + Send,
+    {
+        let state = CacheChangeStream {
+            receiver: self
+                .db
+                .ensure_event_sender::<CommittedCacheChange>()
+                .subscribe(),
+            key,
+            authorize,
+            initial: true,
+            terminated: false,
+        };
+        futures::stream::unfold(state, |mut state| async move {
+            if state.terminated {
+                return None;
+            }
+            let notice = if state.initial {
+                state.initial = false;
+                CacheSyncChange {
+                    generation: None,
+                    refetch_required: true,
+                }
+            } else {
+                loop {
+                    match state.receiver.recv().await {
+                        Ok(event) if event.key == state.key => {
+                            break CacheSyncChange {
+                                generation: Some(event.generation.to_string()),
+                                refetch_required: false,
+                            };
+                        }
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            break CacheSyncChange {
+                                generation: None,
+                                refetch_required: true,
+                            };
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                    }
+                }
+            };
+            let released = if (state.authorize)(state.key.clone()).await.is_ok() {
+                Ok(notice)
+            } else {
+                state.terminated = true;
+                Err(OrmPublicError::forbidden().into_graphql_error())
+            };
+            Some((released, state))
+        })
+    }
+
+    /// Register cache changes using the existing owned current-authority bridge.
+    ///
+    /// Capture `AgqlOwnedOperation` from a coherent real request context with
+    /// mandatory host binding/business checks for the complete partition. Its
+    /// `check_release` revalidates original status/current grants after policy
+    /// awaits; this adapter uses it for initial, committed and gap signals.
+    ///
+    /// # Errors
+    /// Denied/unavailable current authority emits a sanitized error and ends
+    /// the stream without releasing metadata.
+    #[cfg(feature = "auth-agql")]
+    pub fn changes_with_agql(
+        &self,
+        key: CachePartitionKey,
+        authority: Arc<crate::graphql::auth_agql::AgqlOwnedOperation<CachePartitionKey>>,
+    ) -> impl futures::Stream<Item = async_graphql::Result<CacheSyncChange>> + Send + 'static {
+        self.changes(key, move |key| {
+            let authority = authority.clone();
+            async move { authority.check_release(&key).await }
+        })
     }
 
     /// Atomically coalesce a refresh trigger and persist an expiring worker fence.
@@ -464,6 +589,10 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
                     state.consecutive_failures = 0;
                     store.save(tx, &claim.key, &state).await?;
                     check_deadline(clock(), completed, expires_at)?;
+                    tx.queue_event(CommittedCacheChange {
+                        key: claim.key.clone(),
+                        generation,
+                    });
                     Ok(value)
                 })
             })
