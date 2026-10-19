@@ -15,6 +15,19 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.53.0 to 0.54.0: service-owned cache synchronization
+
+Upgrade ORM/macros together. Existing generated schemas and stored data are
+unchanged; no automatic data migration is needed. New adopters register a
+service-owned status entity and implement `CacheSyncStore` with transaction-bound
+generated repositories. Use `CacheSync::{claim,promote,fail}` for fenced refresh
+and atomic generation promotion, and the status entity's generated `…Changed`
+subscription for authorized post-commit invalidation. Existing streams remain
+best-effort: clients must reconcile the initial subscription/query race and
+refetch unconditionally after reconnect or gaps. See the
+[cache coordination reference](docs/reference/graphql-orm/cache-sync.md).
+
+
 ## 0.52.0 to 0.53.0: post-await and owned release checks
 
 Upgrade ORM/macros together. Successful sensitive checks now re-read original

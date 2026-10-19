@@ -434,6 +434,9 @@ pub type DbRow = <DefaultBackend as OrmBackend>::Row;
 
 /// Database handle, builder, backend-specific pool helpers, and runtime configuration.
 pub mod db;
+
+/// Durable service-owned cache generations and bounded refresh coordination.
+pub mod cache_sync;
 /// ORM runtime traits, filters, pagination, relation loading, schema models, and migrations.
 pub mod graphql;
 /// Common imports for applications using generated `graphql-orm` code.

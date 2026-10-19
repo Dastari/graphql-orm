@@ -30,6 +30,7 @@ guidance for the core ORM package.
 
 ## Generated and repository operations
 
+- [Durable cache generations and refresh coordination](cache-sync.md)
 - [Runtime writes, hooks, subscriptions, and policies](runtime-and-writes.md)
 - [Schema-bound transactional runtime mutations](runtime-mutations.md)
 - [Composite mutations](composite-mutations.md)
