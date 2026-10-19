@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.54.0 pairs runtime/macros for durable cache refresh coordination.
+Generated status-entity subscriptions retain post-commit current authorization;
+clients reconcile initial/query races and refetch after reconnect or gaps. See
+[cache synchronization](../../docs/reference/graphql-orm/cache-sync.md).
+
 Version 0.53.0 aligns ORM/macros for post-await current-authority revalidation
 and owned custom release checks. Policies remain read-only admission callbacks;
 resource ownership, deleted-preimage and commit fences remain host-owned. No
