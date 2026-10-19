@@ -507,7 +507,6 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # pinned installer
         with:
-          toolchain: 1.97.1
           components: rustfmt
       - name: Run only literal positive metadata commands
         run: python3 scripts/run-replay-release-positive.py metadata --output target/release-evidence/replay-scoped-integrity
@@ -534,7 +533,7 @@ jobs:
           ref: ${{ inputs.target_ref }}
           fetch-depth: 0
       - uses: ./.github/actions/reclaim-runner-disk
-      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # pinned installer
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: ${{ matrix.toolchain }}
           components: clippy
