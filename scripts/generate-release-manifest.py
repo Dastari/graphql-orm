@@ -365,6 +365,17 @@ def render_notes(manifest: dict[str, Any]) -> str:
             "The attached JSON manifest is the canonical release bill of materials.",
         ]
     )
+    if "verification" in manifest:
+        evidence = manifest["verification"]
+        lines[2] = "This is an immutable, Git-only source release with scoped positive verification. The full release matrix was not executed."
+        lines.extend([
+            "", "## Scoped verification and retained limitations", "",
+            f"Profile: `{evidence['profile']}`; approval: {evidence['approvalReference']}.",
+            f"See `{evidence['asset']}` and the checksummed evidence archives for exact sources, commands, counts and unexecuted obligations.",
+            "Historical Rust 1.97.1 and native Rust 1.98.1 replay recipes remain distinct, exact-compiler/stock x86_64-unknown-linux-gnu profiles; replay is default-off.",
+            "The supplementary MSSQL integration-target Clippy compile failure (exit 101) remains retained. Security/refusal/fault/concurrency and broad mixed suites remain runtime-unverified.",
+            "Dependency audit exit 1 and known findings remain. Its advisory snapshot is historical; no new scan, current advisory coverage or clean graph is claimed.",
+        ])
     return "\n".join(lines) + "\n"
 
 
@@ -384,10 +395,29 @@ def main() -> int:
     parser.add_argument("--notes-output", type=Path)
     parser.add_argument("--check-clean", action="store_true")
     parser.add_argument("--verify-tags", action="store_true")
+    parser.add_argument("--verification-evidence", type=Path)
     args = parser.parse_args()
     if args.check_clean:
         require_clean_worktree()
     manifest = build_manifest(args.release_id, args.ref, args.verify_tags)
+    if args.verification_evidence is not None:
+        from replay_release import COMPILERS, GATES, PROFILE, check_lane, require
+        evidence = json.loads(args.verification_evidence.read_text())
+        commit = manifest["source"]["commit"]
+        require(evidence["profile"] == PROFILE and evidence["releaseId"] == args.release_id
+                and evidence["sourceCommit"] == commit
+                and bool(evidence["approvalReference"].strip())
+                and evidence["fullReleaseMatrixExecuted"] is False
+                and evidence["mandatoryGates"] == {gate: "success" for gate in GATES},
+                "scoped manifest evidence identity changed")
+        for compiler in COMPILERS:
+            check_lane(evidence["freshPositiveLanes"][compiler], compiler, commit)
+        manifest["verification"] = {
+            "profile": PROFILE, "fullReleaseMatrixExecuted": False,
+            "approvalReference": evidence["approvalReference"],
+            "asset": args.verification_evidence.name,
+            "sha256": file_sha256(args.verification_evidence),
+        }
     serialized = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     write_or_print(serialized, args.output)
     if args.notes_output is not None:

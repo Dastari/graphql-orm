@@ -16,6 +16,10 @@ for historical context.
 
 ## 0.52.0 (unreleased)
 
+- Add an explicit source-only `replay-scoped-positive-v1` release profile with
+  source-qualified evidence reuse and retained audit/runtime gaps. Full release
+  validation remains the default; policy merge and publication need separate review.
+
 - Add explicit `OwnedPlanningReplayRecipe` selection, capture and decode APIs for
   new native Rust 1.98.1 evidence using `graphql-orm-owned-planning-8e1-rust1981-v1`.
   The released historical APIs and `graphql-orm-owned-planning-8e1-v1` still

@@ -17,6 +17,12 @@ published to crates.io.
 
 ## 0.51.0 to 0.52.0: explicit native Rust 1.98.1 replay recipe
 
+Source releases may explicitly select the reviewed scoped positive release
+profile; inspect the attached verification evidence and runtime-unverified gaps.
+The full release profile remains the default. No package version or database
+migration is added by the release-policy change. See the
+[release runbook](docs/operations/release/process.md#replay-scoped-positive-v1).
+
 Upgrade ORM/macros together. Existing historical capture/decode entry points keep
 all signatures/defaults and remain on exact Rust 1.97.1. They do not automatically
 select a new recipe when the compiler changes. Existing witness bytes, producer
