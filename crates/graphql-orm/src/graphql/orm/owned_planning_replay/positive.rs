@@ -27,6 +27,7 @@ fn decode(bytes: &[u8]) -> Result<OwnedPlanningReplayWitness, OwnedPlanningRepla
         ),
     }
 }
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn offline(retained: Vec<Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> {
     for bytes in retained {
         let witness = decode(&bytes)?;
@@ -348,6 +349,7 @@ async fn run_postgres(
     Ok(retained)
 }
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 fn check(
     plan: &OwnedPlannedMigration,
     w: OwnedPlanningReplayWitness,

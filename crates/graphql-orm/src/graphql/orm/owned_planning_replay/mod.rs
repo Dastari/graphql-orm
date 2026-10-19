@@ -1136,11 +1136,5 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
     }
 }
 
-#[cfg(all(
-    test,
-    any(
-        graphql_orm_replay_qualified_profile,
-        graphql_orm_replay_rust1981_profile
-    )
-))]
+#[cfg(test)]
 mod positive;
