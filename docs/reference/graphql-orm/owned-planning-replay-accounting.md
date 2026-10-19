@@ -3,7 +3,7 @@ title: Owned planning replay accounting
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-18
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,6 +12,64 @@ supersedes: []
 
 See the [public contract](owned-planning-replay.md) for scope, limits and custody.
 The following source-qualified schedule is the approved admission contract.
+
+## Per-recipe compiler accounting
+
+The historical recipe retains its exact 1.97.1 admission and accounting schedule.
+The separately selected `graphql-orm-owned-planning-8e1-rust1981-v1` admits only
+stock Rust 1.98.1 commit `48a229ceaefd4985c50990b14116b6d856af0985`, with the
+same exact GNU x86_64 host/target and wrapper exclusion. Its native Debug bytes
+are deliberately different where that compiler changes escaping. Neither recipe
+is a formatter emulator or a portable hash.
+
+Installed 1.98.1 `library/core/src/slice/sort/{stable,shared}` sources are
+byte-identical to 1.97.1. BTree search/node/set implementations are unchanged;
+map's Default const annotation and entry's fallible wrappers do not add a tree
+pass, comparison, allocation or string copy. Existing 64(n+1) operation envelopes
+cover their fixed dispatch. String/str call-path changes include constant-time
+range/boundary refactoring (`core/src/str/traits.rs:116–338`) and removal of
+redundant two-way-search bounds checks (`core/src/str/pattern.rs:1496–1630`),
+without extra scans/candidate comparisons or text copies. ASCII normalization
+and string-copy paths retain their bounds. New casefold APIs are not called by
+the planning engine; unused UTF-8 boundary convenience changes add no helper
+invocation. Integer formatter changes are const/stability/NumBuffer plumbing,
+with the existing closed scalar/output envelopes retained. The source review digest manifest is retained alongside
+the [fresh producer provenance](../../../crates/graphql-orm/tests/fixtures/owned-planning-replay-rust1981/README.md).
+
+Native Debug needs an additional bound. In the exact 1.98.1 source:
+
+- `core/src/fmt/mod.rs:2920–2960` scans printable ASCII and calls
+  `char::escape_debug_ext` for other scalars.
+- `core/src/char/methods.rs:478–503,1084,1144,1176,1218,1260,1274`
+  adds fixed range/property checks and up to four skip searches for Cf,
+  Cn_planes_0_3, Default_Ignorable_Code_Point and Grapheme_Extend.
+- `core/src/unicode/unicode_data.rs:94–146` performs a header binary search and
+  a bounded offset-run scan. The respective header/run maxima are 11/8, 54/332,
+  12/8 and 33/244. Thus there are at most 592 offset iterations and eight header
+  comparisons per search. Charge eight logical visits/arithmetic/comparisons per
+  offset iteration, eight per header comparison, plus 512 fixed scalar/dispatch/
+  range/escape events: `8*592 + 8*32 + 512 = 5504 < 8192` extra W per non-ASCII
+  scalar. Each such scalar occupies at least two non-ASCII UTF-8 bytes.
+
+Only the new recipe inventories `U(X)`, the number of non-ASCII stored UTF-8
+bytes, preserving every original byte. Its string inventory prepays the scan
+within the existing `128+4n` work reservation before traversal (byte visit,
+ASCII predicate, iterator and count); historical inventories do no new byte scan.
+Every Debug definition/profile pass and every semantic-hash step pass adds
+`4096*U(X)` W **before** the helper, including repeated source/target/step
+occurrences and future decode/encode/verify admission certificates. ASCII scalar,
+number and ordinary type/field formatting retain the original allowances.
+The `10B+256N` text envelope still dominates both native escape spellings, so
+there is no text expansion exception or increased ceiling. Inventory size/copy/
+comparison accounting includes the extra private descriptor's fixed operations
+within existing per-slot allowances. New recipe dispatch and identifier comparison
+fit the 4096 entry allowance; wire inventory/layout uses the actual recipe string
+length, including every subsequent materialization/copy.
+
+W remains 16,777,216 and T remains 67,108,864 per operation. These intersecting
+ceilings can refuse otherwise valid inputs; the new lane's Unicode work does not
+change historical admission or any ordinary planning entry point. New compiler
+and wrong-recipe refusal properties are inspection-only, not runtime tested.
 
 ## Implementation envelopes
 
@@ -124,7 +182,9 @@ Toolchain-library accounting is qualified to the reviewed Rust 1.97.1 standard
 library, compiler commit 8bab26f4f68e0e26f0bb7960be334d5b520ea452, stock
 x86_64-unknown-linux-gnu host/target, with no compiler wrappers. The std-only
 crate build.rs checks the exact compiler release/commit/host and Cargo target;
-only that match emits graphql_orm_replay_qualified_profile. A missing match
+only the historical match emits graphql_orm_replay_qualified_profile.
+The additional 1.98.1 recipe emits its separate graphql_orm_replay_rust1981_profile;
+each public path checks the explicitly requested or privately stored recipe. A missing match
 fails closed in all four library entry points, rather than relying on the
 standalone inspection script. Ordinary planning has no profile gate.
 Its installed source was inspected, including stable sort and BTree

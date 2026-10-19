@@ -1,4 +1,43 @@
 use super::*;
+fn recipe() -> OwnedPlanningReplayRecipe {
+    if cfg!(graphql_orm_replay_rust1981_profile) {
+        OwnedPlanningReplayRecipe::Rust1981V1
+    } else {
+        OwnedPlanningReplayRecipe::Historical8e1V1
+    }
+}
+fn fixture_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(match recipe() {
+            OwnedPlanningReplayRecipe::Historical8e1V1 => "owned-planning-replay-8e1",
+            OwnedPlanningReplayRecipe::Rust1981V1 => "owned-planning-replay-rust1981",
+        })
+}
+fn decode(bytes: &[u8]) -> Result<OwnedPlanningReplayWitness, OwnedPlanningReplayError> {
+    let limits = OwnedPlanningReplayLimits::default();
+    match recipe() {
+        OwnedPlanningReplayRecipe::Historical8e1V1 => {
+            OwnedPlanningReplayWitness::from_json(bytes, limits)
+        }
+        OwnedPlanningReplayRecipe::Rust1981V1 => OwnedPlanningReplayWitness::from_json_for_recipe(
+            bytes,
+            limits,
+            OwnedPlanningReplayRecipe::Rust1981V1,
+        ),
+    }
+}
+fn offline(retained: Vec<Vec<u8>>) -> Result<(), Box<dyn std::error::Error>> {
+    for bytes in retained {
+        let witness = decode(&bytes)?;
+        witness.verify()?;
+        assert_eq!(
+            bytes,
+            witness.to_json(OwnedPlanningReplayLimits::default())?
+        );
+    }
+    Ok(())
+}
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use crate::db::Database;
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
@@ -39,16 +78,18 @@ fn table(name: &str, keys: &[&str], cols: &[&str]) -> OwnedTableModel {
 async fn replay_positive_sqlite() -> Result<(), Box<dyn std::error::Error>> {
     let db =
         Database::<super::super::super::SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
-    run_sqlite(&db).await?;
+    let retained = run_sqlite(&db).await?;
     db.pool().close().await;
     assert!(db.pool().is_closed());
-    replay_positive_offline_original_fixtures()?;
+    offline(retained)?;
+    replay_positive_offline_fixtures()?;
     Ok(())
 }
 #[cfg(feature = "sqlite")]
 async fn run_sqlite(
     db: &Database<super::super::super::SqliteBackend>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let mut retained = Vec::new();
     for sql in [
         "CREATE TABLE replay_notes (id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE external_notes (payload TEXT DEFAULT 'private ''quoted'' 雪')",
@@ -74,12 +115,18 @@ async fn run_sqlite(
             options,
         )
         .await?;
-        check(&p, w)?;
+        retained.push(check(&p, w)?);
         assert!(p.steps().is_empty());
         let mut target = base.clone();
         let mut c = col("extra", false);
         c.nullable = true;
-        c.default = Some("'literal ''雪''\\path'".into());
+        c.default = Some(
+            if matches!(recipe(), OwnedPlanningReplayRecipe::Rust1981V1) {
+                "'literal ''雪\u{3164}''\\path'".into()
+            } else {
+                "'literal ''雪''\\path'".into()
+            },
+        );
         target.tables[0].columns.push(c);
         let (p, w) = capture(
             db,
@@ -90,7 +137,7 @@ async fn run_sqlite(
             options,
         )
         .await?;
-        check(&p, w)?;
+        retained.push(check(&p, w)?);
         assert!(!p.steps().is_empty());
     }
     let mut child = table("replay_child", &["id"], &["id", "a", "b"]);
@@ -128,10 +175,35 @@ async fn run_sqlite(
             options,
         )
         .await?;
-        check(&p, w)?;
+        retained.push(check(&p, w)?);
         assert!(!p.steps().is_empty());
     }
-    Ok(())
+    if matches!(recipe(), OwnedPlanningReplayRecipe::Rust1981V1) {
+        for (tag, options) in [
+            ("strict", PlanOptions::strict()),
+            ("managed", PlanOptions::managed_tables_only()),
+        ] {
+            let mut t = table("review_notes", &["id"], &["id"]);
+            t.entity_name = "ReviewNote".into();
+            t.columns[0].default = Some("'\u{3164}'".into());
+            let target = OwnedSchemaModel {
+                tables: vec![t],
+                ..Default::default()
+            };
+            let own = ManagedTableSet::new(["review_notes".into()])?;
+            let (p, w) = capture(
+                db,
+                format!("unicode-{tag}"),
+                "native U+3164",
+                &target,
+                &own,
+                options,
+            )
+            .await?;
+            retained.push(check(&p, w)?);
+        }
+    }
+    Ok(retained)
 }
 
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
@@ -143,7 +215,7 @@ async fn replay_positive_postgres() -> Result<(), Box<dyn std::error::Error>> {
         .fetch_one(db.pool())
         .await?;
     assert_eq!(Some(identity.as_str()), owned.url.rsplit('/').next());
-    run_postgres(&db).await?;
+    let retained = run_postgres(&db).await?;
     let identity: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(db.pool())
         .await?;
@@ -151,13 +223,15 @@ async fn replay_positive_postgres() -> Result<(), Box<dyn std::error::Error>> {
     db.pool().close().await;
     assert!(db.pool().is_closed());
     owned.cleanup()?;
-    replay_positive_offline_original_fixtures()?;
+    offline(retained)?;
+    replay_positive_offline_fixtures()?;
     Ok(())
 }
 #[cfg(all(feature = "postgres", not(feature = "sqlite")))]
 async fn run_postgres(
     db: &Database<super::super::super::PostgresBackend>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<Vec<u8>>, Box<dyn std::error::Error>> {
+    let mut retained = Vec::new();
     for sql in [
         "CREATE TABLE replay_notes (id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL)",
         "CREATE TABLE external_notes (payload TEXT DEFAULT 'private ''quoted'' 雪')",
@@ -183,12 +257,18 @@ async fn run_postgres(
             options,
         )
         .await?;
-        check(&p, w)?;
+        retained.push(check(&p, w)?);
         assert!(p.steps().is_empty());
         let mut target = base.clone();
         let mut c = col("extra", false);
         c.nullable = true;
-        c.default = Some("'literal ''雪''\\path'".into());
+        c.default = Some(
+            if matches!(recipe(), OwnedPlanningReplayRecipe::Rust1981V1) {
+                "'literal ''雪\u{3164}''\\path'".into()
+            } else {
+                "'literal ''雪''\\path'".into()
+            },
+        );
         target.tables[0].columns.push(c);
         let (p, w) = capture(
             db,
@@ -199,7 +279,7 @@ async fn run_postgres(
             options,
         )
         .await?;
-        check(&p, w)?;
+        retained.push(check(&p, w)?);
         assert!(!p.steps().is_empty());
     }
     let mut child = table("replay_child", &["id"], &["id", "a", "b"]);
@@ -237,24 +317,47 @@ async fn run_postgres(
             options,
         )
         .await?;
-        check(&p, w)?;
+        retained.push(check(&p, w)?);
         assert!(!p.steps().is_empty());
     }
-    Ok(())
+    if matches!(recipe(), OwnedPlanningReplayRecipe::Rust1981V1) {
+        for (tag, options) in [
+            ("strict", PlanOptions::strict()),
+            ("managed", PlanOptions::managed_tables_only()),
+        ] {
+            let mut t = table("review_notes", &["id"], &["id"]);
+            t.entity_name = "ReviewNote".into();
+            t.columns[0].default = Some("'\u{3164}'".into());
+            let target = OwnedSchemaModel {
+                tables: vec![t],
+                ..Default::default()
+            };
+            let own = ManagedTableSet::new(["review_notes".into()])?;
+            let (p, w) = capture(
+                db,
+                format!("unicode-{tag}"),
+                "native U+3164",
+                &target,
+                &own,
+                options,
+            )
+            .await?;
+            retained.push(check(&p, w)?);
+        }
+    }
+    Ok(retained)
 }
 
 fn check(
     plan: &OwnedPlannedMigration,
     w: OwnedPlanningReplayWitness,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let limits = OwnedPlanningReplayLimits::default();
     let bytes = w.to_json(limits)?;
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/owned-planning-replay-8e1")
-        .join(format!("{}-{}.json", plan.backend(), plan.version()));
+    let path = fixture_root().join(format!("{}-{}.json", plan.backend(), plan.version()));
     let expected = std::fs::read(path)?;
     assert_eq!(bytes, expected, "complete source-qualified 8e1 output");
-    let decoded = OwnedPlanningReplayWitness::from_json(&bytes, limits)?;
+    let decoded = decode(&bytes)?;
     assert_eq!(decoded.to_json(limits)?, bytes);
     let facts = decoded.verify()?;
     assert_eq!(facts.plan_hash(), plan.plan_hash());
@@ -263,37 +366,40 @@ fn check(
     assert_eq!(facts.statements(), plan.statements());
     assert_eq!(facts.steps().len(), plan.steps().len());
     assert_eq!(facts.format_version(), 1);
-    assert_eq!(facts.recipe(), RECIPE);
+    assert_eq!(facts.recipe(), recipe().identifier());
     assert_eq!(facts.version(), plan.version());
     assert_eq!(facts.description(), plan.description());
     assert_eq!(facts.ownership(), plan.ownership());
     fn owned_send_sync<T: Send + Sync>() {}
     owned_send_sync::<OwnedPlanningReplayWitness>();
     owned_send_sync::<VerifiedOwnedPlanningReplay>();
-    Ok(())
+    Ok(bytes)
 }
 #[test]
-fn replay_positive_offline_original_fixtures() -> Result<(), Box<dyn std::error::Error>> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/owned-planning-replay-8e1");
+fn replay_positive_offline_fixtures() -> Result<(), Box<dyn std::error::Error>> {
+    let root = fixture_root();
+    let mut count = 0;
     for file in std::fs::read_dir(root)? {
         let path = file?.path();
-        if path.extension().is_some_and(|x| x == "json") {
+        // Only witness fixtures; source-review/provenance JSON is separate data.
+        if path
+            .file_name()
+            .and_then(|x| x.to_str())
+            .is_some_and(|name| {
+                (name.starts_with("sqlite-") || name.starts_with("postgres-"))
+                    && (name.ends_with("-strict.json") || name.ends_with("-managed.json"))
+            })
+        {
             let bytes = std::fs::read(path)?;
-            let w = OwnedPlanningReplayWitness::from_json(
-                &bytes,
-                OwnedPlanningReplayLimits::default(),
-            )?;
+            count += 1;
+            let w = decode(&bytes)?;
             w.verify()?;
             assert_eq!(bytes, w.to_json(OwnedPlanningReplayLimits::default())?);
             // Valid alternative object order, including nested compound FK
             // payloads buffered before the internally tagged discriminant.
             let value: serde_json::Value = serde_json::from_slice(&bytes)?;
             let kind_last = serde_json::to_vec(&KindLast(&value))?;
-            let reordered = OwnedPlanningReplayWitness::from_json(
-                &kind_last,
-                OwnedPlanningReplayLimits::default(),
-            )?;
+            let reordered = decode(&kind_last)?;
             reordered.verify()?;
             assert_eq!(
                 bytes,
@@ -301,6 +407,14 @@ fn replay_positive_offline_original_fixtures() -> Result<(), Box<dyn std::error:
             );
         }
     }
+    assert_eq!(
+        count,
+        if matches!(recipe(), OwnedPlanningReplayRecipe::Rust1981V1) {
+            16
+        } else {
+            12
+        }
+    );
     Ok(())
 }
 
@@ -349,9 +463,9 @@ async fn capture<B: RuntimeMigrationBackend>(
         .plan_owned_migration(version.clone(), description, target, ownership, options)
         .await?;
     let count = REPLAY_OBSERVATIONS.swap(0, SeqCst);
-    let pair = db
-        .schema()
-        .plan_owned_migration_with_replay_witness(
+    let manager = db.schema();
+    let pair = match recipe() {
+        OwnedPlanningReplayRecipe::Historical8e1V1 => manager.plan_owned_migration_with_replay_witness(
             version,
             description,
             target,
@@ -360,8 +474,13 @@ async fn capture<B: RuntimeMigrationBackend>(
             OwnedPlanningReplayLimits::default(),
             OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody(
             ),
-        )
-        .await?;
+        ).await?,
+        OwnedPlanningReplayRecipe::Rust1981V1 => manager.plan_owned_migration_with_replay_witness_for_recipe(
+            version, description, target, ownership, options, OwnedPlanningReplayRecipe::Rust1981V1,
+            OwnedPlanningReplayLimits::default(),
+            OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody(),
+        ).await?,
+    };
     assert_eq!(
         REPLAY_OBSERVATIONS.load(SeqCst),
         count,

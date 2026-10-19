@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-18
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,21 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.52.0 (unreleased)
+
+- Add explicit `OwnedPlanningReplayRecipe` selection, capture and decode APIs for
+  new native Rust 1.98.1 evidence using `graphql-orm-owned-planning-8e1-rust1981-v1`.
+  The released historical APIs and `graphql-orm-owned-planning-8e1-v1` still
+  require exact qualified 1.97.1 and retain their original behavior/defaults.
+- Keep format 1 and compiler-native ordinary plan hashes unchanged; distinct
+  per-recipe library admission prevents silent compiler-driven recipe selection.
+  Rust 1.98.1 Unicode Debug differences are preserved, with separately accounted
+  work and fresh independent SQLite/PostgreSQL producer fixtures.
+- Align ORM/macros at 0.52.0; generated code, default-off feature graph, external
+  dependencies and database schemas are unchanged. No historical receipt upgrade,
+  consumer update or release publication is included. Refusal/security/failure
+  properties remain inspection-only and runtime-unverified.
 
 ## 0.51.0 (unreleased)
 

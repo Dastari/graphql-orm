@@ -1,4 +1,4 @@
-//! Complete sensitive evidence stays in memory; this example prints hashes only.
+//! Historical recipe: run with exact qualified Rust 1.97.1; prints hashes only.
 use graphql_orm::{db::Database, graphql::orm::*};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

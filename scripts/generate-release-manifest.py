@@ -143,12 +143,15 @@ def parse_contracts(commit: str) -> list[dict[str, str]]:
         text = run("git", "show", f"{commit}:{replay_path}")
         for name, pattern in (
             ("graphql-orm-owned-planning-replay-format", r"FORMAT:\s*u16\s*=\s*(\d+)"),
-            ("graphql-orm-owned-planning-replay-recipe", r'RECIPE:\s*&str\s*=\s*"([^"]+)"'),
+            ("graphql-orm-owned-planning-replay-recipe", r'(?m)^const RECIPE:\s*&str\s*=\s*"([^"]+)"'),
         ):
             match = re.search(pattern, text)
             if match is None:
                 raise SystemExit(f"could not read {name} from {replay_path}")
             values.append({"name": name, "version": match.group(1)})
+        native = re.search(r'(?m)^const RUST1981_RECIPE:\s*&str\s*=\s*"([^"]+)"', text)
+        if native is not None:
+            values.append({"name": "graphql-orm-owned-planning-replay-rust1981-recipe", "version": native.group(1)})
     return sorted(values, key=lambda contract: contract["name"])
 
 

@@ -92,6 +92,13 @@ new_hash = new[new.index("    let semantic = stable_plan_hash_views(", new.index
                new.index("\n#[cfg(all(test, feature = \"owned-planning-replay\"))]")].rstrip().removesuffix("}")
 same(old_hash, new_hash, "owned integrity wrapper bytes and semantic helper")
 version = subprocess.check_output(["rustc", "-Vv"], text=True)
-if "commit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\n" not in version:
+profiles = {
+    ("1.97.1", "8bab26f4f68e0e26f0bb7960be334d5b520ea452"): "graphql-orm-owned-planning-8e1-v1",
+    ("1.98.1", "48a229ceaefd4985c50990b14116b6d856af0985"): "graphql-orm-owned-planning-8e1-rust1981-v1",
+}
+identity = dict(line.split(": ", 1) for line in version.splitlines() if ": " in line)
+pair = (identity.get("release"), identity.get("commit-hash"))
+if pair not in profiles or identity.get("host") != "x86_64-unknown-linux-gnu":
     raise SystemExit("replay recipe toolchain needs accounting/conformance review")
-print("qualified recipe source/toolchain inspection passed")
+print(f"qualified recipe source/toolchain inspection passed: {profiles[pair]}")
+# This inspection never grants library admission or cross-recipe compatibility.

@@ -3,12 +3,18 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
+Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
+preserve compiler-native hashes and have separate admission; format 1, default-off
+features, generated code and dependencies are unchanged. Upgrade ORM/macros
+together; see the [migration guide](../../MIGRATION.md#0510-to-0520-explicit-native-rust-1981-replay-recipe).
 
 Version 0.51.0 adds the runtime's default-off `owned-planning-replay` capability.
 Upgrade ORM/macros together; generated code is unchanged. Explicit capture retains

@@ -1337,7 +1337,8 @@ mod owned_planning_replay;
 #[cfg(feature = "owned-planning-replay")]
 pub use owned_planning_replay::{
     OwnedPlanningCaptureError, OwnedPlanningReplayCaptureConsent, OwnedPlanningReplayError,
-    OwnedPlanningReplayLimits, OwnedPlanningReplayWitness, VerifiedOwnedPlanningReplay,
+    OwnedPlanningReplayLimits, OwnedPlanningReplayRecipe, OwnedPlanningReplayWitness,
+    VerifiedOwnedPlanningReplay,
 };
 
 #[allow(clippy::too_many_arguments)]

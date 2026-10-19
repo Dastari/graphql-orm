@@ -1,0 +1,15 @@
+{
+  "positive_original_owned_plan": {
+    "1.97.1": {
+      "source": "cbf29ce484222325",
+      "target": "833642a1059a4851",
+      "plan": "1fdf860ccd8e7eca"
+    },
+    "1.98.1": {
+      "source": "cbf29ce484222325",
+      "target": "833642a1059a4851",
+      "plan": "d22edd67f4c4d8f5"
+    }
+  },
+  "outcome": "historical Debug/hash incompatibility; do not admit 1.98.1"
+}

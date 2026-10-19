@@ -1,6 +1,6 @@
 //! Explicit capture of sensitive complete schema evidence; pure, passive replay.
-//! Capture/codec/verification require the build-qualified Rust 1.97.1 compiler
-//! and x86_64-unknown-linux-gnu profile; other builds return LimitExceeded before
+//! Each explicitly selected recipe requires its own exact build-qualified compiler
+//! and x86_64-unknown-linux-gnu profile; other pairs return LimitExceeded before
 //! those operations start. Ordinary planning is unaffected.
 use super::*;
 use serde::{Deserialize, Serialize};
@@ -13,12 +13,35 @@ use wire::{Decode, Enc, Wire};
 type E = OwnedPlanningReplayError;
 type R<T> = Result<T, E>;
 const RECIPE: &str = "graphql-orm-owned-planning-8e1-v1";
+const RUST1981_RECIPE: &str = "graphql-orm-owned-planning-8e1-rust1981-v1";
 const FORMAT: u16 = 1;
+/// Explicit compiler-scoped planning recipe. There is no implicit selection.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug)]
+pub enum OwnedPlanningReplayRecipe {
+    /// Original 8e1 recipe on exact qualified Rust 1.97.1.
+    Historical8e1V1,
+    /// Native 8e1 recipe on exact qualified Rust 1.98.1, for new evidence.
+    Rust1981V1,
+}
+impl OwnedPlanningReplayRecipe {
+    /// Exact wire identifier; this is distinct from producer identity and hashes.
+    pub fn identifier(self) -> &'static str {
+        match self {
+            Self::Historical8e1V1 => RECIPE,
+            Self::Rust1981V1 => RUST1981_RECIPE,
+        }
+    }
+}
 const MAX_ENCODED: usize = 67_108_864;
 // A missing build-time attestation fails closed, before even allocating a ledger.
 // No runtime environment/filesystem/process access participates in replay.
-fn qualified_profile() -> R<()> {
-    if cfg!(graphql_orm_replay_qualified_profile) {
+fn qualified_profile(recipe: OwnedPlanningReplayRecipe) -> R<()> {
+    let admitted = match recipe {
+        OwnedPlanningReplayRecipe::Historical8e1V1 => cfg!(graphql_orm_replay_qualified_profile),
+        OwnedPlanningReplayRecipe::Rust1981V1 => cfg!(graphql_orm_replay_rust1981_profile),
+    };
+    if admitted {
         Ok(())
     } else {
         Err(E::LimitExceeded)
@@ -175,6 +198,7 @@ impl fmt::Debug for OwnedPlanningReplayWitness {
 /// Passive verified facts, without an apply-capable plan or conversion to one.
 pub struct VerifiedOwnedPlanningReplay {
     data: Facts,
+    recipe: OwnedPlanningReplayRecipe,
     backend: DatabaseBackend,
     version: String,
     description: String,
@@ -194,6 +218,7 @@ struct Facts {
     statements: Vec<String>,
 }
 struct Data {
+    recipe: OwnedPlanningReplayRecipe,
     backend: DatabaseBackend,
     version: String,
     description: String,
@@ -268,7 +293,7 @@ impl Wire for Data {
         }
         let mut o = s.serialize_struct("Witness", 10)?;
         o.serialize_field("formatVersion", &FORMAT)?;
-        o.serialize_field("recipe", RECIPE)?;
+        o.serialize_field("recipe", self.recipe.identifier())?;
         o.serialize_field("backend", self.backend.name())?;
         o.serialize_field("version", &self.version)?;
         o.serialize_field("description", &self.description)?;
@@ -295,7 +320,7 @@ impl Wire for Data {
         ] {
             i.member(k)?;
         }
-        i.string(RECIPE)?;
+        i.string(self.recipe.identifier())?;
         i.string(self.backend.name())?;
         self.version.inventory(i)?;
         self.description.inventory(i)?;
@@ -382,7 +407,7 @@ fn profile_check_once(
     l: &mut Ledger,
 ) -> R<Size> {
     let z = size(s, l, limits.max_encoded_bytes)?;
-    l.reserve(profile(z)?)?;
+    l.reserve(profile(z, l.recipe)?)?;
     check_limit_values(s.limits, PINNED_SCHEMA_LIMITS)?;
     // The structural/Debug check runs once with the intersection, preserving every
     // original embedded ceiling while permitting only a narrower witness profile.
@@ -528,6 +553,7 @@ fn compute_after_target(
             + version.len() as u64
             + description.len() as u64,
         longest: 0,
+        non_ascii_bytes: 0,
     };
     let c = integrity(&steps, &statements, id, l, cap)?;
     l.reserve(c)?;
@@ -634,17 +660,17 @@ fn codec_admit(n: usize, l: &mut Ledger) -> R<()> {
 fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -> R<()> {
     let calculator_start = l.used;
     let n = canonical_size(data, limits, l)?;
-    let mut future = Ledger::default();
+    let mut future = Ledger::for_recipe(data.recipe);
     codec_admit(n, &mut future)?;
     let z = size(data, l, limits.max_encoded_bytes)?;
     // Lexical member/value nodes are at most twice the wire inventory slots.
     // Includes the strict re-entry wrappers after tagged Content buffering.
     future.reserve(Cost::new(mul(128, z.n)?, 0))?;
     // Only admission calculations run here. No extra engine observation or replay.
-    let mut verify = Ledger::default();
+    let mut verify = Ledger::for_recipe(data.recipe);
     let a = size(&data.source, l, limits.max_encoded_bytes)?;
     let b = size(&data.target, l, limits.max_encoded_bytes)?;
-    verify.reserve(profile(a)?.add(profile(b)?)?)?;
+    verify.reserve(profile(a, data.recipe)?.add(profile(b, data.recipe)?)?)?;
     let c = accounting::target(&data.target, b, l, limits.max_encoded_bytes)?;
     verify.reserve(c)?;
     let c = effects(
@@ -723,13 +749,13 @@ fn certificate(data: &Data, limits: OwnedPlanningReplayLimits, l: &mut Ledger) -
         .reserve(ownership_cost(owners, longest, bytes)?.add(Cost::new(mul(128, owners)?, 0))?)?;
     // Decode additionally performs the once-only profile/target checks. This is
     // separate from certificate arithmetic and from a future verification.
-    future.reserve(profile(a)?.add(profile(b)?)?)?;
+    future.reserve(profile(a, data.recipe)?.add(profile(b, data.recipe)?)?)?;
     let c = accounting::target(&data.target, b, l, limits.max_encoded_bytes)?;
     future.reserve(c)?;
     let encode_upper = add(mul(256, z.n)?, mul(6, z.b)?)?;
-    let mut encode = Ledger::default();
+    let mut encode = Ledger::for_recipe(data.recipe);
     encode.reserve(calculator)?;
-    encode.reserve(profile(a)?.add(profile(b)?)?)?;
+    encode.reserve(profile(a, data.recipe)?.add(profile(b, data.recipe)?)?)?;
     encode.reserve(ownership_tree(owners)?)?;
     encode.reserve(Cost::new(
         add(mul(64, z.n)?, mul(32, z.b)?)?,
@@ -808,8 +834,17 @@ impl OwnedPlanningReplayWitness {
         bytes: &[u8],
         limits: OwnedPlanningReplayLimits,
     ) -> Result<Self, OwnedPlanningReplayError> {
-        qualified_profile()?;
-        let mut l = Ledger::default();
+        Self::from_json_for_recipe(bytes, limits, OwnedPlanningReplayRecipe::Historical8e1V1)
+    }
+    /// Decode only the explicitly expected recipe on its own qualified compiler.
+    /// This never relabels evidence or tries a different recipe on failure.
+    pub fn from_json_for_recipe(
+        bytes: &[u8],
+        limits: OwnedPlanningReplayLimits,
+        expected_recipe: OwnedPlanningReplayRecipe,
+    ) -> Result<Self, OwnedPlanningReplayError> {
+        qualified_profile(expected_recipe)?;
+        let mut l = Ledger::for_recipe(expected_recipe);
         predecode(bytes, limits, &mut l)?;
         let mut parser = serde_json::Deserializer::from_slice(bytes);
         let input = Input::deserialize(bounded_decode::Fixed(&mut parser))
@@ -818,7 +853,7 @@ impl OwnedPlanningReplayWitness {
         if input.format_version != FORMAT {
             return Err(E::UnsupportedFormat);
         }
-        if input.recipe != RECIPE {
+        if input.recipe != expected_recipe.identifier() {
             return Err(E::UnsupportedRecipe);
         }
         let backend = match input.backend.as_str() {
@@ -843,6 +878,7 @@ impl OwnedPlanningReplayWitness {
             return Err(E::InvalidWitness);
         }
         let data = Data {
+            recipe: expected_recipe,
             backend,
             version: input.version,
             description: input.description,
@@ -873,9 +909,9 @@ impl OwnedPlanningReplayWitness {
         &self,
         limits: OwnedPlanningReplayLimits,
     ) -> Result<Vec<u8>, OwnedPlanningReplayError> {
-        qualified_profile()?;
+        qualified_profile(self.data.recipe)?;
         let limits = self.limits.intersect(limits);
-        let mut l = Ledger::default();
+        let mut l = Ledger::for_recipe(self.data.recipe);
         profile_check_once(&self.data.source, limits, &mut l)?;
         profile_check_once(&self.data.target, limits, &mut l)?;
         plan_limits(
@@ -896,8 +932,8 @@ impl OwnedPlanningReplayWitness {
     /// Reproduce exact engine facts purely in memory. This grants no authorization,
     /// present baseline, recovery or data-validity assurance.
     pub fn verify(&self) -> Result<VerifiedOwnedPlanningReplay, OwnedPlanningReplayError> {
-        qualified_profile()?;
-        let mut l = Ledger::default();
+        qualified_profile(self.data.recipe)?;
+        let mut l = Ledger::for_recipe(self.data.recipe);
         let facts = compute(&self.data, self.limits, &mut l)?;
         let z = size(&self.data.expected, &mut l, self.limits.max_encoded_bytes)?;
         let actual = size(&facts, &mut l, self.limits.max_encoded_bytes)?;
@@ -916,6 +952,7 @@ impl OwnedPlanningReplayWitness {
         )?;
         Ok(VerifiedOwnedPlanningReplay {
             data: facts,
+            recipe: self.data.recipe,
             backend: self.data.backend,
             version: self.data.version.clone(),
             description: self.data.description.clone(),
@@ -931,7 +968,7 @@ impl VerifiedOwnedPlanningReplay {
     }
     /// Source-qualified planning/integrity recipe.
     pub fn recipe(&self) -> &str {
-        RECIPE
+        self.recipe.identifier()
     }
     /// Original planning backend.
     pub fn backend(&self) -> DatabaseBackend {
@@ -990,13 +1027,41 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
         _consent: OwnedPlanningReplayCaptureConsent,
     ) -> Result<(OwnedPlannedMigration, OwnedPlanningReplayWitness), OwnedPlanningCaptureError>
     {
-        qualified_profile()?;
+        self.plan_owned_migration_with_replay_witness_for_recipe(
+            version,
+            description,
+            target,
+            ownership,
+            options,
+            OwnedPlanningReplayRecipe::Historical8e1V1,
+            limits,
+            _consent,
+        )
+        .await
+    }
+    /// Capture new complete evidence using an explicitly selected native recipe.
+    /// Every recipe is admitted only on its own exact compiler/platform profile.
+    /// This labels the unchanged ordinary plan; it does not rehash that plan.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn plan_owned_migration_with_replay_witness_for_recipe(
+        &self,
+        version: impl Into<String>,
+        description: impl Into<String>,
+        target: &OwnedSchemaModel,
+        ownership: &ManagedTableSet,
+        options: PlanOptions,
+        recipe: OwnedPlanningReplayRecipe,
+        limits: OwnedPlanningReplayLimits,
+        _consent: OwnedPlanningReplayCaptureConsent,
+    ) -> Result<(OwnedPlannedMigration, OwnedPlanningReplayWitness), OwnedPlanningCaptureError>
+    {
+        qualified_profile(recipe)?;
         backend(B::DIALECT)?;
         supported::<B>()?;
         if !self.policy().allows_planning() {
             return Err(rejection(RuntimeMigrationDiagnosticCode::PolicyDenied).into());
         }
-        let mut l = Ledger::default();
+        let mut l = Ledger::for_recipe(recipe);
         let b = profile_check_once(target, limits, &mut l)?;
         let c = accounting::target(target, b, &mut l, limits.max_encoded_bytes)?;
         l.reserve(c)?;
@@ -1032,6 +1097,7 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
                 + mul(MAX_PHYSICAL_IDENTIFIER_LEN as u64, ownership.0.len() as u64)?
                 + 48,
             longest: 0,
+            non_ascii_bytes: 0,
         };
         let f = size(&facts, &mut l, limits.max_encoded_bytes)?;
         l.reserve(
@@ -1054,6 +1120,7 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
             target: target.clone(),
         };
         let data = Data {
+            recipe,
             backend: B::DIALECT,
             version,
             description,
@@ -1069,5 +1136,11 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    any(
+        graphql_orm_replay_qualified_profile,
+        graphql_orm_replay_rust1981_profile
+    )
+))]
 mod positive;

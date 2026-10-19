@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-18
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,6 +14,35 @@ supersedes: []
 workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
+
+## 0.51.0 to 0.52.0: explicit native Rust 1.98.1 replay recipe
+
+Upgrade ORM/macros together. Existing historical capture/decode entry points keep
+all signatures/defaults and remain on exact Rust 1.97.1. They do not automatically
+select a new recipe when the compiler changes. Existing witness bytes, producer
+identities, format 1 mapping and historical provenance are unchanged.
+
+For new evidence on exact qualified Rust 1.98.1, explicitly select
+`OwnedPlanningReplayRecipe::Rust1981V1` in
+`plan_owned_migration_with_replay_witness_for_recipe` and
+`OwnedPlanningReplayWitness::from_json_for_recipe`. The chosen recipe must equal
+the encoded recipe; each pair is library-admitted only on its own exact stock
+compiler commit, GNU x86_64 host/target and absence of compiler wrappers.
+`to_json`/`verify` use the privately retained recipe; no relabel or fallback exists.
+
+Rust 1.98.1 can produce different native Debug-based plan hashes for valid Unicode
+metadata. This release labels those native facts with a separate recipe; it does
+not change ordinary planning or apply hashes. Bind complete canonical witnesses,
+format/recipe and authenticated producer artifact identity with external
+cryptographic custody; matching `planHash` alone does not establish equivalence.
+No baseline can be reconstructed, old receipt adopted/upgraded or approval
+reissued by selecting the new recipe. Separate historical verifier integrations,
+release publication and consumer/pin adoption require review.
+
+The feature remains default-off and explicit per call. No database migration,
+dependency change or change to existing callers is required. See the
+[recipe/compatibility reference](docs/reference/graphql-orm/owned-planning-replay.md)
+and [per-recipe accounting](docs/reference/graphql-orm/owned-planning-replay-accounting.md).
 
 ## 0.50.2 to 0.51.0: optional owned planning replay
 

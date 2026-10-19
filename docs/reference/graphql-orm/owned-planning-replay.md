@@ -3,7 +3,7 @@ title: Owned planning replay
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-18
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -23,6 +23,10 @@ the actual full observation of `plan_owned_migration`, its private owned adapter
 or its complete ownership-bound integrity preimage. Reconstructing a source from
 a target or making a second observation does not supply that evidence. The new
 path reuses the existing validation/scoping/diff/classification/render/hash engine.
+
+ORM/macros 0.52.0 adds an explicitly selected native Rust 1.98.1 recipe. The
+historical API still selects its original Rust 1.97.1 recipe. A compiler upgrade
+does not select or upgrade evidence automatically.
 
 ## Enable and capture
 
@@ -76,7 +80,7 @@ inspect a retained original planning error or disclose JSON/fact getters.
 
 ## Public surface and ownership
 
-All six new types and the additive manager method are reexported at
+The replay types and additive manager methods are reexported at
 `graphql_orm::graphql::orm`. Witness and verified facts are opaque, own their data,
 and are `Send + Sync`. They have no public serde implementation, mutable accessor,
 unchecked constructor, apply-plan conversion, Deref or execution capability.
@@ -85,7 +89,8 @@ unchecked constructor, apply-plan conversion, Deref or execution capability.
 | --- | --- |
 | `OwnedPlanningReplayLimits` | `new(usize, RuntimeMigrationLimits) -> Result<Self, OwnedPlanningReplayError>`, `Default`, `max_encoded_bytes()`, `schema()` |
 | `OwnedPlanningReplayCaptureConsent` | `accept_sensitive_schema_metadata_and_private_custody() -> Self` |
-| `OwnedPlanningReplayWitness` | `from_json(&[u8], limits)`, `to_json(&self, limits) -> Result<Vec<u8>, _>`, `verify(&self) -> Result<VerifiedOwnedPlanningReplay, _>` |
+| `OwnedPlanningReplayRecipe` | `Historical8e1V1`, `Rust1981V1`, `identifier()`; non-exhaustive, no Default/string constructor |
+| `OwnedPlanningReplayWitness` | `from_json(&[u8], limits)`, `from_json_for_recipe(&[u8], limits, expected_recipe)`, `to_json(&self, limits) -> Result<Vec<u8>, _>`, `verify(&self) -> Result<VerifiedOwnedPlanningReplay, _>` |
 | `VerifiedOwnedPlanningReplay` | `format_version()`, `recipe()`, `backend()`, `version()`, `description()`, three hash getters, `ownership()`, `options()`, `steps()`, `statements()` |
 
 The manager signature takes `version: impl Into<String>`,
@@ -117,29 +122,75 @@ filesystem, policy callback or host state. It grants no authorization, current
 baseline, crash recovery or data-validity assurance. Apply still requires the
 original live plan and every existing policy/baseline/backend/application check.
 
-Format 1 supports recipe `graphql-orm-owned-planning-8e1-v1`, qualified to
-`8e1e5698437d9ea5c0d6ff2c0f29cf7af58d45a0`, ORM 0.50.2 and Rust 1.97.1
-(`8bab26f4f68e0e26f0bb7960be334d5b520ea452`, host and target
-`x86_64-unknown-linux-gnu`, stock standard library, no compiler wrappers).
-The library enforces this profile: a dependency-free build script queries the
-opt-in build's compiler and checks Cargo's host/target, emitting a private
-qualification cfg only on an exact match. Nonempty `RUSTC_WRAPPER` or
-`RUSTC_WORKSPACE_WRAPPER` prevents qualification because the wrapper could select
-a different compiler. Absent qualification, capture, `from_json`, `to_json` and
-`verify` return `LimitExceeded` before ledger creation, input inspection,
-conversion, validation, codec allocation or database access. This is an unknown
-accounting-bound refusal; it does not prevent compilation or ordinary planning.
-No runtime environment, filesystem or process probe is used. Build inputs and
-toolchain provenance remain trusted caller/build-system responsibilities.
-Recipe maintenance includes
-Debug behavior, schema/scoping/diff/order/classification/rendering and FNV/wrapper
-bytes. Sharing helper names does not prove compatibility; source review and
-[authentic source-qualified fixtures](../../../crates/graphql-orm/tests/fixtures/owned-planning-replay-8e1/README.md)
-are required. Other compiler/platform profiles cannot perform these replay
-operations until reviewed and qualified in the library.
-Unknown recipes are rejected, and old plans are never silently resealed. No
-missing historical baseline can be recovered. Historical consumer artifact
-adoption and release/pin changes require separate review.
+Format 1 supports two separate compiler-scoped recipes:
+
+| Exact identifier | Exact Rust/compiler commit |
+| --- | --- |
+| `graphql-orm-owned-planning-8e1-v1` | 1.97.1 / `8bab26f4f68e0e26f0bb7960be334d5b520ea452` |
+| `graphql-orm-owned-planning-8e1-rust1981-v1` | 1.98.1 / `48a229ceaefd4985c50990b14116b6d856af0985` |
+
+Both freeze the complete native planning behavior rooted in exact
+`8e1e5698437d9ea5c0d6ff2c0f29cf7af58d45a0` (ORM 0.50.2), including schema
+hashes, scope/diff/order/classification/reasons, rendering, native Debug, semantic
+FNV bytes and the `owned-migration-v1` integrity wrapper. They require stock
+`x86_64-unknown-linux-gnu` host **and** target, stock std and no compiler wrappers.
+The new recipe is for new captures; it is not historical Rust 1.98.1 receipt
+adoption or a compiler-independent hash redesign.
+
+The library enforces each pair separately. Its dependency-free build script
+checks exact release/commit/host and Cargo host/target. The private historical
+qualification cfg is emitted only for 1.97.1; a distinct native cfg is emitted
+only for 1.98.1. Nonempty `RUSTC_WRAPPER` or `RUSTC_WORKSPACE_WRAPPER` prevents
+qualification. Unknown or unavailable pairs return `LimitExceeded` before ledger
+creation, input inspection/conversion, codec allocation or database access.
+No runtime environment/filesystem/process probe or override participates.
+Build inputs and toolchain provenance remain trusted build-system responsibilities.
+Ordinary planning has no recipe/profile gate and retains its native hashes.
+
+The released `plan_owned_migration_with_replay_witness` and `from_json` remain
+historical-only, with their original signatures/defaults and 1.97.1 admission.
+They are neither read-only nor silently routed to the new recipe. On 1.98.1,
+select the new recipe explicitly:
+
+```rust,ignore
+let recipe = OwnedPlanningReplayRecipe::Rust1981V1;
+let (plan, witness) = database.schema().plan_owned_migration_with_replay_witness_for_recipe(
+    version, description, &target, &ownership, options, recipe, limits,
+    OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody(),
+).await?;
+let private_bytes = witness.to_json(limits)?;
+let retained = OwnedPlanningReplayWitness::from_json_for_recipe(&private_bytes, limits, recipe)?;
+let facts = retained.verify()?;
+assert_eq!(facts.recipe(), recipe.identifier());
+assert_eq!(facts.plan_hash(), plan.plan_hash());
+```
+
+The additive capture signature inserts `recipe: OwnedPlanningReplayRecipe`
+between options and limits. The decoder requires the encoded recipe to equal the
+caller's expected recipe. Unknown/different encoded recipes return
+`UnsupportedRecipe` on an admitted profile. There is no trial verification,
+hash-based fallback or relabeling. Witnesses retain their recipe privately;
+`to_json` and `verify` admit only that stored recipe, and passive facts report its
+exact identifier. The [native example](../../../crates/graphql-orm/examples/owned_planning_replay_rust1981.rs)
+runs with `cargo +1.98.1 run -p graphql-orm --no-default-features --features
+sqlite,owned-planning-replay --example owned_planning_replay_rust1981`.
+
+Rust 1.98.1 changed Unicode Debug escaping. A valid U+3164 default produces
+different native plan hashes with unchanged source/target hashes in the retained
+[paired ordinary-producer comparison](../../../crates/graphql-orm/tests/fixtures/owned-planning-replay-rust1981/README.md).
+Never normalize/restrict that input or substitute the historical hash. Equal
+hash strings on other inputs do not imply recipe equivalence: the native plan
+hash is not a domain-separated portable digest. Hosts must cryptographically
+bind the **complete canonical witness**, including format/recipe, and authenticated
+producer artifact identity, rather than key custody/adoption on `planHash` alone.
+
+Source review and independent complete ordinary-producer facts are required:
+[unchanged twelve historical fixtures](../../../crates/graphql-orm/tests/fixtures/owned-planning-replay-8e1/README.md)
+run only on their 1.97.1 recipe; [sixteen fresh native fixtures](../../../crates/graphql-orm/tests/fixtures/owned-planning-replay-rust1981/README.md)
+run only on their 1.98.1 recipe. Shared helper names do not prove conformance.
+No missing baseline is recovered, old approval reissued or old receipt upgraded.
+Separate archival verifier integration, future portable hashes, historical artifact
+adoption, release publication and consumer/pin changes require separate review.
 
 ## Complete v1 wire mapping
 
@@ -161,7 +212,7 @@ Unicode escapes. Other Unicode and solidus remain unescaped. No producer identit
 checksum, receipt or approval-policy member is added to this engine format.
 
 ```text
-Witness { formatVersion: 1, recipe: "graphql-orm-owned-planning-8e1-v1",
+Witness { formatVersion: 1, recipe: "graphql-orm-owned-planning-8e1-v1" | "graphql-orm-owned-planning-8e1-rust1981-v1",
   backend: "sqlite" | "postgres", version: String, description: String,
   ownership: [String], options: Options, source: Schema, target: Schema,
   expected: Expected }
@@ -247,14 +298,14 @@ outside this bound, while their returned data is bounded before new engine work.
 
 | Area | Impact |
 | --- | --- |
-| Source/API | Additive feature-gated methods/types; no new required trait methods, existing fields or exhaustive enum variants |
+| Source/API | 0.52.0 adds a non-exhaustive recipe enum and two explicit-selection methods; all released signatures/fields/required traits/exhaustive enums unchanged |
 | Behavior | Existing methods, defaults, limits, live observations and apply checks unchanged; capture is explicit per call |
 | Feature graph | Empty default-off feature, with no incoming edges from existing features |
 | Dependencies | No added or updated external dependency; reuse existing serde/serde_json; std-only build qualification |
-| Serialized formats | New complete v1 witness only; existing formats unchanged; external producer identity/custody remains host-owned |
-| Hashes | Existing schema/semantic/owned integrity bytes unchanged; complete recipe-qualified comparisons, no resealing |
+| Serialized formats | Format 1 mapping/canonicalization unchanged; explicit new recipe string, with actual length charged; old witness bytes/provenance unchanged |
+| Hashes | Existing compiler-native algorithms unchanged; native 1.98.1 Debug hashes may differ from 1.97.1; distinct recipes, no resealing/rehashing |
 | Performance | Existing production paths have no accounting/retention cost; explicit capture/codec/replay pay bounded extra work; build script has fixed setup and queries rustc only for opt-in builds |
-| Semver/migration | ORM/macros 0.51.0 aligned additive release; no database or consumer migration required for existing APIs |
+| Semver/migration | ORM/macros 0.52.0 aligned additive preparation; no database/wire migration; explicit new API required on 1.98.1, with historical evidence still verified on 1.97.1 |
 
 Runtime conformance is limited to the documented normal positive gates. Malformed
 input (including rejected nested shapes), unsupported-profile refusal, resource

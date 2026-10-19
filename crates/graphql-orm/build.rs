@@ -3,6 +3,7 @@ use std::{env, process::Command};
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(graphql_orm_replay_qualified_profile)");
+    println!("cargo:rustc-check-cfg=cfg(graphql_orm_replay_rust1981_profile)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=RUSTC_WRAPPER");
@@ -44,5 +45,14 @@ fn main() {
             .any(|s| s == "host: x86_64-unknown-linux-gnu")
     {
         println!("cargo:rustc-cfg=graphql_orm_replay_qualified_profile");
+    } else if version.lines().any(|s| s == "release: 1.98.1")
+        && version
+            .lines()
+            .any(|s| s == "commit-hash: 48a229ceaefd4985c50990b14116b6d856af0985")
+        && version
+            .lines()
+            .any(|s| s == "host: x86_64-unknown-linux-gnu")
+    {
+        println!("cargo:rustc-cfg=graphql_orm_replay_rust1981_profile");
     }
 }

@@ -1,0 +1,46 @@
+[
+  {
+    "compiler": "1.97.1",
+    "command": [
+      "cargo",
+      "+1.97.1",
+      "run",
+      "--offline",
+      "--locked",
+      "--manifest-path",
+      "/home/toby/.cache/graphql-orm-replay-1.98.1-11wpe6f9/source/Cargo.toml",
+      "-p",
+      "graphql-orm",
+      "--no-default-features",
+      "--features",
+      "sqlite",
+      "--example",
+      "compiler_positive"
+    ],
+    "exit": 0,
+    "seconds": 57.08,
+    "original_lock_sha256": "56452a04aeca141b4462ac2ae6c56bf638d606f87f66c6ea84cb2fcbf1bc312d"
+  },
+  {
+    "compiler": "1.98.1",
+    "command": [
+      "cargo",
+      "+1.98.1",
+      "run",
+      "--offline",
+      "--locked",
+      "--manifest-path",
+      "/home/toby/.cache/graphql-orm-replay-1.98.1-11wpe6f9/source/Cargo.toml",
+      "-p",
+      "graphql-orm",
+      "--no-default-features",
+      "--features",
+      "sqlite",
+      "--example",
+      "compiler_positive"
+    ],
+    "exit": 0,
+    "seconds": 58.19,
+    "original_lock_sha256": "56452a04aeca141b4462ac2ae6c56bf638d606f87f66c6ea84cb2fcbf1bc312d"
+  }
+]

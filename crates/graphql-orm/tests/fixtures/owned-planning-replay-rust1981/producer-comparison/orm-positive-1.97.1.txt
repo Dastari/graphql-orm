@@ -1,0 +1,5 @@
+source=cbf29ce484222325
+target=833642a1059a4851
+plan=1fdf860ccd8e7eca
+steps=[OwnedPlannedMigrationStep { step: CreateTable(OwnedTableModel { entity_name: "ReviewNote", table_name: "review_notes", primary_key: "id", primary_keys: ["id"], default_sort: "id", columns: [ColumnModel { name: "id", sql_type: "TEXT", spatial: None, nullable: false, is_primary_key: true, is_unique: false, default: Some("'ㅤ'") }], indexes: [], composite_unique_indexes: [], foreign_keys: [], search_indexes: [], append_only: false, retention_purge: false, check_constraints: [] }), risk: Additive, reason: "creates a new table without changing existing data" }]
+sql=["CREATE TABLE review_notes (id TEXT NOT NULL PRIMARY KEY DEFAULT 'ㅤ')"]

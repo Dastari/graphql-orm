@@ -32,15 +32,23 @@ pub(super) fn mul(a: u64, b: u64) -> R<u64> {
 }
 pub(super) struct Ledger {
     pub used: Cost,
+    pub recipe: OwnedPlanningReplayRecipe,
 }
 impl Default for Ledger {
     fn default() -> Self {
         Self {
             used: Cost::new(4096, 256),
+            recipe: OwnedPlanningReplayRecipe::Historical8e1V1,
         }
     }
 }
 impl Ledger {
+    pub fn for_recipe(recipe: OwnedPlanningReplayRecipe) -> Self {
+        Self {
+            recipe,
+            ..Self::default()
+        }
+    }
     pub fn reserve(&mut self, c: Cost) -> R<()> {
         let next = self.used.add(c)?;
         if next.w > WORK || next.t > TEXT {
@@ -55,6 +63,7 @@ pub(super) struct Size {
     pub n: u64,
     pub b: u64,
     pub longest: u64,
+    pub non_ascii_bytes: u64,
 }
 impl Size {
     pub fn m(self) -> R<u64> {
@@ -114,6 +123,13 @@ impl<'a> Inventory<'a> {
             return Err(E::LimitExceeded);
         }
         self.size.longest = self.size.longest.max(n);
+        if matches!(self.ledger.recipe, OwnedPlanningReplayRecipe::Rust1981V1) {
+            // The preceding 128+4n reservation prepays this bounded byte scan.
+            self.size.non_ascii_bytes = add(
+                self.size.non_ascii_bytes,
+                s.bytes().filter(|b| !b.is_ascii()).count() as u64,
+            )?;
+        }
         Ok(())
     }
 }
@@ -187,8 +203,22 @@ fn table_size(t: &OwnedTableModel, l: &mut Ledger, cap: usize) -> R<Size> {
 }
 /// These helpers are upper bounds from counts/maxima only, with no matching,
 /// ownership decision, speculative step, normalization, rendering or hashing.
-pub(super) fn profile(s: Size) -> R<Cost> {
-    Ok(Cost::new(add(mul(64, s.n)?, mul(20, s.b)?)?, s.debug()?))
+// Rust 1.98.1 Debug uses additional Unicode property lookups. Reserve their
+// closed source-derived envelope only for that recipe, before every Debug pass.
+fn native_debug_work(s: Size, recipe: OwnedPlanningReplayRecipe) -> R<u64> {
+    match recipe {
+        OwnedPlanningReplayRecipe::Historical8e1V1 => Ok(0),
+        OwnedPlanningReplayRecipe::Rust1981V1 => mul(4096, s.non_ascii_bytes),
+    }
+}
+pub(super) fn profile(s: Size, recipe: OwnedPlanningReplayRecipe) -> R<Cost> {
+    Ok(Cost::new(
+        add(
+            add(mul(64, s.n)?, mul(20, s.b)?)?,
+            native_debug_work(s, recipe)?,
+        )?,
+        s.debug()?,
+    ))
 }
 pub(super) fn target(s: &OwnedSchemaModel, sz: Size, l: &mut Ledger, cap: usize) -> R<Cost> {
     l.reserve(Cost::new(mul(256, sz.n)?, 0))?;
@@ -457,7 +487,13 @@ pub(super) fn integrity(
     for step in steps {
         let z = size(&step.step, l, cap)?;
         lines = add(lines, add(256, add(z.debug()?, step.reason.len() as u64)?)?)?;
-        work = add(work, add(mul(32, z.n)?, mul(16, z.b)?)?)?;
+        work = add(
+            work,
+            add(
+                add(mul(32, z.n)?, mul(16, z.b)?)?,
+                native_debug_work(z, l.recipe)?,
+            )?,
+        )?;
     }
     let mut p = add(32, lines)?;
     for s in sql {
