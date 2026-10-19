@@ -42,7 +42,10 @@ Use structural encoding, not ambiguous delimiter concatenation.
 Implement `CacheSyncStore<B>::load/save` through generated repositories on the
 supplied `MutationContext`. Persist `CacheState` privately (for example as JSON
 text) and mirror its authorized public getter values in ordinary status fields.
-Never expose its private active claim token. Use `tx.find_by_id` /
+Never expose its private active claim token. Disable public generated cache/status
+mutations with `schema_roots! { generated_mutations: "none", ... }` (or an
+explicit reviewed allowlist); background repository writes remain available.
+Use `tx.find_by_id` /
 `tx.update_by_id` for single keys, or generated composite repository operations
 where supported. A status entity's type must not be named `CachePartition`,
 because its generated `CachePartitionKey` would shadow the module's key type.
@@ -112,7 +115,9 @@ source's own observation age and maximum-staleness contract.
 Expose the generated status `…Changed` subscription with only safe persisted
 scalars, plus the normal authorized status query. Include committed generation,
 last attempt/success, source observation, freshness, refresh-in-progress,
-sanitized failure and policy-approved counts. Register the ordinary current
+sanitized failure and policy-approved counts. Expose the policy-approved
+`refresh_expires_at` deadline and derive progress against the current clock,
+so a crashed worker cannot leave a permanently true progress flag. Register the ordinary current
 principal, tenant, row, field, scope and assurance checks; registration and
 router metadata never substitute for authorization on each release.
 

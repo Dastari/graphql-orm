@@ -196,6 +196,13 @@ impl CacheState {
     pub fn is_fresh(&self, now: i64) -> bool {
         self.generation > 0 && self.fresh_until.is_some_and(|until| now < until)
     }
+    /// Durable lease deadline, without the private worker token.
+    ///
+    /// Hosts may expose this under status policy so progress does not remain
+    /// stuck after a worker crash; compare it with the current clock on reads.
+    pub fn refresh_expires_at(&self) -> Option<i64> {
+        self.active.as_ref().map(|active| active.expires_at)
+    }
     /// Whether a nonexpired durable refresh claim exists.
     pub fn refresh_in_progress(&self, now: i64) -> bool {
         self.active.as_ref().is_some_and(|a| now < a.expires_at)
@@ -314,6 +321,9 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
                     }
                     if now < state.next_attempt || (!force && state.is_fresh(now)) {
                         return Ok(RefreshAdmission::NotDue);
+                    }
+                    if state.generation < 0 || state.generation.checked_add(1).is_none() {
+                        return Err(invalid());
                     }
                     let token = Uuid::new_v4();
                     let base_generation = state.generation;

@@ -35,7 +35,7 @@ struct CacheItem {
     generation: i64,
     value: String,
 }
-schema_roots! { query_custom_ops: [], entities: [DatasetCacheStatus, CacheItem], }
+schema_roots! { generated_mutations: "none", query_custom_ops: [], entities: [DatasetCacheStatus, CacheItem], }
 
 struct Store;
 fn key_id(key: &CachePartitionKey) -> String {
@@ -163,6 +163,8 @@ async fn promotion_is_atomic_and_generated_subscription_is_post_commit() {
     let schema = schema_builder(db.clone())
         .data(AuthSubject::new("reader"))
         .finish();
+    assert!(!schema.sdl().contains("createDatasetCacheStatus"));
+    assert!(!schema.sdl().contains("stateJson"));
     let mut stream = Box::pin(schema.execute_stream(
         "subscription { datasetCacheStatusChanged { datasetCacheStatus { generation rows } } }",
     ));
