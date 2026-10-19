@@ -75,6 +75,7 @@ is the canonical version and dependency overview.
 
 - [Development](development/README.md) — local setup, testing, and GraphQL
   workflow.
+- [Scoped replay source releases](operations/release/process.md#replay-scoped-positive-v1) — explicit positive verification and retained gaps.
 - [Operations](operations/README.md) — repeatable operational and release
   guidance.
 - [Decisions](decisions/README.md) — accepted durable rationale.

@@ -11,6 +11,18 @@ on:
         description: Full commit SHA expected to equal current main
         required: true
         type: string
+      validation_profile:
+        description: Full matrix by default; scoped profile is source-only with explicit approval
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - replay-scoped-positive-v1
+      release_approval_reference:
+        description: Required scoped publication approval binding target_ref, profile and retained gaps
+        required: false
+        type: string
       include_router_artifact:
         description: Build and attach the reviewed Linux router artifact
         required: true
@@ -63,6 +75,8 @@ jobs:
           fetch-depth: 0
       - name: Prove the selected source is current main
         env:
+          VALIDATION_PROFILE: ${{ inputs.validation_profile }}
+          RELEASE_APPROVAL: ${{ inputs.release_approval_reference }}
           TARGET_REF: ${{ inputs.target_ref }}
           RELEASE_ID: ${{ inputs.release_id }}
           INCLUDE_ROUTER: ${{ inputs.include_router_artifact }}
@@ -74,6 +88,8 @@ jobs:
           protection=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
             --jq '.protection_rules | any(.type == "required_reviewers" and any(.reviewers[]; .type == "User" and .reviewer.login == "Dastari"))')
           test "$protection" = true
+          test "${GITHUB_REF}" = refs/heads/main
+          test "${GITHUB_SHA}" = "${TARGET_REF}"
           git fetch origin main --tags --force
           test "$(git rev-parse HEAD)" = "${TARGET_REF}"
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
@@ -85,8 +101,19 @@ jobs:
             echo "router_distribution_approval is required for a router binary" >&2
             exit 1
           fi
+          case "${VALIDATION_PROFILE}" in
+            full) ;;
+            replay-scoped-positive-v1)
+              test "${INCLUDE_ROUTER}" = false
+              test -n "${RELEASE_APPROVAL}"
+              python3 scripts/replay_release.py reuse --ref "${TARGET_REF}" \
+                --output "${RUNNER_TEMP}/scoped-admission.json"
+              ;;
+            *) echo "unsupported release validation profile" >&2; exit 1 ;;
+          esac
 
   workspace-integrity:
+    if: inputs.validation_profile == 'full'
     name: Workspace integrity and release metadata
     needs: guard
     runs-on: ubuntu-latest
@@ -111,6 +138,7 @@ jobs:
           cargo fmt --all -- --check
 
   neutral-packages:
+    if: inputs.validation_profile == 'full'
     name: Neutral package lanes
     needs: guard
     runs-on: ubuntu-latest
@@ -134,6 +162,7 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-backup --features orm-sqlite --no-deps --locked
 
   s3-security:
+    if: inputs.validation_profile == 'full'
     name: Owned S3 transport and single-attempt deletion
     needs: guard
     runs-on: ubuntu-latest
@@ -160,6 +189,7 @@ jobs:
         run: cargo check -p graphql-orm-backup --locked --features graphql-orm-storage/s3
 
   orm:
+    if: inputs.validation_profile == 'full'
     name: ORM backend lanes
     needs: guard
     runs-on: ubuntu-latest
@@ -205,6 +235,7 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps --locked
 
   orm-security-sqlite:
+    if: inputs.validation_profile == 'full'
     name: Current authority and subscription privacy (SQLite)
     needs: guard
     runs-on: ubuntu-latest
@@ -225,6 +256,7 @@ jobs:
             subscription_repository_provenance
 
   orm-security-portable:
+    if: inputs.validation_profile == 'full'
     name: Portable authorization and scan bounds (${{ matrix.backend }})
     needs: guard
     runs-on: ubuntu-latest
@@ -250,6 +282,7 @@ jobs:
         run: cargo clippy -p graphql-orm --locked --no-default-features --features "${{ matrix.backend }},auth-agql" --lib -- -D warnings
 
   sqlserver-security:
+    if: inputs.validation_profile == 'full'
     name: Owned SQL Server transport and transaction checks
     needs: guard
     runs-on: ubuntu-latest
@@ -266,6 +299,7 @@ jobs:
         run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications -- --ignored --test-threads=1
 
   ai-provider-matrix:
+    if: inputs.validation_profile == 'full'
     name: Enumerate AI provider lanes
     needs: guard
     runs-on: ubuntu-latest
@@ -288,6 +322,7 @@ jobs:
           printf 'providers=%s\n' "${providers}" >> "${GITHUB_OUTPUT}"
 
   ai-provider-lanes:
+    if: inputs.validation_profile == 'full'
     name: AI provider lane (${{ matrix.provider }})
     needs:
       - guard
@@ -325,6 +360,7 @@ jobs:
           scripts/check-ai-provider-lanes.sh doc "${PROVIDER}"
 
   ai-graphql-naming:
+    if: inputs.validation_profile == 'full'
     name: AI GraphQL naming lane
     needs: guard
     runs-on: ubuntu-latest
@@ -338,6 +374,7 @@ jobs:
       - run: cargo test -p graphql-orm-ai --features graphql-case-pascal --test graphql_naming --locked
 
   ai-postgres-parity:
+    if: inputs.validation_profile == 'full'
     name: AI PostgreSQL parity lane
     needs: guard
     runs-on: ubuntu-latest
@@ -352,6 +389,7 @@ jobs:
         run: cargo test -p graphql-orm-ai --no-default-features --features postgres,provider-openai --test postgres_parity --locked -- --test-threads=1
 
   alternate-features:
+    if: inputs.validation_profile == 'full'
     name: Alternate feature lanes
     needs: guard
     runs-on: ubuntu-latest
@@ -372,6 +410,7 @@ jobs:
           cargo check -p graphql-orm-storage --no-default-features --features smb --locked
 
   router:
+    if: inputs.validation_profile == 'full'
     name: Router lanes
     needs: guard
     runs-on: ubuntu-latest
@@ -395,6 +434,7 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm-router --no-deps --features auth-agql --locked
 
   router-msrv:
+    if: inputs.validation_profile == 'full'
     name: Router minimum supported Rust version
     needs: guard
     runs-on: ubuntu-latest
@@ -413,6 +453,7 @@ jobs:
           cargo test -p graphql-orm-router --locked
 
   validate:
+    if: inputs.validation_profile == 'full'
     name: Release validation complete
     needs:
       - guard
@@ -453,7 +494,101 @@ jobs:
           fi
           jq -r 'to_entries[] | "release: \(.key) succeeded"' <<<"${LANE_RESULTS}"
 
+  replay-scoped-integrity:
+    name: Scoped source identity, evidence reuse and release metadata
+    if: inputs.validation_profile == 'replay-scoped-positive-v1'
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # pinned installer
+        with:
+          components: rustfmt
+      - name: Run only literal positive metadata commands
+        run: python3 scripts/run-replay-release-positive.py metadata --output target/release-evidence/replay-scoped-integrity
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: replay-scoped-integrity
+          path: target/release-evidence/replay-scoped-integrity/
+          if-no-files-found: error
+          retention-days: 30
+
+  replay-scoped-positive:
+    name: Scoped native replay and compatibility (${{ matrix.toolchain }})
+    if: inputs.validation_profile == 'replay-scoped-positive-v1'
+    needs: [guard, replay-scoped-integrity]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ['1.97.1', '1.98.1']
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - uses: ./.github/actions/reclaim-runner-disk
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: replay-scoped-${{ matrix.toolchain }}
+      - name: Run only literal positive ORM commands
+        env:
+          REPLAY_TOOLCHAIN: ${{ matrix.toolchain }}
+        run: python3 scripts/run-replay-release-positive.py "${REPLAY_TOOLCHAIN}" --output "target/release-evidence/replay-scoped-${REPLAY_TOOLCHAIN}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: replay-scoped-${{ matrix.toolchain }}
+          path: target/release-evidence/replay-scoped-${{ matrix.toolchain }}/
+          if-no-files-found: error
+          retention-days: 30
+
+  replay-scoped-validate:
+    name: Require every mandatory scoped gate and both compiler records
+    if: inputs.validation_profile == 'replay-scoped-positive-v1'
+    needs: [guard, replay-scoped-integrity, replay-scoped-positive]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - name: Require all selected scoped jobs to have succeeded
+        env:
+          LANE_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os
+          lanes = json.loads(os.environ['LANE_RESULTS'])
+          expected = {'guard', 'replay-scoped-integrity', 'replay-scoped-positive'}
+          if set(lanes) != expected or any(lane['result'] != 'success' for lane in lanes.values()):
+              raise SystemExit('mandatory scoped release gate did not succeed')
+          print('Every mandatory scoped gate succeeded; excluded full-profile gates remain unexecuted.')
+          PYTHON
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: replay-scoped-*
+          path: target/scoped-results
+      - name: Verify complete source-bound records, counts and checksums
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_APPROVAL: ${{ inputs.release_approval_reference }}
+        run: |
+          python3 scripts/replay_release.py bundle --results target/scoped-results \
+            --release-id "${RELEASE_ID}" --approval-reference "${RELEASE_APPROVAL}" \
+            --output "target/validated/${RELEASE_ID}-verification.json"
+
   release:
+    if: inputs.validation_profile == 'full'
     permissions:
       contents: write
       id-token: write
@@ -590,3 +725,114 @@ jobs:
             --notes-file "release-dist/${RELEASE_ID}.md" \
             "${prerelease_flag[@]}" \
             release-dist/*
+
+  release-scoped:
+    if: inputs.validation_profile == 'replay-scoped-positive-v1'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    name: Publish immutable scoped source release
+    needs:
+      - guard
+      - replay-scoped-validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+          fetch-depth: 0
+      - name: Restore release tag visibility
+        env:
+          TARGET_REF: ${{ inputs.target_ref }}
+        run: |
+          set -euo pipefail
+          # The release identity proof - current main, unused workspace tag,
+          # router approval - runs once in the guard job before any validation
+          # lane, exactly as it did before validation was split. This job only
+          # re-establishes the tag data that the manifest generator and the tag
+          # step read, and confirms this runner checked out the validated
+          # commit.
+          git fetch origin main --tags --force
+          test "$(git rev-parse HEAD)" = "${TARGET_REF}"
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: replay-scoped-*
+          path: target/scoped-results
+      - name: Retain verified scoped evidence and original qualification archives
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          RELEASE_APPROVAL: ${{ inputs.release_approval_reference }}
+        run: |
+          python3 scripts/replay_release.py bundle --results target/scoped-results \
+            --release-id "${RELEASE_ID}" --approval-reference "${RELEASE_APPROVAL}" \
+            --output "target/scoped-dist/${RELEASE_ID}-verification.json"
+      - name: Generate deterministic release bundle
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+        run: |
+          mkdir -p target/scoped-dist
+          python3 scripts/generate-release-manifest.py \
+            --release-id "${RELEASE_ID}" \
+            --ref HEAD \
+            --check-clean \
+            --verification-evidence "target/scoped-dist/${RELEASE_ID}-verification.json" \
+            --verify-tags \
+            --output "target/scoped-dist/${RELEASE_ID}.json" \
+            --notes-output "target/scoped-dist/${RELEASE_ID}.md"
+      - name: Create checksums
+        run: |
+          cd target/scoped-dist
+          sha256sum -- * > SHA256SUMS
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: target/scoped-dist/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ inputs.release_id }}
+          path: target/scoped-dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Create annotated release tags
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          tags_to_push=()
+          while IFS= read -r package_tag; do
+            if git show-ref --verify --quiet "refs/tags/${package_tag}"; then
+              continue
+            fi
+            git tag -a "${package_tag}" -m "${package_tag}"
+            tags_to_push+=("refs/tags/${package_tag}")
+          done < <(jq -r '.packages[].tag' "target/scoped-dist/${RELEASE_ID}.json")
+          git tag -a "${RELEASE_ID}" -m "${RELEASE_ID}"
+          tags_to_push+=("refs/tags/${RELEASE_ID}")
+          git push --atomic origin "${tags_to_push[@]}"
+      - name: Publish immutable workspace release
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=()
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            prerelease_flag=(--prerelease)
+          fi
+          gh release create "${RELEASE_ID}" \
+            --verify-tag \
+            --title "${RELEASE_ID}" \
+            --notes-file "target/scoped-dist/${RELEASE_ID}.md" \
+            "${prerelease_flag[@]}" \
+            target/scoped-dist/*

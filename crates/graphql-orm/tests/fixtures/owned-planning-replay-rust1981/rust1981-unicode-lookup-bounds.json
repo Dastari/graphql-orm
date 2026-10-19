@@ -1,0 +1,26 @@
+[
+  {
+    "module": "cf",
+    "headers": 11,
+    "offsets": 43,
+    "largest_run": 8
+  },
+  {
+    "module": "cn_planes_0_3",
+    "headers": 54,
+    "offsets": 1461,
+    "largest_run": 332
+  },
+  {
+    "module": "default_ignorable_code_point",
+    "headers": 12,
+    "offsets": 35,
+    "largest_run": 8
+  },
+  {
+    "module": "grapheme_extend",
+    "headers": 33,
+    "offsets": 767,
+    "largest_run": 244
+  }
+]

@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-17
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,7 +15,7 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
-## 0.50.2 to 0.51.0: post-await and owned release checks
+## 0.52.0 to 0.53.0: post-await and owned release checks
 
 Upgrade ORM/macros together. Successful sensitive checks now re-read original
 status/current authority after binding and business-policy awaits. Callbacks run
@@ -44,6 +44,69 @@ session or replace the accepted carrier. Current grants only narrow the original
 ceilings, and a longer current lifetime cannot extend the accepted credential.
 The legacy `ResolvedPrincipal::new` sensitive path remains strict. Host binding,
 owner/current-row checks and transaction/revision fences remain mandatory.
+
+
+## 0.51.0 to 0.52.0: explicit native Rust 1.98.1 replay recipe
+
+Source releases may explicitly select the reviewed scoped positive release
+profile; inspect the attached verification evidence and runtime-unverified gaps.
+The full release profile remains the default. No package version or database
+migration is added by the release-policy change. See the
+[release runbook](docs/operations/release/process.md#replay-scoped-positive-v1).
+
+Upgrade ORM/macros together. Existing historical capture/decode entry points keep
+all signatures/defaults and remain on exact Rust 1.97.1. They do not automatically
+select a new recipe when the compiler changes. Existing witness bytes, producer
+identities, format 1 mapping and historical provenance are unchanged.
+
+For new evidence on exact qualified Rust 1.98.1, explicitly select
+`OwnedPlanningReplayRecipe::Rust1981V1` in
+`plan_owned_migration_with_replay_witness_for_recipe` and
+`OwnedPlanningReplayWitness::from_json_for_recipe`. The chosen recipe must equal
+the encoded recipe; each pair is library-admitted only on its own exact stock
+compiler commit, GNU x86_64 host/target and absence of compiler wrappers.
+`to_json`/`verify` use the privately retained recipe; no relabel or fallback exists.
+
+Rust 1.98.1 can produce different native Debug-based plan hashes for valid Unicode
+metadata. This release labels those native facts with a separate recipe; it does
+not change ordinary planning or apply hashes. Bind complete canonical witnesses,
+format/recipe and authenticated producer artifact identity with external
+cryptographic custody; matching `planHash` alone does not establish equivalence.
+No baseline can be reconstructed, old receipt adopted/upgraded or approval
+reissued by selecting the new recipe. Separate historical verifier integrations,
+release publication and consumer/pin adoption require review.
+
+The feature remains default-off and explicit per call. No database migration,
+dependency change or change to existing callers is required. See the
+[recipe/compatibility reference](docs/reference/graphql-orm/owned-planning-replay.md)
+and [per-recipe accounting](docs/reference/graphql-orm/owned-planning-replay-accounting.md).
+
+## 0.50.2 to 0.51.0: optional owned planning replay
+
+Upgrade ORM/macros together. Existing callers need no code, configuration,
+serialized-format or database migration. Enable `owned-planning-replay` explicitly
+alongside `sqlite` or `postgres`, then call
+`plan_owned_migration_with_replay_witness` with a checked limits profile and
+`OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody()`.
+The separate witness retains sensitive complete schema metadata; the caller must
+keep it private and bind external cryptographic custody and producer identity.
+`verify()` returns passive facts and does not replace any live apply check.
+
+The new format is v1 and the supported recipe is
+`graphql-orm-owned-planning-8e1-v1`, qualified to Rust 1.97.1. Authentic fixtures
+prove the listed historical cases, not arbitrary historical receipt adoption or
+all toolchains. Capture/codec/replay now enforce that exact compiler commit with
+stock `x86_64-unknown-linux-gnu` host/target and no compiler wrappers at build time;
+unqualified builds return `LimitExceeded` before those operations start. Ordinary
+planning is unaffected. Nested structs remain JSON objects and enum values remain
+strings, including buffered step payloads with `kind` last. The increased prepaid
+decoder allowance can refuse additional near-ceiling witnesses. No missing
+historical baseline can be recovered. Unsupported
+recipes are rejected; old plans are never silently resealed. MSSQL capture is
+unsupported before connection acquisition; ordinary MSSQL builds remain available.
+See [the replay reference](docs/reference/graphql-orm/owned-planning-replay.md)
+for limits, exact mapping, compatibility and remaining inspection-only obligations.
+Release/pin adoption remains a separate review; this branch does not publish.
 
 ## 0.50.1 to 0.50.2: published Auth source alignment
 

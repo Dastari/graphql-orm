@@ -16,6 +16,10 @@ catalog persistence, public revision selection, authorization policy and transpo
 which remain host responsibilities. Dynamic GraphQL and runtime record mutations
 are later capabilities. No feature beyond the selected database backend is required.
 
+The optional default-off [owned planning replay](owned-planning-replay.md)
+capability can separately retain complete sensitive planning evidence and verify
+it offline. Ordinary planning requires no replay feature or consent token.
+
 ## Public host flow
 
 ```rust,ignore

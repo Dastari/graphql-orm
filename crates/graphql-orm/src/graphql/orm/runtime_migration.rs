@@ -558,6 +558,12 @@ impl OwnedSchemaModel {
         &self,
         limits: RuntimeMigrationLimits,
     ) -> Result<(), RuntimeMigrationDiagnostics> {
+        self.check_limits_size(limits).map(|_| ())
+    }
+    fn check_limits_size(
+        &self,
+        limits: RuntimeMigrationLimits,
+    ) -> Result<usize, RuntimeMigrationDiagnostics> {
         if self.tables.len() > limits.max_collections
             || self.tables.iter().any(|table| {
                 table.columns.len() > limits.max_fields
@@ -590,7 +596,8 @@ impl OwnedSchemaModel {
         // predicates, FK members and search metadata; writing counts, never copies.
         let mut writer = BoundedDefinitionWriter::new(limits.max_target_bytes);
         std::fmt::write(&mut writer, format_args!("{:?}", self.borrowed()))
-            .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::LimitExceeded))
+            .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::LimitExceeded))?;
+        Ok(writer.size)
     }
 }
 
@@ -668,24 +675,18 @@ impl OwnedPlannedMigration {
         &self.statements
     }
     fn integrity_hash(&self) -> String {
-        let semantic = stable_plan_hash_views(
+        owned_integrity_hash(
             self.backend,
-            self.steps
-                .iter()
-                .map(|step| (step.risk, StepRef::from(&step.step), step.reason.as_str())),
+            &self.version,
+            &self.description,
+            &self.source_schema_hash,
+            &self.target_schema_hash,
+            &self.ownership,
+            &self.steps,
             &self.statements,
-        );
-        let canonical = format!(
-            "owned-migration-v1|{}|{}|{}|{}|{}|{}",
-            self.version,
-            self.description,
-            self.source_schema_hash,
-            self.target_schema_hash,
-            self.ownership.tables().collect::<Vec<_>>().join(","),
-            semantic
-        );
-        format!("{:016x}", fnv1a64(canonical.as_bytes()))
+        )
     }
+
     pub(super) fn validate_apply(
         &self,
         policy: SchemaPolicy,
@@ -1329,3 +1330,47 @@ impl fmt::Write for BoundedDefinitionWriter {
         }
     }
 }
+
+#[cfg(feature = "owned-planning-replay")]
+#[path = "owned_planning_replay/mod.rs"]
+mod owned_planning_replay;
+#[cfg(feature = "owned-planning-replay")]
+pub use owned_planning_replay::{
+    OwnedPlanningCaptureError, OwnedPlanningReplayCaptureConsent, OwnedPlanningReplayError,
+    OwnedPlanningReplayLimits, OwnedPlanningReplayRecipe, OwnedPlanningReplayWitness,
+    VerifiedOwnedPlanningReplay,
+};
+
+#[allow(clippy::too_many_arguments)]
+fn owned_integrity_hash(
+    backend: &'static str,
+    version: &str,
+    description: &str,
+    source_schema_hash: &str,
+    target_schema_hash: &str,
+    ownership: &ManagedTableSet,
+    steps: &[OwnedPlannedMigrationStep],
+    statements: &[String],
+) -> String {
+    let semantic = stable_plan_hash_views(
+        backend,
+        steps
+            .iter()
+            .map(|step| (step.risk, StepRef::from(&step.step), step.reason.as_str())),
+        statements,
+    );
+    let canonical = format!(
+        "owned-migration-v1|{}|{}|{}|{}|{}|{}",
+        version,
+        description,
+        source_schema_hash,
+        target_schema_hash,
+        ownership.tables().collect::<Vec<_>>().join(","),
+        semantic
+    );
+    format!("{:016x}", fnv1a64(canonical.as_bytes()))
+}
+
+#[cfg(all(test, feature = "owned-planning-replay"))]
+pub(super) static REPLAY_OBSERVATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);

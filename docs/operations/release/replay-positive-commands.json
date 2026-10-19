@@ -1,0 +1,1456 @@
+{
+  "1.97.1": [
+    {
+      "command": [
+        "python3",
+        "scripts/check-owned-planning-replay-source.py"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "recipe-source"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,mssql",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,mssql,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,postgres",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,postgres,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 1,
+      "label": "api-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 3,
+      "label": "api-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 1,
+      "label": "api-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 3,
+      "label": "api-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 1,
+      "label": "api-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 3,
+      "label": "api-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib",
+        "replay_positive"
+      ],
+      "environment": {},
+      "expectedTests": 2,
+      "label": "positive-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib",
+        "replay_positive"
+      ],
+      "environment": {},
+      "expectedTests": 2,
+      "label": "positive-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib",
+        "--no-run"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "mssql-unit-compile"
+    }
+  ],
+  "1.98.1": [
+    {
+      "command": [
+        "python3",
+        "scripts/check-owned-planning-replay-source.py"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "recipe-source"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,mssql",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,mssql,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,postgres",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "check",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,postgres,owned-planning-replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "build-sqlite,postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 1,
+      "label": "api-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 3,
+      "label": "api-sqlite,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 1,
+      "label": "api-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 3,
+      "label": "api-postgres,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 1,
+      "label": "api-mssql"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "clippy",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "clippy-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "doc",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib",
+        "--no-deps"
+      ],
+      "environment": {
+        "RUSTDOCFLAGS": "-D warnings"
+      },
+      "expectedTests": null,
+      "label": "rustdoc-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "tree",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "-e",
+        "features"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "tree-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "--manifest-path",
+        "crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,replay",
+        "--lib"
+      ],
+      "environment": {},
+      "expectedTests": 3,
+      "label": "api-mssql,owned-planning-replay"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "sqlite,owned-planning-replay",
+        "--lib",
+        "replay_positive"
+      ],
+      "environment": {},
+      "expectedTests": 2,
+      "label": "positive-sqlite"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "postgres,owned-planning-replay",
+        "--lib",
+        "replay_positive"
+      ],
+      "environment": {},
+      "expectedTests": 2,
+      "label": "positive-postgres"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.98.1",
+        "test",
+        "-p",
+        "graphql-orm",
+        "--locked",
+        "--no-default-features",
+        "--features",
+        "mssql,owned-planning-replay",
+        "--lib",
+        "--no-run"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "mssql-unit-compile"
+    }
+  ],
+  "metadata": [
+    {
+      "command": [
+        "python3",
+        "scripts/check-documentation.py",
+        "--base",
+        "1e49f1c63728865b294795684e38a27e48258b5a"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "documentation"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/generate-workspace-inventory.py",
+        "--check"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "inventory"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/check-release-state.py"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "release-state"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/check-workspace-dependencies.sh"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "dependencies"
+    },
+    {
+      "command": [
+        "bash",
+        "scripts/check-package-release-policy.sh",
+        "1e49f1c63728865b294795684e38a27e48258b5a"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "package-policy"
+    },
+    {
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "format"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "1e49f1c63728865b294795684e38a27e48258b5a",
+        "--check"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "diff"
+    },
+    {
+      "command": [
+        "python3",
+        "scripts/check-replay-release-positive.py"
+      ],
+      "environment": {},
+      "expectedTests": null,
+      "label": "positive-policy"
+    }
+  ]
+}

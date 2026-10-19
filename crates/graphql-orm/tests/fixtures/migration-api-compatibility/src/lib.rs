@@ -159,3 +159,44 @@ pub fn apply_method_pointer<'db, 'call>(
 fn existing_migration_api_is_source_compatible() {
     verify_legacy_surface();
 }
+
+#[cfg(feature = "replay")]
+#[test]
+fn additive_replay_surface_is_owned_and_bounded() {
+    use graphql_orm::graphql::orm::*;
+    fn owned<T: Send + Sync>() {}
+    owned::<OwnedPlanningReplayWitness>();
+    owned::<VerifiedOwnedPlanningReplay>();
+    let limits=OwnedPlanningReplayLimits::new(4096,RuntimeMigrationLimits::default()).unwrap();
+    assert_eq!(limits.max_encoded_bytes(),4096);
+    let _consent=OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody();
+    let _decode: fn(&[u8],OwnedPlanningReplayLimits)->Result<OwnedPlanningReplayWitness,OwnedPlanningReplayError>=OwnedPlanningReplayWitness::from_json;
+    let _verify: fn(&OwnedPlanningReplayWitness)->Result<VerifiedOwnedPlanningReplay,OwnedPlanningReplayError>=OwnedPlanningReplayWitness::verify;
+}
+
+/// Only compile the additive explicit selection; do not poll or access a database.
+#[cfg(feature = "replay")]
+pub fn explicit_recipe_capture_signature<B: graphql_orm::graphql::orm::RuntimeMigrationBackend>(
+    manager: &SchemaManager<'_, B>,
+    target: &graphql_orm::graphql::orm::OwnedSchemaModel,
+    ownership: &graphql_orm::graphql::orm::ManagedTableSet,
+    recipe: graphql_orm::graphql::orm::OwnedPlanningReplayRecipe,
+) {
+    use graphql_orm::graphql::orm::*;
+    drop(manager.plan_owned_migration_with_replay_witness_for_recipe(
+        "version", "description", target, ownership, PlanOptions::strict(), recipe,
+        OwnedPlanningReplayLimits::default(),
+        OwnedPlanningReplayCaptureConsent::accept_sensitive_schema_metadata_and_private_custody(),
+    ));
+    let _decode: fn(&[u8], OwnedPlanningReplayLimits, OwnedPlanningReplayRecipe)
+        -> Result<OwnedPlanningReplayWitness, OwnedPlanningReplayError> =
+        OwnedPlanningReplayWitness::from_json_for_recipe;
+}
+
+#[cfg(feature = "replay")]
+#[test]
+fn explicit_recipe_identifiers_are_distinct() {
+    use graphql_orm::graphql::orm::OwnedPlanningReplayRecipe;
+    assert_eq!(OwnedPlanningReplayRecipe::Historical8e1V1.identifier(), "graphql-orm-owned-planning-8e1-v1");
+    assert_eq!(OwnedPlanningReplayRecipe::Rust1981V1.identifier(), "graphql-orm-owned-planning-8e1-rust1981-v1");
+}

@@ -3,7 +3,7 @@ title: Plans index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-18
 review_by: 2026-11-01
 supersedes: []
 ---
@@ -18,6 +18,7 @@ supersedes: []
 ## Backlog
 
 - [Backup providers](backlog/backup-providers/README.md)
+- [Private static queries and generated views](backlog/private-static-query-capabilities/README.md)
 - [Router subgraph lifecycle resilience](backlog/router-subgraph-lifecycle-resilience/README.md)
 - [Storage providers](backlog/storage-providers/README.md)
 

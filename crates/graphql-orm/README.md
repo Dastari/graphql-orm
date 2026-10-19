@@ -3,14 +3,14 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-17
+last_reviewed: 2026-10-19
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
 
-Version 0.51.0 aligns ORM/macros for post-await current-authority revalidation
+Version 0.53.0 aligns ORM/macros for post-await current-authority revalidation
 and owned custom release checks. Policies remain read-only admission callbacks;
 resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
@@ -19,9 +19,21 @@ generated code, SDL or schema migration is added. See
 The current workspace selects published Auth `v0.22.0` at
 `997707e060bcf5fabf879a5f98146dc2732b1c99`. Use that tag for direct Auth
 dependencies and refresh the lockfile to one source. The
-[0.51 migration](../../MIGRATION.md#0502-to-0510-post-await-and-owned-release-checks)
+[0.53 migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks)
 describes validated current-session proofs; earlier version notes below retain
 their historical selectors.
+
+
+Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
+Historical entry points retain exact qualified 1.97.1 behavior. The two recipes
+preserve compiler-native hashes and have separate admission; format 1, default-off
+features, generated code and dependencies are unchanged. Upgrade ORM/macros
+together; see the [migration guide](../../MIGRATION.md#0510-to-0520-explicit-native-rust-1981-replay-recipe).
+
+Version 0.51.0 adds the runtime's default-off `owned-planning-replay` capability.
+Upgrade ORM/macros together; generated code is unchanged. Explicit capture retains
+complete sensitive schema evidence; offline verification returns passive facts.
+See the [replay contract](../../docs/reference/graphql-orm/owned-planning-replay.md).
 
 Version 0.50.2 aligns the paired runtime/macros release with published
 `agql-auth` `v0.21.3`, retaining the same reviewed Auth commit. Use that tag

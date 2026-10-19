@@ -13,7 +13,7 @@ supersedes: []
 The current workspace selects published Auth `v0.22.0` at
 `997707e060bcf5fabf879a5f98146dc2732b1c99`. Direct Auth consumers must match
 that tag and refresh their locks to one source; see the
-[workspace migration](../../MIGRATION.md#0502-to-0510-post-await-and-owned-release-checks).
+[workspace migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks).
 Version-specific notes below retain their historical dependency facts.
 
 Version `0.107.3` refreshes the immutable package identity for the maintained
