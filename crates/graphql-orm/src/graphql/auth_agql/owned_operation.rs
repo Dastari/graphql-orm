@@ -71,6 +71,9 @@ impl<T: Send + Sync> AgqlOwnedOperation<T> {
     /// Construction does not authorize a release. Supply enforcement and owned
     /// policy from trusted host configuration; the owned policy must retain any
     /// verified binding evidence needed after this context has gone away.
+    ///
+    /// # Errors
+    /// Rejects absent, inconsistent or schema-only accepted request identity.
     pub fn from_context(
         ctx: &Context<'_>,
         enforcement: Arc<AgqlCurrentAuthorityEnforcement>,
@@ -95,6 +98,10 @@ impl<T: Send + Sync> AgqlOwnedOperation<T> {
     /// Every call performs new reads. A denial/error stops before the next
     /// callback; successful callbacks run exactly once. Current narrowing denies
     /// the whole release rather than mutating shared accepted request identity.
+    ///
+    /// # Errors
+    /// Rejects expired/revoked original credentials, narrowed current authority,
+    /// missing bindings, denied business policy and unavailable authority reads.
     pub async fn check_release(&self, release: &T) -> async_graphql::Result<()> {
         let deadline = self.enforcement.revalidate(&self.accepted).await?;
         let bindings = self
