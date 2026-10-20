@@ -57,6 +57,10 @@ impl CustomQuery {
                 &context,
             )
             .await?;
+        let current_generation = ctx.data::<ServerGeneration>()?.0.load(Ordering::Relaxed);
+        if AuthorizedScanContext::new(current_generation.to_be_bytes())? != context {
+            return Err(OrmPublicError::new(OrmErrorCode::CursorInvalid).into_graphql_error());
+        }
         Ok(json!({
             "ids": page.nodes.iter().map(|node| node.id.to_string()).collect::<Vec<_>>(),
             "cursor": page.page_info.continuation,
@@ -80,6 +84,7 @@ struct Policy {
     mode: Mode,
     minimum: Arc<AtomicI64>,
     evaluations: Arc<AtomicUsize>,
+    mutate_generation_after_row: Option<Arc<AtomicI64>>,
 }
 fn owner<'a>(ctx: Option<&'a async_graphql::Context<'_>>) -> &'a str {
     ctx.and_then(|ctx| ctx.data_opt::<String>())
@@ -133,6 +138,9 @@ impl RowPolicy for Policy {
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
             self.evaluations.fetch_add(1, Ordering::Relaxed);
+            if let Some(generation) = &self.mutate_generation_after_row {
+                generation.store(2, Ordering::Relaxed);
+            }
             let row = row.downcast_ref::<VisibilityItem>().unwrap();
             // A complete decision deliberately bypasses this callback.
             Ok(!matches!(self.mode, Mode::Unrestricted | Mode::Complete)
@@ -185,6 +193,7 @@ async fn setup(mode: Mode, min: i64, budget: u32) -> (Database, Policy, Capture)
         mode,
         minimum: Arc::new(AtomicI64::new(min)),
         evaluations: Arc::new(AtomicUsize::new(0)),
+        mutate_generation_after_row: None,
     };
     let capture = Capture::default();
     let mut database = database;
@@ -272,6 +281,20 @@ async fn custom_resolver_reads_current_server_context_on_each_request() {
     let changed = execute_custom_page(&schema, generation, Some(cursor)).await;
     assert!(!changed.errors.is_empty());
     assert!(capture.take().is_empty(), "mismatch must fail before a read");
+}
+
+#[tokio::test]
+async fn custom_resolver_discards_page_when_context_changes_during_scan() {
+    let (mut db, mut policy, capture) = setup(Mode::Callback, 0, 19).await;
+    let generation = Arc::new(AtomicI64::new(1));
+    policy.mutate_generation_after_row = Some(generation.clone());
+    db.set_row_policy(policy);
+    let schema = schema_builder(db).finish();
+
+    let result = execute_custom_page(&schema, generation, None).await;
+    assert!(!result.errors.is_empty());
+    assert!(result.data.into_json().unwrap()["protectedPage"].is_null());
+    assert_bounded(&capture.take(), 7);
 }
 
 #[tokio::test]
@@ -490,6 +513,16 @@ async fn custom_scan_context_rotates_keys_and_preserves_empty_residual_pages() {
         .fetch_authorized_scan_with_context(&replica, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(6), ..Default::default() }, &context)
         .await.unwrap();
     assert!(same_key.nodes.is_empty());
+    let aliased_key = db.clone().with_authorized_scan_config(
+        AuthorizedScanConfig::new([7; 32], 7, 19)
+            .with_protected_key_id(2)
+            .with_retired_protected_key(0, [7; 32], std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap()
+    );
+    let forged_id = cursor.replacen("goms2.00000000", "goms2.00000002", 1);
+    assert_ne!(forged_id, cursor);
+    assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
+        .fetch_authorized_scan_with_context(&aliased_key, None, None, AuthorizedScanInput { after: Some(forged_id), limit: Some(6), ..Default::default() }, &context)
+        .await.is_err());
     let rotated = db.clone().with_authorized_scan_config(
         AuthorizedScanConfig::new([8; 32], 7, 19)
             .with_protected_key_id(2)

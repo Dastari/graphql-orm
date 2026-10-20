@@ -16,6 +16,9 @@ the installed `AuthorizedScanConfig` and returns the same `AuthorizedScanPage`
 and `ScanStatus` as `fetch_authorized_scan`. Its `goms2` continuation is
 encrypted and authenticated by the ORM. Existing `goms1` scan cursors and
 generated pagination are unchanged and are not accepted by this method.
+The protected version and key ID are authenticated with the encrypted body, so
+changing an ID cannot redirect a cursor to the same key under another rotation
+deadline.
 
 On **every** request, construct `AuthorizedScanContext` from an unambiguous,
 complete encoding of trusted current state. Include the committed dataset or

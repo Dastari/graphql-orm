@@ -5,7 +5,7 @@ use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
 use crate::graphql::pagination::*;
 use chacha20poly1305::{
     XChaCha20Poly1305,
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
 };
 use std::any::TypeId;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -370,8 +370,15 @@ impl AuthorizedScanConfig {
         }
         let cipher = XChaCha20Poly1305::new((&self.key).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let ciphertext = cipher.encrypt(&nonce, plaintext.as_slice()).map_err(|_| invalid())?;
-        let bytes: Vec<u8> = self.protected_key_id.to_be_bytes().iter()
+        let key_id = self.protected_key_id.to_be_bytes();
+        let mut associated_data = [0_u8; 10];
+        associated_data[..6].copy_from_slice(b"goms2.");
+        associated_data[6..].copy_from_slice(&key_id);
+        let ciphertext = cipher.encrypt(&nonce, Payload {
+            msg: plaintext.as_slice(),
+            aad: &associated_data,
+        }).map_err(|_| invalid())?;
+        let bytes: Vec<u8> = key_id.iter()
             .chain(nonce.iter()).chain(ciphertext.iter()).copied().collect();
         Ok(format!("goms2.{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()))
     }
@@ -402,7 +409,13 @@ impl AuthorizedScanConfig {
                 .ok_or_else(error)?.key
         };
         let cipher = XChaCha20Poly1305::new(key.into());
-        let plaintext = cipher.decrypt((&bytes[4..28]).into(), &bytes[28..])
+        let mut associated_data = [0_u8; 10];
+        associated_data[..6].copy_from_slice(b"goms2.");
+        associated_data[6..].copy_from_slice(&bytes[..4]);
+        let plaintext = cipher.decrypt((&bytes[4..28]).into(), Payload {
+            msg: &bytes[28..],
+            aad: &associated_data,
+        })
             .map_err(|_| error())?;
         if plaintext.len() < 11 { return Err(error()); }
         let expiry = u64::from_be_bytes(plaintext[..8].try_into().map_err(|_| error())?);
