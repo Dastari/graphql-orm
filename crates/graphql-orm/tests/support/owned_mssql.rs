@@ -161,7 +161,9 @@ impl OwnedSqlServer {
             "--env",
             sa_password.as_str(),
         ];
-        let run_label = run.as_ref().map(|token| format!("graphql-orm.test-run={token}"));
+        let run_label = run
+            .as_ref()
+            .map(|token| format!("graphql-orm.test-run={token}"));
         if let Some(label) = &run_label {
             arguments.extend(["--label", label.as_str()]);
         }
