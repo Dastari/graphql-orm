@@ -33,6 +33,7 @@ struct Custody {
     source_delivery_allowed: AtomicBool,
     withdraw_access_after_effect: AtomicUsize,
     access_withdrawn: AtomicBool,
+    frozen_tool_surface: AtomicBool,
     #[cfg(feature = "provider-codex-app-server")]
     legacy_factory_launches: AtomicUsize,
 }
@@ -322,6 +323,9 @@ impl crate::AiProvider for MediaProvider {
     }
     fn supports_tool_result_images(&self) -> bool {
         self.supported
+    }
+    fn freezes_session_tool_surface(&self) -> bool {
+        self.custody.frozen_tool_surface.load(Ordering::SeqCst)
     }
     fn supports_tool_result_source_delivery(&self) -> bool {
         self.supported && self.custody.source_delivery_allowed.load(Ordering::SeqCst)
@@ -2106,6 +2110,11 @@ async fn owning_approved_static_reset_requires_confirmed_cleanup_and_current_sou
     }
 }
 
+#[tokio::test]
+async fn frozen_tool_surface_task_context_continuation_budgets_the_per_turn_share() {
+    Box::pin(approved_media_lifecycle(false, false, 0, Some(16))).await;
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn exercise_owned_static_reset(
     fixture: &Fixture,
@@ -2167,6 +2176,21 @@ async fn exercise_owned_static_reset(
         .conservative_provider_egress_tokens(&base.provider_kind)
         .unwrap();
     base.budget.estimate.image_units = 4;
+    let frozen_share = if mode == 16 {
+        Some(assert_frozen_tool_surface_admission(
+            fixture,
+            &base,
+            &continuation,
+            &delivery,
+            &policy,
+            &complete_projection,
+        ))
+    } else {
+        None
+    };
+    if let Some(share) = &frozen_share {
+        base.budget.estimate.input_tokens = share.per_turn;
+    }
     assert!(
         AiProviderCallPlan::new_continuation_with_classified_tools(
             base.provider_kind.clone(),
@@ -2255,6 +2279,75 @@ async fn exercise_owned_static_reset(
         .unwrap();
         assert_eq!(binding.state, "claimed");
         assert!(binding.protected_cursor.is_some());
+        return;
+    }
+    if let Some(share) = frozen_share {
+        assert!(next.admitted_on_frozen_tool_surface_share());
+        let budgets_before = AiBudgetReservationRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap()
+            .len();
+        // An adapter that does not prove a frozen surface cannot redeem the per-turn share on
+        // any path, and refuses before a session claim, thread, deletion, or reservation.
+        for provider_session in [true, false] {
+            let refused = if provider_session {
+                executor
+                    .execute_with_provider_session(
+                        Arc::new(Mutex::new(lease.clone())),
+                        next.clone(),
+                        session_plan.clone(),
+                        sessions.clone(),
+                        Some(native.clone()),
+                    )
+                    .await
+            } else {
+                executor.execute(lease, next.clone()).await
+            };
+            assert!(matches!(refused, Err(AiError::PreTransportBudgetDenied)));
+        }
+        assert_eq!(custody.created_threads.load(Ordering::SeqCst), 1);
+        assert!(deletion.requests.lock().await.is_empty());
+        assert_eq!(
+            AiBudgetReservationRecord::query(fixture.database.pool())
+                .fetch_all()
+                .await
+                .unwrap()
+                .len(),
+            budgets_before
+        );
+        // A frozen-surface adapter redeems it through the retained session; the fresh
+        // thread's sealed manifest still authorizes the whole surface.
+        custody.frozen_tool_surface.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            executor.execute(lease, next.clone()).await,
+            Err(AiError::PreTransportBudgetDenied)
+        ));
+        custody.requests.lock().await.clear();
+        custody.complete_after_capture.store(true, Ordering::SeqCst);
+        let result = executor
+            .execute_with_provider_session(
+                Arc::new(Mutex::new(lease.clone())),
+                next,
+                session_plan,
+                sessions,
+                Some(native),
+            )
+            .await
+            .unwrap();
+        assert!(result.proves_static_offering_reset_from(Some(&original_reference)));
+        assert_eq!(custody.effects.load(Ordering::SeqCst), 1);
+        let inference = result.model_inference_manifest();
+        assert!(inference.estimated_tokens > share.per_turn);
+        let reservation = AiBudgetReservationRecord::query(fixture.database.pool())
+            .fetch_all()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|budget| budget.id == result.budget_reservation_id().0)
+            .unwrap();
+        assert_eq!(reservation.state, "committed");
+        assert_eq!(reservation.reserved_input_tokens as u64, share.per_turn);
         return;
     }
     if mode == 3 {
@@ -2543,3 +2636,66 @@ async fn exercise_owned_static_reset(
 }
 
 mod continuation_context_state;
+
+/// Whole sealed figure and per-turn share of one prepared task-context continuation.
+struct FrozenToolSurfaceShare {
+    per_turn: u64,
+}
+
+/// Constructor admission for a retained tool surface frozen at registration: a reservation
+/// below the whole figure but covering the per-turn share is admitted and marked, the sealed
+/// manifest keeps the whole figure, and a per-turn share above the reservation is refused.
+fn assert_frozen_tool_surface_admission(
+    fixture: &Fixture,
+    base: &AiProviderCallPlan,
+    continuation: &crate::AiAgentContinuation,
+    delivery: &crate::AiCapabilityDeliveryTurn,
+    policy: &AiToolPolicySet,
+    complete_projection: &ModelRequest,
+) -> FrozenToolSurfaceShare {
+    let full = complete_projection
+        .conservative_provider_egress_tokens(&base.provider_kind)
+        .unwrap();
+    let surface = complete_projection
+        .conservative_provider_tool_surface_tokens(&base.provider_kind)
+        .unwrap();
+    let per_turn = full - surface;
+    let construct = |input_tokens: u64| {
+        let mut budget = base.budget.clone();
+        budget.estimate.input_tokens = input_tokens;
+        AiProviderCallPlan::new_continuation_with_classified_capability_surface(
+            base.provider_kind.clone(),
+            base.request.clone(),
+            budget,
+            base.transfers.clone(),
+            "owned-static-reset",
+            continuation.clone(),
+            &delivery.current_surface(),
+            fixture.runtime.tool_catalog(),
+            policy,
+            &fixture.generated_target_policy,
+        )
+    };
+    // The whole figure keeps the original, unmarked admission.
+    assert!(
+        !construct(full)
+            .unwrap()
+            .admitted_on_frozen_tool_surface_share()
+    );
+    let admitted = construct(per_turn).unwrap();
+    assert!(admitted.admitted_on_frozen_tool_surface_share());
+    let sealed = admitted
+        .transfers
+        .iter()
+        .find(|manifest| manifest.capability == AiEgressCapability::ModelInference)
+        .unwrap();
+    assert_eq!(sealed.estimated_tokens, full);
+    // Task-context content that alone exceeds the reservation is still refused.
+    for input_tokens in [per_turn - 1, 1] {
+        assert!(matches!(
+            construct(input_tokens),
+            Err(AiError::PreTransportBudgetDenied)
+        ));
+    }
+    FrozenToolSurfaceShare { per_turn }
+}

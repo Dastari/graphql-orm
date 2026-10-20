@@ -18,6 +18,33 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.109.0
+
+### Changed
+
+- A prepared task-context continuation
+  (`AiProviderCallPlan::new_continuation_with_classified_capability_surface`)
+  whose budget input-token estimate is below the sealed model-inference figure
+  is now admitted when the estimate covers the per-turn share: the figure minus
+  `ModelRequest::conservative_provider_tool_surface_tokens`. This applies only
+  to a provider-retained continuation; otherwise, or when the per-turn content
+  alone exceeds the estimate, it still returns `PreTransportBudgetDenied`. The
+  sealed manifest still authorizes the whole figure, including the surface.
+- Such a plan executes only through `execute_with_provider_session` with a
+  provider whose `AiProvider::freezes_session_tool_surface` is true, including
+  through a static-offering reset of a fresh thread. Every other path, and a
+  non-freezing provider, returns `PreTransportBudgetDenied` before any session
+  claim, thread creation, deletion or budget reservation.
+
+### Added
+
+- `AiProvider::freezes_session_tool_surface` (default `false`). The Codex
+  app-server adapter returns true for an experimental dynamic-tools
+  registration, whose `thread/start` installs the surface once and whose bound
+  turns reject any differing definition (`FrozenDefinitionMismatch`).
+- `AiProviderCallPlan::admitted_on_frozen_tool_surface_share` reports whether a
+  plan was admitted on the per-turn share.
+
 ## Unreleased - 0.108.0
 
 ### Changed

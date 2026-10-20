@@ -16,6 +16,13 @@ correction. Direct Auth consumers must select the same tag and refresh their
 locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
+Version `0.109.0` admits a prepared task-context continuation whose input
+reservation covers only the per-turn share of a retained tool surface frozen at
+session registration (for example a large Codex app-server `dynamicTools`
+catalogue), while the sealed egress manifest keeps the whole figure. Such a
+plan runs only through a provider session whose adapter proves the frozen
+surface; see [MIGRATION.md](MIGRATION.md).
+
 Version `0.108.0` records which `AiError` a turn planner returned as a
 `<site>_plan_failed:<classification>` failure code and logs it, splits the
 supervised initial-plan phase error into its own code, and admits retry of an
@@ -192,7 +199,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.108.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.109.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
