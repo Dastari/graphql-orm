@@ -118,7 +118,8 @@ impl JwksFixture {
                             "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         );
-                        stream.write_all(response.as_bytes()).unwrap();
+                        // A bounded client may close immediately after rejecting Content-Length.
+                        let _ = stream.write_all(response.as_bytes());
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
@@ -860,4 +861,96 @@ fn unknown_authorization_role_fails_instead_of_dropping_inherited_scopes() {
         provider.authenticate_bearer(&credential).unwrap().scopes(),
         &["inventory.read", "inventory.write", "profile.read"]
     );
+}
+
+#[cfg(feature = "auth-agql")]
+#[test]
+fn complete_signed_catalogue_over_one_mib_is_verified_with_finite_body_limits() {
+    let keys = JwksFixture::start(jwks("key-a"));
+    let scopes = (0..128)
+        .map(|index| format!("catalogue.resources.{index:03}.authorization.read"))
+        .collect::<Vec<_>>();
+    let catalogue = RoleScopeCatalogue::new(
+        "large-revision",
+        scopes.iter().cloned().map(RoleScopeDefinition::new),
+        (0..128).map(|index| {
+            RoleScopeGrant::new(
+                format!("role-{index:03}"),
+                format!("Role {index:03}"),
+                scopes.clone(),
+            )
+        }),
+    );
+    let claims = RoleScopeCatalogueClaims::new(
+        catalogue.clone(),
+        "https://issuer.test",
+        "role-catalogue-clients",
+        1_000,
+        1_100,
+    );
+    let envelope = SignedRoleScopeCatalogue::new(
+        catalogue,
+        token("key-a", serde_json::to_value(claims).unwrap()),
+    );
+    envelope.validate_structure().unwrap();
+    let body = serde_json::to_string(&envelope).unwrap();
+    assert!(body.len() > 1024 * 1024, "{} bytes", body.len());
+    assert!(body.len() < DEFAULT_MAX_ROLE_SCOPE_CATALOGUE_BYTES);
+    let remote = JwksFixture::start(body.clone());
+    let provider = provider_with_catalogue(&keys, &remote, Arc::new(TestClock::at(1_000)));
+    initialize(&provider).unwrap();
+    refresh_catalogue(&provider).unwrap();
+    let credential = token(
+        "key-a",
+        json!({
+            "sub": "user-7", "iss": "https://issuer.test", "aud": "graphql-router",
+            "exp": 1_100, "authorization_roles": ["role-127"]
+        }),
+    );
+    assert_eq!(
+        provider.authenticate_bearer(&credential).unwrap().scopes(),
+        scopes.as_slice()
+    );
+
+    // An explicitly smaller host transport bound remains authoritative.
+    let mut limited_config = provider.config.clone();
+    limited_config
+        .role_scope_catalogue
+        .as_mut()
+        .unwrap()
+        .max_body_bytes = 1024 * 1024;
+    let limited = JwksAuthenticationProvider::new(limited_config).unwrap();
+    initialize(&limited).unwrap();
+    assert_eq!(
+        refresh_catalogue(&limited).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    assert!(limited.authenticate_bearer(&credential).is_err());
+
+    // Valid trailing JSON whitespace cannot bypass the finite default transport cap.
+    let mut oversized = body;
+    oversized.extend(std::iter::repeat_n(
+        ' ',
+        DEFAULT_MAX_ROLE_SCOPE_CATALOGUE_BYTES + 1 - oversized.len(),
+    ));
+    remote.replace(oversized);
+    let over = provider_with_catalogue(&keys, &remote, Arc::new(TestClock::at(1_000)));
+    initialize(&over).unwrap();
+    assert_eq!(
+        refresh_catalogue(&over).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    assert!(over.authenticate_bearer(&credential).is_err());
+
+    // A large structurally legal document still needs the genuine bound signature.
+    let mut forged = envelope;
+    forged.catalogue.roles[0].name = "Tampered metadata".into();
+    remote.replace(serde_json::to_string(&forged).unwrap());
+    let invalid = provider_with_catalogue(&keys, &remote, Arc::new(TestClock::at(1_000)));
+    initialize(&invalid).unwrap();
+    assert_eq!(
+        refresh_catalogue(&invalid).unwrap_err().kind(),
+        AuthenticationErrorKind::Unavailable
+    );
+    assert!(invalid.authenticate_bearer(&credential).is_err());
 }

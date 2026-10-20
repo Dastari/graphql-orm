@@ -10,11 +10,15 @@ supersedes: []
 
 # graphql-orm-ai
 
-The current workspace selects published Auth `v0.22.0` at
-`997707e060bcf5fabf879a5f98146dc2732b1c99`. Direct Auth consumers must match
-that tag and refresh their locks to one source; see the
-[workspace migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks).
-Version-specific notes below retain their historical dependency facts.
+The current workspace selects published Auth `v0.22.1` at
+`86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
+correction. Direct Auth consumers must select the same tag and refresh their
+locks to one source; see the
+[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+
+Version `0.107.4` aligns the Auth dependency with the reviewed signed-catalogue
+correction and ORM/macros 0.54.1. Runtime policy, provider APIs and the
+`AI_SCHEMA_MODULE_VERSION` are unchanged; see [MIGRATION.md](MIGRATION.md).
 
 Version `0.107.3` refreshes the immutable package identity for the maintained
 workspace dependency guidance. The Rust implementation is unchanged; consuming
@@ -182,7 +186,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.3", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.4", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

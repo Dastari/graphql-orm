@@ -3,12 +3,21 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-20
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.6.3 - 2026-10-20
+
+- Raise the default signed role-scope catalogue HTTP response bound to 2 MiB.
+  The whole JSON envelope includes a second copy inside the JWS. Keep explicit
+  smaller bounds, signature verification, exact content/claim binding and
+  all existing expiry rules. Add a genuine RS256 >1 MiB remote regression with
+  lower-limit, oversize and tampered-content refusal coverage.
+
 
 ## 0.6.2 - 2026-10-18
 

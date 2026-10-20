@@ -18,6 +18,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.107.4
+
+- Align with published Auth 0.22.1 and ORM/macros 0.54.1 for finite signed
+  role-catalogue capacity. No provider, AI runtime, public API or schema change.
+
+
 ## 0.107.3 - 2026-10-18
 
 - Allocate a new immutable package identity for maintained README guidance

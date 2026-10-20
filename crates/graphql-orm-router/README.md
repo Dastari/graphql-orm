@@ -10,11 +10,16 @@ supersedes: []
 
 # graphql-orm-router
 
-The current workspace selects published Auth `v0.22.0` at
-`997707e060bcf5fabf879a5f98146dc2732b1c99`. Direct Auth consumers must match
-that tag and refresh their locks to one source; see the
-[workspace migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks).
-Version-specific notes below retain their historical dependency facts.
+The current workspace selects published Auth `v0.22.1` at
+`86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
+correction. Direct Auth consumers must select the same tag and refresh their
+locks to one source; see the
+[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+
+Version `0.6.3` raises the finite default signed role-catalogue HTTP response
+bound to 2 MiB. This includes both the plaintext catalogue and its complete JWS;
+explicit lower host limits still apply. Adoption also requires the coordinated
+Auth signature-envelope correction. See [MIGRATION.md](MIGRATION.md).
 
 Version `0.6.2` refreshes the immutable package identity for the maintained
 workspace dependency guidance. The Rust implementation is unchanged; consuming
@@ -41,7 +46,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.2" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.3" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
