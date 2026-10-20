@@ -11,7 +11,10 @@ use futures_core::Stream;
 use futures_util::{StreamExt, stream};
 use time::OffsetDateTime;
 
-use crate::{StorageBackend, StorageError};
+use crate::{
+    CapacityBinding, CapacityObservation, CapacityRequest, CapacityState, StorageBackend,
+    StorageError, UnknownCapacity,
+};
 
 /// Boxed stream of storage byte chunks.
 pub type BoxedStorageStream =
@@ -305,6 +308,37 @@ pub trait BlobStore: Send + Sync {
     /// Returns [`StorageError`] when the key is invalid or the provider cannot
     /// delete the blob.
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError>;
+
+    /// Returns the non-secret binding of this destination's location, account
+    /// and capacity-relevant configuration.
+    ///
+    /// Compare it with [`CapacityObservation::binding`] through
+    /// [`CapacityObservation::validate_for`] before admission. The default
+    /// binds only the backend kind; providers that observe capacity must
+    /// override it.
+    fn capacity_binding(&self) -> CapacityBinding {
+        CapacityBinding::new(self.backend(), &[])
+    }
+
+    /// Observes the capacity available to the authenticated caller at this
+    /// destination.
+    ///
+    /// The default reports [`CapacityState::Unknown`] with
+    /// [`crate::CapacityUnknownReason::Unsupported`] without provider I/O.
+    /// Implementations must observe the configured location with its real
+    /// account, never an unrelated host filesystem or configured value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the provider cannot be observed. An error
+    /// never implies available capacity.
+    async fn observe_capacity(
+        &self,
+        request: &CapacityRequest,
+    ) -> Result<CapacityObservation, StorageError> {
+        let state = CapacityState::Unknown(UnknownCapacity::unsupported());
+        Ok(CapacityObservation::new(self.capacity_binding(), None, state, request))
+    }
 }
 
 fn ranged_storage_stream(body: StorageByteStream, skip: u64, length: u64) -> StorageByteStream {

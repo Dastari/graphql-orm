@@ -28,4 +28,6 @@ run_owned_test() {
 }
 
 run_owned_test s3_integration single_attempt_delete_does_not_replay_after_lost_response_and_replacement
+run_owned_test s3_integration s3_capacity_distinguishes_declared_provider_managed_from_unknown
+run_owned_test s3_integration s3_capacity_reports_unreachable_bucket_as_an_error
 run_owned_test s3_https_transport owned_https_transport_fixture --ignored

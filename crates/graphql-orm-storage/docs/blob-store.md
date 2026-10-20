@@ -3,7 +3,7 @@ title: "BlobStore"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -73,6 +73,13 @@ pub trait BlobStore: Send + Sync {
     async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError>;
 
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError>;
+
+    fn capacity_binding(&self) -> CapacityBinding;
+
+    async fn observe_capacity(
+        &self,
+        request: &CapacityRequest,
+    ) -> Result<CapacityObservation, StorageError>;
 }
 ```
 
@@ -104,6 +111,47 @@ Callers can use `head_blob` after copying when they need backend metadata.
 The local provider writes through temporary `.uploading` files. Host
 applications can call `LocalStorageBackend::sweep_temp_files` periodically to
 remove stale temp files.
+
+## Destination capacity
+
+`observe_capacity` reports what the exact configured destination tells its
+authenticated account about remaining allocation. The result is a bounded
+`CapacityObservation`:
+
+- `binding`: a non-secret SHA-256 `CapacityBinding` of the backend, location,
+  account and capacity-relevant configuration. Secrets are never included.
+  Changing any of those inputs changes the binding.
+- `placement`: an optional redaction-safe identity of the observed volume
+  (local device and filesystem ID, SMB volume serial or S3 bucket region).
+  `same_placement` compares two observations of the same binding.
+- `observed_at` and `valid_until`: the default validity is 30 seconds,
+  `CapacityRequest::validity` selects another, and the maximum is 10 minutes.
+- `state`: one of
+  - `Known`: `caller_available_bytes`, plus optional `total_bytes` and
+    `physical_available_bytes`, and the `quota` accounting
+    (`Limited` with each observed limit, `NotEnforced`, `ProviderAccounted` or
+    `NotObserved`). `KnownCapacity::quota_accounted` is false only for
+    `NotObserved`, where caller-available bytes may overstate the allocation.
+  - `ProviderManaged`: the provider admits no physical-byte capacity, and the
+    destination declares this. It is not an unlimited grant.
+  - `Unknown`: with a reason (`Unsupported`, `ProviderQuotaNotObservable` or
+    `PlatformUnsupported`). Unknown never means unlimited.
+
+Provider or observation failures are `Err(StorageError)` and never imply
+available capacity. Immediately before admission, call
+`observation.validate_for(&store.capacity_binding(), now)`. It rejects a
+changed binding, an expired observation or a validation clock that is earlier
+than the observation. Observe again after any rejection. Consumers keep their
+own service-owned quota and subtract their active reservations separately; a
+provider observation is never a reservation.
+
+| Provider | Observation | State |
+| --- | --- | --- |
+| Local (Unix) | `fstatvfs` on the opened root directory. Unprivileged callers use the available-block count, which excludes reserved blocks. On Linux, `quotactl_fd` reads the effective user's quota and the quota of the group that new files receive. | `Known`. Physical is the free-block count. The tighter of the soft and hard limits is applied. ext4 and XFS project quotas appear in `statfs`. Filesystems without a VFS quota interface report `NotObserved`. |
+| Local (other) | Verifies that the root is a directory. | `Unknown(PlatformUnsupported)` |
+| SMB | An authenticated `QUERY_INFO` for `FileFsFullSizeInformation` and `FileFsVolumeInformation` on the configured share and prefix. A missing prefix is an error and is not created. | `Known` with `ProviderAccounted`. The caller-available units include server-enforced quotas for the session user. Physical is the actual-available units, which some servers also report caller-limited. |
+| S3 | `HeadBucket` with the configured account. Missing or denied buckets are errors. | `Unknown(ProviderQuotaNotObservable)` by default. `ProviderManaged` only through `with_capacity_mode(S3CapacityMode::ProviderManaged)`. The S3 API has no quota operation, so a finite provider quota is not reported. |
+| Custom / Azure | Default implementation, with no I/O. | `Unknown(Unsupported)` |
 
 ## Key Safety
 

@@ -2,7 +2,9 @@
 
 use bytes::Bytes;
 use graphql_orm_storage::{
-    BlobPutOptions, BlobStore, S3StorageBackend, S3StorageConfig, StorageByteStream,
+    BlobPutOptions, BlobStore, CapacityRequest, CapacityState, CapacityUnknownReason,
+    CapacityValidationError, ProviderManagedBasis, ProviderManagedCapacity, S3CapacityMode,
+    S3StorageBackend, S3StorageConfig, StorageByteStream, StorageError, UnknownCapacity,
     collect_storage_stream, sha256_hex,
 };
 use uuid::Uuid;
@@ -211,4 +213,133 @@ async fn single_attempt_delete_does_not_replay_after_lost_response_and_replaceme
     assert!(replacement.expect("replacement create").is_some());
     assert_eq!(deletes.load(Ordering::SeqCst), 1);
     assert!(replacement_alive.load(Ordering::SeqCst));
+}
+
+/// Serves one fixed HeadBucket response per connection on an owned loopback port.
+fn head_bucket_fixture(
+    status_line: &'static str,
+    expected_requests: usize,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        time::{Duration, Instant},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("owned loopback listener");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut requests = Vec::new();
+        while requests.len() < expected_requests && Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(error) => panic!("accept: {error}"),
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).expect("request headers");
+                request.push(byte[0]);
+                assert!(request.len() < 32_768, "bounded headers");
+            }
+            let headers = String::from_utf8(request).expect("HTTP headers");
+            let request_line = headers.lines().next().expect("request line").to_string();
+            let response = format!(
+                "{status_line}\r\nx-amz-bucket-region: fixture-region\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("head bucket response");
+            requests.push(request_line);
+        }
+        requests
+    });
+    (endpoint, server)
+}
+
+fn fixture_backend(endpoint: String) -> S3StorageBackend {
+    S3StorageBackend::new(S3StorageConfig {
+        endpoint_url: endpoint,
+        region: "us-east-1".to_string(),
+        bucket: "fixture".to_string(),
+        key_prefix: Some("tenant".to_string()),
+        access_key_id: "owned-fixture".to_string(),
+        secret_access_key: "owned-fixture-secret".to_string(),
+        path_style: true,
+    })
+}
+
+#[tokio::test]
+async fn s3_capacity_distinguishes_declared_provider_managed_from_unknown() {
+    let (endpoint, server) = head_bucket_fixture("HTTP/1.1 200 OK", 2);
+    let unknown = fixture_backend(endpoint.clone());
+    let managed = fixture_backend(endpoint).with_capacity_mode(S3CapacityMode::ProviderManaged);
+    assert_eq!(unknown.capacity_mode(), S3CapacityMode::Unknown);
+    assert_ne!(unknown.capacity_binding(), managed.capacity_binding());
+
+    let unknown_observation = unknown
+        .observe_capacity(&CapacityRequest::default())
+        .await
+        .expect("observe unknown capacity");
+    assert_eq!(
+        unknown_observation.state,
+        CapacityState::Unknown(UnknownCapacity {
+            reason: CapacityUnknownReason::ProviderQuotaNotObservable,
+        })
+    );
+    assert_eq!(unknown_observation.binding, unknown.capacity_binding());
+
+    let managed_observation = managed
+        .observe_capacity(&CapacityRequest::default())
+        .await
+        .expect("observe managed capacity");
+    assert_eq!(
+        managed_observation.state,
+        CapacityState::ProviderManaged(ProviderManagedCapacity {
+            basis: ProviderManagedBasis::DeclaredAndReachable,
+        })
+    );
+    assert_eq!(
+        managed_observation
+            .placement
+            .as_ref()
+            .map(|placement| placement.0.as_str()),
+        Some("s3:region=fixture-region")
+    );
+    let observed_at = managed_observation.observed_at;
+    assert_eq!(
+        managed_observation.validate_for(&unknown.capacity_binding(), observed_at),
+        Err(CapacityValidationError::BindingMismatch)
+    );
+
+    let requests = server.join().expect("fixture thread");
+    assert_eq!(requests, vec!["HEAD /fixture HTTP/1.1"; 2]);
+}
+
+#[tokio::test]
+async fn s3_capacity_reports_unreachable_bucket_as_an_error() {
+    for status_line in ["HTTP/1.1 404 Not Found", "HTTP/1.1 403 Forbidden"] {
+        let (endpoint, server) = head_bucket_fixture(status_line, 1);
+        let backend = fixture_backend(endpoint).with_capacity_mode(S3CapacityMode::ProviderManaged);
+        let error = backend
+            .observe_capacity(&CapacityRequest::default())
+            .await
+            .expect_err("unreachable bucket must not report capacity");
+        assert!(
+            matches!(&error, StorageError::Provider { backend, .. } if backend == "s3"),
+            "{status_line}: {error:?}"
+        );
+        let requests = server.join().expect("fixture thread");
+        assert_eq!(requests.len(), 1);
+    }
 }

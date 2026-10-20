@@ -15,8 +15,10 @@ use tokio_util::io::ReaderStream;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    ObjectStorage, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
-    StoredObject, collect_storage_stream, validate_blob_key,
+    CapacityBinding, CapacityObservation, CapacityPlacement, CapacityRequest, CapacityState,
+    CapacityUnknownReason, ObjectStorage, ProviderManagedBasis, ProviderManagedCapacity,
+    StorageBackend, StorageByteStream, StorageError, StorageObjectBody, StoredObject,
+    UnknownCapacity, collect_storage_stream, validate_blob_key,
 };
 
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
@@ -55,10 +57,43 @@ impl fmt::Debug for S3StorageConfig {
     }
 }
 
+/// How an S3-compatible destination reports capacity.
+///
+/// The S3 API has no capacity or quota operation. Capacity is therefore never
+/// inferred from the endpoint; the destination configuration must declare it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum S3CapacityMode {
+    /// The provider may enforce a quota that the S3 API cannot observe.
+    ///
+    /// Observations report [`CapacityState::Unknown`] with
+    /// [`CapacityUnknownReason::ProviderQuotaNotObservable`].
+    #[default]
+    Unknown,
+    /// The provider performs no physical-byte capacity admission for this
+    /// bucket and account, for example a public cloud object store without a
+    /// bucket quota.
+    ///
+    /// Observations report [`CapacityState::ProviderManaged`] after the
+    /// authenticated account reaches the bucket. Consumers must still enforce
+    /// a finite service-owned quota.
+    ProviderManaged,
+}
+
+impl S3CapacityMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::ProviderManaged => "provider_managed",
+        }
+    }
+}
+
 /// S3-compatible storage backend.
 #[derive(Clone, Debug)]
 pub struct S3StorageBackend {
     config: S3StorageConfig,
+    capacity_mode: S3CapacityMode,
     client: Client,
 }
 
@@ -82,14 +117,28 @@ impl S3StorageBackend {
 
         Self {
             config,
+            capacity_mode: S3CapacityMode::default(),
             client: Client::from_conf(s3_config),
         }
+    }
+
+    /// Declares how this destination reports capacity.
+    #[must_use]
+    pub fn with_capacity_mode(mut self, mode: S3CapacityMode) -> Self {
+        self.capacity_mode = mode;
+        self
     }
 
     /// Returns the backend configuration.
     #[must_use]
     pub const fn config(&self) -> &S3StorageConfig {
         &self.config
+    }
+
+    /// Returns the declared capacity mode.
+    #[must_use]
+    pub const fn capacity_mode(&self) -> S3CapacityMode {
+        self.capacity_mode
     }
 
     fn provider_key(&self, key: &str) -> Result<String, StorageError> {
@@ -327,6 +376,55 @@ impl BlobStore for S3StorageBackend {
 
     fn backend(&self) -> StorageBackend {
         StorageBackend::S3
+    }
+
+    fn capacity_binding(&self) -> CapacityBinding {
+        let path_style = if self.config.path_style {
+            "true"
+        } else {
+            "false"
+        };
+        CapacityBinding::new(
+            StorageBackend::S3,
+            &[
+                ("endpoint_url", self.config.endpoint_url.as_str()),
+                ("region", self.config.region.as_str()),
+                ("bucket", self.config.bucket.as_str()),
+                ("key_prefix", self.config.key_prefix.as_deref().unwrap_or("")),
+                ("access_key_id", self.config.access_key_id.as_str()),
+                ("path_style", path_style),
+                ("capacity_mode", self.capacity_mode.as_str()),
+            ],
+        )
+    }
+
+    async fn observe_capacity(
+        &self,
+        request: &CapacityRequest,
+    ) -> Result<CapacityObservation, StorageError> {
+        // Prove the configured account reaches the exact bucket before
+        // reporting any state for it.
+        let head = self
+            .client
+            .head_bucket()
+            .bucket(&self.config.bucket)
+            .send()
+            .await
+            .map_err(map_s3_error)?;
+        let placement = head
+            .bucket_region()
+            .map(|region| CapacityPlacement(format!("s3:region={region}")));
+        let state = match self.capacity_mode {
+            S3CapacityMode::Unknown => CapacityState::Unknown(UnknownCapacity {
+                reason: CapacityUnknownReason::ProviderQuotaNotObservable,
+            }),
+            S3CapacityMode::ProviderManaged => {
+                CapacityState::ProviderManaged(ProviderManagedCapacity {
+                    basis: ProviderManagedBasis::DeclaredAndReachable,
+                })
+            }
+        };
+        Ok(CapacityObservation::new(self.capacity_binding(), placement, state, request))
     }
 
     async fn put_blob(

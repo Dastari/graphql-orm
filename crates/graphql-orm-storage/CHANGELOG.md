@@ -3,12 +3,32 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.7.6 - 2026-10-20
+
+- Added `BlobStore::observe_capacity` and `BlobStore::capacity_binding`. They
+  return a bounded `CapacityObservation` bound to a non-secret digest of the
+  destination's location, account and capacity configuration. Each observation
+  has an observed placement, an observation time and an expiry.
+  `CapacityObservation::validate_for` rejects changed bindings, stale
+  observations and future observations before admission.
+- `CapacityState` distinguishes `Known` (caller-available bytes kept separate
+  from physical-available and total bytes, plus quota accounting),
+  `ProviderManaged` and `Unknown` with a reason. Observation failures are
+  errors. Unknown never means unlimited.
+- Local: `fstatvfs` on the root, plus the effective user's and group's quotas
+  through Linux `quotactl_fd`. SMB: an authenticated `FileFsFullSizeInformation`
+  and volume-serial query on the configured prefix. S3: `HeadBucket` and the new
+  `S3CapacityMode`, which defaults to `Unknown`.
+- Additive only. Custom providers inherit `Unknown(Unsupported)` without I/O.
+  The `local` feature now depends on `libc` on Unix and enables Tokio's `rt`.
+  No storage key, object format or persisted-data migration is required.
 
 ## 0.7.5 - 2026-10-18
 
