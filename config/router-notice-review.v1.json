@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
-  "cargoLockSha256": "0d64413d9a85f60454c42dda5191767fcdbf1445459450ab57a11b8e4ac70c4e",
-  "componentsSha256": "ed0ed9a9760c2040a17ca930f53c9bb760fec574fa9c2299d2f61b52ab17caf5",
+  "cargoLockSha256": "cee044e1d7ffd5430bfb521573ab58b7e1fbb4e8a46427e993f4f04c0c653e5e",
+  "componentsSha256": "55866b51dbf219788e6132ff4620a1a77f23c1e023f1100f1eedef327a0c1b1b",
   "target": "x86_64-unknown-linux-gnu",
   "features": [
     "auth-agql"
