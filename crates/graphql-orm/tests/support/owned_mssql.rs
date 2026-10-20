@@ -25,6 +25,48 @@ fn pull_policy() -> Result<&'static str, String> {
     }
 }
 
+/// Optional external run token (`GRAPHQL_ORM_TEST_RUN_TOKEN`). When set, it is
+/// added as the `graphql-orm.test-run` label so an external controller can
+/// identify exactly the containers this run created.
+fn run_token() -> Result<Option<String>, String> {
+    let Some(value) = std::env::var_os("GRAPHQL_ORM_TEST_RUN_TOKEN") else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| "GRAPHQL_ORM_TEST_RUN_TOKEN must be UTF-8".to_string())?;
+    let valid = (8..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid {
+        Ok(Some(value))
+    } else {
+        Err("GRAPHQL_ORM_TEST_RUN_TOKEN must be 8-64 of [a-z0-9-]".to_string())
+    }
+}
+
+/// Records the exact container ID in `GRAPHQL_ORM_TEST_MSSQL_EVIDENCE_DIR`, when
+/// set, with exclusive creation, so an existing record is never overwritten.
+fn record_owned_container(
+    container_id: &str,
+    name: &str,
+    run_token: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
+    let Some(directory) = std::env::var_os("GRAPHQL_ORM_TEST_MSSQL_EVIDENCE_DIR") else {
+        return Ok(());
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(std::path::Path::new(&directory).join(format!("{container_id}.owned")))?;
+    writeln!(file, "{container_id}\n{name}\n{}", run_token.unwrap_or(""))?;
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Optional writable-layer size such as `8G`, passed as `--storage-opt size=`.
 /// Only some storage drivers support it; Docker rejects the run otherwise, so
 /// a requested bound is never silently dropped.
@@ -82,6 +124,7 @@ impl OwnedSqlServer {
         }
         let pull = pull_policy()?;
         let storage = storage_size()?;
+        let run = run_token()?;
         let token = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
         let name = format!("graphql-orm-mssql-writes-{token}");
         let password = format!("Gom_{token}A9!");
@@ -118,6 +161,10 @@ impl OwnedSqlServer {
             "--env",
             sa_password.as_str(),
         ];
+        let run_label = run.as_ref().map(|token| format!("graphql-orm.test-run={token}"));
+        if let Some(label) = &run_label {
+            arguments.extend(["--label", label.as_str()]);
+        }
         let storage_option = storage.map(|size| format!("size={size}"));
         if let Some(option) = &storage_option {
             arguments.extend(["--storage-opt", option.as_str()]);
@@ -142,6 +189,8 @@ impl OwnedSqlServer {
             connection_string: String::new(),
             cleaned: false,
         };
+        // On failure, `owned` drops here and removes the exact container.
+        record_owned_container(&owned.container_id, &owned.name, run.as_deref())?;
         let port = Command::new("docker")
             .args(["port", &owned.name, "1433/tcp"])
             .output()?;

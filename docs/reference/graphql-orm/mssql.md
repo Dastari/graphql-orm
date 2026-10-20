@@ -522,7 +522,9 @@ json-file log. It never pulls unless `GRAPHQL_ORM_TEST_MSSQL_PULL=missing` is se
 workflows set it), so local runs need the pinned image already cached.
 `GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE=8G` additionally bounds the writable layer through
 `--storage-opt size=`; storage drivers that cannot enforce it make the run fail rather than
-dropping the bound:
+dropping the bound. A controller may set `GRAPHQL_ORM_TEST_RUN_TOKEN` (8-64 of `[a-z0-9-]`) to
+add a `graphql-orm.test-run` label, and `GRAPHQL_ORM_TEST_MSSQL_EVIDENCE_DIR` to receive an
+exclusively created `<container-id>.owned` record for every container the fixture starts:
 
 ```bash
 scripts/run-owned-database-lanes.sh mssql

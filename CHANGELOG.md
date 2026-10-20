@@ -28,6 +28,10 @@ for historical context.
   1024-task PID limit, one bounded 16 MiB json-file log, and an optional
   writable-layer bound (`GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE`, for example
   `8G`, rejected by Docker where the storage driver cannot enforce it).
+  An optional `GRAPHQL_ORM_TEST_RUN_TOKEN` adds a `graphql-orm.test-run`
+  label, and `GRAPHQL_ORM_TEST_MSSQL_EVIDENCE_DIR` receives each exact
+  container ID by exclusive creation, so an external controller can clean up
+  only the containers its run created.
 
 ## 0.55.1 (unreleased)
 
