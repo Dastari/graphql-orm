@@ -443,7 +443,8 @@ impl BlobStore for S3StorageBackend {
         let observed_at = OffsetDateTime::now_utc();
         let mut head = self.client.head_bucket().bucket(&self.config.bucket);
         if let Some(owner) = self.capacity_mode.expected_bucket_owner() {
-            aws_general_purpose_configuration(&self.config, owner).map_err(s3_configuration_error)?;
+            aws_general_purpose_configuration(&self.config, owner)
+                .map_err(s3_configuration_error)?;
             head = head.expected_bucket_owner(owner);
         }
         let head = head.send().await.map_err(map_s3_error)?;
@@ -890,7 +891,10 @@ mod tests {
             "https://s3.ap-southeast-2.amazonaws.com/",
             "https://s3.dualstack.ap-southeast-2.amazonaws.com",
         ] {
-            assert!(is_aws_regional_endpoint(endpoint, "ap-southeast-2"), "{endpoint}");
+            assert!(
+                is_aws_regional_endpoint(endpoint, "ap-southeast-2"),
+                "{endpoint}"
+            );
         }
         for endpoint in [
             "http://s3.ap-southeast-2.amazonaws.com",
@@ -901,10 +905,16 @@ mod tests {
             "https://minio.example.test",
             "https://s3.cn-north-1.amazonaws.com.cn",
         ] {
-            assert!(!is_aws_regional_endpoint(endpoint, "ap-southeast-2"), "{endpoint}");
+            assert!(
+                !is_aws_regional_endpoint(endpoint, "ap-southeast-2"),
+                "{endpoint}"
+            );
         }
         assert!(!is_aws_regional_endpoint("https://s3..amazonaws.com", ""));
-        assert!(!is_aws_regional_endpoint("https://s3.x/y.amazonaws.com", "x/y"));
+        assert!(!is_aws_regional_endpoint(
+            "https://s3.x/y.amazonaws.com",
+            "x/y"
+        ));
     }
 
     #[test]
@@ -927,8 +937,15 @@ mod tests {
 
     #[test]
     fn aws_general_purpose_configuration_requires_account_endpoint_and_bucket() {
-        let aws = config("https://s3.ap-southeast-2.amazonaws.com", "ap-southeast-2", "backups");
-        assert_eq!(aws_general_purpose_configuration(&aws, "123456789012"), Ok(()));
+        let aws = config(
+            "https://s3.ap-southeast-2.amazonaws.com",
+            "ap-southeast-2",
+            "backups",
+        );
+        assert_eq!(
+            aws_general_purpose_configuration(&aws, "123456789012"),
+            Ok(())
+        );
         assert!(aws_general_purpose_configuration(&aws, "12345678901").is_err());
         assert!(aws_general_purpose_configuration(&aws, "12345678901x").is_err());
         let custom = config("https://minio.example.test", "ap-southeast-2", "backups");
