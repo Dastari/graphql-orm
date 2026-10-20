@@ -18,9 +18,9 @@ use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
     FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
-    FileFsObjectIdInformation, FileFullDirectoryInformation, FileIdInformation,
-    FileRenameInformation, FileStandardInformation, Resource, Status, UncPath,
-    connection::EncryptionMode,
+    FileFsObjectIdInformation, FileFsVolumeInformation, FileFullDirectoryInformation,
+    FileIdInformation, FileInternalInformation, FileRenameInformation, FileStandardInformation,
+    Resource, Status, UncPath, connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
 use time::OffsetDateTime;
@@ -2252,12 +2252,7 @@ impl SmbStorageBackend {
                 ));
             }
         };
-        let identity = self
-            .with_timeout(
-                "namespace_identity",
-                directory.query_info::<FileIdInformation>(),
-            )
-            .await;
+        let identity = self.query_file_identity(&directory).await;
         // Servers that do not support volume object IDs only omit that fact.
         let object = self
             .with_timeout(
@@ -2266,17 +2261,54 @@ impl SmbStorageBackend {
             )
             .await;
         let closed = self.with_timeout("close", directory.close()).await;
-        let identity = identity?;
+        let (volume_serial, file_id) = identity?;
         closed?;
         let volume_object_id = object
             .ok()
             .map(|info| info.object_id.to_string())
             .filter(|object_id| object_id != ZERO_GUID);
         Ok(SmbDirectoryIdentity {
-            volume_serial: identity.volume_serial_number,
-            file_id: identity.file_id,
+            volume_serial,
+            file_id,
             volume_object_id,
         })
+    }
+
+    /// `FileIdInformation` (128-bit file ID plus 64-bit volume serial) where the
+    /// server supports it. Otherwise (for example on Samba, which reports an
+    /// invalid info class), the 64-bit `FileInternalInformation` index plus the
+    /// 32-bit `FileFsVolumeInformation` serial.
+    async fn query_file_identity(
+        &self,
+        directory: &Directory,
+    ) -> Result<(u64, u128), StorageError> {
+        match self
+            .with_timeout(
+                "namespace_identity",
+                directory.query_info::<FileIdInformation>(),
+            )
+            .await
+        {
+            Ok(identity) => return Ok((identity.volume_serial_number, identity.file_id)),
+            Err(error) if error.is_retryable() => return Err(error),
+            Err(_) => {}
+        }
+        let internal = self
+            .with_timeout(
+                "namespace_identity",
+                directory.query_info::<FileInternalInformation>(),
+            )
+            .await?;
+        let volume = self
+            .with_timeout(
+                "namespace_identity",
+                directory.query_fs_info::<FileFsVolumeInformation>(),
+            )
+            .await?;
+        Ok((
+            u64::from(volume.volume_serial_number),
+            u128::from(internal.index_number),
+        ))
     }
 
     async fn namespace_epoch(&self) -> ObservationEpoch {
