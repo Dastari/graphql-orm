@@ -7,6 +7,8 @@ mod backend;
 ))]
 mod backup;
 mod core;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod default_equivalence;
 mod dialect;
 mod execution;
 mod lease;
@@ -17,8 +19,10 @@ mod owned_foreign_keys;
 mod owned_schema;
 mod query;
 mod rls;
+mod runtime_format;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod runtime_key_read;
+mod runtime_literal;
 mod runtime_migration;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod runtime_mutation;
@@ -50,8 +54,10 @@ pub use operation_metadata::*;
 pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
 pub use query::*;
 pub use rls::*;
+pub use runtime_format::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use runtime_key_read::*;
+pub use runtime_literal::*;
 pub use runtime_migration::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use runtime_mutation::*;

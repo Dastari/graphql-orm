@@ -248,6 +248,7 @@ pub(super) struct Prepared {
     visibility: Option<RuntimePredicate>,
     limits: RuntimeGraphqlLimits,
     shape: super::execution::OutputShape,
+    projected: Vec<super::projection::ProjectedPlan>,
     response_bytes: Arc<std::sync::atomic::AtomicUsize>,
     // Shared by occurrences of this response key, fresh for every execution.
     outcome: Arc<Mutex<GroupOutcome>>,
@@ -362,6 +363,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
     registry: &async_graphql::registry::Registry,
 ) -> Result<super::execution::Results, RuntimeGraphqlError> {
     let mut prepared = BTreeMap::new();
+    let mut projection_calls = 0usize;
     let response_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for field in planner.selections(selections, root, 0)? {
         for module in modules {
@@ -388,6 +390,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         .resolve_collection(&c.id)
                         .map_err(record_error)?;
                     let mut fields = vec![];
+                    let mut projected = vec![];
                     for payload in planner.selections(
                         &field.selection_set.node,
                         &format!("{object}MutationPayload"),
@@ -416,10 +419,26 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                 .schema
                                 .resolve_field(&collection, &f.id)
                                 .map_err(record_error)?;
+                            if let Some(binding) = module.projection(&f.id) {
+                                let names = planner.projected_selection(binding, &selected, 3)?;
+                                super::projection::merge_projected(
+                                    &mut projected,
+                                    handle.clone(),
+                                    &f.api_name,
+                                    binding,
+                                    names,
+                                );
+                            }
                             if !fields.contains(&handle) {
                                 fields.push(handle);
                             }
                         }
+                    }
+                    projection_calls = projection_calls
+                        .checked_add(projected.len())
+                        .ok_or_else(invalid)?;
+                    if projection_calls > planner.limits.projection.max_calls {
+                        return Err(RuntimeGraphqlError::new("cost_exceeded"));
                     }
                     let mut intent = super::plan::FilterIntent::default();
                     let expected = args
@@ -462,6 +481,10 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                 logical_operators: intent.logical,
                                 relation: None,
                                 include_count: false,
+                                projections: projected
+                                    .iter()
+                                    .map(super::projection::ProjectedPlan::selection)
+                                    .collect(),
                             })
                             .await?
                     };
@@ -563,6 +586,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             visibility: grant.predicate,
                             limits: planner.limits,
                             shape,
+                            projected,
                             response_bytes: response_bytes.clone(),
                             outcome: Arc::new(Mutex::new(GroupOutcome::Ready)),
                         },
@@ -727,6 +751,11 @@ async fn execute_once<B: RuntimeMutationBackend>(
                 kind,
                 projection,
                 record,
+                projections: prepared
+                    .projected
+                    .iter()
+                    .map(super::projection::ProjectedPlan::selection)
+                    .collect(),
             }),
     )
     .await;
@@ -749,6 +778,13 @@ async fn execute_once<B: RuntimeMutationBackend>(
         .find(|c| &c.id == prepared.collection.id())
         .ok_or_else(|| committed_error("mutation_payload_failed"))?;
     for field in projection.fields() {
+        if prepared
+            .projected
+            .iter()
+            .any(|projected| &projected.field == field)
+        {
+            continue;
+        }
         let value = match record
             .state(field)
             .map_err(|_| committed_error("mutation_payload_failed"))?
@@ -767,6 +803,37 @@ async fn execute_once<B: RuntimeMutationBackend>(
             .ok_or_else(|| committed_error("mutation_payload_failed"))?
             .api_name;
         values.insert(async_graphql::Name::new(name), value);
+    }
+    // Host objects resolve only after commit and the independent release check.
+    for projected in &prepared.projected {
+        let stored = match record
+            .state(&projected.field)
+            .map_err(|_| committed_error("mutation_payload_failed"))?
+        {
+            RuntimeFieldState::Value(value) => value.clone(),
+            RuntimeFieldState::Null => RuntimeValue::Null,
+            RuntimeFieldState::Unloaded => return Err(committed_error("mutation_payload_failed")),
+        };
+        let (mut value, _) = projected
+            .resolve(
+                &prepared.module.schema,
+                std::slice::from_ref(&stored),
+                super::RuntimeProjectionPurpose::MutationResult {
+                    action: effect.action(),
+                    kind,
+                },
+                context.auth.as_ref(),
+                context.projection_context.as_deref(),
+                prepared.limits,
+            )
+            .await
+            .map_err(|_| committed_error("mutation_payload_failed"))?;
+        values.insert(
+            async_graphql::Name::new(&projected.api_name),
+            value
+                .pop()
+                .ok_or_else(|| committed_error("mutation_payload_failed"))?,
+        );
     }
     let payload = Value::Object(
         [(async_graphql::Name::new("record"), Value::Object(values))]
@@ -792,6 +859,8 @@ pub struct RuntimeMutationOutputCheck<'a> {
     pub kind: RuntimeMutationRecordKind,
     pub projection: &'a RuntimeProjection,
     pub record: &'a RuntimeRecord,
+    /// Projected fields whose host objects will be resolved after this release check.
+    pub projections: Vec<super::RuntimeProjectedSelection<'a>>,
 }
 fn committed_error(code: &'static str) -> async_graphql::Error {
     use async_graphql::ErrorExtensions;

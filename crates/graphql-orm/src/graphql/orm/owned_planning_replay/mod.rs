@@ -468,7 +468,13 @@ fn compute_after_target(
     let owners = ownership.0.len() as u64;
     let c = effects(current, target, a, b, owners, l, cap)?;
     l.reserve(c)?;
-    validate_owned_effects(backend, current, target, ownership)?;
+    validate_owned_effects(
+        backend,
+        current,
+        target,
+        ownership,
+        super::super::migrations::DefaultEquivalence::Pinned8e1,
+    )?;
     let scoped = scoped_current(current, ownership, options, target);
     let c = diff(current, target, a, b, l, cap)?;
     l.reserve(c)?;
@@ -1118,6 +1124,7 @@ impl<B: RuntimeMigrationBackend> SchemaManager<'_, B> {
             steps: facts.steps.clone(),
             statements: facts.statements.clone(),
             target: target.clone(),
+            equivalence: super::super::migrations::DefaultEquivalence::Pinned8e1,
         };
         let data = Data {
             recipe,

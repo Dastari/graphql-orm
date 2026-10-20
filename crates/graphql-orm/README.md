@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.55.0 pairs runtime/macros for typed runtime literal defaults, semantic field
+formats and reviewed runtime GraphQL projections; see the
+[workspace migration](../../MIGRATION.md#0540-to-0550-typed-literal-defaults-and-semantic-field-formats).
+
 Version 0.54.1 pairs the runtime/macros with the reviewed Auth 0.22.1 signed
 role-catalogue correction. Generated code, SDL and persistence are unchanged.
 Adopt one coordinated published workspace/Auth source; see the

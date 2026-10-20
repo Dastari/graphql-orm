@@ -322,13 +322,27 @@ pub trait RuntimeWriteAuthority<B: RuntimeMutationBackend>: Send + Sync {
 pub struct RuntimeMutationEffect {
     action: RuntimeMutationAction,
     record: Option<RuntimeRecord>,
+    staged: RuntimeRecord,
+    preimage: Option<RuntimeRecord>,
 }
 impl RuntimeMutationEffect {
     pub fn action(&self) -> RuntimeMutationAction {
         self.action
     }
+    /// The approved return projection only; this is what callers may release.
     pub fn record(&self) -> Option<&RuntimeRecord> {
         self.record.as_ref()
+    }
+    /// Authoritative staged image from the pinned transaction: key fields, written
+    /// input fields and the write grant's projection. For delete it is the authorized
+    /// preimage. Trusted hooks use it to stage related typed writes atomically; it is
+    /// never part of a GraphQL payload.
+    pub fn staged(&self) -> &RuntimeRecord {
+        &self.staged
+    }
+    /// Authorized preimage for update and delete, read under the transaction's lock.
+    pub fn preimage(&self) -> Option<&RuntimeRecord> {
+        self.preimage.as_ref()
     }
 }
 redacted_debug!(RuntimeMutationEffect);
@@ -984,6 +998,8 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         Ok(RuntimeMutationEffect {
             action: request.action,
             record,
+            staged: result,
+            preimage,
         })
     }
 }

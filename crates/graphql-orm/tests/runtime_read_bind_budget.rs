@@ -42,6 +42,7 @@ fn schema() -> ValidatedRuntimeSchema {
                 sortable: true,
                 generated: false,
                 default: None,
+                format: None,
             })
             .collect(),
             relations: vec![],

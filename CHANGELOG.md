@@ -14,6 +14,47 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.55.0 (unreleased)
+
+- Add typed, bounded runtime literal defaults for UUID, JSON (canonical JSON v1),
+  canonical base64 bytes and canonical UTC microsecond date-times, with typed
+  constructors (`RuntimeDefault::{boolean,integer,float,string,uuid,json,bytes,datetime}`)
+  and `RuntimeDefault::typed`. Full `i64` and finite `f64` domains are preserved;
+  float literals keep a fraction or exponent and negative zero follows
+  `RuntimeFloat`. Literal encoding and every previously accepted literal are
+  unchanged, so serialized schemas, canonical bytes, fingerprints and physical
+  targets of existing schemas are byte-identical.
+- Rejected defaults report `RuntimeSchemaDiagnostic::detail` with a value-free
+  `RuntimeDefaultProblem`; diagnostic messages no longer echo the literal.
+- The owned/runtime planner (`plan_owned_migration`, `validate_owned_schema`,
+  `runtime_mutation_environment` and owned apply rechecks) compares recognized
+  PostgreSQL constant defaults by value (`'…'::uuid`, `'-1'::integer`,
+  `'2147483648'::bigint`, `'-1.5'::numeric`, `jsonb`, `bytea` and session-zone
+  `timestamptz` text), so typed defaults replan as no-ops and certify. Rendering,
+  physical/plan hashes and history are unchanged; static planning and the 8e1
+  owned-planning replay recipes keep the pinned comparator byte-for-byte.
+- Add owned semantic field formats: `RuntimeField::format` with
+  `RuntimeFieldFormat`/`RuntimeFormatNamespace`/`RuntimeFormatPayload`,
+  `RuntimeFieldHandle::format` and `ValidatedRuntimeSchema::format_fingerprint`.
+  A descriptor participates in `canonical_bytes`/`fingerprint` only when present,
+  never in the structural fingerprint or physical target, so adding or editing a
+  descriptor is a new schema revision with no DDL.
+- Add reviewed runtime GraphQL projections: `RuntimeGraphqlOptions::project_field`
+  binds a `RuntimeFieldProjector` by stable field ID to an ORM-registered output
+  object; `scalar_format` serves a format as its plain scalar with identical SDL.
+  Missing or incompatible projections fail compilation. Projectors run only after
+  row/field authorization (and after commit plus output release for mutation
+  payloads), batched per layer under `RuntimeProjectionLimits`, and fail the whole
+  operation with value-free codes.
+- Add `RuntimeMutationEffect::{staged,preimage}` so trusted hooks can stage related
+  typed writes atomically from the authoritative transaction image.
+- New public fields: `RuntimeField::format`, `RuntimeSchemaDiagnostic::detail`,
+  `RuntimeReadCheck::projections`, `RuntimeMutationOutputCheck::projections`,
+  `RuntimeGraphqlLimits::projection` and `RuntimeGraphqlCost::projection_calls`;
+  new `RuntimeSchemaDiagnosticCode::InvalidFormat`. Align ORM/macros at 0.55.0;
+  no generated code, stored-data or automatic database migration.
+
+
 ## 0.54.1 (unreleased)
 
 - Pair ORM/macros 0.54.1 and AI 0.107.4 with published Auth `v0.22.1` at

@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-11
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -284,3 +284,69 @@ This conservative classification does not imply rollback; reconcile state.
 Whole-request cancellation may prevent any response. Before-commit guarded hook
 cancellation still rolls back under B's guarantees. Static transaction
 inner-timeout semantics are unchanged.
+
+## Formatted fields and host projections
+
+A field carrying a [semantic format](runtime-schema-ir.md#semantic-field-formats) is served only
+after an explicit compile-time decision; a formatted field without one fails
+`RuntimeGraphqlModule::compile` with `missing_projection`, before anything is served.
+
+- `RuntimeGraphqlOptions::scalar_format(namespace, versions)` serves every field of that
+  namespace and version range as its plain stored scalar. SDL, inputs, filters, ordering and
+  values are identical to an unformatted field; the descriptor stays visible to hosts through
+  `RuntimeFieldHandle::format()`.
+- `RuntimeGraphqlOptions::project_field(field_id, projector)` binds a reviewed
+  `RuntimeFieldProjector` to one field by stable field ID. The projector's
+  `RuntimeProjectionContract` is read once at compilation: accepted namespace, version range and
+  value kinds, a flat `RuntimeProjectedObject` of at most 32 scalar fields, and whether a stored
+  value may resolve to no object (`may_be_absent`).
+
+Compilation rejects a binding for an unknown or unformatted field (`invalid_composition`), a
+namespace/version/kind outside the contract (`incompatible_projection`), a primary-key or
+relation-key member (`unsupported_capability`; keys stay scalar so cursors, key inputs and
+relation batching are unchanged), and an object name that collides with a generated or host type
+or reuses a name with a different definition (`name_collision`). One projector and object may
+serve several fields and modules.
+
+The ORM registers the projected object type itself; its fields read only the authorized payload,
+so there is no raw builder hook. A projected field outputs `Field: Object`, nullable when the
+stored field is nullable or the contract allows absence. Create/update inputs, `WhereInput`
+filters and order enums keep the stored scalar type, and their existing collision, nullability,
+filter and cost checks remain authoritative. Selections accept aliases, fragments on the object
+type, `__typename`, `@skip`/`@include`; unknown object fields or arguments are rejected.
+
+Execution order is fixed:
+
+1. Every layer is authorized before any ORM I/O, as before. `RuntimeReadCheck::projections`
+   lists each projected field with its selected object fields; the stored field also appears in
+   `projection`. A denial fails the request and the projector is never called.
+2. After a layer's rows are read and decoded, the ORM makes **one** `resolve` call per projected
+   field per layer with the distinct non-null stored values of authorized rows only. Null stored
+   values output null without a call. Calls run sequentially, each under
+   `RuntimeProjectionLimits::call_timeout`; the planner admits `max_calls` per operation and
+   `max_values_per_call` before I/O (`cost_exceeded`).
+3. The ORM validates the result: exactly one outcome for every requested value and none for
+   other values, only declared object fields with matching kinds, nulls only where declared
+   nullable, and `Absent` only when allowed. It emits only the selected object fields, encodes
+   them with the scalar limits and charges the response budget. The stored scalar itself is
+   never emitted for a projected field.
+4. Any failure fails the whole operation with a value-free code: `projection_denied`,
+   `projection_failed`, `projection_timeout` or `cost_exceeded`. Projector error text and values
+   never reach the response.
+
+Mutation payloads use the same contract after the transaction commits and
+`authorize_mutation_result` releases the record (`RuntimeMutationOutputCheck::projections`
+lists them). The batch purpose is `RuntimeProjectionPurpose::MutationResult { action, kind }`;
+a delete resolves the authorized preimage. A projection failure then reports the committed
+outcome: `mutation_payload_failed` with `outcome: committed` and `retryable: false`.
+
+`RuntimeFieldProjector` is `Send + Sync + 'static` and held in an `Arc` by the compiled module.
+`RuntimeProjectionBatch` borrows the schema, field handle, descriptor, values, selection,
+`DbAuthContext` and the optional trusted `RuntimeGraphqlRequest::with_projection_context` value
+for the duration of one call only. Projectors must be read-only and cancel-safe: the ORM drops
+the future on request cancellation or timeout. Persistent side effects belong in the mutation
+transaction (see [hooks](runtime-mutations.md#cancellation-rollback-and-commit)), never in a
+projector.
+
+The executable [projection example](../../../crates/graphql-orm/examples/runtime_field_projection.rs)
+serves a projected file reference and a plain-scalar email format side by side.

@@ -33,6 +33,7 @@ pub(super) struct Plan {
     pub count: bool,
     pub relation: Option<RuntimeRelationHandle>,
     pub children: Vec<Plan>,
+    pub projected: Vec<super::projection::ProjectedPlan>,
 }
 impl Plan {
     pub fn relations(&self) -> Vec<RuntimeRelationHandle> {
@@ -316,6 +317,7 @@ impl Planner<'_> {
         }
         let mut fields = Vec::new();
         let mut children = Vec::new();
+        let mut projected_fields = Vec::new();
         for selected in self.selections(&node_set, &object, depth + 1)? {
             if selected.name.node == "__typename" {
                 continue;
@@ -329,6 +331,16 @@ impl Planner<'_> {
                     .schema
                     .resolve_field(&collection, &f.id)
                     .map_err(record_error)?;
+                if let Some(binding) = module.projection(&f.id) {
+                    let names = self.projected_selection(binding, &selected, depth + 1)?;
+                    super::projection::merge_projected(
+                        &mut projected_fields,
+                        handle.clone(),
+                        &f.api_name,
+                        binding,
+                        names,
+                    );
+                }
                 if !fields.contains(&handle) {
                     fields.push(handle);
                 }
@@ -363,6 +375,18 @@ impl Planner<'_> {
                 return Err(invalid());
             }
         }
+        if !projected_fields.is_empty() {
+            self.cost.projection_calls = self
+                .cost
+                .projection_calls
+                .checked_add(projected_fields.len())
+                .ok_or_else(invalid)?;
+            if self.cost.projection_calls > self.limits.projection.max_calls
+                || nodes > self.limits.projection.max_values_per_call
+            {
+                return Err(RuntimeGraphqlError::new("cost_exceeded"));
+            }
+        }
         // A count-only/relationship-only request still needs an internal row anchor.
         let projected = if fields.is_empty() {
             vec![
@@ -394,7 +418,30 @@ impl Planner<'_> {
             count,
             relation,
             children,
+            projected: projected_fields,
         })
+    }
+    /// Validate a projected field's object subselection; returns selected field names.
+    pub(super) fn projected_selection(
+        &mut self,
+        binding: &super::projection::ProjectionBinding,
+        field: &Field,
+        depth: usize,
+    ) -> Result<Vec<String>, RuntimeGraphqlError> {
+        let object = &binding.contract.object;
+        let mut names: Vec<String> = Vec::new();
+        for selected in self.selections(&field.selection_set.node, object.name(), depth)? {
+            if selected.name.node == "__typename" {
+                continue;
+            }
+            if !selected.arguments.is_empty() || object.field(&selected.name.node).is_none() {
+                return Err(invalid());
+            }
+            if !names.iter().any(|name| name == selected.name.node.as_str()) {
+                names.push(selected.name.node.to_string());
+            }
+        }
+        Ok(names)
     }
 }
 
@@ -772,6 +819,7 @@ mod checked_compatibility_tests {
                     sortable: n == "id",
                     generated: false,
                     default: None,
+                    format: None,
                 })
                 .collect(),
                 relations: vec![],

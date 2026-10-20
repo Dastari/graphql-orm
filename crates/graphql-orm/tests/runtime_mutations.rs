@@ -59,6 +59,7 @@ fn definition() -> RuntimeSchema {
             sortable: true,
             generated: false,
             default,
+            format: None,
         });
     }
     RuntimeSchema {
@@ -886,6 +887,7 @@ async fn generated_uuid_json_null_bytes_and_exact_values_use_existing_runtime_ty
             sortable: false,
             generated: false,
             default: None,
+            format: None,
         });
     }
     let f = Fixture::with_definition(schema).await;
@@ -1017,6 +1019,7 @@ async fn incoming_modifying_dependencies_fail_closed_while_restrict_remains_usab
             sortable: false,
             generated: false,
             default: None,
+            format: None,
         });
         schema.collections[0].relations.push(RuntimeRelation {
             id: RelationId::new("parent_link").unwrap(),

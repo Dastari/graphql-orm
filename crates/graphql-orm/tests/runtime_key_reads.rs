@@ -55,6 +55,7 @@ fn definition(composite: bool) -> RuntimeSchema {
                 sortable: false,
                 generated: false,
                 default: None,
+                format: None,
             })
             .collect(),
             relations: vec![],

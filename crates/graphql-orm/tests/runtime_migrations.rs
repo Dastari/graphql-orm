@@ -304,6 +304,7 @@ async fn sqlite_guards_baseline_removed_ownership_and_rollback()
         sortable: false,
         generated: false,
         default: None,
+        format: None,
     });
     let upgrade = definition
         .validate()?
@@ -673,6 +674,7 @@ async fn sqlite_composite_keys_all_runtime_types_and_timestamp_defaults()
             sortable: false,
             generated,
             default,
+            format: None,
         });
     }
     let target = definition
@@ -932,6 +934,7 @@ async fn postgres_competing_baselines_destructive_guards_and_atomic_failure()
         sortable: false,
         generated: false,
         default: None,
+        format: None,
     });
     let target = definition
         .validate()?
@@ -1921,6 +1924,7 @@ async fn datetime_fixed_point<B: RuntimeMigrationBackend>(
                 sortable: false,
                 generated: false,
                 default,
+                format: None,
             });
         }
         let schema = std::sync::Arc::new(definition.validate()?);
@@ -2021,6 +2025,7 @@ async fn owned_string_defaults_fixed_point<B: RuntimeMigrationBackend>(
             sortable: false,
             generated: false,
             default: Some(RuntimeDefault::Literal(literal.into())),
+            format: None,
         });
         if position == 2 {
             collection.indexes.push(RuntimeIndex {

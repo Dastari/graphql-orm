@@ -40,6 +40,7 @@ fn schema() -> ValidatedRuntimeSchema {
                 sortable: kind != RuntimeValueKind::Json,
                 generated: false,
                 default: None,
+                format: None,
             })
             .collect(),
             relations: vec![],

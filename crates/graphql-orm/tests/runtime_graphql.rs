@@ -133,6 +133,7 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -> Runtim
         sortable: kind != RuntimeValueKind::Json,
         generated: false,
         default: None,
+        format: None,
     }
 }
 fn schema() -> Arc<ValidatedRuntimeSchema> {

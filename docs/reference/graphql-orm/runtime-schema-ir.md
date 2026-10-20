@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,7 +21,10 @@ and `IndexId`.
 - `RuntimeSchema` → `RuntimeCollection` → `RuntimeField` / `RuntimeRelation` / `RuntimeIndex`.
 - `RuntimeValueKind`: `boolean`, `integer`, `float`, `string`, `uuid`, `json`, `bytes`,
   `datetime`. Date-time is first-class here; backends choose the storage representation.
-- `RuntimeDefault`: portable `Literal` values or `CurrentTimestamp`.
+- `RuntimeDefault`: a `Literal` in the canonical text grammar of the field's value kind, or
+  the database-evaluated `CurrentTimestamp`. See [typed literal defaults](#typed-literal-defaults).
+- `RuntimeField::format`: an optional owned semantic descriptor. See
+  [semantic field formats](#semantic-field-formats).
 - Relations hold ordered `RelationKeyPair` lists, so source/target key arity mismatches are
   unrepresentable. Delete behavior (`restrict`/`cascade`/`set_null`) belongs only on the
   foreign-key-enforcing side.
@@ -66,9 +69,77 @@ Only a `ValidatedRuntimeSchema` produces canonical output:
   successful conversion plus equal structural fingerprints cannot silently equate schemas with
   different security or persistence behavior.
 
+- `format_fingerprint()` — only the semantic field format descriptors, keyed by stable
+  collection and field IDs. A schema without descriptors has one constant value.
+
 Fingerprints use FNV-1a like the existing schema hashes. They detect structural drift; they are
 not cryptographic signatures. The existing `stable_schema_hash`/backup hashing behavior is
 unchanged.
+
+## Typed literal defaults
+
+`RuntimeDefault::Literal` keeps one owned text encoding; the field's value kind selects its
+grammar. Build literals with `RuntimeDefault::{boolean, integer, float, string, uuid, json,
+bytes, datetime}` and read the typed value a backend returns for an omitted create input with
+`RuntimeDefault::typed(kind)`.
+
+| Kind | Accepted literal text | Constructor output |
+| --- | --- | --- |
+| boolean, integer, float, string | unchanged from earlier releases (`i64`/finite `f64` text, e.g. `+5`, `007`, `.5`, `1e5`, `-0.0`) | minimal decimal; floats keep `.0` or an exponent, negative zero becomes `0.0` |
+| uuid | unchanged: any `Uuid::parse_str` form, rendered exactly as stored | lowercase hyphenated |
+| json | canonical JSON v1 only | canonical JSON v1 |
+| bytes | padded standard base64 whose re-encoding is identical, at most 8 KiB decoded | same |
+| datetime | `YYYY-MM-DDTHH:MM:SS.ffffffZ`, years 0001–9999 | from `RuntimeDateTime`; parse authored text with `RuntimeDateTime::parse_exact`, which normalizes offsets and rejects sub-microsecond precision |
+
+Canonical JSON v1 is compact text with unique object keys sorted by UTF-8 bytes, minimal string
+escapes (`\"`, `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, other controls as lowercase `\u00xx`),
+integers in the `i64`/`u64` range in minimal form, and decimals with a fraction but no exponent,
+no trailing fractional zero except `X.0`, no negative zero and at most 17 significant digits.
+Bounds are 16 KiB, depth 32 and 1024 values. PostgreSQL `jsonb` preserves these spellings, so
+SQLite and PostgreSQL return the same typed JSON value.
+
+Every literal accepted by earlier releases is still accepted with identical serialized form,
+canonical bytes and physical rendering. A rejected default reports
+`RuntimeSchemaDiagnosticCode::InvalidDefault` with `detail:
+RuntimeSchemaDiagnosticDetail::Default(RuntimeDefaultProblem)`; neither the message nor the
+detail contains the submitted literal. `CurrentTimestamp` remains a database-evaluated
+expression and is valid only for datetime and epoch-second integer fields.
+
+## Semantic field formats
+
+A `RuntimeFieldFormat` describes what a stored scalar means — for example an external
+resource reference stored as a UUID — separately from its value kind, physical type and
+nullability. It is plain owned data:
+
+- `namespace`: `RuntimeFormatNamespace`, two or more `[a-z][a-z0-9_]*` segments separated by
+  `.`, at most 64 bytes. The first segment `graphql_orm` is reserved.
+- `version`: a positive `u16`.
+- `payload`: `RuntimeFormatPayload`, a JSON object of null, boolean, `i64`, string, list and
+  object values. Floats are rejected so identity never depends on float formatting. Keys are
+  `[a-z][a-z0-9_]*`; bounds are 4 KiB canonical bytes, depth 8, 256 values and 1 KiB strings.
+  An empty payload is omitted from serialization.
+
+The ORM validates descriptors, preserves them through serde, validation and field handles
+(`RuntimeFieldHandle::format`), and never interprets them. An invalid descriptor reports
+`RuntimeSchemaDiagnosticCode::InvalidFormat` with a value-free `RuntimeFormatProblem` detail;
+deserialization rejects invalid namespaces, zero versions, float payloads and unknown properties.
+
+Identity rules:
+
+| Identity | Schema without descriptors | Descriptor added, changed or removed |
+| --- | --- | --- |
+| serialized JSON | byte-identical; `format` is omitted when absent | gains `"format": {…}` |
+| `canonical_bytes()` / `fingerprint()` | byte-identical | changes; this is the stale-write binding for handles, records, cursors, GraphQL `expectedSchema` and mutation environments |
+| `structural_fingerprint()` | byte-identical | unchanged; descriptors are semantic, not structural |
+| physical target hash, plan hash, migration history | byte-identical | unchanged; there is no DDL |
+
+The descriptor joins the ID-bearing canonical line of its field as
+`|format="<namespace>@<version>:<canonical payload>"`. Rebuild the runtime mutation environment
+for a descriptor-only revision; certification introspects and needs no DDL. Readers older than
+0.55.0 reject serialized documents that contain `format`. The serialized format version stays 1.
+
+Runtime GraphQL serves a formatted field only through an explicit plain-scalar allowance or a
+reviewed projector; see [formatted fields](runtime-graphql.md#formatted-fields-and-host-projections).
 
 ## Static conversion
 
