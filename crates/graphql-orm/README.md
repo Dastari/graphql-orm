@@ -10,8 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.55.1 refreshes the backend-coexistence fixture lock for graphql-orm-ai
-0.109.0. Source, public API, generated code, SDL and persistence are unchanged.
+Version 0.56.0 adds exact SQL Server `MONEY` typed reads through
+`#[graphql_orm(mssql_money)]`. The generated read projection casts the native
+column to `DECIMAL(19,4)` under its original alias before decoding; ordinary
+portable decimals retain their precision-18 limit. See the
+[SQL Server reference](../../docs/reference/graphql-orm/mssql.md) and
+[migration guide](../../MIGRATION.md#0551-to-0560-exact-sql-server-money-reads).
 
 Version 0.55.0 pairs runtime/macros for typed runtime literal defaults, semantic field
 formats and reviewed runtime GraphQL projections; see the
