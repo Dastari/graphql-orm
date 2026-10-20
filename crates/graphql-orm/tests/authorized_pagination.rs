@@ -229,7 +229,11 @@ async fn execute_custom_page(
     );
     let request = async_graphql::Request::new(query)
         .data("a".to_string())
-        .data(AuthSubject::builder("a").scopes(vec!["records.page".into()]).build())
+        .data(
+            AuthSubject::builder("a")
+                .scopes(vec!["records.page".into()])
+                .build(),
+        )
         .data(ServerGeneration(generation));
     schema.execute(request).await
 }
@@ -262,7 +266,9 @@ async fn custom_resolver_reads_current_server_context_on_each_request() {
     let first = execute_custom_page(&schema, generation.clone(), None).await;
     assert!(first.errors.is_empty(), "{:?}", first.errors);
     let first: Value = serde_json::from_str(
-        first.data.into_json().unwrap()["protectedPage"].as_str().unwrap(),
+        first.data.into_json().unwrap()["protectedPage"]
+            .as_str()
+            .unwrap(),
     )
     .unwrap();
     let cursor = first["cursor"].as_str().unwrap();
@@ -271,7 +277,9 @@ async fn custom_resolver_reads_current_server_context_on_each_request() {
     let second = execute_custom_page(&schema, generation.clone(), Some(cursor)).await;
     assert!(second.errors.is_empty(), "{:?}", second.errors);
     let second: Value = serde_json::from_str(
-        second.data.into_json().unwrap()["protectedPage"].as_str().unwrap(),
+        second.data.into_json().unwrap()["protectedPage"]
+            .as_str()
+            .unwrap(),
     )
     .unwrap();
     assert_ne!(first["ids"], second["ids"]);
@@ -280,7 +288,10 @@ async fn custom_resolver_reads_current_server_context_on_each_request() {
     generation.store(2, Ordering::Relaxed);
     let changed = execute_custom_page(&schema, generation, Some(cursor)).await;
     assert!(!changed.errors.is_empty());
-    assert!(capture.take().is_empty(), "mismatch must fail before a read");
+    assert!(
+        capture.take().is_empty(),
+        "mismatch must fail before a read"
+    );
 }
 
 #[tokio::test]
@@ -418,8 +429,18 @@ async fn custom_scan_context_binds_each_server_stamp_and_keeps_current_policy() 
     let (db, policy, capture) = setup(Mode::Callback, 0, 19).await;
     let original = AuthorizedScanContext::new(b"snapshot=1|registration=7|incarnation=a|workspace=w|original=p|current=p|grants=3|credential=4|configuration=5|placement=6").unwrap();
     let first = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { limit: Some(3), ..Default::default() }, &original)
-        .await.unwrap();
+        .fetch_authorized_scan_with_context(
+            &db,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(3),
+                ..Default::default()
+            },
+            &original,
+        )
+        .await
+        .unwrap();
     assert_eq!(first.nodes.len(), 3);
     let cursor = first.page_info.continuation.unwrap();
     assert!(cursor.starts_with("goms2."));
@@ -447,15 +468,44 @@ async fn custom_scan_context_binds_each_server_stamp_and_keeps_current_policy() 
 
     policy.minimum.store(30, Ordering::Relaxed);
     let next = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(3), ..Default::default() }, &original)
-        .await.unwrap();
+        .fetch_authorized_scan_with_context(
+            &db,
+            None,
+            None,
+            AuthorizedScanInput {
+                after: Some(cursor.clone()),
+                limit: Some(3),
+                ..Default::default()
+            },
+            &original,
+        )
+        .await
+        .unwrap();
     assert!(next.nodes.iter().all(|node| node.rank >= 30));
     assert_bounded(&capture.take(), 7);
 
-    for invalid_cursor in [format!("{cursor}00"), cursor[..cursor.len() - 2].to_string(), "goms9.00".into(), format!("goms2.{}", "a".repeat(32770))] {
-        assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
-            .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { after: Some(invalid_cursor), limit: Some(3), ..Default::default() }, &original)
-            .await.is_err());
+    for invalid_cursor in [
+        format!("{cursor}00"),
+        cursor[..cursor.len() - 2].to_string(),
+        "goms9.00".into(),
+        format!("goms2.{}", "a".repeat(32770)),
+    ] {
+        assert!(
+            EntityQuery::<VisibilityItem, SqliteBackend>::new()
+                .fetch_authorized_scan_with_context(
+                    &db,
+                    None,
+                    None,
+                    AuthorizedScanInput {
+                        after: Some(invalid_cursor),
+                        limit: Some(3),
+                        ..Default::default()
+                    },
+                    &original
+                )
+                .await
+                .is_err()
+        );
     }
     assert!(AuthorizedScanContext::new(b"").is_err());
     assert!(AuthorizedScanContext::new(vec![0; 2049]).is_err());
@@ -473,8 +523,18 @@ async fn custom_scan_context_rejects_original_credential_and_grant_reversal() {
     });
     let context = AuthorizedScanContext::new(serde_json::to_vec(&original_state).unwrap()).unwrap();
     let first = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { limit: Some(3), ..Default::default() }, &context)
-        .await.unwrap();
+        .fetch_authorized_scan_with_context(
+            &db,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(3),
+                ..Default::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
     let cursor = first.page_info.continuation.unwrap();
     capture.take();
 
@@ -489,10 +549,26 @@ async fn custom_scan_context_rejects_original_credential_and_grant_reversal() {
     restored["grant_epoch"] = json!(5);
     for state in [changed_id, changed_expiry, withdrawn, restored] {
         let changed = AuthorizedScanContext::new(serde_json::to_vec(&state).unwrap()).unwrap();
-        assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
-            .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(3), ..Default::default() }, &changed)
-            .await.is_err());
-        assert!(capture.take().is_empty(), "changed context must fail before a read");
+        assert!(
+            EntityQuery::<VisibilityItem, SqliteBackend>::new()
+                .fetch_authorized_scan_with_context(
+                    &db,
+                    None,
+                    None,
+                    AuthorizedScanInput {
+                        after: Some(cursor.clone()),
+                        limit: Some(3),
+                        ..Default::default()
+                    },
+                    &changed
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            capture.take().is_empty(),
+            "changed context must fail before a read"
+        );
     }
 }
 
@@ -501,41 +577,112 @@ async fn custom_scan_context_rotates_keys_and_preserves_empty_residual_pages() {
     let (db, _, _) = setup(Mode::Callback, 40, 19).await;
     let context = AuthorizedScanContext::new(b"dataset=one|owner=one").unwrap();
     let first = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { limit: Some(6), ..Default::default() }, &context)
-        .await.unwrap();
+        .fetch_authorized_scan_with_context(
+            &db,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(6),
+                ..Default::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
     assert!(first.nodes.is_empty());
     assert_eq!(first.page_info.status, ScanStatus::BudgetExhausted);
     let cursor = first.page_info.continuation.unwrap();
-    let replica = db.clone().with_authorized_scan_config(
-        AuthorizedScanConfig::new([7; 32], 7, 19),
-    );
+    let replica = db
+        .clone()
+        .with_authorized_scan_config(AuthorizedScanConfig::new([7; 32], 7, 19));
     let same_key = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&replica, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(6), ..Default::default() }, &context)
-        .await.unwrap();
+        .fetch_authorized_scan_with_context(
+            &replica,
+            None,
+            None,
+            AuthorizedScanInput {
+                after: Some(cursor.clone()),
+                limit: Some(6),
+                ..Default::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
     assert!(same_key.nodes.is_empty());
     let aliased_key = db.clone().with_authorized_scan_config(
         AuthorizedScanConfig::new([7; 32], 7, 19)
             .with_protected_key_id(2)
-            .with_retired_protected_key(0, [7; 32], std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap()
+            .with_retired_protected_key(
+                0,
+                [7; 32],
+                std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+            )
+            .unwrap(),
     );
     let forged_id = cursor.replacen("goms2.00000000", "goms2.00000002", 1);
     assert_ne!(forged_id, cursor);
-    assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&aliased_key, None, None, AuthorizedScanInput { after: Some(forged_id), limit: Some(6), ..Default::default() }, &context)
-        .await.is_err());
+    assert!(
+        EntityQuery::<VisibilityItem, SqliteBackend>::new()
+            .fetch_authorized_scan_with_context(
+                &aliased_key,
+                None,
+                None,
+                AuthorizedScanInput {
+                    after: Some(forged_id),
+                    limit: Some(6),
+                    ..Default::default()
+                },
+                &context
+            )
+            .await
+            .is_err()
+    );
     let rotated = db.clone().with_authorized_scan_config(
         AuthorizedScanConfig::new([8; 32], 7, 19)
             .with_protected_key_id(2)
-            .with_retired_protected_key(0, [7; 32], std::time::SystemTime::now() + std::time::Duration::from_secs(60)).unwrap()
+            .with_retired_protected_key(
+                0,
+                [7; 32],
+                std::time::SystemTime::now() + std::time::Duration::from_secs(60),
+            )
+            .unwrap(),
     );
     let continued = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&rotated, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(6), ..Default::default() }, &context)
-        .await.unwrap();
-    assert!(matches!(continued.page_info.status, ScanStatus::BudgetExhausted | ScanStatus::PageFull | ScanStatus::Exhausted));
+        .fetch_authorized_scan_with_context(
+            &rotated,
+            None,
+            None,
+            AuthorizedScanInput {
+                after: Some(cursor.clone()),
+                limit: Some(6),
+                ..Default::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        continued.page_info.status,
+        ScanStatus::BudgetExhausted | ScanStatus::PageFull | ScanStatus::Exhausted
+    ));
     let wrong_key = db.with_authorized_scan_config(AuthorizedScanConfig::new([9; 32], 7, 19));
-    assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&wrong_key, None, None, AuthorizedScanInput { after: Some(cursor), limit: Some(6), ..Default::default() }, &context)
-        .await.is_err());
+    assert!(
+        EntityQuery::<VisibilityItem, SqliteBackend>::new()
+            .fetch_authorized_scan_with_context(
+                &wrong_key,
+                None,
+                None,
+                AuthorizedScanInput {
+                    after: Some(cursor),
+                    limit: Some(6),
+                    ..Default::default()
+                },
+                &context
+            )
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -544,24 +691,62 @@ async fn custom_scan_context_rejects_expired_and_retired_cursors() {
     let context = AuthorizedScanContext::new(b"dataset=one|owner=one").unwrap();
     let short = db.with_authorized_scan_config(
         AuthorizedScanConfig::new([7; 32], 7, 19)
-            .with_protected_ttl(std::time::Duration::from_secs(1)).unwrap()
+            .with_protected_ttl(std::time::Duration::from_secs(1))
+            .unwrap(),
     );
     let first = EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&short, None, None, AuthorizedScanInput { limit: Some(3), ..Default::default() }, &context)
-        .await.unwrap();
+        .fetch_authorized_scan_with_context(
+            &short,
+            None,
+            None,
+            AuthorizedScanInput {
+                limit: Some(3),
+                ..Default::default()
+            },
+            &context,
+        )
+        .await
+        .unwrap();
     let cursor = first.page_info.continuation.unwrap();
     let retired = short.clone().with_authorized_scan_config(
         AuthorizedScanConfig::new([8; 32], 7, 19)
             .with_protected_key_id(2)
-            .with_retired_protected_key(0, [7; 32], std::time::UNIX_EPOCH).unwrap()
+            .with_retired_protected_key(0, [7; 32], std::time::UNIX_EPOCH)
+            .unwrap(),
     );
-    assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&retired, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(3), ..Default::default() }, &context)
-        .await.is_err());
+    assert!(
+        EntityQuery::<VisibilityItem, SqliteBackend>::new()
+            .fetch_authorized_scan_with_context(
+                &retired,
+                None,
+                None,
+                AuthorizedScanInput {
+                    after: Some(cursor.clone()),
+                    limit: Some(3),
+                    ..Default::default()
+                },
+                &context
+            )
+            .await
+            .is_err()
+    );
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
-        .fetch_authorized_scan_with_context(&short, None, None, AuthorizedScanInput { after: Some(cursor), limit: Some(3), ..Default::default() }, &context)
-        .await.is_err());
+    assert!(
+        EntityQuery::<VisibilityItem, SqliteBackend>::new()
+            .fetch_authorized_scan_with_context(
+                &short,
+                None,
+                None,
+                AuthorizedScanInput {
+                    after: Some(cursor),
+                    limit: Some(3),
+                    ..Default::default()
+                },
+                &context
+            )
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

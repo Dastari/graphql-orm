@@ -27,7 +27,9 @@ pub struct AuthorizedScanContext(Vec<u8>);
 
 impl std::fmt::Debug for AuthorizedScanContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("AuthorizedScanContext").field(&"[redacted]").finish()
+        f.debug_tuple("AuthorizedScanContext")
+            .field(&"[redacted]")
+            .finish()
     }
 }
 
@@ -292,7 +294,11 @@ impl AuthorizedScanConfig {
         {
             return Err(input_error());
         }
-        self.retired_keys.push(RetiredScanKey { id, key, accept_until });
+        self.retired_keys.push(RetiredScanKey {
+            id,
+            key,
+            accept_until,
+        });
         Ok(self)
     }
     fn encode<T: AuthorizedKeysetEntity>(
@@ -354,7 +360,9 @@ impl AuthorizedScanConfig {
         let expiry = SystemTime::now()
             .checked_add(self.protected_ttl)
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::ServiceUnavailable).into_graphql_error())?
+            .ok_or_else(|| {
+                OrmPublicError::new(OrmErrorCode::ServiceUnavailable).into_graphql_error()
+            })?
             .as_secs();
         let keyset = encode_keyset_cursor(
             &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
@@ -374,13 +382,25 @@ impl AuthorizedScanConfig {
         let mut associated_data = [0_u8; 10];
         associated_data[..6].copy_from_slice(b"goms2.");
         associated_data[6..].copy_from_slice(&key_id);
-        let ciphertext = cipher.encrypt(&nonce, Payload {
-            msg: plaintext.as_slice(),
-            aad: &associated_data,
-        }).map_err(|_| invalid())?;
-        let bytes: Vec<u8> = key_id.iter()
-            .chain(nonce.iter()).chain(ciphertext.iter()).copied().collect();
-        Ok(format!("goms2.{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext.as_slice(),
+                    aad: &associated_data,
+                },
+            )
+            .map_err(|_| invalid())?;
+        let bytes: Vec<u8> = key_id
+            .iter()
+            .chain(nonce.iter())
+            .chain(ciphertext.iter())
+            .copied()
+            .collect();
+        Ok(format!(
+            "goms2.{}",
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        ))
     }
 
     fn decode_bound<T: AuthorizedKeysetEntity>(
@@ -390,13 +410,15 @@ impl AuthorizedScanConfig {
     ) -> async_graphql::Result<Vec<KeysetValue>> {
         let error = || OrmPublicError::new(OrmErrorCode::CursorInvalid).into_graphql_error();
         let text = cursor.strip_prefix("goms2.").ok_or_else(error)?;
-        if cursor.len() > MAX_PROTECTED_CURSOR_BYTES || text.len() < 88
+        if cursor.len() > MAX_PROTECTED_CURSOR_BYTES
+            || text.len() < 88
             || !text.len().is_multiple_of(2)
             || !text.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(error());
         }
-        let bytes = (0..text.len()).step_by(2)
+        let bytes = (0..text.len())
+            .step_by(2)
             .map(|index| u8::from_str_radix(&text[index..index + 2], 16).map_err(|_| error()))
             .collect::<Result<Vec<_>, _>>()?;
         let id = u32::from_be_bytes(bytes[..4].try_into().map_err(|_| error())?);
@@ -404,27 +426,42 @@ impl AuthorizedScanConfig {
         let key = if id == self.protected_key_id {
             &self.key
         } else {
-            &self.retired_keys.iter()
+            &self
+                .retired_keys
+                .iter()
                 .find(|retired| retired.id == id && now <= retired.accept_until)
-                .ok_or_else(error)?.key
+                .ok_or_else(error)?
+                .key
         };
         let cipher = XChaCha20Poly1305::new(key.into());
         let mut associated_data = [0_u8; 10];
         associated_data[..6].copy_from_slice(b"goms2.");
         associated_data[6..].copy_from_slice(&bytes[..4]);
-        let plaintext = cipher.decrypt((&bytes[4..28]).into(), Payload {
-            msg: &bytes[28..],
-            aad: &associated_data,
-        })
+        let plaintext = cipher
+            .decrypt(
+                (&bytes[4..28]).into(),
+                Payload {
+                    msg: &bytes[28..],
+                    aad: &associated_data,
+                },
+            )
             .map_err(|_| error())?;
-        if plaintext.len() < 11 { return Err(error()); }
+        if plaintext.len() < 11 {
+            return Err(error());
+        }
         let expiry = u64::from_be_bytes(plaintext[..8].try_into().map_err(|_| error())?);
-        let now_secs = now.duration_since(UNIX_EPOCH).map_err(|_| error())?.as_secs();
+        let now_secs = now
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| error())?
+            .as_secs();
         if expiry < now_secs || expiry > now_secs.saturating_add(86_400) {
             return Err(error());
         }
-        let binding_len = usize::from(u16::from_be_bytes(plaintext[8..10].try_into().map_err(|_| error())?));
-        if binding_len != context.0.len() || plaintext.len() <= 10 + binding_len
+        let binding_len = usize::from(u16::from_be_bytes(
+            plaintext[8..10].try_into().map_err(|_| error())?,
+        ));
+        if binding_len != context.0.len()
+            || plaintext.len() <= 10 + binding_len
             || plaintext[10..10 + binding_len] != context.0
         {
             return Err(error());
@@ -434,7 +471,8 @@ impl AuthorizedScanConfig {
             keyset,
             &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
             T::KEYSET_ORDER.len(),
-        ).map_err(|_| error())
+        )
+        .map_err(|_| error())
     }
 }
 
@@ -759,7 +797,8 @@ where
         auth: Option<&DbAuthContext>,
         page: AuthorizedScanInput,
     ) -> async_graphql::Result<AuthorizedScanPage<T>> {
-        self.fetch_authorized_scan_inner(db, ctx, auth, page, None).await
+        self.fetch_authorized_scan_inner(db, ctx, auth, page, None)
+            .await
     }
 
     /// Scan a custom resolver page with a complete server-owned context bound
@@ -782,7 +821,8 @@ where
         page: AuthorizedScanInput,
         context: &AuthorizedScanContext,
     ) -> async_graphql::Result<AuthorizedScanPage<T>> {
-        self.fetch_authorized_scan_inner(db, ctx, auth, page, Some(context)).await
+        self.fetch_authorized_scan_inner(db, ctx, auth, page, Some(context))
+            .await
     }
 
     async fn fetch_authorized_scan_inner(
@@ -795,14 +835,26 @@ where
     ) -> async_graphql::Result<AuthorizedScanPage<T>> {
         let visibility = self.authorize_pagination(db, ctx).await?;
         let config = db.authorized_scan_config().ok_or_else(|| {
-            if context.is_some() { unavailable() } else { invalid() }
+            if context.is_some() {
+                unavailable()
+            } else {
+                invalid()
+            }
         })?;
         if config.batch_size == 0 || config.max_scanned_rows == 0 {
-            return Err(if context.is_some() { unavailable() } else { invalid() });
+            return Err(if context.is_some() {
+                unavailable()
+            } else {
+                invalid()
+            });
         }
-        if context.is_some() && (config.batch_size > MAX_PROTECTED_BATCH_ROWS
-            || config.max_scanned_rows > MAX_PROTECTED_SCAN_ROWS
-            || config.retired_keys.iter().any(|retired| retired.id == config.protected_key_id))
+        if context.is_some()
+            && (config.batch_size > MAX_PROTECTED_BATCH_ROWS
+                || config.max_scanned_rows > MAX_PROTECTED_SCAN_ROWS
+                || config
+                    .retired_keys
+                    .iter()
+                    .any(|retired| retired.id == config.protected_key_id))
         {
             return Err(unavailable());
         }
@@ -894,7 +946,9 @@ where
             None
         } else {
             Some(match context {
-                Some(context) => config.encode_bound::<T>(position.ok_or_else(invalid)?, context)?,
+                Some(context) => {
+                    config.encode_bound::<T>(position.ok_or_else(invalid)?, context)?
+                }
                 None => config.encode::<T>(position.ok_or_else(invalid)?)?,
             })
         };
