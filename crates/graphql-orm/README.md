@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.54.1 pairs the runtime/macros with the reviewed Auth 0.22.1 signed
+role-catalogue correction. Generated code, SDL and persistence are unchanged.
+Adopt one coordinated published workspace/Auth source; see the
+[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+
 Version 0.54.0 pairs runtime/macros for durable cache refresh coordination.
 Generated status-entity subscriptions retain post-commit current authorization;
 clients reconcile initial/query races and refetch after reconnect or gaps. See
@@ -21,12 +26,12 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth `v0.22.0` at
-`997707e060bcf5fabf879a5f98146dc2732b1c99`. Use that tag for direct Auth
-dependencies and refresh the lockfile to one source. The
-[0.53 migration](../../MIGRATION.md#0520-to-0530-post-await-and-owned-release-checks)
-describes validated current-session proofs; earlier version notes below retain
-their historical selectors.
+This development branch selects reviewed Auth `0.22.1` source at
+`86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
+correction. This is preparation, not a published release: replace the reviewed
+revision with its published `v0.22.1` tag and verify one Auth source before
+workspace publication or consuming-product adoption. See the
+[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.

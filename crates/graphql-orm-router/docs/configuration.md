@@ -92,7 +92,10 @@ of literal `url` or `urlFromEnv`. Request headers are loaded only through
 `requestHeadersFromEnv`; values never appear in JSON or diagnostics. Optional
 bounds are `cacheTtlSeconds`, `maximumSignedLifetimeSeconds`,
 `clockSkewLeewaySeconds`, `retryBackoffSeconds`,
-`maximumRetryBackoffSeconds`, and `maxBodyBytes`. Its URL is HTTPS-only except for
+`maximumRetryBackoffSeconds`, and `maxBodyBytes`. The default response bound is
+2 MiB for the complete signed JSON envelope, including the catalogue repeated
+inside its JWS. An explicit lower limit still applies. This is separate from
+the JWKS and public GraphQL request-body limits. Its URL is HTTPS-only except for
 explicit loopback development. The literal `allowInsecureLoopbackHttp` flag or
 `allowInsecureLoopbackHttpFromEnv` can opt into that development exception,
 but both cannot be set together.

@@ -3,12 +3,22 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-20
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.6.2 to 0.6.3: signed catalogue transport bound
+
+The default role-catalogue response limit is now 2 MiB. Explicit `maxBodyBytes`
+values continue to apply; review any previous 1 MiB override before accepting
+larger complete signed envelopes. This HTTP limit is separate from Auth
+structural JWS limits, JWKS limits and GraphQL request limits. Use the coordinated
+Auth signature-envelope correction; increasing a transport limit cannot repair
+an older verifier. No SDL, database or stored-data migration is added.
+
 
 ## 0.6.1 to 0.6.2: maintained workspace package identity
 

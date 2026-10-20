@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-19
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,6 +14,21 @@ supersedes: []
 workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
+
+## Signed role-catalogue transport bound
+
+ORM/macros 0.54.1, AI 0.107.4 and router 0.6.3 select reviewed Auth 0.22.1
+source at `86fabec09eea1eec0f675bc150e90e3809734567` during preparation. The
+published Auth version tag and one matching source must replace that temporary
+revision before publication or downstream adoption. No immutable version tag
+is claimed by the source preparation.
+
+Router 0.6.3 accepts complete signed role catalogues up to the finite default
+2 MiB HTTP limit. Explicit lower bounds remain in force. Adopt the coordinated
+Auth signature-envelope correction too; transport capacity does not bypass
+structural, cryptographic, issuer/audience or exact-content checks. No generated
+schema, data migration or host policy change is added.
+
 
 ## 0.53.0 to 0.54.0: service-owned cache synchronization
 

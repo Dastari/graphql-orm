@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.107.3 to 0.107.4: coordinated Auth source
+
+Select one published Auth 0.22.1 source together with the coordinated workspace
+release. This development preparation uses the reviewed merged revision until
+the Auth version tag is published. The runtime schema module remains `0.72.0`;
+no database, stored-data, GraphQL SDL or provider-policy migration is needed.
+
+
 ## 0.107.2 to 0.107.3: maintained workspace package identity
 
 Select the reviewed coordinated workspace revision for all companion packages,

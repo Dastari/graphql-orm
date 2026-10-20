@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-19
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -13,6 +13,22 @@ supersedes: []
 This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
+
+## 0.54.1 (unreleased)
+
+- Pair ORM/macros 0.54.1 and AI 0.107.4 with reviewed Auth 0.22.1 source
+  for its finite signed-role-catalogue correction. Replace the preparatory
+  reviewed revision with the published Auth tag before workspace publication.
+  No generated code, public ORM API, SDL, persistence or AI schema change.
+
+
+## Router 0.6.3 (unreleased)
+
+- Increase the finite default signed role-catalogue response bound to 2 MiB,
+  retaining exact signature/content binding and explicit smaller host bounds.
+  This requires the coordinated Auth signature-envelope correction; no new
+  router artifact or workspace release is implied by the source change.
+
 
 ## 0.54.0 (unreleased)
 

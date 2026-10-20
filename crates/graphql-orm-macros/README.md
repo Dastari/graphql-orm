@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.54.1 pairs the runtime/macros with the reviewed Auth 0.22.1 signed
+role-catalogue correction. Generated code, SDL and persistence are unchanged.
+Adopt one coordinated published workspace/Auth source; see the
+[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+
 Version 0.54.0 pairs runtime/macros for durable cache refresh coordination.
 Generated status-entity subscriptions retain post-commit current authorization;
 clients reconcile initial/query races and refetch after reconnect or gaps. See
