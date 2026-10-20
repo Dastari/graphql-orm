@@ -13,8 +13,8 @@ use time::OffsetDateTime;
 
 use crate::{
     CapacityDomainObservation, DomainState, NamespaceFence, NamespaceId, NamespaceInitialisation,
-    NamespaceObservation, NamespaceState, NamespaceTarget, ObservationEpoch, ScanResult, StorageBackend,
-    StorageError, TopologyScan,
+    NamespaceObservation, NamespaceState, NamespaceTarget, ObservationEpoch, ScanResult,
+    StorageBackend, StorageError, TopologyScan,
 };
 
 /// Boxed stream of storage byte chunks.

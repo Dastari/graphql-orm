@@ -412,33 +412,64 @@ async fn samba_namespace_marker_lifecycle_and_reserved_aliases() {
 
     let root = format!("graphql-orm-storage-namespace/{}", Uuid::new_v4());
     let config = test_config(root);
-    SmbStorageBackend::probe(config.clone(), SmbProbeOptions { create_prefix: true })
+    SmbStorageBackend::probe(
+        config.clone(),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe creates the owned prefix");
+    let store = SmbStorageBackend::connect(config.clone())
         .await
-        .expect("probe creates the owned prefix");
-    let store = SmbStorageBackend::connect(config.clone()).await.expect("connect");
+        .expect("connect");
     let target = NamespaceTarget::Root;
     let scan = TopologyScan::default();
 
-    let first = store.observe_namespace(&target, &scan).await.expect("observe");
+    let first = store
+        .observe_namespace(&target, &scan)
+        .await
+        .expect("observe");
     assert_eq!(first.state, NamespaceState::Uninitialised);
     let id = NamespaceId::new_random();
-    assert_eq!(store.initialise_namespace(&target, id).await.expect("init"), NamespaceInitialisation::Created(id));
     assert_eq!(
-        store.initialise_namespace(&target, id).await.expect("retry"),
+        store.initialise_namespace(&target, id).await.expect("init"),
+        NamespaceInitialisation::Created(id)
+    );
+    assert_eq!(
+        store
+            .initialise_namespace(&target, id)
+            .await
+            .expect("retry"),
         NamespaceInitialisation::AlreadyInitialisedSame(id)
     );
     assert_eq!(
-        store.initialise_namespace(&target, NamespaceId::new_random()).await.expect("other"),
+        store
+            .initialise_namespace(&target, NamespaceId::new_random())
+            .await
+            .expect("other"),
         NamespaceInitialisation::AlreadyInitialisedOther(id)
     );
 
     // A new connection (restart) observes the same identity; never "distinct".
     let restarted = SmbStorageBackend::connect(config).await.expect("reconnect");
-    let before = store.observe_namespace(&target, &scan).await.expect("observe");
-    let after = restarted.observe_namespace(&target, &scan).await.expect("observe");
+    let before = store
+        .observe_namespace(&target, &scan)
+        .await
+        .expect("observe");
+    let after = restarted
+        .observe_namespace(&target, &scan)
+        .await
+        .expect("observe");
     assert_eq!(after.state, NamespaceState::Initialised { id });
     let relation = relate_namespaces(&before, &after);
-    assert!(matches!(relation, NamespaceRelation::SameNamespace | NamespaceRelation::Unknown), "{relation:?}");
+    assert!(
+        matches!(
+            relation,
+            NamespaceRelation::SameNamespace | NamespaceRelation::Unknown
+        ),
+        "{relation:?}"
+    );
 
     // Case-insensitive, trailing-dot/space, stream and short-name aliases never reach the server.
     for key in [
@@ -450,16 +481,26 @@ async fn samba_namespace_marker_lifecycle_and_reserved_aliases() {
         "GRAPHQ~1",
     ] {
         let body = StorageByteStream::from_bytes(Bytes::from_static(b"overwrite"));
-        assert!(matches!(
-            store.put_blob(key, body, BlobPutOptions::default()).await,
-            Err(StorageError::InvalidStorageKey { .. })
-        ), "{key}");
+        assert!(
+            matches!(
+                store.put_blob(key, body, BlobPutOptions::default()).await,
+                Err(StorageError::InvalidStorageKey { .. })
+            ),
+            "{key}"
+        );
     }
     store
-        .put_blob("data/x", StorageByteStream::from_bytes(Bytes::from_static(b"x")), BlobPutOptions::default())
+        .put_blob(
+            "data/x",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
         .await
         .expect("ordinary put");
-    assert_eq!(store.list_blobs("").await.expect("list"), vec!["data/x".to_string()]);
+    assert_eq!(
+        store.list_blobs("").await.expect("list"),
+        vec!["data/x".to_string()]
+    );
 
     let domain = store.observe_capacity_domain().await.expect("domain");
     assert!(matches!(domain.state, DomainState::Partial { .. }));
@@ -471,12 +512,22 @@ async fn samba_namespace_marker_lifecycle_and_reserved_aliases() {
         epoch: before.epoch.clone(),
     };
     store
-        .put_blob_fenced("data/fenced", StorageByteStream::from_bytes(Bytes::from_static(b"f")), BlobPutOptions::default(), &fence)
+        .put_blob_fenced(
+            "data/fenced",
+            StorageByteStream::from_bytes(Bytes::from_static(b"f")),
+            BlobPutOptions::default(),
+            &fence,
+        )
         .await
         .expect("fenced put");
     assert!(
         restarted
-            .put_blob_fenced("data/stale", StorageByteStream::from_bytes(Bytes::from_static(b"s")), BlobPutOptions::default(), &fence)
+            .put_blob_fenced(
+                "data/stale",
+                StorageByteStream::from_bytes(Bytes::from_static(b"s")),
+                BlobPutOptions::default(),
+                &fence
+            )
             .await
             .is_err()
     );

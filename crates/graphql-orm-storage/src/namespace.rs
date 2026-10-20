@@ -85,7 +85,10 @@ impl NamespaceTarget {
     /// # Errors
     ///
     /// Returns [`StorageError::InvalidStorageKey`] for an unsafe or reserved sub-prefix.
-    pub fn relative_prefix(&self, equivalence: KeyEquivalence) -> Result<Option<&str>, StorageError> {
+    pub fn relative_prefix(
+        &self,
+        equivalence: KeyEquivalence,
+    ) -> Result<Option<&str>, StorageError> {
         match self {
             Self::Root => Ok(None),
             Self::SubPrefix(prefix) => {
@@ -351,14 +354,21 @@ fn scopes_cover(left: &FactScope, right: &FactScope) -> bool {
 }
 
 fn complete(tuple: &[(String, String)]) -> bool {
-    !tuple.is_empty() && tuple.iter().all(|(name, value)| !name.is_empty() && !value.is_empty())
+    !tuple.is_empty()
+        && tuple
+            .iter()
+            .all(|(name, value)| !name.is_empty() && !value.is_empty())
 }
 
 fn compare_tuples(
     left: (&StorageBackend, &[(String, String)], &FactScope),
     right: (&StorageBackend, &[(String, String)], &FactScope),
 ) -> FactComparison {
-    if left.0 != right.0 || !complete(left.1) || !complete(right.1) || !scopes_cover(left.2, right.2) {
+    if left.0 != right.0
+        || !complete(left.1)
+        || !complete(right.1)
+        || !scopes_cover(left.2, right.2)
+    {
         return FactComparison::Unknown;
     }
     let left_names: Vec<&str> = left.1.iter().map(|(name, _)| name.as_str()).collect();
@@ -382,16 +392,42 @@ impl DomainFact {
     pub fn compare(&self, other: &Self) -> FactComparison {
         match (self, other) {
             (
-                Self::RootLocation { provider: a, tuple: ta, scope: sa },
-                Self::RootLocation { provider: b, tuple: tb, scope: sb },
+                Self::RootLocation {
+                    provider: a,
+                    tuple: ta,
+                    scope: sa,
+                },
+                Self::RootLocation {
+                    provider: b,
+                    tuple: tb,
+                    scope: sb,
+                },
             )
             | (
-                Self::PhysicalStore { provider: a, tuple: ta, scope: sa },
-                Self::PhysicalStore { provider: b, tuple: tb, scope: sb },
+                Self::PhysicalStore {
+                    provider: a,
+                    tuple: ta,
+                    scope: sa,
+                },
+                Self::PhysicalStore {
+                    provider: b,
+                    tuple: tb,
+                    scope: sb,
+                },
             ) => compare_tuples((a, ta.as_slice(), sa), (b, tb.as_slice(), sb)),
             (
-                Self::QuotaConstraint { store: store_a, quota_type: type_a, principal: pa, scope: sa },
-                Self::QuotaConstraint { store: store_b, quota_type: type_b, principal: pb, scope: sb },
+                Self::QuotaConstraint {
+                    store: store_a,
+                    quota_type: type_a,
+                    principal: pa,
+                    scope: sa,
+                },
+                Self::QuotaConstraint {
+                    store: store_b,
+                    quota_type: type_b,
+                    principal: pb,
+                    scope: sb,
+                },
             ) => {
                 if type_a.is_empty() || pa.is_empty() || !scopes_cover(sa, sb) {
                     return FactComparison::Unknown;
@@ -457,7 +493,10 @@ pub enum NamespaceRelation {
 
 /// Compares two observations without inferring capacity distinctness.
 #[must_use]
-pub fn relate_namespaces(left: &NamespaceObservation, right: &NamespaceObservation) -> NamespaceRelation {
+pub fn relate_namespaces(
+    left: &NamespaceObservation,
+    right: &NamespaceObservation,
+) -> NamespaceRelation {
     let (NamespaceState::Initialised { id: a }, NamespaceState::Initialised { id: b }) =
         (&left.state, &right.state)
     else {
@@ -544,12 +583,20 @@ fn short_name_unprovable(component: &str) -> bool {
     if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
         return false;
     }
-    let prefix: String = prefix.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+    let prefix: String = prefix
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .collect::<String>()
+        .to_ascii_lowercase();
     if prefix.is_empty() || prefix.len() > 6 {
         return false;
     }
     RESERVED_NAMES.iter().any(|name| {
-        let reserved: String = name.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        let reserved: String = name
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase();
         reserved.starts_with(&prefix)
     })
 }
@@ -599,12 +646,16 @@ pub fn validate_unreserved_key(key: &str, equivalence: KeyEquivalence) -> Result
 /// Returns whether an ordinary listing must hide this key.
 #[must_use]
 pub fn is_reserved_key(key: &str, equivalence: KeyEquivalence) -> bool {
-    key.split('/').any(|component| is_reserved_component(component, equivalence))
+    key.split('/')
+        .any(|component| is_reserved_component(component, equivalence))
 }
 
 /// Error returned when a fence no longer matches the destination.
 #[must_use]
-#[cfg_attr(not(any(feature = "local", feature = "s3", feature = "smb")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "local", feature = "s3", feature = "smb")),
+    allow(dead_code)
+)]
 pub(crate) fn fence_invalidated(key: &str, reason: &str) -> StorageError {
     StorageError::PreconditionFailed {
         key: key.to_string(),
@@ -619,7 +670,10 @@ mod tests {
     fn location(scope: FactScope, value: &str) -> DomainFact {
         DomainFact::RootLocation {
             provider: StorageBackend::Local,
-            tuple: vec![("dev".to_string(), "1".to_string()), ("ino".to_string(), value.to_string())],
+            tuple: vec![
+                ("dev".to_string(), "1".to_string()),
+                ("ino".to_string(), value.to_string()),
+            ],
             scope,
         }
     }
@@ -633,24 +687,35 @@ mod tests {
     #[test]
     fn marker_round_trips_only_in_canonical_form() {
         let id = NamespaceId::new_random();
-        assert_eq!(decode_marker(&encode_marker(id)), NamespaceState::Initialised { id });
+        assert_eq!(
+            decode_marker(&encode_marker(id)),
+            NamespaceState::Initialised { id }
+        );
         let body = String::from_utf8(encode_marker(id)).expect("utf8");
         let without_newline = body.trim_end().to_string();
-        assert_eq!(decode_marker(without_newline.as_bytes()), NamespaceState::Initialised { id });
+        assert_eq!(
+            decode_marker(without_newline.as_bytes()),
+            NamespaceState::Initialised { id }
+        );
         for bad in [
             String::new(),
             format!("{body}\n"),
             body.replace("namespace/v1", "namespace/v2"),
             body.replace(",\"namespace_id\"", ", \"namespace_id\""),
             body.replace('}', ",\"extra\":1}"),
-            format!("{{\"format\":\"{NAMESPACE_MARKER_FORMAT}\",\"namespace_id\":\"{id}\",\"namespace_id\":\"{id}\"}}"),
+            format!(
+                "{{\"format\":\"{NAMESPACE_MARKER_FORMAT}\",\"namespace_id\":\"{id}\",\"namespace_id\":\"{id}\"}}"
+            ),
             body.to_uppercase(),
             body.replace(&id.to_string(), &id.as_uuid().simple().to_string()),
             body[..body.len() / 2].to_string(),
             "x".repeat(MAX_NAMESPACE_MARKER_BYTES + 1),
         ] {
             assert!(
-                matches!(decode_marker(bad.as_bytes()), NamespaceState::Conflict { .. }),
+                matches!(
+                    decode_marker(bad.as_bytes()),
+                    NamespaceState::Conflict { .. }
+                ),
                 "accepted {bad:?}"
             );
         }
@@ -658,14 +723,39 @@ mod tests {
 
     #[test]
     fn reserved_names_follow_provider_equivalence() {
-        assert!(is_reserved_component(NAMESPACE_MARKER, KeyEquivalence::Exact));
-        assert!(!is_reserved_component(".GRAPHQL-ORM-NAMESPACE", KeyEquivalence::Exact));
-        for alias in [".GRAPHQL-ORM-NAMESPACE", ".Graphql-Orm-Namespace", ".graphql-orm-namespace.", ".graphql-orm-namespace "] {
-            assert!(is_reserved_component(alias, KeyEquivalence::CaseFolding), "{alias}");
-            assert!(is_reserved_component(alias, KeyEquivalence::Windows), "{alias}");
+        assert!(is_reserved_component(
+            NAMESPACE_MARKER,
+            KeyEquivalence::Exact
+        ));
+        assert!(!is_reserved_component(
+            ".GRAPHQL-ORM-NAMESPACE",
+            KeyEquivalence::Exact
+        ));
+        for alias in [
+            ".GRAPHQL-ORM-NAMESPACE",
+            ".Graphql-Orm-Namespace",
+            ".graphql-orm-namespace.",
+            ".graphql-orm-namespace ",
+        ] {
+            assert!(
+                is_reserved_component(alias, KeyEquivalence::CaseFolding),
+                "{alias}"
+            );
+            assert!(
+                is_reserved_component(alias, KeyEquivalence::Windows),
+                "{alias}"
+            );
         }
-        for alias in [".graphql-orm-namespace:stream", ".graphql-orm-namespace::$DATA", "GRAPHQ~1", "graphq~2.pub"] {
-            assert!(is_reserved_component(alias, KeyEquivalence::Windows), "{alias}");
+        for alias in [
+            ".graphql-orm-namespace:stream",
+            ".graphql-orm-namespace::$DATA",
+            "GRAPHQ~1",
+            "graphq~2.pub",
+        ] {
+            assert!(
+                is_reserved_component(alias, KeyEquivalence::Windows),
+                "{alias}"
+            );
         }
         assert!(!is_reserved_component("PROGRA~1", KeyEquivalence::Windows));
         assert!(!is_reserved_component("ordinary", KeyEquivalence::Windows));
@@ -673,66 +763,133 @@ mod tests {
 
     #[test]
     fn ordinary_keys_reject_reserved_components_at_any_depth() {
-        for key in ["a/.graphql-orm-namespace", ".graphql-orm-namespace.publishing", "a/b/.graphql-orm-namespace/c"] {
-            assert!(validate_unreserved_key(key, KeyEquivalence::Exact).is_err(), "{key}");
+        for key in [
+            "a/.graphql-orm-namespace",
+            ".graphql-orm-namespace.publishing",
+            "a/b/.graphql-orm-namespace/c",
+        ] {
+            assert!(
+                validate_unreserved_key(key, KeyEquivalence::Exact).is_err(),
+                "{key}"
+            );
         }
-        assert!(validate_unreserved_key("a/.GRAPHQL-ORM-NAMESPACE", KeyEquivalence::CaseFolding).is_err());
+        assert!(
+            validate_unreserved_key("a/.GRAPHQL-ORM-NAMESPACE", KeyEquivalence::CaseFolding)
+                .is_err()
+        );
         assert!(validate_unreserved_key("a/file:stream", KeyEquivalence::Windows).is_err());
         assert!(validate_unreserved_key("a/file:stream", KeyEquivalence::Exact).is_ok());
         assert!(validate_unreserved_key("a/b/c.txt", KeyEquivalence::Windows).is_ok());
-        assert!(is_reserved_key("x/.graphql-orm-namespace", KeyEquivalence::Exact));
+        assert!(is_reserved_key(
+            "x/.graphql-orm-namespace",
+            KeyEquivalence::Exact
+        ));
     }
 
     #[test]
     fn scoped_fact_equality_never_infers_distinctness_from_incomplete_scope() {
-        assert_eq!(location(boot("b1"), "5").compare(&location(boot("b1"), "5")), FactComparison::Same);
-        assert_eq!(location(boot("b1"), "5").compare(&location(boot("b1"), "6")), FactComparison::Different);
-        assert_eq!(location(boot("b1"), "5").compare(&location(boot("b2"), "5")), FactComparison::Unknown);
-        assert_eq!(location(FactScope::Unspecified, "5").compare(&location(FactScope::Unspecified, "5")), FactComparison::Unknown);
-        assert_eq!(location(boot("b1"), "").compare(&location(boot("b1"), "")), FactComparison::Unknown);
+        assert_eq!(
+            location(boot("b1"), "5").compare(&location(boot("b1"), "5")),
+            FactComparison::Same
+        );
+        assert_eq!(
+            location(boot("b1"), "5").compare(&location(boot("b1"), "6")),
+            FactComparison::Different
+        );
+        assert_eq!(
+            location(boot("b1"), "5").compare(&location(boot("b2"), "5")),
+            FactComparison::Unknown
+        );
+        assert_eq!(
+            location(FactScope::Unspecified, "5").compare(&location(FactScope::Unspecified, "5")),
+            FactComparison::Unknown
+        );
+        assert_eq!(
+            location(boot("b1"), "").compare(&location(boot("b1"), "")),
+            FactComparison::Unknown
+        );
         let store = |value: &str| DomainFact::PhysicalStore {
             provider: StorageBackend::Local,
             tuple: vec![("fs".to_string(), value.to_string())],
             scope: FactScope::StoreIdentity,
         };
-        assert_eq!(location(boot("b1"), "5").compare(&store("5")), FactComparison::Unknown);
+        assert_eq!(
+            location(boot("b1"), "5").compare(&store("5")),
+            FactComparison::Unknown
+        );
         let quota = |fs: &str, principal: &str| DomainFact::QuotaConstraint {
             store: Box::new(store(fs)),
             quota_type: "user".to_string(),
             principal: principal.to_string(),
             scope: FactScope::StoreIdentity,
         };
-        assert_eq!(quota("fs1", "1000").compare(&quota("fs1", "1000")), FactComparison::Same);
+        assert_eq!(
+            quota("fs1", "1000").compare(&quota("fs1", "1000")),
+            FactComparison::Same
+        );
         // A shared principal never joins two filesystems.
-        assert_eq!(quota("fs1", "1000").compare(&quota("fs2", "1000")), FactComparison::Different);
+        assert_eq!(
+            quota("fs1", "1000").compare(&quota("fs2", "1000")),
+            FactComparison::Different
+        );
     }
 
     #[test]
     fn copied_markers_are_duplicated_not_aliases() {
         let id = NamespaceId::new_random();
-        let observation = |location: Option<DomainFact>, state: NamespaceState| NamespaceObservation {
-            target: NamespaceTarget::Root,
-            state,
-            root_location: location,
-            ancestors: ScanResult::not_requested(),
-            nested: ScanResult::not_requested(),
-            epoch: ObservationEpoch {
-                backend_instance: Uuid::nil(),
-                connection_generation: 0,
-                root_witness: None,
-            },
-            observed_at: OffsetDateTime::UNIX_EPOCH,
-        };
-        let here = observation(Some(location(boot("b"), "1")), NamespaceState::Initialised { id });
-        let alias = observation(Some(location(boot("b"), "1")), NamespaceState::Initialised { id });
-        let copy = observation(Some(location(boot("b"), "2")), NamespaceState::Initialised { id });
+        let observation =
+            |location: Option<DomainFact>, state: NamespaceState| NamespaceObservation {
+                target: NamespaceTarget::Root,
+                state,
+                root_location: location,
+                ancestors: ScanResult::not_requested(),
+                nested: ScanResult::not_requested(),
+                epoch: ObservationEpoch {
+                    backend_instance: Uuid::nil(),
+                    connection_generation: 0,
+                    root_witness: None,
+                },
+                observed_at: OffsetDateTime::UNIX_EPOCH,
+            };
+        let here = observation(
+            Some(location(boot("b"), "1")),
+            NamespaceState::Initialised { id },
+        );
+        let alias = observation(
+            Some(location(boot("b"), "1")),
+            NamespaceState::Initialised { id },
+        );
+        let copy = observation(
+            Some(location(boot("b"), "2")),
+            NamespaceState::Initialised { id },
+        );
         let unlocated = observation(None, NamespaceState::Initialised { id });
-        let other = observation(None, NamespaceState::Initialised { id: NamespaceId::new_random() });
-        assert_eq!(relate_namespaces(&here, &alias), NamespaceRelation::SameNamespace);
-        assert_eq!(relate_namespaces(&here, &copy), NamespaceRelation::Duplicated);
-        assert_eq!(relate_namespaces(&here, &unlocated), NamespaceRelation::Unknown);
-        assert_eq!(relate_namespaces(&here, &other), NamespaceRelation::DifferentNamespaces);
+        let other = observation(
+            None,
+            NamespaceState::Initialised {
+                id: NamespaceId::new_random(),
+            },
+        );
+        assert_eq!(
+            relate_namespaces(&here, &alias),
+            NamespaceRelation::SameNamespace
+        );
+        assert_eq!(
+            relate_namespaces(&here, &copy),
+            NamespaceRelation::Duplicated
+        );
+        assert_eq!(
+            relate_namespaces(&here, &unlocated),
+            NamespaceRelation::Unknown
+        );
+        assert_eq!(
+            relate_namespaces(&here, &other),
+            NamespaceRelation::DifferentNamespaces
+        );
         let pending = observation(None, NamespaceState::PublicationInProgress);
-        assert_eq!(relate_namespaces(&here, &pending), NamespaceRelation::Unknown);
+        assert_eq!(
+            relate_namespaces(&here, &pending),
+            NamespaceRelation::Unknown
+        );
     }
 }

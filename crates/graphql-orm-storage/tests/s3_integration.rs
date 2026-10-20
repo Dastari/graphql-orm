@@ -243,7 +243,9 @@ fn namespace_fixture(
                 Err(error) => panic!("accept: {error}"),
             };
             stream.set_nonblocking(false).expect("blocking stream");
-            stream.set_read_timeout(Some(Duration::from_secs(5))).expect("read timeout");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
             let mut request = Vec::new();
             let mut byte = [0];
             while !request.ends_with(b"\r\n\r\n") {
@@ -259,7 +261,9 @@ fn namespace_fixture(
                     .find(|(key, _)| key.eq_ignore_ascii_case(name))
                     .map(|(_, value)| value.trim().to_string())
             };
-            let length = header("content-length").map(|value| value.parse::<usize>().expect("length")).unwrap_or(0);
+            let length = header("content-length")
+                .map(|value| value.parse::<usize>().expect("length"))
+                .unwrap_or(0);
             assert!(length < 65_536, "bounded fixture body");
             let mut body = vec![0; length];
             stream.read_exact(&mut body).expect("request body");
@@ -267,8 +271,16 @@ fn namespace_fixture(
             let mut parts = line.split_whitespace();
             let method = parts.next().expect("method").to_string();
             let target = parts.next().expect("target").to_string();
-            let path = target.split('?').next().expect("path").trim_start_matches("/fixture/").to_string();
-            log.push(format!("{method} {path} if-none-match={}", header("if-none-match").unwrap_or_default()));
+            let path = target
+                .split('?')
+                .next()
+                .expect("path")
+                .trim_start_matches("/fixture/")
+                .to_string();
+            log.push(format!(
+                "{method} {path} if-none-match={}",
+                header("if-none-match").unwrap_or_default()
+            ));
             let response = match method.as_str() {
                 "GET" => match objects.get(&path) {
                     Some(object) => {
@@ -314,17 +326,31 @@ fn namespace_backend(endpoint: String) -> S3StorageBackend {
 
 #[tokio::test]
 async fn s3_namespace_initialise_is_conditional_and_reconciles_same_identity() {
-    use graphql_orm_storage::{NamespaceId, NamespaceInitialisation, NamespaceState, NamespaceTarget, TopologyScan};
+    use graphql_orm_storage::{
+        NamespaceId, NamespaceInitialisation, NamespaceState, NamespaceTarget, TopologyScan,
+    };
 
     // Requests: observe GET 404; initialise GET 404, PUT, GET; retry GET.
     let (endpoint, server) = namespace_fixture(Vec::new(), 5);
     let store = namespace_backend(endpoint);
     let id = NamespaceId::new_random();
-    let observed = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    let observed = store
+        .observe_namespace(&NamespaceTarget::Root, &TopologyScan::default())
+        .await
+        .expect("observe");
     assert_eq!(observed.state, NamespaceState::Uninitialised);
-    assert_eq!(store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init"), NamespaceInitialisation::Created(id));
     assert_eq!(
-        store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("retry"),
+        store
+            .initialise_namespace(&NamespaceTarget::Root, id)
+            .await
+            .expect("init"),
+        NamespaceInitialisation::Created(id)
+    );
+    assert_eq!(
+        store
+            .initialise_namespace(&NamespaceTarget::Root, id)
+            .await
+            .expect("retry"),
         NamespaceInitialisation::AlreadyInitialisedSame(id)
     );
     let log = server.join().expect("fixture thread");
@@ -342,18 +368,33 @@ async fn s3_namespace_initialise_is_conditional_and_reconciles_same_identity() {
 
 #[tokio::test]
 async fn s3_namespace_foreign_marker_is_conflict_and_reserved_keys_never_reach_the_provider() {
-    use graphql_orm_storage::{NamespaceId, NamespaceInitialisation, NamespaceState, NamespaceTarget, TopologyScan};
+    use graphql_orm_storage::{
+        NamespaceId, NamespaceInitialisation, NamespaceState, NamespaceTarget, TopologyScan,
+    };
 
-    let foreign = (String::from("tenant/.graphql-orm-namespace"), b"{\"format\":\"other\"}".to_vec());
+    let foreign = (
+        String::from("tenant/.graphql-orm-namespace"),
+        b"{\"format\":\"other\"}".to_vec(),
+    );
     let (endpoint, server) = namespace_fixture(vec![foreign], 2);
     let store = namespace_backend(endpoint);
-    let observed = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    let observed = store
+        .observe_namespace(&NamespaceTarget::Root, &TopologyScan::default())
+        .await
+        .expect("observe");
     assert!(matches!(observed.state, NamespaceState::Conflict { .. }));
     assert!(matches!(
-        store.initialise_namespace(&NamespaceTarget::Root, NamespaceId::new_random()).await.expect("init"),
+        store
+            .initialise_namespace(&NamespaceTarget::Root, NamespaceId::new_random())
+            .await
+            .expect("init"),
         NamespaceInitialisation::Conflict { .. }
     ));
-    for key in [".graphql-orm-namespace", "data/.graphql-orm-namespace", ".graphql-orm-namespace.publishing"] {
+    for key in [
+        ".graphql-orm-namespace",
+        "data/.graphql-orm-namespace",
+        ".graphql-orm-namespace.publishing",
+    ] {
         let body = StorageByteStream::from_bytes(Bytes::from_static(b"overwrite"));
         assert!(matches!(
             store.put_blob(key, body, BlobPutOptions::default()).await,

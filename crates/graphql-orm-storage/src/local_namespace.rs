@@ -41,7 +41,10 @@ enum MarkerRead {
     Failed(String),
 }
 
-pub(crate) fn namespace_dir(root: &Path, target: &NamespaceTarget) -> Result<PathBuf, StorageError> {
+pub(crate) fn namespace_dir(
+    root: &Path,
+    target: &NamespaceTarget,
+) -> Result<PathBuf, StorageError> {
     Ok(match target.relative_prefix(LOCAL_KEY_EQUIVALENCE)? {
         Some(prefix) => root.join(prefix),
         None => root.to_path_buf(),
@@ -52,7 +55,9 @@ async fn read_bounded(path: &Path) -> MarkerRead {
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return MarkerRead::Absent,
-        Err(error) => return MarkerRead::Failed(format!("marker metadata unreadable: {}", error.kind())),
+        Err(error) => {
+            return MarkerRead::Failed(format!("marker metadata unreadable: {}", error.kind()));
+        }
     };
     if !metadata.is_file() {
         return MarkerRead::NotAFile;
@@ -71,7 +76,11 @@ async fn read_bounded(path: &Path) -> MarkerRead {
 }
 
 async fn marker_state(dir: &Path) -> NamespaceState {
-    let read = tokio::time::timeout(DEFAULT_MARKER_READ_TIMEOUT, read_bounded(&dir.join(NAMESPACE_MARKER))).await;
+    let read = tokio::time::timeout(
+        DEFAULT_MARKER_READ_TIMEOUT,
+        read_bounded(&dir.join(NAMESPACE_MARKER)),
+    )
+    .await;
     match read {
         Err(_) => NamespaceState::Unknown {
             reason: "marker read timed out".to_string(),
@@ -81,13 +90,17 @@ async fn marker_state(dir: &Path) -> NamespaceState {
             reason: "marker is not a regular file".to_string(),
         },
         Ok(MarkerRead::Failed(reason)) => NamespaceState::Unknown { reason },
-        Ok(MarkerRead::Absent) => match tokio::fs::symlink_metadata(dir.join(NAMESPACE_MARKER_PUBLISHING)).await {
-            Ok(_) => NamespaceState::PublicationInProgress,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => NamespaceState::Uninitialised,
-            Err(error) => NamespaceState::Unknown {
-                reason: format!("publication state unreadable: {}", error.kind()),
-            },
-        },
+        Ok(MarkerRead::Absent) => {
+            match tokio::fs::symlink_metadata(dir.join(NAMESPACE_MARKER_PUBLISHING)).await {
+                Ok(_) => NamespaceState::PublicationInProgress,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    NamespaceState::Uninitialised
+                }
+                Err(error) => NamespaceState::Unknown {
+                    reason: format!("publication state unreadable: {}", error.kind()),
+                },
+            }
+        }
     }
 }
 
@@ -111,7 +124,10 @@ async fn device_inode(path: &Path) -> Result<(u64, u64), std::io::Error> {
 
 #[cfg(unix)]
 async fn root_witness(root: &Path) -> Option<String> {
-    device_inode(root).await.ok().map(|(dev, ino)| format!("local:dev={dev:x};ino={ino:x}"))
+    device_inode(root)
+        .await
+        .ok()
+        .map(|(dev, ino)| format!("local:dev={dev:x};ino={ino:x}"))
 }
 
 #[cfg(not(unix))]
@@ -124,7 +140,10 @@ async fn location_fact(dir: &Path) -> Option<DomainFact> {
     let (dev, ino) = device_inode(dir).await.ok()?;
     Some(DomainFact::RootLocation {
         provider: StorageBackend::Local,
-        tuple: vec![("dev".to_string(), format!("{dev:x}")), ("ino".to_string(), format!("{ino:x}"))],
+        tuple: vec![
+            ("dev".to_string(), format!("{dev:x}")),
+            ("ino".to_string(), format!("{ino:x}")),
+        ],
         scope: boot_scope(),
     })
 }
@@ -151,7 +170,10 @@ async fn require_directory(dir: &Path) -> Result<(), StorageError> {
     } else {
         Err(StorageError::io(
             dir,
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "namespace root is not a directory"),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "namespace root is not a directory",
+            ),
         ))
     }
 }
@@ -192,7 +214,9 @@ async fn scan_ancestors(dir: &Path, max_depth: usize) -> ScanResult {
         }
         let state = marker_state(&parent).await;
         if let NamespaceState::Unknown { reason } = &state {
-            completeness = ScanCompleteness::Denied { reason: reason.clone() };
+            completeness = ScanCompleteness::Denied {
+                reason: reason.clone(),
+            };
         }
         if state != NamespaceState::Uninitialised {
             found.push(FoundNamespace {
@@ -202,7 +226,10 @@ async fn scan_ancestors(dir: &Path, max_depth: usize) -> ScanResult {
         }
         current = parent;
     }
-    ScanResult { completeness, found }
+    ScanResult {
+        completeness,
+        found,
+    }
 }
 
 #[cfg(not(unix))]
@@ -285,10 +312,16 @@ async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
             }
             let state = marker_state(&child).await;
             if let NamespaceState::Unknown { reason } = &state {
-                completeness = ScanCompleteness::Denied { reason: reason.clone() };
+                completeness = ScanCompleteness::Denied {
+                    reason: reason.clone(),
+                };
             }
             if state != NamespaceState::Uninitialised {
-                let relative = child.strip_prefix(dir).unwrap_or(&child).to_string_lossy().replace('\\', "/");
+                let relative = child
+                    .strip_prefix(dir)
+                    .unwrap_or(&child)
+                    .to_string_lossy()
+                    .replace('\\', "/");
                 found.push(FoundNamespace {
                     relative_path: relative,
                     state,
@@ -298,7 +331,10 @@ async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
         }
     }
     found.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    ScanResult { completeness, found }
+    ScanResult {
+        completeness,
+        found,
+    }
 }
 
 pub(crate) async fn observe(
@@ -335,7 +371,10 @@ async fn sync_directory(dir: &Path) -> Result<(), StorageError> {
     let handle = tokio::fs::File::open(dir)
         .await
         .map_err(|source| StorageError::io(dir, source))?;
-    handle.sync_all().await.map_err(|source| StorageError::io(dir, source))
+    handle
+        .sync_all()
+        .await
+        .map_err(|source| StorageError::io(dir, source))
 }
 
 #[cfg(not(unix))]
@@ -346,8 +385,12 @@ async fn sync_directory(_dir: &Path) -> Result<(), StorageError> {
 
 fn settled(existing: NamespaceState, proposed: NamespaceId) -> Option<NamespaceInitialisation> {
     match existing {
-        NamespaceState::Initialised { id } if id == proposed => Some(NamespaceInitialisation::AlreadyInitialisedSame(id)),
-        NamespaceState::Initialised { id } => Some(NamespaceInitialisation::AlreadyInitialisedOther(id)),
+        NamespaceState::Initialised { id } if id == proposed => {
+            Some(NamespaceInitialisation::AlreadyInitialisedSame(id))
+        }
+        NamespaceState::Initialised { id } => {
+            Some(NamespaceInitialisation::AlreadyInitialisedOther(id))
+        }
         NamespaceState::Conflict { reason } => Some(NamespaceInitialisation::Conflict { reason }),
         _ => None,
     }
@@ -374,15 +417,25 @@ pub(crate) async fn initialise(
     }
 
     let body = encode_marker(proposed);
-    match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&publishing).await {
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&publishing)
+        .await
+    {
         Ok(mut file) => {
-            file.write_all(&body).await.map_err(|source| StorageError::io(&publishing, source))?;
-            file.sync_all().await.map_err(|source| StorageError::io(&publishing, source))?;
+            file.write_all(&body)
+                .await
+                .map_err(|source| StorageError::io(&publishing, source))?;
+            file.sync_all()
+                .await
+                .map_err(|source| StorageError::io(&publishing, source))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             // Reconcile only a complete publication of the SAME identity.
             match read_bounded(&publishing).await {
-                MarkerRead::Bytes(bytes) if decode_marker(&bytes) == (NamespaceState::Initialised { id: proposed }) => {}
+                MarkerRead::Bytes(bytes)
+                    if decode_marker(&bytes) == (NamespaceState::Initialised { id: proposed }) => {}
                 _ => {
                     return Ok(NamespaceInitialisation::Conflict {
                         reason: "another or incomplete publication is in progress".to_string(),
@@ -398,9 +451,11 @@ pub(crate) async fn initialise(
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = tokio::fs::remove_file(&publishing).await;
             let state = marker_state(&dir).await;
-            return Ok(settled(state, proposed).unwrap_or(NamespaceInitialisation::Conflict {
-                reason: "marker appeared during publication but is unreadable".to_string(),
-            }));
+            return Ok(
+                settled(state, proposed).unwrap_or(NamespaceInitialisation::Conflict {
+                    reason: "marker appeared during publication but is unreadable".to_string(),
+                }),
+            );
         }
         Err(source) => return Err(StorageError::io(&marker, source)),
     }
@@ -411,16 +466,22 @@ pub(crate) async fn initialise(
     let _ = sync_directory(&dir).await;
 
     match marker_state(&dir).await {
-        NamespaceState::Initialised { id } if id == proposed => Ok(NamespaceInitialisation::Created(id)),
-        other => Ok(settled(other, proposed).unwrap_or(NamespaceInitialisation::Conflict {
-            reason: "published marker did not read back".to_string(),
-        })),
+        NamespaceState::Initialised { id } if id == proposed => {
+            Ok(NamespaceInitialisation::Created(id))
+        }
+        other => Ok(
+            settled(other, proposed).unwrap_or(NamespaceInitialisation::Conflict {
+                reason: "published marker did not read back".to_string(),
+            }),
+        ),
     }
 }
 
 #[cfg(unix)]
 async fn domain_facts(root: &Path) -> Result<(Vec<DomainFact>, DomainState), StorageError> {
-    let (dev, _) = device_inode(root).await.map_err(|source| StorageError::io(root, source))?;
+    let (dev, _) = device_inode(root)
+        .await
+        .map_err(|source| StorageError::io(root, source))?;
     let mut facts = Vec::new();
     if let Some(location) = location_fact(root).await {
         facts.push(location);
@@ -430,7 +491,10 @@ async fn domain_facts(root: &Path) -> Result<(Vec<DomainFact>, DomainState), Sto
         tuple: vec![("dev".to_string(), format!("{dev:x}"))],
         scope: boot_scope(),
     });
-    let missing = vec!["quota constraints".to_string(), "filesystem identity beyond the boot".to_string()];
+    let missing = vec![
+        "quota constraints".to_string(),
+        "filesystem identity beyond the boot".to_string(),
+    ];
     Ok((facts, DomainState::Partial { missing }))
 }
 
@@ -439,7 +503,10 @@ async fn domain_facts(_root: &Path) -> Result<(Vec<DomainFact>, DomainState), St
     Ok((Vec::new(), DomainState::Unsupported))
 }
 
-pub(crate) async fn capacity_domain(root: &Path, instance: Uuid) -> Result<CapacityDomainObservation, StorageError> {
+pub(crate) async fn capacity_domain(
+    root: &Path,
+    instance: Uuid,
+) -> Result<CapacityDomainObservation, StorageError> {
     let observed_at = OffsetDateTime::now_utc();
     require_directory(root).await?;
     let (facts, state) = domain_facts(root).await?;
@@ -451,13 +518,21 @@ pub(crate) async fn capacity_domain(root: &Path, instance: Uuid) -> Result<Capac
     })
 }
 
-pub(crate) async fn check_fence(root: &Path, instance: Uuid, fence: &NamespaceFence, key: &str) -> Result<(), StorageError> {
+pub(crate) async fn check_fence(
+    root: &Path,
+    instance: Uuid,
+    fence: &NamespaceFence,
+    key: &str,
+) -> Result<(), StorageError> {
     if fence.epoch.backend_instance != instance {
         return Err(fence_invalidated(key, "different backend instance"));
     }
     let current = root_witness(root).await;
     if current.is_none() || current != fence.epoch.root_witness {
-        return Err(fence_invalidated(key, "configured root was replaced or is unreadable"));
+        return Err(fence_invalidated(
+            key,
+            "configured root was replaced or is unreadable",
+        ));
     }
     let dir = namespace_dir(root, &fence.target)?;
     match marker_state(&dir).await {

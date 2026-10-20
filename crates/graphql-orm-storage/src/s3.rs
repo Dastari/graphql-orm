@@ -22,9 +22,10 @@ use crate::{
     CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
     FoundNamespace, KeyEquivalence, MAX_NAMESPACE_MARKER_BYTES, NAMESPACE_MARKER, NamespaceFence,
     NamespaceId, NamespaceInitialisation, NamespaceObservation, NamespaceState, NamespaceTarget,
-    ObjectStorage, ObservationEpoch, ScanCompleteness, ScanResult, StorageBackend, StorageByteStream,
-    StorageError, StorageObjectBody, StoredObject, TopologyScan, collect_storage_stream, decode_marker,
-    encode_marker, is_reserved_key, validate_blob_key, validate_unreserved_key,
+    ObjectStorage, ObservationEpoch, ScanCompleteness, ScanResult, StorageBackend,
+    StorageByteStream, StorageError, StorageObjectBody, StoredObject, TopologyScan,
+    collect_storage_stream, decode_marker, encode_marker, is_reserved_key, validate_blob_key,
+    validate_unreserved_key,
 };
 
 /// S3 keys are byte-exact.
@@ -324,17 +325,23 @@ impl S3StorageBackend {
 
 fn s3_is_denied<E: fmt::Debug>(error: &aws_sdk_s3::error::SdkError<E>) -> bool {
     let message = format!("{error:?}");
-    message.contains("AccessDenied") || message.contains("status: 403") || message.contains("code: 403")
+    message.contains("AccessDenied")
+        || message.contains("status: 403")
+        || message.contains("code: 403")
 }
 
 fn s3_is_precondition<E: fmt::Debug>(error: &aws_sdk_s3::error::SdkError<E>) -> bool {
     let message = format!("{error:?}");
-    message.contains("PreconditionFailed") || message.contains("status: 412") || message.contains("code: 412")
+    message.contains("PreconditionFailed")
+        || message.contains("status: 412")
+        || message.contains("code: 412")
 }
 
 fn s3_is_unsatisfiable_range<E: fmt::Debug>(error: &aws_sdk_s3::error::SdkError<E>) -> bool {
     let message = format!("{error:?}");
-    message.contains("InvalidRange") || message.contains("status: 416") || message.contains("code: 416")
+    message.contains("InvalidRange")
+        || message.contains("status: 416")
+        || message.contains("code: 416")
 }
 
 fn marker_key_in(prefix: &str) -> String {
@@ -346,12 +353,19 @@ fn marker_key_in(prefix: &str) -> String {
 }
 
 fn content_range_total(range: &str) -> Option<u64> {
-    range.rsplit_once('/').and_then(|(_, total)| total.parse().ok())
+    range
+        .rsplit_once('/')
+        .and_then(|(_, total)| total.parse().ok())
 }
 
 impl S3StorageBackend {
     fn root_prefix(&self) -> String {
-        self.config.key_prefix.as_deref().map(|prefix| prefix.trim_matches('/')).unwrap_or_default().to_string()
+        self.config
+            .key_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_matches('/'))
+            .unwrap_or_default()
+            .to_string()
     }
 
     fn namespace_prefix(&self, target: &NamespaceTarget) -> Result<String, StorageError> {
@@ -359,11 +373,13 @@ impl S3StorageBackend {
         if !root.is_empty() {
             validate_blob_key(&root)?;
         }
-        Ok(match (target.relative_prefix(S3_KEY_EQUIVALENCE)?, root.is_empty()) {
-            (None, _) => root,
-            (Some(relative), true) => relative.to_string(),
-            (Some(relative), false) => format!("{root}/{relative}"),
-        })
+        Ok(
+            match (target.relative_prefix(S3_KEY_EQUIVALENCE)?, root.is_empty()) {
+                (None, _) => root,
+                (Some(relative), true) => relative.to_string(),
+                (Some(relative), false) => format!("{root}/{relative}"),
+            },
+        )
     }
 
     /// Bounded marker read: a ranged GET of at most MAX+1 bytes, a bounded
@@ -408,7 +424,13 @@ impl S3StorageBackend {
             }
             let mut bytes = Vec::with_capacity(MAX_NAMESPACE_MARKER_BYTES + 1);
             let limit = (MAX_NAMESPACE_MARKER_BYTES + 1) as u64;
-            match output.body.into_async_read().take(limit).read_to_end(&mut bytes).await {
+            match output
+                .body
+                .into_async_read()
+                .take(limit)
+                .read_to_end(&mut bytes)
+                .await
+            {
                 Ok(_) => decode_marker(&bytes),
                 Err(_) => NamespaceState::Unknown {
                     reason: "marker body read failed".to_string(),
@@ -430,7 +452,14 @@ impl S3StorageBackend {
             tuple: vec![
                 ("endpoint".to_string(), self.config.endpoint_url.clone()),
                 ("bucket".to_string(), self.config.bucket.clone()),
-                ("prefix".to_string(), if prefix.is_empty() { "/".to_string() } else { prefix.to_string() }),
+                (
+                    "prefix".to_string(),
+                    if prefix.is_empty() {
+                        "/".to_string()
+                    } else {
+                        prefix.to_string()
+                    },
+                ),
             ],
             scope: FactScope::Unspecified,
         }
@@ -439,7 +468,11 @@ impl S3StorageBackend {
     async fn scan_ancestors(&self, prefix: &str, max_depth: usize) -> ScanResult {
         let mut found = Vec::new();
         let mut completeness = ScanCompleteness::Complete;
-        let mut components: Vec<&str> = if prefix.is_empty() { Vec::new() } else { prefix.split('/').collect() };
+        let mut components: Vec<&str> = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            prefix.split('/').collect()
+        };
         let mut level = 0_usize;
         // The bucket root is the authority boundary.
         while !components.is_empty() {
@@ -451,9 +484,13 @@ impl S3StorageBackend {
                 break;
             }
             components.pop();
-            let state = self.read_marker(&marker_key_in(&components.join("/"))).await;
+            let state = self
+                .read_marker(&marker_key_in(&components.join("/")))
+                .await;
             if let NamespaceState::Unknown { reason } = &state {
-                completeness = ScanCompleteness::Denied { reason: reason.clone() };
+                completeness = ScanCompleteness::Denied {
+                    reason: reason.clone(),
+                };
             }
             if state != NamespaceState::Uninitialised {
                 found.push(FoundNamespace {
@@ -462,13 +499,20 @@ impl S3StorageBackend {
                 });
             }
         }
-        ScanResult { completeness, found }
+        ScanResult {
+            completeness,
+            found,
+        }
     }
 
     async fn scan_nested(&self, prefix: &str, scan: crate::NestedScan) -> ScanResult {
         let started = std::time::Instant::now();
         let own_marker = marker_key_in(prefix);
-        let list_prefix = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
+        let list_prefix = if prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix}/")
+        };
         let mut found = Vec::new();
         let mut completeness = ScanCompleteness::Complete;
         let mut continuation = None;
@@ -498,7 +542,11 @@ impl S3StorageBackend {
             {
                 Ok(output) => output,
                 Err(error) => {
-                    let reason = if s3_is_denied(&error) { "listing denied" } else { "listing failed" };
+                    let reason = if s3_is_denied(&error) {
+                        "listing denied"
+                    } else {
+                        "listing failed"
+                    };
                     completeness = ScanCompleteness::Denied {
                         reason: reason.to_string(),
                     };
@@ -531,7 +579,9 @@ impl S3StorageBackend {
                 }
                 let state = self.read_marker(key).await;
                 if let NamespaceState::Unknown { reason } = &state {
-                    completeness = ScanCompleteness::Denied { reason: reason.clone() };
+                    completeness = ScanCompleteness::Denied {
+                        reason: reason.clone(),
+                    };
                 }
                 found.push(FoundNamespace {
                     relative_path: relative,
@@ -547,7 +597,10 @@ impl S3StorageBackend {
             }
         }
         found.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-        ScanResult { completeness, found }
+        ScanResult {
+            completeness,
+            found,
+        }
     }
 }
 
@@ -595,9 +648,15 @@ impl BlobStore for S3StorageBackend {
     ) -> Result<NamespaceInitialisation, StorageError> {
         let key = marker_key_in(&self.namespace_prefix(target)?);
         let settled = |state: NamespaceState| match state {
-            NamespaceState::Initialised { id } if id == proposed => Some(NamespaceInitialisation::AlreadyInitialisedSame(id)),
-            NamespaceState::Initialised { id } => Some(NamespaceInitialisation::AlreadyInitialisedOther(id)),
-            NamespaceState::Conflict { reason } => Some(NamespaceInitialisation::Conflict { reason }),
+            NamespaceState::Initialised { id } if id == proposed => {
+                Some(NamespaceInitialisation::AlreadyInitialisedSame(id))
+            }
+            NamespaceState::Initialised { id } => {
+                Some(NamespaceInitialisation::AlreadyInitialisedOther(id))
+            }
+            NamespaceState::Conflict { reason } => {
+                Some(NamespaceInitialisation::Conflict { reason })
+            }
             _ => None,
         };
         let existing = self.read_marker(&key).await;
@@ -628,7 +687,9 @@ impl BlobStore for S3StorageBackend {
             Err(error) => return Err(map_s3_error(error)),
         }
         match self.read_marker(&key).await {
-            NamespaceState::Initialised { id } if id == proposed => Ok(NamespaceInitialisation::Created(id)),
+            NamespaceState::Initialised { id } if id == proposed => {
+                Ok(NamespaceInitialisation::Created(id))
+            }
             other => Ok(settled(other).unwrap_or(NamespaceInitialisation::Conflict {
                 reason: "published marker did not read back".to_string(),
             })),
@@ -639,7 +700,8 @@ impl BlobStore for S3StorageBackend {
         Ok(CapacityDomainObservation {
             facts: Vec::new(),
             state: DomainState::Unknown {
-                reason: "a generic S3 endpoint reports no physical or quota domain facts".to_string(),
+                reason: "a generic S3 endpoint reports no physical or quota domain facts"
+                    .to_string(),
             },
             epoch: self.observation_epoch(),
             observed_at: OffsetDateTime::now_utc(),
@@ -661,7 +723,9 @@ impl BlobStore for S3StorageBackend {
         // cannot be detected by a generic S3 endpoint.
         let marker = marker_key_in(&self.namespace_prefix(&fence.target)?);
         match self.read_marker(&marker).await {
-            NamespaceState::Initialised { id } if id == fence.namespace => self.put_blob(key, body, options).await,
+            NamespaceState::Initialised { id } if id == fence.namespace => {
+                self.put_blob(key, body, options).await
+            }
             _ => Err(fence_invalidated(key, "namespace marker changed")),
         }
     }

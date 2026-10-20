@@ -18,8 +18,9 @@ use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
     FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
-    FileFsObjectIdInformation, FileFullDirectoryInformation, FileIdInformation, FileRenameInformation,
-    FileStandardInformation, Resource, Status, UncPath, connection::EncryptionMode,
+    FileFsObjectIdInformation, FileFullDirectoryInformation, FileIdInformation,
+    FileRenameInformation, FileStandardInformation, Resource, Status, UncPath,
+    connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
 use time::OffsetDateTime;
@@ -32,9 +33,9 @@ use crate::{
     CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
     FoundNamespace, KeyEquivalence, MAX_NAMESPACE_MARKER_BYTES, NAMESPACE_MARKER, NamespaceFence,
     NamespaceId, NamespaceInitialisation, NamespaceObservation, NamespaceState, NamespaceTarget,
-    ObservationEpoch, ScanCompleteness, ScanResult, StorageBackend, StorageByteStream, StorageError,
-    StorageProviderErrorKind, TopologyScan, decode_marker, encode_marker, is_reserved_key,
-    validate_blob_key, validate_unreserved_key,
+    ObservationEpoch, ScanCompleteness, ScanResult, StorageBackend, StorageByteStream,
+    StorageError, StorageProviderErrorKind, TopologyScan, decode_marker, encode_marker,
+    is_reserved_key, validate_blob_key, validate_unreserved_key,
 };
 
 /// SMB servers resolve Windows spellings: case, trailing dots/spaces, streams.
@@ -1630,7 +1631,12 @@ impl BlobStore for SmbStorageBackend {
     fn observation_epoch(&self) -> ObservationEpoch {
         ObservationEpoch {
             backend_instance: self.inner.instance,
-            connection_generation: self.inner.client.try_read().map(|client| client.generation).unwrap_or(0),
+            connection_generation: self
+                .inner
+                .client
+                .try_read()
+                .map(|client| client.generation)
+                .unwrap_or(0),
             root_witness: None,
         }
     }
@@ -1642,7 +1648,9 @@ impl BlobStore for SmbStorageBackend {
     ) -> Result<NamespaceObservation, StorageError> {
         let observed_at = OffsetDateTime::now_utc();
         let directory = self.namespace_directory(target)?;
-        let state = self.read_marker(&join_share_path(&directory, NAMESPACE_MARKER)).await;
+        let state = self
+            .read_marker(&join_share_path(&directory, NAMESPACE_MARKER))
+            .await;
         let ancestors = match scan.ancestors {
             Some(ancestors) => self.scan_ancestors(&directory, ancestors.max_depth).await,
             None => ScanResult::not_requested(),
@@ -1691,7 +1699,11 @@ impl BlobStore for SmbStorageBackend {
         // FILE_CREATE at the marker name with delete-on-close until flushed.
         // Durability is the server's flush semantics; nothing stronger is claimed.
         match self
-            .write_file(&relative_key, StorageByteStream::from_bytes(encode_marker(proposed)), true)
+            .write_file(
+                &relative_key,
+                StorageByteStream::from_bytes(encode_marker(proposed)),
+                true,
+            )
             .await
         {
             Ok(_) => {}
@@ -1699,10 +1711,14 @@ impl BlobStore for SmbStorageBackend {
             Err(error) => return Err(error),
         }
         match self.read_marker(&marker).await {
-            NamespaceState::Initialised { id } if id == proposed => Ok(NamespaceInitialisation::Created(id)),
-            other => Ok(settled_initialisation(other, proposed).unwrap_or(NamespaceInitialisation::Conflict {
-                reason: "published marker did not read back".to_string(),
-            })),
+            NamespaceState::Initialised { id } if id == proposed => {
+                Ok(NamespaceInitialisation::Created(id))
+            }
+            other => Ok(settled_initialisation(other, proposed).unwrap_or(
+                NamespaceInitialisation::Conflict {
+                    reason: "published marker did not read back".to_string(),
+                },
+            )),
         }
     }
 
@@ -1740,10 +1756,16 @@ impl BlobStore for SmbStorageBackend {
             return Err(fence_invalidated(key, "the SMB session reconnected"));
         }
         if current.root_witness.is_none() || current.root_witness != fence.epoch.root_witness {
-            return Err(fence_invalidated(key, "configured root was replaced or is unreadable"));
+            return Err(fence_invalidated(
+                key,
+                "configured root was replaced or is unreadable",
+            ));
         }
         let directory = self.namespace_directory(&fence.target)?;
-        match self.read_marker(&join_share_path(&directory, NAMESPACE_MARKER)).await {
+        match self
+            .read_marker(&join_share_path(&directory, NAMESPACE_MARKER))
+            .await
+        {
             NamespaceState::Initialised { id } if id == fence.namespace => {}
             _ => return Err(fence_invalidated(key, "namespace marker changed")),
         }
@@ -2016,10 +2038,17 @@ fn join_share_path(directory: &str, name: &str) -> String {
     }
 }
 
-fn settled_initialisation(state: NamespaceState, proposed: NamespaceId) -> Option<NamespaceInitialisation> {
+fn settled_initialisation(
+    state: NamespaceState,
+    proposed: NamespaceId,
+) -> Option<NamespaceInitialisation> {
     match state {
-        NamespaceState::Initialised { id } if id == proposed => Some(NamespaceInitialisation::AlreadyInitialisedSame(id)),
-        NamespaceState::Initialised { id } => Some(NamespaceInitialisation::AlreadyInitialisedOther(id)),
+        NamespaceState::Initialised { id } if id == proposed => {
+            Some(NamespaceInitialisation::AlreadyInitialisedSame(id))
+        }
+        NamespaceState::Initialised { id } => {
+            Some(NamespaceInitialisation::AlreadyInitialisedOther(id))
+        }
         NamespaceState::Conflict { reason } => Some(NamespaceInitialisation::Conflict { reason }),
         _ => None,
     }
@@ -2036,7 +2065,10 @@ struct SmbDirectoryIdentity {
 
 impl SmbDirectoryIdentity {
     fn witness(&self) -> String {
-        format!("smb:serial={:x};file={:x}", self.volume_serial, self.file_id)
+        format!(
+            "smb:serial={:x};file={:x}",
+            self.volume_serial, self.file_id
+        )
     }
 
     /// The volume object GUID makes the tuple comparable. Without it, server
@@ -2054,7 +2086,10 @@ impl SmbDirectoryIdentity {
             None => DomainFact::RootLocation {
                 provider: StorageBackend::Smb,
                 tuple: vec![
-                    ("volume_serial".to_string(), format!("{:x}", self.volume_serial)),
+                    (
+                        "volume_serial".to_string(),
+                        format!("{:x}", self.volume_serial),
+                    ),
                     ("file_id".to_string(), format!("{:x}", self.file_id)),
                 ],
                 scope: FactScope::Unspecified,
@@ -2063,11 +2098,13 @@ impl SmbDirectoryIdentity {
     }
 
     fn store_fact(&self) -> Option<DomainFact> {
-        self.volume_object_id.as_ref().map(|object_id| DomainFact::PhysicalStore {
-            provider: StorageBackend::Smb,
-            tuple: vec![("volume_object_id".to_string(), object_id.clone())],
-            scope: FactScope::StoreIdentity,
-        })
+        self.volume_object_id
+            .as_ref()
+            .map(|object_id| DomainFact::PhysicalStore {
+                provider: StorageBackend::Smb,
+                tuple: vec![("volume_object_id".to_string(), object_id.clone())],
+                scope: FactScope::StoreIdentity,
+            })
     }
 }
 
@@ -2075,11 +2112,16 @@ impl SmbStorageBackend {
     /// Share-relative directory of a namespace target.
     fn namespace_directory(&self, target: &NamespaceTarget) -> Result<String, StorageError> {
         let root = self.inner.config.root_prefix.clone().unwrap_or_default();
-        Ok(match (target.relative_prefix(SMB_KEY_EQUIVALENCE)?, root.is_empty()) {
-            (None, _) => root,
-            (Some(relative), true) => relative.to_string(),
-            (Some(relative), false) => format!("{root}/{relative}"),
-        })
+        Ok(
+            match (
+                target.relative_prefix(SMB_KEY_EQUIVALENCE)?,
+                root.is_empty(),
+            ) {
+                (None, _) => root,
+                (Some(relative), true) => relative.to_string(),
+                (Some(relative), false) => format!("{root}/{relative}"),
+            },
+        )
     }
 
     /// Bounded marker read at a share-relative path: one open, a size check
@@ -2095,8 +2137,12 @@ impl SmbStorageBackend {
                 }
             };
             let snapshot = self.client_snapshot().await;
-            let open = FileCreateArgs::make_open_existing(FileAccessMask::new().with_generic_read(true));
-            let resource = match self.with_timeout("namespace_read", snapshot.client.create_file(&path, &open)).await {
+            let open =
+                FileCreateArgs::make_open_existing(FileAccessMask::new().with_generic_read(true));
+            let resource = match self
+                .with_timeout("namespace_read", snapshot.client.create_file(&path, &open))
+                .await
+            {
                 Ok(resource) => resource,
                 Err(error) if is_not_found(&error) => return NamespaceState::Uninitialised,
                 Err(error) => {
@@ -2127,14 +2173,15 @@ impl SmbStorageBackend {
     }
 
     async fn read_open_marker(&self, file: &File) -> NamespaceState {
-        let standard: FileStandardInformation = match self.with_timeout("namespace_read", file.query_info()).await {
-            Ok(standard) => standard,
-            Err(_) => {
-                return NamespaceState::Unknown {
-                    reason: "marker size unreadable".to_string(),
-                };
-            }
-        };
+        let standard: FileStandardInformation =
+            match self.with_timeout("namespace_read", file.query_info()).await {
+                Ok(standard) => standard,
+                Err(_) => {
+                    return NamespaceState::Unknown {
+                        reason: "marker size unreadable".to_string(),
+                    };
+                }
+            };
         let Ok(size) = usize::try_from(standard.end_of_file) else {
             return NamespaceState::Conflict {
                 reason: "oversized marker".to_string(),
@@ -2170,9 +2217,16 @@ impl SmbStorageBackend {
         decode_marker(&buffer)
     }
 
-    async fn directory_identity(&self, share_relative: &str) -> Result<SmbDirectoryIdentity, StorageError> {
+    async fn directory_identity(
+        &self,
+        share_relative: &str,
+    ) -> Result<SmbDirectoryIdentity, StorageError> {
         let base = self.share_path()?;
-        let target = if share_relative.is_empty() { base } else { base.with_path(share_relative) };
+        let target = if share_relative.is_empty() {
+            base
+        } else {
+            base.with_path(share_relative)
+        };
         let access = DirAccessMask::new()
             .with_list_directory(true)
             .with_read_attributes(true)
@@ -2181,7 +2235,9 @@ impl SmbStorageBackend {
         let resource = self
             .with_timeout(
                 "namespace_identity",
-                snapshot.client.create_file(&target, &FileCreateArgs::make_open_existing(access.into())),
+                snapshot
+                    .client
+                    .create_file(&target, &FileCreateArgs::make_open_existing(access.into())),
             )
             .await?;
         let directory = match resource {
@@ -2197,11 +2253,17 @@ impl SmbStorageBackend {
             }
         };
         let identity = self
-            .with_timeout("namespace_identity", directory.query_info::<FileIdInformation>())
+            .with_timeout(
+                "namespace_identity",
+                directory.query_info::<FileIdInformation>(),
+            )
             .await;
         // Servers that do not support volume object IDs only omit that fact.
         let object = self
-            .with_timeout("namespace_identity", directory.query_fs_info::<FileFsObjectIdInformation>())
+            .with_timeout(
+                "namespace_identity",
+                directory.query_fs_info::<FileFsObjectIdInformation>(),
+            )
             .await;
         let closed = self.with_timeout("close", directory.close()).await;
         let identity = identity?;
@@ -2220,7 +2282,11 @@ impl SmbStorageBackend {
     async fn namespace_epoch(&self) -> ObservationEpoch {
         let generation = self.client_snapshot().await.generation;
         let witness = match self.namespace_directory(&NamespaceTarget::Root) {
-            Ok(directory) => self.directory_identity(&directory).await.ok().map(|identity| identity.witness()),
+            Ok(directory) => self
+                .directory_identity(&directory)
+                .await
+                .ok()
+                .map(|identity| identity.witness()),
             Err(_) => None,
         };
         ObservationEpoch {
@@ -2234,7 +2300,11 @@ impl SmbStorageBackend {
     async fn scan_ancestors(&self, directory: &str, max_depth: usize) -> ScanResult {
         let mut found = Vec::new();
         let mut completeness = ScanCompleteness::Complete;
-        let mut components: Vec<&str> = if directory.is_empty() { Vec::new() } else { directory.split('/').collect() };
+        let mut components: Vec<&str> = if directory.is_empty() {
+            Vec::new()
+        } else {
+            directory.split('/').collect()
+        };
         let mut level = 0_usize;
         while !components.is_empty() {
             level += 1;
@@ -2245,9 +2315,13 @@ impl SmbStorageBackend {
                 break;
             }
             components.pop();
-            let state = self.read_marker(&join_share_path(&components.join("/"), NAMESPACE_MARKER)).await;
+            let state = self
+                .read_marker(&join_share_path(&components.join("/"), NAMESPACE_MARKER))
+                .await;
             if let NamespaceState::Unknown { reason } = &state {
-                completeness = ScanCompleteness::Denied { reason: reason.clone() };
+                completeness = ScanCompleteness::Denied {
+                    reason: reason.clone(),
+                };
             }
             if state != NamespaceState::Uninitialised {
                 found.push(FoundNamespace {
@@ -2256,7 +2330,10 @@ impl SmbStorageBackend {
                 });
             }
         }
-        ScanResult { completeness, found }
+        ScanResult {
+            completeness,
+            found,
+        }
     }
 }
 
