@@ -187,6 +187,9 @@ impl DecimalDef {
 
     /// Exact SQL Server MONEY domain: scale four and a signed 64-bit mantissa.
     /// This definition is not portable to an ordinary DECIMAL(19,4) column.
+    /// Generated entities use it only with the SQL Server backend. Hand-built
+    /// entities must supply their own exact MONEY cast and row decoder and must
+    /// not attach this definition to SQLite or PostgreSQL columns.
     pub const fn mssql_money() -> Self {
         Self {
             precision: 19,
