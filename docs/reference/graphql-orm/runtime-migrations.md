@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -269,6 +269,45 @@ physical/plan hashes or history; genuinely different literals and unsupported
 casts/expressions remain distinct. Runtime literal SQL assumes PostgreSQL's
 standard string mode (`standard_conforming_strings=on`); nonstandard session
 escape modes are not newly supported. SQLite default behavior is unchanged.
+
+### Typed literal defaults (0.55.0)
+
+The physical target renders [typed literal defaults](runtime-schema-ir.md#typed-literal-defaults)
+as constants:
+
+| Kind | SQLite | PostgreSQL |
+| --- | --- | --- |
+| boolean, integer, float | bare literal, unchanged | bare literal, unchanged |
+| string, uuid | quoted, unchanged | quoted, unchanged |
+| json | `'<canonical text>'` | `'<canonical text>'::jsonb` |
+| bytes | `X'<HEX>'` | `'\x<hex>'::bytea` |
+| datetime | `'<canonical UTC text>'`, the same text runtime writes store | `'<canonical UTC text>'::timestamptz` |
+
+PostgreSQL deparses many constants differently from the target text: `'…'::uuid`,
+`'-1'::integer`, `'2147483648'::bigint`, `'-9223372036854775808'::numeric`, `'-1.5'::numeric`,
+normalized `jsonb` text, `'\x…'::bytea` and `timestamptz` text in the session time zone. The
+owned/runtime planner therefore compares defaults with the **typed-literal profile**: for the
+target column type it accepts exactly one bare numeric/boolean token or one complete quoted
+literal with at most one allowed cast, and compares the two constants by value — `i64` for
+integer types, finite `f64` (negative zero equal to zero) for floating types, UUID value, JSON
+structure, decoded bytes and timestamptz instant, including offsets with seconds such as
+historical LMT zones. Anything else, including session-dependent output (`DateStyle` other than
+ISO, `bytea_output=escape`, `standard_conforming_strings=off`), is not equivalent and fails
+closed as a planned `AlterColumn` or a certification `BaselineMismatch`.
+
+The profile changes only whether a column differs. Target rendering, introspected text,
+physical/plan hashes and statement rendering are unchanged. It applies to
+`plan_owned_migration`, `validate_owned_schema`, `runtime_mutation_environment` and owned apply
+rechecks. Static `SchemaManager` planning and the `graphql-orm-owned-planning-8e1-*` replay
+recipes keep the pinned 0.50.2 comparator byte-for-byte; plans captured with a replay witness
+recheck with that pinned profile at apply time. A plan that previously contained a perpetual
+default-only `AlterColumn` for an equivalent constant now plans nothing; such a plan could never
+certify, and recorded history is not rewritten.
+
+For schemas whose defaults use only earlier kinds and values (string, boolean, small positive
+integer, float, `CurrentTimestamp`), the release keeps golden tests captured at 0.50.2 on both
+backends: serialized schemas, canonical bytes, fingerprints, physical hashes, plans, plan hashes,
+live replans after apply, certified baselines and SDL are byte-identical.
 
 Static-to-runtime conversion rejects legacy epoch-second defaults on fields
 marked DateTime with a scoped `RuntimeSchemaDiagnosticCode::UnsupportedDefault`.

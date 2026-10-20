@@ -28,6 +28,7 @@ fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
         sortable: !matches!(kind, RuntimeValueKind::Json),
         generated: false,
         default: None,
+        format: None,
     }
 }
 

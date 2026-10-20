@@ -397,6 +397,7 @@ mod tests {
             sortable: false,
             generated: false,
             default: None,
+            format: None,
         };
         let schema = RuntimeSchema {
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,

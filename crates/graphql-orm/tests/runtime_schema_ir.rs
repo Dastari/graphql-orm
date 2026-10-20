@@ -194,6 +194,7 @@ fn field(id: &str, api: &str, column: &str, kind: RuntimeValueKind) -> RuntimeFi
         sortable: false,
         generated: false,
         default: None,
+        format: None,
     }
 }
 

@@ -165,10 +165,18 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
             ));
         let mut order_enum = Enum::new(format!("{name}OrderField"));
         for f in &c.fields {
-            let ty = if f.nullable {
-                TypeRef::named(scalar::name(f.value_kind))
+            // A projected field outputs its host object; everything else stays scalar.
+            let (name, nullable) = match module.projection(&f.id) {
+                Some(binding) => (
+                    binding.contract.object.name(),
+                    f.nullable || binding.contract.may_be_absent,
+                ),
+                None => (scalar::name(f.value_kind), f.nullable),
+            };
+            let ty = if nullable {
+                TypeRef::named(name)
             } else {
-                TypeRef::named_nn(scalar::name(f.value_kind))
+                TypeRef::named_nn(name)
             };
             object = object.field(output(&f.api_name, ty));
             if f.filterable {
@@ -236,4 +244,21 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
         ]);
     }
     result
+}
+
+/// ORM-built output type of a projector; fields read only authorized payloads.
+pub(super) fn projected_type(object: &super::RuntimeProjectedObject) -> Type {
+    let mut result = Object::new(object.name());
+    for field in object.fields() {
+        let name = scalar::name(field.kind());
+        result = result.field(output(
+            field.name(),
+            if field.nullable() {
+                TypeRef::named(name)
+            } else {
+                TypeRef::named_nn(name)
+            },
+        ));
+    }
+    result.into()
 }

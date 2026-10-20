@@ -3,7 +3,7 @@ title: Schema-bound transactional runtime mutations
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-07
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -143,6 +143,27 @@ variants remain; `commit_outcome()` reports confirmed `RolledBack` only for
 unknown outcomes. `OrmPublicError::runtime_mutation_code()` retains safe runtime
 codes through callback error conversion; no caller values, SQL or preimages are
 formatted by runtime request/grant/effect/error Debug implementations.
+
+### Validating stored inputs and staging related writes
+
+Host validation of a stored input — for example that a formatted UUID references a resource
+the caller may claim — belongs in the existing callbacks, which receive the pinned
+`MutationContext` of the same transaction. No new hook and no pool preflight is involved:
+
+1. `RuntimeWriteAuthority::authorize_intent(intent, tx)` inspects `intent.fields()` and reads or
+   locks host rows through typed ORM calls on `tx` (row locks on PostgreSQL; SQLite state-machine
+   transactions begin `IMMEDIATE`). Returning an error rolls back the transaction.
+2. `run_runtime_before_commit(hook, &effect)` runs `RuntimeMutationHook::before_commit(tx,
+   pending)` in the same transaction. `RuntimeMutationEffect::staged()` is the authoritative
+   post-write image (keys, written fields and the write grant projection; the preimage for
+   delete) and `preimage()` the authorized update/delete preimage. Hooks use them to claim new
+   values and release replaced ones with typed repository writes, even when the request returns
+   nothing. `record()` remains the only approved return projection; staged images are never part
+   of a GraphQL payload and their `Debug` output is redacted.
+3. A hook error, a rejected typed write or cancellation poisons the transaction; the runtime
+   row and every staged host write roll back together. Concurrent conflicting claims serialize
+   on host locks and should also be backed by a host uniqueness constraint, so at most one can
+   commit.
 
 `RuntimeMutationEffect` is pending, not an event or commit receipt. The engine emits
 no events. Static repository events/actions remain deferred until commit. Durable

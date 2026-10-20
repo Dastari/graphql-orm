@@ -34,6 +34,7 @@ fn field(id: &str, column: &str, kind: RuntimeValueKind, nullable: bool) -> Runt
         sortable: true,
         generated: false,
         default: None,
+        format: None,
     }
 }
 

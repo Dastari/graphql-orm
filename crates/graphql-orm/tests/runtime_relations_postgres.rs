@@ -31,6 +31,7 @@ fn field(id: &str, kind: RuntimeValueKind) -> RuntimeField {
         sortable: true,
         generated: false,
         default: None,
+        format: None,
     }
 }
 

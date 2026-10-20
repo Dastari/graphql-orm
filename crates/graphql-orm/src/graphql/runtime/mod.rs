@@ -46,6 +46,13 @@ mod execution;
 mod module;
 mod plan;
 pub use plan::prepare_runtime_filter;
+mod projection;
+pub use projection::{
+    MAX_PROJECTED_OBJECT_FIELDS, RuntimeFieldProjector, RuntimeProjected, RuntimeProjectedField,
+    RuntimeProjectedObject, RuntimeProjectedSelection, RuntimeProjectionBatch,
+    RuntimeProjectionContract, RuntimeProjectionError, RuntimeProjectionLimits,
+    RuntimeProjectionPurpose, RuntimeProjectionResults,
+};
 mod schema;
 pub use execution::{
     RuntimeGraphqlRequest, RuntimeReadAuthority, RuntimeReadCheck, RuntimeReadGrant,

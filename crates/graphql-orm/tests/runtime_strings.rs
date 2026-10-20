@@ -49,6 +49,7 @@ fn field(name: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
         sortable: true,
         generated: false,
         default: None,
+        format: None,
     }
 }
 fn schema() -> ValidatedRuntimeSchema {

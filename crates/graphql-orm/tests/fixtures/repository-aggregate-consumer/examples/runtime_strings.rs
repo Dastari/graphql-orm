@@ -40,6 +40,7 @@ mod supported {
             sortable: true,
             generated: false,
             default: None,
+            format: None,
         }
     }
     pub async fn run(db: &Database<Backend>) -> Result<(), Box<dyn std::error::Error>> {

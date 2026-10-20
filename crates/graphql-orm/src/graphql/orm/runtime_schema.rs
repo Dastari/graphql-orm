@@ -40,6 +40,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use super::{RuntimeDefaultError, RuntimeDefaultProblem, RuntimeFieldFormat, RuntimeFormatProblem};
+
 use super::core::{
     BackupValueKind, ColumnBackupPolicy, DeletePolicy, EntityMetadata, FieldMetadata, IndexMethod,
     RelationChangePropagation, SchemaPolicy, fnv1a64,
@@ -172,10 +174,14 @@ impl RuntimeValueKind {
 }
 
 /// Backend-neutral default value of a runtime field.
+///
+/// Literal text follows the grammar of the field's value kind; build literals
+/// with the typed constructors such as [`RuntimeDefault::json`] and inspect
+/// them with [`RuntimeDefault::typed`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeDefault {
-    /// A literal rendered portably: numbers, booleans, or a plain string value.
+    /// A literal in the canonical text grammar of the field's value kind.
     Literal(String),
     /// The transaction/statement timestamp at write time, rendered per backend.
     CurrentTimestamp,
@@ -225,6 +231,11 @@ pub struct RuntimeField {
     /// Server-generated; rejected as writable input by later slices.
     pub generated: bool,
     pub default: Option<RuntimeDefault>,
+    /// Optional semantic descriptor. It never changes the physical shape and is
+    /// omitted from serialization when absent, keeping earlier documents and
+    /// identities byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<RuntimeFieldFormat>,
 }
 
 /// Cardinality of a runtime relation from the declaring collection's perspective.
@@ -374,6 +385,8 @@ pub enum RuntimeSchemaDiagnosticCode {
     InvalidDefaultOrder,
     /// Retention was enabled for a collection that is not append-only.
     RetentionRequiresAppendOnly,
+    /// A semantic field format descriptor is invalid.
+    InvalidFormat,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -404,8 +417,22 @@ impl RuntimeSchemaDiagnosticCode {
             Self::UnsupportedCapability => "unsupported_capability",
             Self::UnsupportedDefault => "unsupported_default",
             Self::InvalidDefaultOrder => "invalid_default_order",
+            Self::InvalidFormat => "invalid_format",
         }
     }
+}
+
+/// Value-free detail refining a diagnostic code.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RuntimeSchemaDiagnosticDetail {
+    /// Why a literal default was rejected.
+    Default(RuntimeDefaultProblem),
+    /// Why a format descriptor was rejected.
+    Format(RuntimeFormatProblem),
 }
 
 /// One structured validation or conversion diagnostic.
@@ -417,6 +444,9 @@ pub struct RuntimeSchemaDiagnostic {
     pub collection: Option<CollectionId>,
     /// Field/relation/index/subject context inside the collection, when applicable.
     pub subject: Option<String>,
+    /// Value-free refinement of `code`; omitted from serialization when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<RuntimeSchemaDiagnosticDetail>,
 }
 
 impl RuntimeSchemaDiagnostic {
@@ -426,6 +456,7 @@ impl RuntimeSchemaDiagnostic {
             message,
             collection: None,
             subject: None,
+            detail: None,
         }
     }
 
@@ -440,7 +471,13 @@ impl RuntimeSchemaDiagnostic {
             message,
             collection: Some(collection.clone()),
             subject: subject.map(str::to_string),
+            detail: None,
         }
+    }
+
+    fn with_detail(mut self, detail: RuntimeSchemaDiagnosticDetail) -> Self {
+        self.detail = Some(detail);
+        self
     }
 }
 
@@ -557,41 +594,14 @@ fn valid_physical_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// Checks a field's default against its value kind; returns the problem description when the
-/// combination is invalid.
-fn invalid_default(field: &RuntimeField) -> Option<String> {
-    match (&field.default, field.value_kind) {
-        (None, _) => None,
-        (Some(RuntimeDefault::CurrentTimestamp), RuntimeValueKind::DateTime) => None,
-        // Epoch seconds stored in integer fields are the one non-datetime timestamp shape.
-        (Some(RuntimeDefault::CurrentTimestamp), RuntimeValueKind::Integer) => None,
-        (Some(RuntimeDefault::CurrentTimestamp), kind) => Some(format!(
-            "current_timestamp default is not valid for a {} field",
-            kind.as_str()
-        )),
-        (Some(RuntimeDefault::Literal(value)), kind) => {
-            let ok = match kind {
-                RuntimeValueKind::Boolean => value == "true" || value == "false",
-                RuntimeValueKind::Integer => value.parse::<i64>().is_ok(),
-                RuntimeValueKind::Float => value.parse::<f64>().is_ok_and(f64::is_finite),
-                RuntimeValueKind::String => true,
-                RuntimeValueKind::Uuid => uuid::Uuid::parse_str(value).is_ok(),
-                // Structured and date-time kinds take no literal defaults in this slice.
-                RuntimeValueKind::Json | RuntimeValueKind::Bytes | RuntimeValueKind::DateTime => {
-                    false
-                }
-            };
-            if ok {
-                None
-            } else {
-                Some(format!(
-                    "literal default `{}` is not a valid {} value",
-                    value.escape_debug(),
-                    kind.as_str()
-                ))
-            }
-        }
-    }
+/// Checks a field's default against its value kind. The returned problem never carries the
+/// literal itself, so diagnostics cannot echo submitted values.
+fn invalid_default(field: &RuntimeField) -> Option<RuntimeDefaultProblem> {
+    field
+        .default
+        .as_ref()
+        .and_then(|default| default.typed(field.value_kind).err())
+        .map(RuntimeDefaultError::problem)
 }
 
 /// True when the referenced target fields are provably unique on the target collection.
@@ -669,6 +679,7 @@ impl RuntimeSchema {
                     message: format!("invalid {kind} stable ID `{}`", id.escape_debug()),
                     collection: collection.cloned(),
                     subject: Some(id.to_string()),
+                    detail: None,
                 });
             }
         };
@@ -872,12 +883,36 @@ impl RuntimeSchema {
                     ));
                 }
                 if let Some(problem) = invalid_default(field) {
-                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
-                        RuntimeSchemaDiagnosticCode::InvalidDefault,
-                        problem,
-                        cid,
-                        subject,
-                    ));
+                    let message = match &field.default {
+                        Some(RuntimeDefault::CurrentTimestamp) => format!(
+                            "current_timestamp default is not valid for a {} field",
+                            field.value_kind.as_str()
+                        ),
+                        _ => format!(
+                            "literal default is not a valid {} value ({problem})",
+                            field.value_kind.as_str()
+                        ),
+                    };
+                    diagnostics.push(
+                        RuntimeSchemaDiagnostic::scoped(
+                            RuntimeSchemaDiagnosticCode::InvalidDefault,
+                            message,
+                            cid,
+                            subject,
+                        )
+                        .with_detail(RuntimeSchemaDiagnosticDetail::Default(problem)),
+                    );
+                }
+                if let Some(Err(error)) = field.format.as_ref().map(RuntimeFieldFormat::validate) {
+                    diagnostics.push(
+                        RuntimeSchemaDiagnostic::scoped(
+                            RuntimeSchemaDiagnosticCode::InvalidFormat,
+                            format!("field format descriptor is invalid ({})", error.problem()),
+                            cid,
+                            subject,
+                        )
+                        .with_detail(RuntimeSchemaDiagnosticDetail::Format(error.problem())),
+                    );
                 }
             }
 
@@ -1249,6 +1284,32 @@ impl ValidatedRuntimeSchema {
         SchemaFingerprint::from_bytes(self.render(false).as_bytes())
     }
 
+    /// Fingerprint of only the semantic field format descriptors, keyed by stable
+    /// collection and field IDs. Hosts use it with [`Self::fingerprint`] and the
+    /// physical target hash to classify a descriptor-only revision. A schema
+    /// without descriptors has one constant value.
+    pub fn format_fingerprint(&self) -> SchemaFingerprint {
+        let mut out = String::from("runtime-schema-formats v1\n");
+        let mut collections = self.schema.collections.iter().collect::<Vec<_>>();
+        collections.sort_by(|a, b| a.id.cmp(&b.id));
+        for collection in collections {
+            let mut fields = collection.fields.iter().collect::<Vec<_>>();
+            fields.sort_by(|a, b| a.id.cmp(&b.id));
+            for field in fields {
+                if let Some(format) = &field.format {
+                    out.push_str(&format!(
+                        "{}|{}|{}\n",
+                        collection.id,
+                        field.id,
+                        serde_json::to_string(&format.canonical())
+                            .expect("strings always serialize")
+                    ));
+                }
+            }
+        }
+        SchemaFingerprint::from_bytes(out.as_bytes())
+    }
+
     fn render(&self, with_ids: bool) -> String {
         let schema = &self.schema;
         let mut collections: Vec<&RuntimeCollection> = schema.collections.iter().collect();
@@ -1332,7 +1393,7 @@ impl ValidatedRuntimeSchema {
                     Some(RuntimeDefault::CurrentTimestamp) => "current_timestamp".to_string(),
                 };
                 out.push_str(&format!(
-                    "|api={}|column={}|kind={}|nullable={}|unique={}|filterable={}|sortable={}|generated={}|default={}\n",
+                    "|api={}|column={}|kind={}|nullable={}|unique={}|filterable={}|sortable={}|generated={}|default={}",
                     field.api_name,
                     field.physical_column,
                     field.value_kind.as_str(),
@@ -1343,6 +1404,17 @@ impl ValidatedRuntimeSchema {
                     field.generated,
                     default
                 ));
+                // Semantic descriptors join the ID-bearing identity only when present, so
+                // schemas without them keep their exact earlier bytes. The structural
+                // fingerprint stays structural-only.
+                if with_ids && let Some(format) = &field.format {
+                    out.push_str("|format=");
+                    out.push_str(
+                        &serde_json::to_string(&format.canonical())
+                            .expect("strings always serialize"),
+                    );
+                }
+                out.push('\n');
             }
 
             let mut relations: Vec<&RuntimeRelation> = collection.relations.iter().collect();
@@ -1668,6 +1740,7 @@ impl RuntimeSchema {
                     sortable: field.is_sortable,
                     generated: field.is_generated,
                     default,
+                    format: None,
                 });
             }
 

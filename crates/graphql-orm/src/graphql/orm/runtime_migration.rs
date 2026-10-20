@@ -9,7 +9,8 @@ use std::sync::Arc;
 use super::core::*;
 use super::dialect::{DatabaseBackend, SqlDialect};
 use super::migrations::{
-    build_migration_plan_views, classify_migration_step_view, migration_step_table_name,
+    DefaultEquivalence, build_migration_plan_views_with, classify_migration_step_view,
+    migration_step_table_name,
 };
 use super::owned_schema::{
     IndexModel, OwnedMigrationStep, OwnedSchemaModel, OwnedTableModel, StepRef,
@@ -20,6 +21,7 @@ use super::schema_manager::{
     SchemaManager, reject_migration_risks, stable_plan_hash_views, validate_schema_views,
 };
 use super::{NoDefaultBackend, OrmBackend};
+use super::{RuntimeTypedDefault, RuntimeValue};
 
 /// Stable classification of a runtime physical conversion/planning failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -502,19 +504,48 @@ fn runtime_default(
                 RuntimeMigrationDiagnosticCode::UnsupportedDefault,
             )),
         },
-        Some(RuntimeDefault::Literal(value)) => Ok(Some(match field.value_kind {
-            RuntimeValueKind::String | RuntimeValueKind::Uuid => {
-                format!("'{}'", value.replace('\'', "''"))
-            }
-            RuntimeValueKind::Boolean | RuntimeValueKind::Integer | RuntimeValueKind::Float => {
-                value.clone()
-            }
-            _ => {
-                return Err(rejection(
-                    RuntimeMigrationDiagnosticCode::UnsupportedDefault,
-                ));
-            }
-        })),
+        Some(default @ RuntimeDefault::Literal(value)) => {
+            let quoted = || format!("'{}'", value.replace('\'', "''"));
+            Ok(Some(match (field.value_kind, backend) {
+                (RuntimeValueKind::String | RuntimeValueKind::Uuid, _) => quoted(),
+                (
+                    RuntimeValueKind::Boolean | RuntimeValueKind::Integer | RuntimeValueKind::Float,
+                    _,
+                ) => value.clone(),
+                (RuntimeValueKind::Json, DatabaseBackend::Postgres) => {
+                    format!("{}::jsonb", quoted())
+                }
+                (RuntimeValueKind::DateTime, DatabaseBackend::Postgres) => {
+                    format!("{}::timestamptz", quoted())
+                }
+                (RuntimeValueKind::Json | RuntimeValueKind::DateTime, DatabaseBackend::Sqlite) => {
+                    quoted()
+                }
+                (RuntimeValueKind::Bytes, DatabaseBackend::Sqlite | DatabaseBackend::Postgres) => {
+                    let Ok(RuntimeTypedDefault::Value(RuntimeValue::Bytes(bytes))) =
+                        default.typed(RuntimeValueKind::Bytes)
+                    else {
+                        return Err(rejection(
+                            RuntimeMigrationDiagnosticCode::UnsupportedDefault,
+                        ));
+                    };
+                    let hex = bytes
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    if backend == DatabaseBackend::Sqlite {
+                        format!("X'{}'", hex.to_ascii_uppercase())
+                    } else {
+                        format!("'\\x{hex}'::bytea")
+                    }
+                }
+                _ => {
+                    return Err(rejection(
+                        RuntimeMigrationDiagnosticCode::UnsupportedDefault,
+                    ));
+                }
+            }))
+        }
     }
 }
 
@@ -636,6 +667,8 @@ pub struct OwnedPlannedMigration {
     steps: Vec<OwnedPlannedMigrationStep>,
     statements: Vec<String>,
     target: OwnedSchemaModel,
+    /// Default comparison used to produce the plan; apply rechecks with the same profile.
+    equivalence: DefaultEquivalence,
 }
 impl OwnedPlannedMigration {
     /// Host version identifier.
@@ -792,6 +825,7 @@ impl OwnedPlannedMigration {
             current,
             &self.target,
             &self.ownership,
+            self.equivalence,
         )
         .map_err(Into::into)
     }
@@ -969,7 +1003,13 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
         B::validate_owned_dependencies(self.database.pool(), ownership).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
-        validate_owned_effects(B::DIALECT, &current, target, ownership)?;
+        validate_owned_effects(
+            B::DIALECT,
+            &current,
+            target,
+            ownership,
+            DefaultEquivalence::TypedLiteralsV1,
+        )?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);
         Ok(validate_schema_views(
             B::DIALECT.name(),
@@ -1002,10 +1042,20 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         }
         B::validate_owned_dependencies(self.database.pool(), ownership).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
-        validate_owned_effects(B::DIALECT, &current, target, ownership)?;
+        validate_owned_effects(
+            B::DIALECT,
+            &current,
+            target,
+            ownership,
+            DefaultEquivalence::TypedLiteralsV1,
+        )?;
         let scoped = scoped_current(&current, ownership, options, target);
-        let physical =
-            build_migration_plan_views(B::DIALECT, &scoped.borrowed(), &target.borrowed());
+        let physical = build_migration_plan_views_with(
+            B::DIALECT,
+            &scoped.borrowed(),
+            &target.borrowed(),
+            DefaultEquivalence::TypedLiteralsV1,
+        );
         let limits = target.limits;
         if physical.steps.len() > limits.max_plan_steps
             || physical.statements.len() > limits.max_plan_statements
@@ -1040,6 +1090,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             steps,
             statements: physical.statements,
             target: target.clone(),
+            equivalence: DefaultEquivalence::TypedLiteralsV1,
         };
         plan.plan_hash = plan.integrity_hash();
         B::validate_owned_plan(self.database.pool(), &plan).await?;
@@ -1076,11 +1127,23 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             .map_err(|_| rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract))?;
         B::validate_owned_dependencies(self.database.pool(), ownership).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
-        validate_owned_effects(B::DIALECT, &current, target, ownership)?;
+        validate_owned_effects(
+            B::DIALECT,
+            &current,
+            target,
+            ownership,
+            DefaultEquivalence::TypedLiteralsV1,
+        )?;
         let scoped = scoped_current(&current, ownership, PlanOptions::strict(), target);
-        if !build_migration_plan_views(B::DIALECT, &scoped.borrowed(), &target.borrowed())
-            .steps
-            .is_empty()
+        let typed = DefaultEquivalence::TypedLiteralsV1;
+        if !build_migration_plan_views_with(
+            B::DIALECT,
+            &scoped.borrowed(),
+            &target.borrowed(),
+            typed,
+        )
+        .steps
+        .is_empty()
         {
             return Err(rejection(RuntimeMigrationDiagnosticCode::BaselineMismatch).into());
         }
@@ -1101,12 +1164,22 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
                 .collect(),
         };
         if relevant.tables.len() != runtime.tables.len()
-            || !build_migration_plan_views(B::DIALECT, &runtime.borrowed(), &relevant.borrowed())
-                .steps
-                .is_empty()
-            || !build_migration_plan_views(B::DIALECT, &relevant.borrowed(), &runtime.borrowed())
-                .steps
-                .is_empty()
+            || !build_migration_plan_views_with(
+                B::DIALECT,
+                &runtime.borrowed(),
+                &relevant.borrowed(),
+                typed,
+            )
+            .steps
+            .is_empty()
+            || !build_migration_plan_views_with(
+                B::DIALECT,
+                &relevant.borrowed(),
+                &runtime.borrowed(),
+                typed,
+            )
+            .steps
+            .is_empty()
         {
             return Err(rejection(RuntimeMigrationDiagnosticCode::InvalidPhysicalContract).into());
         }
@@ -1171,6 +1244,7 @@ fn validate_owned_effects(
     current: &OwnedSchemaModel,
     target: &OwnedSchemaModel,
     ownership: &ManagedTableSet,
+    equivalence: DefaultEquivalence,
 ) -> Result<(), RuntimeMigrationDiagnostics> {
     if target
         .tables
@@ -1226,8 +1300,11 @@ fn validate_owned_effects(
                                 && before.columns.iter().zip(&after.columns).all(
                                     |(before, after)| {
                                         before.name == after.name
-                                            && !super::migrations::column_changed_for_backend(
-                                                backend, before, after,
+                                            && !super::migrations::column_changed_with(
+                                                backend,
+                                                before,
+                                                after,
+                                                equivalence,
                                             )
                                     },
                                 )

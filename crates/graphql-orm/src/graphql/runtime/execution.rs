@@ -29,6 +29,9 @@ pub struct RuntimeReadCheck<'a> {
     pub logical_operators: Vec<&'static str>,
     pub relation: Option<&'a RuntimeRelationHandle>,
     pub include_count: bool,
+    /// Formatted fields served through host projectors and their selected
+    /// object fields. Each stored field also appears in `projection`.
+    pub projections: Vec<super::RuntimeProjectedSelection<'a>>,
 }
 /// Explicit host grant. No provider or error means denial.
 pub struct RuntimeReadGrant {
@@ -65,6 +68,7 @@ pub struct RuntimeGraphqlRequest<B: RuntimeReadBackend> {
     pub(super) mutation_environment: Option<Arc<RuntimeMutationEnvironment>>,
     pub(super) write_authority: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub(super) mutation_hook: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    pub(super) projection_context: Option<Arc<dyn std::any::Any + Send + Sync>>,
     backend: PhantomData<B>,
 }
 impl<B: RuntimeReadBackend> RuntimeGraphqlRequest<B> {
@@ -83,8 +87,17 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlRequest<B> {
             mutation_environment: None,
             write_authority: None,
             mutation_hook: None,
+            projection_context: None,
             backend: PhantomData,
         }
+    }
+    /// Trusted host data passed to field projectors for this request only.
+    pub fn with_projection_context(
+        mut self,
+        context: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Self {
+        self.projection_context = Some(context);
+        self
     }
     /// Bind cursors to a trusted authorization partition, never client input.
     pub fn with_cursor_scope(mut self, scope: impl Into<String>) -> Self {
@@ -399,6 +412,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
             limits,
             response_bytes: 0,
             crypto_calls: 0,
+            projection_calls: 0,
         };
         let mut prepared = Vec::new();
         for plan in &plans {
@@ -483,6 +497,11 @@ fn authorize<'a, B: RuntimeReadBackend>(
                 logical_operators: plan.filter_intent.logical.clone(),
                 relation: plan.relation.as_ref(),
                 include_count: plan.count,
+                projections: plan
+                    .projected
+                    .iter()
+                    .map(super::projection::ProjectedPlan::selection)
+                    .collect(),
             })
             .await?;
         if let Some(predicate) = grant.predicate {
@@ -537,6 +556,7 @@ struct Executor<'a, B: RuntimeReadBackend> {
     limits: RuntimeGraphqlLimits,
     response_bytes: usize,
     crypto_calls: usize,
+    projection_calls: usize,
 }
 fn relation_error(e: RuntimeRelationError) -> RuntimeGraphqlError {
     RuntimeGraphqlError::new(e.code().as_str())
@@ -711,6 +731,14 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         for record in records {
             let mut values = async_graphql::indexmap::IndexMap::new();
             for field in &plan.fields {
+                // Projected stored scalars are never emitted; their objects are attached later.
+                if plan
+                    .projected
+                    .iter()
+                    .any(|projected| &projected.field == field)
+                {
+                    continue;
+                }
                 let value = match record.state(field).map_err(|_| invalid())? {
                     RuntimeFieldState::Value(v) => scalar::encode(v, self.limits.scalars)?,
                     RuntimeFieldState::Null => Value::Null,
@@ -735,6 +763,48 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         }
         Ok(nodes)
     }
+    /// Resolve projected objects for authorized records after their layer is read.
+    async fn project(
+        &mut self,
+        plan: &Plan,
+        records: &[RuntimeRecord],
+        nodes: &mut [Value],
+    ) -> Result<(), RuntimeGraphqlError> {
+        for projected in &plan.projected {
+            let stored = records
+                .iter()
+                .map(|record| match record.state(&projected.field) {
+                    Ok(RuntimeFieldState::Value(value)) => Ok(value.clone()),
+                    Ok(RuntimeFieldState::Null) => Ok(RuntimeValue::Null),
+                    _ => Err(RuntimeGraphqlError::new("projection_mismatch")),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if stored
+                .iter()
+                .all(|value| matches!(value, RuntimeValue::Null))
+            {
+                attach(nodes, &projected.api_name, vec![Value::Null; stored.len()])?;
+                continue;
+            }
+            self.projection_calls = self.projection_calls.checked_add(1).ok_or_else(invalid)?;
+            if self.projection_calls > self.limits.projection.max_calls {
+                return Err(RuntimeGraphqlError::new("cost_exceeded"));
+            }
+            let (values, bytes) = projected
+                .resolve(
+                    &plan.module.schema,
+                    &stored,
+                    RuntimeProjectionPurpose::Read,
+                    self.request.auth.as_ref(),
+                    self.request.projection_context.as_deref(),
+                    self.limits,
+                )
+                .await?;
+            self.reserve(bytes)?;
+            attach(nodes, &projected.api_name, values)?;
+        }
+        Ok(())
+    }
     async fn root(
         &mut self,
         plan: &Plan,
@@ -751,6 +821,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             .map(|e| e.node.clone())
             .collect::<Vec<_>>();
         let mut nodes = self.records(plan, &records)?;
+        self.project(plan, &records, &mut nodes).await?;
         for child in &plan.children {
             let relation = child.relation.as_ref().ok_or_else(invalid)?;
             let parents = connection
@@ -829,6 +900,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 })
                 .collect::<Vec<_>>();
             let mut nodes = self.records(plan, &records)?;
+            self.project(plan, &records, &mut nodes).await?;
             for child in &plan.children {
                 let parents = batch
                     .relation_parents(child.relation.as_ref().ok_or_else(invalid)?)

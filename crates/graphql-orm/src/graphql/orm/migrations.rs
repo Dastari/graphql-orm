@@ -16,6 +16,7 @@ use super::core::{
 use super::core::{SearchFieldModel, SearchJsonPathModel, SearchRelationFieldModel, SearchWeight};
 #[cfg(feature = "postgres")]
 use super::core::{SpatialColumnDef, SpatialGeometryType};
+pub(super) use super::default_equivalence::DefaultEquivalence;
 use super::dialect::{DatabaseBackend, SqlDialect};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
@@ -778,6 +779,15 @@ pub(super) fn column_changed_for_backend(
     before: &ColumnModel,
     after: &ColumnModel,
 ) -> bool {
+    column_changed_with(backend, before, after, DefaultEquivalence::Pinned8e1)
+}
+
+pub(super) fn column_changed_with(
+    backend: DatabaseBackend,
+    before: &ColumnModel,
+    after: &ColumnModel,
+    equivalence: DefaultEquivalence,
+) -> bool {
     let mut before = before.clone();
     let mut after = after.clone();
     if backend == DatabaseBackend::Sqlite {
@@ -818,6 +828,14 @@ pub(super) fn column_changed_for_backend(
         )
     {
         return before != after;
+    }
+    if equivalence == DefaultEquivalence::TypedLiteralsV1
+        && backend == DatabaseBackend::Postgres
+        && let (Some(live), Some(target)) = (&before.default, &after.default)
+        && let Some(equal) =
+            super::default_equivalence::postgres_typed_defaults_equal(&after.sql_type, live, target)
+    {
+        return !equal;
     }
     true
 }
@@ -891,6 +909,15 @@ pub(super) fn diff_schema_views(
     backend: DatabaseBackend,
     current: &SchemaRef<'_>,
     target: &SchemaRef<'_>,
+) -> Vec<OwnedMigrationStep> {
+    diff_schema_views_with(backend, current, target, DefaultEquivalence::Pinned8e1)
+}
+
+pub(super) fn diff_schema_views_with(
+    backend: DatabaseBackend,
+    current: &SchemaRef<'_>,
+    target: &SchemaRef<'_>,
+    equivalence: DefaultEquivalence,
 ) -> Vec<OwnedMigrationStep> {
     let current_tables = current
         .tables
@@ -974,7 +1001,7 @@ pub(super) fn diff_schema_views(
             }
 
             let target_column = target_columns[column_name];
-            if column_changed_for_backend(backend, column, target_column) {
+            if column_changed_with(backend, column, target_column, equivalence) {
                 steps.push(OwnedMigrationStep::AlterColumn {
                     table_name: table_name.clone(),
                     before: (*column).clone(),
@@ -2380,12 +2407,23 @@ pub(super) fn build_migration_plan_views(
     current: &SchemaRef<'_>,
     target: &SchemaRef<'_>,
 ) -> OwnedMigrationPlan {
+    build_migration_plan_views_with(backend, current, target, DefaultEquivalence::Pinned8e1)
+}
+
+/// Plan with an explicit default comparison profile. Statement rendering is
+/// shared and unchanged; the profile only decides whether a column differs.
+pub(super) fn build_migration_plan_views_with(
+    backend: DatabaseBackend,
+    current: &SchemaRef<'_>,
+    target: &SchemaRef<'_>,
+    equivalence: DefaultEquivalence,
+) -> OwnedMigrationPlan {
     let empty_extensions = Vec::new();
     let mut target_for_backend = target.clone();
     if backend != DatabaseBackend::Postgres {
         target_for_backend.extensions = &empty_extensions;
     }
-    let steps = diff_schema_views(backend, current, &target_for_backend);
+    let steps = diff_schema_views_with(backend, current, &target_for_backend, equivalence);
     let statements = render_owned_plan_steps(backend, current, &target_for_backend, &steps);
     OwnedMigrationPlan {
         backend,

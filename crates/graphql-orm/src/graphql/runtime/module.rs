@@ -18,8 +18,33 @@ pub struct RuntimeGraphqlOptions {
     pub root_names: BTreeMap<CollectionId, String>,
     pub cursor_profile: RuntimeCursorProfile,
     pub(super) mutations: Option<RuntimeGraphqlMutationOptions>,
+    pub(super) projections: BTreeMap<FieldId, super::projection::ProjectorRef>,
+    pub(super) scalar_formats: Vec<(RuntimeFormatNamespace, std::ops::RangeInclusive<u16>)>,
 }
 impl RuntimeGraphqlOptions {
+    /// Serve one formatted field through a reviewed projector, keyed by its stable
+    /// field ID. Compilation rejects unknown, unformatted, key or incompatible fields.
+    pub fn project_field(
+        mut self,
+        field: FieldId,
+        projector: Arc<dyn super::RuntimeFieldProjector>,
+    ) -> Self {
+        self.projections
+            .insert(field, super::projection::ProjectorRef(projector));
+        self
+    }
+
+    /// Explicitly serve fields of a format namespace and version range as their
+    /// plain stored scalar, with SDL identical to an unformatted field.
+    pub fn scalar_format(
+        mut self,
+        namespace: RuntimeFormatNamespace,
+        versions: std::ops::RangeInclusive<u16>,
+    ) -> Self {
+        self.scalar_formats.push((namespace, versions));
+        self
+    }
+
     /// Enable typed runtime mutations explicitly; reads remain the default.
     pub fn with_mutations(mut self, options: RuntimeGraphqlMutationOptions) -> Self {
         self.mutations = Some(options);
@@ -50,6 +75,7 @@ pub struct RuntimeGraphqlLimits {
     pub query: RuntimeQueryLimits,
     pub relation: RuntimeRelationLimits,
     pub scalars: RuntimeScalarLimits,
+    pub projection: super::RuntimeProjectionLimits,
 }
 impl Default for RuntimeGraphqlLimits {
     fn default() -> Self {
@@ -69,6 +95,7 @@ impl Default for RuntimeGraphqlLimits {
             query: Default::default(),
             relation: Default::default(),
             scalars: Default::default(),
+            projection: Default::default(),
         }
     }
 }
@@ -94,6 +121,7 @@ impl RuntimeGraphqlLimits {
             max_projection_fields, default_page_size, max_page_size, max_cursor_bytes, max_cursor_values);
         nested!(relation; max_parents, max_key_arity, max_page_size, max_bind_parameters, max_cursor_bytes, max_compatible_groups);
         nested!(scalars; max_text_bytes, max_decoded_bytes, max_json_depth, max_json_nodes);
+        self.projection = self.projection.restricted_by(other.projection);
         self
     }
 }
@@ -104,6 +132,8 @@ pub struct RuntimeGraphqlCost {
     pub materialized_nodes: usize,
     pub crypto_calls: usize,
     pub relation_groups: usize,
+    /// Host projector calls; one per projected field per batched layer.
+    pub projection_calls: usize,
 }
 impl RuntimeGraphqlCost {
     /// Conservative root-page admission estimate, including one possible resume.
@@ -138,6 +168,7 @@ impl RuntimeGraphqlCost {
                 0
             },
             relation_groups: usize::from(parents != 0),
+            projection_calls: 0,
         })
     }
     /// Add independent roots/layers without wrapping admission counters.
@@ -159,6 +190,10 @@ impl RuntimeGraphqlCost {
             relation_groups: self
                 .relation_groups
                 .checked_add(other.relation_groups)
+                .ok_or_else(overflow)?,
+            projection_calls: self
+                .projection_calls
+                .checked_add(other.projection_calls)
                 .ok_or_else(overflow)?,
         })
     }
@@ -200,6 +235,7 @@ pub struct RuntimeGraphqlModule {
     pub(super) schema: Arc<ValidatedRuntimeSchema>,
     pub(super) options: Arc<RuntimeGraphqlOptions>,
     descriptor: Arc<RuntimeGraphqlDescriptor>,
+    pub(super) projections: Arc<BTreeMap<FieldId, Arc<super::projection::ProjectionBinding>>>,
 }
 pub(super) fn valid_name(name: &str, upper: bool) -> bool {
     !name.is_empty()
@@ -223,6 +259,8 @@ impl RuntimeGraphqlModule {
             true,
             options.cursor_profile == RuntimeCursorProfile::AuthenticatedEncryption,
         )?;
+        let projections =
+            super::projection::compile(&schema, &options.projections, &options.scalar_formats)?;
         let mut module = Self {
             schema,
             options: Arc::new(options),
@@ -230,6 +268,7 @@ impl RuntimeGraphqlModule {
                 names: BTreeSet::new(),
                 cost,
             }),
+            projections: Arc::new(projections),
         };
         if module.schema.schema().collections.len() > 512 {
             return Err(RuntimeGraphqlError::new("cost_exceeded").into());
@@ -301,6 +340,16 @@ impl RuntimeGraphqlModule {
                 }
             }
         }
+        // Projected objects are host-named and may be shared across modules, but
+        // never shadow a generated type of this module.
+        if module.projections.values().any(|binding| {
+            module
+                .descriptor
+                .names
+                .contains(binding.contract.object.name())
+        }) {
+            return Err(RuntimeGraphqlError::new("name_collision").into());
+        }
         // Validate representable input objects before publication.
         let _ = super::mutation::types(&module)?;
         if module.options.root_names.keys().any(|id| {
@@ -317,6 +366,12 @@ impl RuntimeGraphqlModule {
     }
     pub fn descriptor(&self) -> &RuntimeGraphqlDescriptor {
         &self.descriptor
+    }
+    pub(super) fn projection(
+        &self,
+        field: &FieldId,
+    ) -> Option<&Arc<super::projection::ProjectionBinding>> {
+        self.projections.get(field)
     }
     pub(super) fn object_name(&self, c: &RuntimeCollection) -> String {
         format!("{}{}", self.options.type_prefix, c.api_type_name)
@@ -389,6 +444,7 @@ pub struct RuntimeGraphqlComposer<B: RuntimeReadBackend> {
     modules: Vec<RuntimeGraphqlModule>,
     limits: RuntimeGraphqlLimits,
     protection: Option<super::execution::Protection>,
+    projected_types: BTreeMap<String, super::RuntimeProjectedObject>,
 }
 impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
     pub fn new(
@@ -425,6 +481,7 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             modules: Vec::new(),
             limits,
             protection: None,
+            projected_types: BTreeMap::new(),
         })
     }
     pub fn query_field(mut self, spec: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
@@ -491,6 +548,17 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             for ty in super::mutation::types(&module)? {
                 self = self.register(ty)?;
             }
+        }
+        for binding in module.projections.values() {
+            let object = &binding.contract.object;
+            match self.projected_types.get(object.name()) {
+                Some(existing) if existing == object => continue,
+                Some(_) => return Err(RuntimeGraphqlError::new("name_collision").into()),
+                None => {}
+            }
+            self = self.register(super::schema::projected_type(object))?;
+            self.projected_types
+                .insert(object.name().to_owned(), object.clone());
         }
         for ty in super::schema::types(&module) {
             self = self.register(ty)?;

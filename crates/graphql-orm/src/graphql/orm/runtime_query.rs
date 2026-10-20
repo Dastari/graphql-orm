@@ -1711,6 +1711,7 @@ mod tests {
             sortable: kind != RuntimeValueKind::Json,
             generated: false,
             default: None,
+            format: None,
         }
     }
 

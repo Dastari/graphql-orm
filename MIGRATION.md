@@ -15,6 +15,75 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.54.0 to 0.55.0: typed literal defaults and semantic field formats
+
+Upgrade ORM/macros together. Generated code, SDL of existing schemas, stored data and
+existing serialized runtime schemas are unchanged; no automatic database migration is needed.
+
+Source changes for direct IR/runtime users:
+
+- `RuntimeField` has a new public field `format: Option<RuntimeFieldFormat>`. Struct literals
+  must add `format: None` (or use `..existing`). Serialized schemas without `format` load
+  unchanged, and `format` is omitted when absent, so stored documents and every identity stay
+  byte-identical.
+- `RuntimeSchemaDiagnostic` has a new public field `detail: Option<RuntimeSchemaDiagnosticDetail>`
+  and `RuntimeSchemaDiagnosticCode` a new variant `InvalidFormat`. Exhaustive matches need a new
+  arm; code that constructs diagnostics needs `detail: None`. Invalid-default messages no longer
+  include the submitted literal; match on `code`/`detail`, not message text.
+- Runtime GraphQL: `RuntimeReadCheck` and `RuntimeMutationOutputCheck` gain `projections`,
+  `RuntimeGraphqlLimits` gains `projection: RuntimeProjectionLimits` and `RuntimeGraphqlCost`
+  gains `projection_calls`. Use `..Default::default()` in limit/cost literals. A schema that
+  carries a format now needs `scalar_format` or `project_field` at compilation
+  (`missing_projection` otherwise); schemas without formats compile as before.
+
+Behaviour changes:
+
+- JSON, bytes and date-time literal defaults are now accepted in their canonical forms; build
+  them with `RuntimeDefault::{json,bytes,datetime}`. Every previously accepted literal keeps
+  its exact text, rendering and hashes. Legacy non-canonical UUID literals still render as
+  stored; new hosts should use `RuntimeDefault::uuid`.
+- Owned/runtime planning on PostgreSQL compares recognized constant defaults by value. Schemas
+  whose UUID, negative or large integer or negative float defaults previously produced a
+  perpetual default-only `AlterColumn` and `BaselineMismatch` now replan as no-ops and certify.
+  Plans for any other input are byte-identical; recorded history is untouched. Static planning
+  and the 8e1 replay recipes are unchanged.
+- Adding, editing or removing a format descriptor changes `fingerprint()` and requires a new
+  runtime mutation environment and fresh client `expectedSchema`, but no DDL.
+
+See the [runtime schema IR](docs/reference/graphql-orm/runtime-schema-ir.md#typed-literal-defaults),
+[runtime migrations](docs/reference/graphql-orm/runtime-migrations.md#typed-literal-defaults-0550)
+and [runtime GraphQL](docs/reference/graphql-orm/runtime-graphql.md#formatted-fields-and-host-projections)
+references.
+
+### Upgrading directly from 0.50.2 to 0.55.0
+
+Consumers of `graphql-orm` 0.50.2 (`8e1e5698437d9ea5c0d6ff2c0f29cf7af58d45a0`) apply the
+0.55.0 notes above plus the following accumulated 0.51–0.54 changes. None requires a database or
+stored-data migration, and macro output is unchanged (`graphql-orm-macros/src` is identical).
+
+- Pin one workspace release tag for every workspace package and refresh the lockfile.
+  ORM/macros 0.54.1 only selected Auth v0.22.1; it adds no ORM API change.
+  `graphql-orm` and `graphql-orm-macros` move together (0.55.0 pins macros 0.55.0 exactly).
+  `graphql-orm-operation-catalog` remains 0.4.0 with no source change. `graphql-orm-storage`
+  moves 0.7.4 → 0.7.5 with no source, provider, `[features]` or dependency change; `s3`,
+  `local` and the other provider features behave as before.
+- `auth-agql` users: the public API now uses Auth v0.22.1 types. Select tag `v0.22.1`
+  (`86fabec09eea1eec0f675bc150e90e3809734567`) for every direct `agql-auth` dependency so only
+  one Auth source is resolved. Since v0.21.3, Auth adds
+  `ResolvedPrincipal::from_current_session` (v0.22.0) and the finite signed role-catalogue
+  correction (v0.22.1); see [the signed role-catalogue note](#signed-role-catalogue-transport-bound).
+- `auth-agql` behaviour (0.53.0): sensitive checks re-read original token status and current
+  authority after binding and successful business-policy awaits, so resolver/status checkers
+  are called up to two or three times per invocation and an earlier expiry still bounds it.
+  Adjust mocks that count calls or checkers with call quotas.
+- New opt-in APIs that need no action: the default-off `owned-planning-replay` feature and its
+  `SchemaManager::plan_owned_migration_with_replay_witness*` methods (0.51/0.52), the
+  always-compiled `graphql_orm::cache_sync` module (0.54), and `AgqlOperationTarget`,
+  `AgqlOwnedOperation` and `AgqlOwnedOperationAuthorizer` (0.53, also exported through the
+  `auth-agql` prelude; glob imports with the same names become ambiguous).
+- Every build now runs the crate build script (check-cfg registration; `rustc -vV` only with
+  `owned-planning-replay`). Ordinary plan hashes are unchanged.
+
 ## Signed role-catalogue transport bound
 
 ORM/macros 0.54.1, AI 0.107.4 and router 0.6.3 select published Auth `v0.22.1`

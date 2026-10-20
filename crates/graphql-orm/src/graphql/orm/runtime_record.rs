@@ -14,7 +14,7 @@ use chrono::{SecondsFormat, Timelike, Utc};
 
 use super::{
     CollectionId, FieldId, NoDefaultBackend, OrmBackend, RelationCardinality, RelationId,
-    RuntimeValueKind, SchemaFingerprint, ValidatedRuntimeSchema,
+    RuntimeFieldFormat, RuntimeValueKind, SchemaFingerprint, ValidatedRuntimeSchema,
 };
 
 /// Serialized format version for [`RuntimeRecord`].
@@ -278,6 +278,26 @@ impl RuntimeDateTime {
         Ok(Self::from_utc(parsed.with_timezone(&Utc)))
     }
 
+    /// Parse an RFC 3339 date-time exactly, normalizing its offset to UTC but
+    /// rejecting sub-microsecond precision instead of rounding it. Use this for
+    /// authored constants such as schema defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeRecordErrorCode::InvalidValue`] for an invalid date-time
+    /// or one with nonzero nanoseconds below microsecond precision.
+    pub fn parse_exact(value: &str) -> Result<Self, RuntimeRecordError> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(value).map_err(|error| {
+            RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue).with_source(error)
+        })?;
+        if parsed.nanosecond() % 1_000 != 0 {
+            return Err(RuntimeRecordError::new(
+                RuntimeRecordErrorCode::InvalidValue,
+            ));
+        }
+        Ok(Self::from_utc(parsed.with_timezone(&Utc)))
+    }
+
     /// Canonicalize a UTC date-time to portable microsecond precision.
     pub(crate) fn from_utc(value: chrono::DateTime<Utc>) -> Self {
         let rounded = value
@@ -401,9 +421,15 @@ pub struct RuntimeFieldHandle {
     nullable: bool,
     filterable: bool,
     sortable: bool,
+    format: Option<std::sync::Arc<RuntimeFieldFormat>>,
 }
 
 impl RuntimeFieldHandle {
+    /// Semantic format descriptor declared by the validated schema, if any.
+    pub fn format(&self) -> Option<&RuntimeFieldFormat> {
+        self.format.as_deref()
+    }
+
     /// Validated schema fingerprint that created this handle.
     pub fn schema_fingerprint(&self) -> &SchemaFingerprint {
         &self.schema_fingerprint
@@ -632,6 +658,7 @@ impl ValidatedRuntimeSchema {
             nullable: field.nullable,
             filterable: field.filterable,
             sortable: field.sortable,
+            format: field.format.clone().map(std::sync::Arc::new),
         })
     }
 
