@@ -261,6 +261,7 @@ impl AiRuntime {
     }
 
     /// Whether the exact registered provider freezes its retained-session tool surface.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn provider_freezes_session_tool_surface(
         &self,
         provider_kind: &ProviderKind,
