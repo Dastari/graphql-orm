@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.55.1 refreshes the backend-coexistence fixture lock for graphql-orm-ai
+0.109.0. Source, public API, generated code, SDL and persistence are unchanged.
+
 Version 0.55.0 pairs runtime/macros for typed runtime literal defaults, semantic field
 formats and reviewed runtime GraphQL projections; see the
 [workspace migration](../../MIGRATION.md#0540-to-0550-typed-literal-defaults-and-semantic-field-formats).
