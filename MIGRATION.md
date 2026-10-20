@@ -17,7 +17,8 @@ published to crates.io.
 
 ## 0.56.0 to 0.57.0: bound custom scan continuation
 
-Custom resolvers that need context-bound continuation can construct an
+Upgrade `graphql-orm` and `graphql-orm-macros` together. Custom resolvers that
+need context-bound continuation can construct an
 `AuthorizedScanContext` from complete trusted current state on every request
 and call `EntityQuery::fetch_authorized_scan_with_context`. Install one
 service-domain random 32-byte key through `AuthorizedScanConfig`, shared by

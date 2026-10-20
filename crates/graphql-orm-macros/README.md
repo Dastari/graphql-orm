@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.57.0 aligns with the paired runtime's protected custom-scan cursor
+API. Generated code and GraphQL SDL are unchanged; see the
+[migration guide](../../MIGRATION.md#0560-to-0570-bound-custom-scan-continuation).
+
 Version 0.56.0 adds the SQL Server-only `#[graphql_orm(mssql_money)]` field
 annotation and identifier-safe exact read projections for native `MONEY`.
 It pairs with runtime 0.56.0; see the
