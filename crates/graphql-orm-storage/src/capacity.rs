@@ -61,7 +61,7 @@ impl CapacityRequest {
 /// location, authenticated account and capacity-relevant configuration.
 /// Secrets such as passwords or secret keys are never part of the binding.
 /// Any change to those inputs yields a different binding.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CapacityBinding {
     backend: StorageBackend,
     digest: String,
