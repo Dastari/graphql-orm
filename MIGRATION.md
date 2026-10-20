@@ -15,6 +15,20 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.56.0 to 0.57.0: bound custom scan continuation
+
+Upgrade `graphql-orm` and `graphql-orm-macros` together. Custom resolvers that
+need context-bound continuation can construct an
+`AuthorizedScanContext` from complete trusted current state on every request
+and call `EntityQuery::fetch_authorized_scan_with_context`. Install one
+service-domain random 32-byte key through `AuthorizedScanConfig`, shared by
+replicas that accept each other's cursors. The new path emits `goms2`; it does
+not accept existing `goms1` cursors. The old `fetch_authorized_scan` API and
+generated pagination continue to use their prior cursor formats. To rotate
+`goms2` keys, assign a new active key ID and explicitly retain old keys for a
+bounded deadline. No stored data, GraphQL SDL or database schema migration is
+needed.
+
 ## 0.55.1 to 0.56.0: exact SQL Server MONEY reads
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together. For an existing SQL

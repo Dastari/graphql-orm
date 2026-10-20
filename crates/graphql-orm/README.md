@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.57.0 adds complete server-owned context binding to authorized custom
+scan continuations. The ORM-owned protected cursor keeps the context and keyset
+confidential, enforces expiry and bounded rotation, and retains current policy
+checks on every page. See
+[protected authorized pagination](../../docs/reference/graphql-orm/authorized-pagination.md)
+and the [migration guide](../../MIGRATION.md#0560-to-0570-bound-custom-scan-continuation).
+
 Version 0.56.0 adds exact SQL Server `MONEY` typed reads through
 `#[graphql_orm(mssql_money)]`. The generated read projection casts the native
 column to `DECIMAL(19,4)` under its original alias before decoding; ordinary
