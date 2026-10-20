@@ -10,8 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.55.1 refreshes the backend-coexistence fixture lock for graphql-orm-ai
-0.109.0. Source, public API, generated code, SDL and persistence are unchanged.
+Version 0.56.0 adds the SQL Server-only `#[graphql_orm(mssql_money)]` field
+annotation and identifier-safe exact read projections for native `MONEY`.
+It pairs with runtime 0.56.0; see the
+[migration guide](../../MIGRATION.md#0551-to-0560-exact-sql-server-money-reads).
 
 Version 0.55.0 pairs runtime/macros for typed runtime literal defaults, semantic field
 formats and reviewed runtime GraphQL projections; see the

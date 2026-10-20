@@ -472,6 +472,14 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
 - fixed decimals declared with `#[graphql_orm(decimal(precision = P, scale = S))]` and mapped to
   `rust_decimal::Decimal`; the portable declaration permits precision `1..=18` and
   `scale <= precision`
+- native `MONEY` declared with `#[graphql_orm(mssql_money)]` on a
+  `rust_decimal::Decimal` or `Option<Decimal>` field. The generated read
+  projection casts the identifier-safe column to `DECIMAL(19,4)` under the
+  original alias before TDS decoding. Values must have scale 4 or less and a
+  signed 64-bit scaled mantissa (`-922337203685477.5808` through
+  `922337203685477.5807`); input/default validation never rounds. This
+  annotation is SQL Server only and cannot be combined with portable
+  `decimal(...)` metadata. It neither changes source schema nor permits DDL.
 - JSON values serialized into compatible text columns and decoded with strict JSON validation
 
 SQL Server-specific types such as `xml`, `hierarchyid`,
@@ -508,7 +516,15 @@ cargo test -p graphql-orm --no-default-features --features mssql --test composit
 
 The owned DML and aggregate parity test is opt-in. It starts the repository-pinned SQL Server image,
 publishes it on loopback only, creates a unique test database, verifies ownership before removal,
-and asserts that the container is absent afterward. It never accepts an ambient database URL:
+and asserts that the container is absent afterward. It never accepts an ambient database URL.
+The container is bounded to 2 CPUs, 3 GiB memory with no swap, 1024 tasks and one 16 MiB
+json-file log. It never pulls unless `GRAPHQL_ORM_TEST_MSSQL_PULL=missing` is set (the hosted
+workflows set it), so local runs need the pinned image already cached.
+`GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE=8G` additionally bounds the writable layer through
+`--storage-opt size=`; storage drivers that cannot enforce it make the run fail rather than
+dropping the bound. A controller may set `GRAPHQL_ORM_TEST_RUN_TOKEN` (8-64 of `[a-z0-9-]`) to
+add a `graphql-orm.test-run` label, and `GRAPHQL_ORM_TEST_MSSQL_EVIDENCE_DIR` to receive an
+exclusively created `<container-id>.owned` record for every container the fixture starts:
 
 ```bash
 scripts/run-owned-database-lanes.sh mssql
