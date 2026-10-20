@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.0 to 0.16.1
+
+This compatible patch adds `AiError::classification`, a distinct payload-free
+lower-snake-case name per variant. Existing `public_code` values and
+`AiError` variants are unchanged. Adopt AI 0.108.0 from the same workspace
+release, which records the classification in planner failure codes. No data
+migration is required.
+
 ## 0.15.0 to 0.16.0
 
 This is a source-breaking pre-1.0 minor release: the public

@@ -830,24 +830,26 @@ impl ModelRequest {
         &self,
         provider_kind: &ProviderKind,
     ) -> Result<u64, ProviderError> {
-        if provider_kind != &ProviderKind::OpenAi {
-            return Ok(self.conservative_egress_bytes());
-        }
-        let mut projected = self.clone();
-        for tool in &mut projected.tools {
-            if tool.strict {
-                tool.parameters = crate::OpenAiStrictToolProjection::compile(&tool.parameters)?
-                    .provider_schema()
-                    .clone();
-            }
-        }
-        Ok(projected.conservative_egress_bytes())
+        Ok(self
+            .provider_projection(provider_kind)?
+            .conservative_egress_bytes())
     }
 
     /// Deterministic conservative token ceiling for the exact final request.
     ///
     /// One token per serialized byte is deliberately conservative for byte
     /// tokenizers while remaining content-free and provider independent.
+    ///
+    /// The figure counts every tool and built-in definition on every turn,
+    /// including retained-session turns whose tool surface was frozen when
+    /// the session was registered. It is an egress disclosure ceiling, not a
+    /// usage forecast: a large generated tool catalogue can dominate it while
+    /// actual per-turn input usage is far lower. Provider-call construction
+    /// seals this whole figure into the model-inference manifest, and the
+    /// prepared task-context and static-offering paths refuse a plan whose
+    /// budget input-token estimate is below it. Use
+    /// [`Self::conservative_provider_tool_surface_tokens`] to separate the
+    /// tool-surface share when sizing or diagnosing a host reservation.
     ///
     /// # Errors
     ///
@@ -858,6 +860,61 @@ impl ModelRequest {
         provider_kind: &ProviderKind,
     ) -> Result<u64, ProviderError> {
         self.conservative_provider_egress_bytes(provider_kind)
+    }
+
+    /// Share of [`Self::conservative_provider_egress_tokens`] attributable to
+    /// tool and built-in tool definitions after provider projection.
+    ///
+    /// The value uses the same one-token-per-byte rule and per-item overhead,
+    /// so it never exceeds the full ceiling; the difference is the per-turn
+    /// instructions, input, continuation, output schema, and fixed overhead.
+    /// It is diagnostic sizing information only. It does not change what the
+    /// egress manifest must authorize and proves nothing about whether a
+    /// provider re-sends a frozen tool surface on the wire.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same conditions as
+    /// [`Self::conservative_provider_egress_bytes`].
+    pub fn conservative_provider_tool_surface_tokens(
+        &self,
+        provider_kind: &ProviderKind,
+    ) -> Result<u64, ProviderError> {
+        Ok(self
+            .provider_projection(provider_kind)?
+            .tool_surface_bytes()
+            .unwrap_or(u64::MAX))
+    }
+
+    fn provider_projection(
+        &self,
+        provider_kind: &ProviderKind,
+    ) -> Result<std::borrow::Cow<'_, Self>, ProviderError> {
+        if provider_kind != &ProviderKind::OpenAi {
+            return Ok(std::borrow::Cow::Borrowed(self));
+        }
+        let mut projected = self.clone();
+        for tool in &mut projected.tools {
+            if tool.strict {
+                tool.parameters = crate::OpenAiStrictToolProjection::compile(&tool.parameters)?
+                    .provider_schema()
+                    .clone();
+            }
+        }
+        Ok(std::borrow::Cow::Owned(projected))
+    }
+
+    fn tool_surface_bytes(&self) -> Option<u64> {
+        let mut total = 64_u64
+            .saturating_mul(self.tools.len() as u64)
+            .checked_add(64_u64.saturating_mul(self.builtin_tools.len() as u64))?;
+        for tool in &self.tools {
+            total = total.checked_add(serialized_bytes(tool)?)?;
+        }
+        for builtin in &self.builtin_tools {
+            total = total.checked_add(serialized_bytes(builtin)?)?;
+        }
+        Some(total)
     }
 
     fn serialized_metadata_bytes(&self) -> Option<u64> {
@@ -3677,6 +3734,60 @@ pub trait AiProvider: Send + Sync {
 #[cfg(test)]
 mod safe_failure_tests {
     use super::*;
+
+    #[test]
+    fn tool_surface_share_is_bounded_by_and_separable_from_the_egress_ceiling() {
+        let tool = |index: usize| ModelToolDefinition {
+            tool_id: format!("records.read_{index}"),
+            provider_name: format!("records_read_{index}"),
+            fingerprint: "f".repeat(64),
+            description: "Read one record page.".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"first": {"type": "integer"}},
+                "required": ["first"],
+                "additionalProperties": false,
+            }),
+            strict: true,
+            defer_loading: false,
+        };
+        let mut request = ModelRequest {
+            model: "reviewed-model".to_owned(),
+            instructions: vec!["Answer briefly.".to_owned()],
+            input: Vec::new(),
+            continuation: None,
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: Vec::new(),
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(128),
+        };
+        for provider_kind in [ProviderKind::OpenAi, ProviderKind::Anthropic] {
+            request.tools.clear();
+            assert_eq!(
+                request
+                    .conservative_provider_tool_surface_tokens(&provider_kind)
+                    .unwrap(),
+                0
+            );
+            let without_tools = request
+                .conservative_provider_egress_tokens(&provider_kind)
+                .unwrap();
+            request.tools = (0..16).map(tool).collect();
+            let total = request
+                .conservative_provider_egress_tokens(&provider_kind)
+                .unwrap();
+            let surface = request
+                .conservative_provider_tool_surface_tokens(&provider_kind)
+                .unwrap();
+            assert!(surface > 0 && surface <= total);
+            // The remainder is exactly the per-turn content and fixed overhead.
+            assert_eq!(total - surface, without_tools);
+        }
+    }
 
     #[test]
     fn reasoning_effort_is_closed_and_unknown_values_fail_closed() {

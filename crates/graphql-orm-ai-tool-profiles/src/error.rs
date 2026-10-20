@@ -143,6 +143,45 @@ impl AiError {
             Self::ProviderSessionDeferred => "AI_PROVIDER_SESSION_DEFERRED",
         }
     }
+
+    /// Stable, content-free lower-snake-case name of the error variant.
+    ///
+    /// Unlike [`Self::public_code`], every variant has a distinct value, so a
+    /// durable outcome or operator log can record exactly which refusal
+    /// occurred (for example `budget_denied` versus
+    /// `pre_transport_budget_denied`). The value never includes a variant's
+    /// payload text, so it is safe to persist and log. It is a diagnostic
+    /// classification only and proves nothing about side effects.
+    pub const fn classification(&self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration(_) => "invalid_configuration",
+            Self::AlreadyExists(_) => "already_exists",
+            Self::NotFound => "not_found",
+            Self::Conflict => "conflict",
+            Self::Forbidden => "forbidden",
+            Self::RecentMfaRequired => "recent_mfa_required",
+            Self::EgressDenied => "egress_denied",
+            Self::BudgetDenied => "budget_denied",
+            Self::PreTransportBudgetDenied => "pre_transport_budget_denied",
+            Self::PreTransportProviderFailed => "pre_transport_provider_failed",
+            Self::PreTransportToolSourceUnavailable => "pre_transport_tool_source_unavailable",
+            Self::InvalidInput(_) => "invalid_input",
+            Self::ResultBudgetExceeded => "result_budget_exceeded",
+            Self::ReauthorizationFailed => "reauthorization_failed",
+            Self::ToolExecutionFailed => "tool_execution_failed",
+            Self::ToolRejectedBeforeExecution(_) => "tool_rejected_before_execution",
+            Self::ProviderFailed => "provider_failed",
+            Self::ProviderExecutionLimit => "provider_execution_limit",
+            Self::ProviderUsageIncomplete => "provider_usage_incomplete",
+            Self::ProviderUsageInvalid => "provider_usage_invalid",
+            Self::StatelessNativeItemRejected => "stateless_native_item_rejected",
+            Self::SessionExecutionUnbound => "session_execution_unbound",
+            Self::SessionExecutionUnavailable => "session_execution_unavailable",
+            Self::RuntimeNotReady => "runtime_not_ready",
+            Self::PersistenceFailed => "persistence_failed",
+            Self::ProviderSessionDeferred => "provider_session_deferred",
+        }
+    }
 }
 
 impl ErrorExtensions for AiError {
@@ -212,6 +251,53 @@ mod tests {
         assert_eq!(
             AiError::ResultBudgetExceeded.public_code(),
             "AI_RESULT_BUDGET_EXCEEDED"
+        );
+    }
+
+    #[test]
+    fn classifications_are_distinct_and_never_include_payload_text() {
+        let errors = [
+            AiError::InvalidConfiguration("secret-configuration-detail".to_owned()),
+            AiError::AlreadyExists("secret-resource".to_owned()),
+            AiError::NotFound,
+            AiError::Conflict,
+            AiError::Forbidden,
+            AiError::RecentMfaRequired,
+            AiError::EgressDenied,
+            AiError::BudgetDenied,
+            AiError::PreTransportBudgetDenied,
+            AiError::PreTransportProviderFailed,
+            AiError::PreTransportToolSourceUnavailable,
+            AiError::InvalidInput("secret-input".to_owned()),
+            AiError::ResultBudgetExceeded,
+            AiError::ReauthorizationFailed,
+            AiError::ToolExecutionFailed,
+            AiError::ProviderFailed,
+            AiError::ProviderExecutionLimit,
+            AiError::ProviderUsageIncomplete,
+            AiError::ProviderUsageInvalid,
+            AiError::StatelessNativeItemRejected,
+            AiError::SessionExecutionUnbound,
+            AiError::SessionExecutionUnavailable,
+            AiError::RuntimeNotReady,
+            AiError::PersistenceFailed,
+            AiError::ProviderSessionDeferred,
+        ];
+        let mut seen = std::collections::BTreeSet::new();
+        for error in &errors {
+            let class = error.classification();
+            assert!(seen.insert(class), "duplicate classification {class}");
+            assert!(!class.is_empty() && !class.contains("secret"));
+            assert!(
+                class
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            );
+        }
+        assert_eq!(AiError::BudgetDenied.classification(), "budget_denied");
+        assert_ne!(
+            AiError::BudgetDenied.classification(),
+            AiError::PreTransportBudgetDenied.classification()
         );
     }
 }
