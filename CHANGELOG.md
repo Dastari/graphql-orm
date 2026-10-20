@@ -23,6 +23,11 @@ for historical context.
   and the signed 64-bit scaled mantissa without rounding. Portable decimal
   precision remains capped at 18; existing declarations and cursor formats are
   unchanged. SQL Server typed read projections are now supported.
+- Test-only: the owned SQL Server fixture never pulls by default
+  (`GRAPHQL_ORM_TEST_MSSQL_PULL=missing` opts in), runs without swap, with a
+  1024-task PID limit, one bounded 16 MiB json-file log, and an optional
+  writable-layer bound (`GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE`, for example
+  `8G`, rejected by Docker where the storage driver cannot enforce it).
 
 ## 0.55.1 (unreleased)
 

@@ -516,7 +516,13 @@ cargo test -p graphql-orm --no-default-features --features mssql --test composit
 
 The owned DML and aggregate parity test is opt-in. It starts the repository-pinned SQL Server image,
 publishes it on loopback only, creates a unique test database, verifies ownership before removal,
-and asserts that the container is absent afterward. It never accepts an ambient database URL:
+and asserts that the container is absent afterward. It never accepts an ambient database URL.
+The container is bounded to 2 CPUs, 3 GiB memory with no swap, 1024 tasks and one 16 MiB
+json-file log. It never pulls unless `GRAPHQL_ORM_TEST_MSSQL_PULL=missing` is set (the hosted
+workflows set it), so local runs need the pinned image already cached.
+`GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE=8G` additionally bounds the writable layer through
+`--storage-opt size=`; storage drivers that cannot enforce it make the run fail rather than
+dropping the bound:
 
 ```bash
 scripts/run-owned-database-lanes.sh mssql

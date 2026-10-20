@@ -21,6 +21,9 @@ env:
   CARGO_PROFILE_DEV_DEBUG: line-tables-only
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
   CARGO_INCREMENTAL: "0"
+  # Disposable runners may pull the digest-pinned owned SQL Server image;
+  # local and qualification runs default to never pulling.
+  GRAPHQL_ORM_TEST_MSSQL_PULL: missing
 
 permissions:
   contents: read

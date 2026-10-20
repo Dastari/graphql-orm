@@ -3,6 +3,53 @@ use std::process::{Command, Stdio};
 
 const SQL_SERVER_IMAGE: &str = "mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89";
 
+/// Finite container bounds. CPU and memory are hard limits; the swap limit
+/// equals the memory limit, so the container receives no swap.
+const CONTAINER_CPUS: &str = "2";
+const CONTAINER_MEMORY: &str = "3g";
+const CONTAINER_MEMORY_SWAP: &str = "3g";
+/// Tasks (processes and threads) inside the container.
+const CONTAINER_PIDS: &str = "1024";
+/// One bounded json-file log; older output is discarded rather than retained.
+const CONTAINER_LOG_MAX_SIZE: &str = "max-size=16m";
+const CONTAINER_LOG_MAX_FILE: &str = "max-file=1";
+
+/// Image pull policy. Defaults to `never`, so a missing pinned image fails
+/// closed instead of downloading; `missing` is an explicit opt-in for
+/// disposable hosted runners.
+fn pull_policy() -> Result<&'static str, String> {
+    match std::env::var("GRAPHQL_ORM_TEST_MSSQL_PULL").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("never") => Ok("never"),
+        Ok("missing") => Ok("missing"),
+        _ => Err("GRAPHQL_ORM_TEST_MSSQL_PULL must be `never` or `missing`".to_string()),
+    }
+}
+
+/// Optional writable-layer size such as `8G`, passed as `--storage-opt size=`.
+/// Only some storage drivers support it; Docker rejects the run otherwise, so
+/// a requested bound is never silently dropped.
+fn storage_size() -> Result<Option<String>, String> {
+    let Some(value) = std::env::var_os("GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE") else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| "GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE must be UTF-8".to_string())?;
+    if !value.is_ascii() {
+        return Err("GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE must look like 8G or 4096M".to_string());
+    }
+    let (digits, unit) = value.split_at(value.len().saturating_sub(1));
+    let valid = matches!(unit, "M" | "G")
+        && (1..=5).contains(&digits.len())
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit());
+    if valid {
+        Ok(Some(value))
+    } else {
+        Err("GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE must look like 8G or 4096M".to_string())
+    }
+}
+
 pub(crate) struct OwnedSqlServer {
     name: String,
     container_id: String,
@@ -33,31 +80,50 @@ impl OwnedSqlServer {
                 "refusing ambient database configuration"
             );
         }
+        let pull = pull_policy()?;
+        let storage = storage_size()?;
         let token = graphql_orm::uuid::Uuid::new_v4().simple().to_string();
         let name = format!("graphql-orm-mssql-writes-{token}");
         let password = format!("Gom_{token}A9!");
-        let output = Command::new("docker")
-            .args([
-                "run",
-                "--detach",
-                "--rm",
-                "--name",
-                &name,
-                "--label",
-                &format!("graphql-orm.test-owner={token}"),
-                "--cpus",
-                "2",
-                "--memory",
-                "3g",
-                "--publish",
-                "127.0.0.1::1433",
-                "--env",
-                "ACCEPT_EULA=Y",
-                "--env",
-                &format!("MSSQL_SA_PASSWORD={password}"),
-                SQL_SERVER_IMAGE,
-            ])
-            .output()?;
+        let label = format!("graphql-orm.test-owner={token}");
+        let sa_password = format!("MSSQL_SA_PASSWORD={password}");
+        let mut arguments: Vec<&str> = vec![
+            "run",
+            "--detach",
+            "--rm",
+            "--pull",
+            pull,
+            "--name",
+            name.as_str(),
+            "--label",
+            label.as_str(),
+            "--cpus",
+            CONTAINER_CPUS,
+            "--memory",
+            CONTAINER_MEMORY,
+            "--memory-swap",
+            CONTAINER_MEMORY_SWAP,
+            "--pids-limit",
+            CONTAINER_PIDS,
+            "--log-driver",
+            "json-file",
+            "--log-opt",
+            CONTAINER_LOG_MAX_SIZE,
+            "--log-opt",
+            CONTAINER_LOG_MAX_FILE,
+            "--publish",
+            "127.0.0.1::1433",
+            "--env",
+            "ACCEPT_EULA=Y",
+            "--env",
+            sa_password.as_str(),
+        ];
+        let storage_option = storage.map(|size| format!("size={size}"));
+        if let Some(option) = &storage_option {
+            arguments.extend(["--storage-opt", option.as_str()]);
+        }
+        arguments.push(SQL_SERVER_IMAGE);
+        let output = Command::new("docker").args(&arguments).output()?;
         if !output.status.success() {
             return Err(format!(
                 "failed to start owned SQL Server: {}",
