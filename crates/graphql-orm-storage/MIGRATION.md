@@ -20,8 +20,10 @@ supersedes: []
   configuration, and no secrets.
 - Consumers must validate an observation with `validate_for` immediately before
   admission. Treat `Unknown` and errors as unavailable, and keep their own
-  service quota and reservations. S3 destinations stay `Unknown` until the
-  operator declares `S3CapacityMode::ProviderManaged`.
+  service quota and reservations. S3 destinations stay `Unknown` unless the
+  operator selects `S3CapacityMode::ProviderManaged` (operator-declared) or
+  `S3CapacityMode::AwsGeneralPurpose` (verified Amazon S3 general-purpose
+  bucket).
 
 ## 0.7.4 to 0.7.5: maintained protocol-validation package identity
 

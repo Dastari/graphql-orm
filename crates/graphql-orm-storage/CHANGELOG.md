@@ -28,7 +28,9 @@ supersedes: []
   also read. SMB: an authenticated `FileFsFullSizeInformation`
   and volume-serial query on the configured prefix. S3: `HeadBucket` and the new
   `S3CapacityMode`, which defaults to `Unknown`. A declared `ProviderManaged`
-  state carries the `OperatorDeclared` basis.
+  state carries the `OperatorDeclared` basis. `AwsGeneralPurpose` verifies an
+  Amazon S3 general-purpose bucket on the regional AWS endpoint, owned by the
+  expected account, and reports the `AwsGeneralPurposeBucket` basis.
 - Additive only. Custom providers inherit `Unknown(Unsupported)` without I/O.
   The `local` feature now depends on `libc` on Unix and enables Tokio's `rt`.
   No storage key, object format or persisted-data migration is required.

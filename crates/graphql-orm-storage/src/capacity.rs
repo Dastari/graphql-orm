@@ -348,6 +348,10 @@ pub enum ProviderManagedBasis {
     /// reachability proves access only. Consumers decide whether an operator
     /// declaration is sufficient for admission.
     OperatorDeclared,
+    /// The destination is an Amazon S3 general-purpose bucket reached through
+    /// the AWS S3 endpoint for its region, owned by the expected account, and
+    /// AWS documents no maximum size for general-purpose buckets.
+    AwsGeneralPurposeBucket,
 }
 
 /// Details for an unknown capacity state.

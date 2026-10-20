@@ -138,8 +138,9 @@ authenticated account about remaining allocation. The result is a bounded
   - `ProviderManaged`: the provider admits no physical-byte capacity. The
     `basis` records how this was established. `OperatorDeclared` means that
     the configuration declared it and that the account reached the exact
-    destination; it is not a provider attestation. It is never an unlimited
-    grant.
+    destination; it is not a provider attestation. `AwsGeneralPurposeBucket`
+    means a verified Amazon S3 general-purpose bucket, which AWS documents as
+    having no maximum size. It is never an unlimited grant.
   - `Unknown`: with a reason (`Unsupported`, `ProviderQuotaNotObservable` or
     `PlatformUnsupported`). Unknown never means unlimited.
 
@@ -156,7 +157,7 @@ provider observation is never a reservation.
 | Local (Unix) | `fstatvfs` on the opened root directory, using checked arithmetic. Inconsistent block counts are errors. Unprivileged callers use the available-block count, which excludes reserved blocks. On Linux, `quotactl_fd` reads the effective user's quota, the quota of the group that new files receive, and the root's project quota (`FS_IOC_FSGETXATTR`). | `Known`, with physical as the free-block count. Quotas use the tighter of the soft and hard limits. Quota types that are inactive or unsupported by the filesystem cannot be enforced. A project quota that is unreadable without privilege counts as accounted only on ext4/XFS project-inheriting roots, where `statfs` applies it. Any other unreadable constraint, or a filesystem without a VFS quota interface (for example btrfs, ZFS or overlayfs), reports `NotObserved`. |
 | Local (other) | Verifies that the root is a directory. | `Unknown(PlatformUnsupported)` |
 | SMB | An authenticated `QUERY_INFO` for `FileFsFullSizeInformation` and `FileFsVolumeInformation` on the configured share and prefix, using checked arithmetic. A missing prefix is an error and is not created. Caller-available units above actual-available units, or actual above total, are errors. | `Known` with `ProviderAccounted`. The caller-available units include server-enforced quotas for the session user. Physical is the actual-available units, which some servers also report caller-limited. |
-| S3 | `HeadBucket` with the configured account. Missing or denied buckets are errors. | `Unknown(ProviderQuotaNotObservable)` by default. `ProviderManaged` (`OperatorDeclared`) only through `with_capacity_mode(S3CapacityMode::ProviderManaged)`. The S3 API has no quota operation, so a finite provider quota is not reported. |
+| S3 | `HeadBucket` with the configured account. Missing or denied buckets are errors. | `Unknown(ProviderQuotaNotObservable)` by default. `ProviderManaged` (`OperatorDeclared`) only through `with_capacity_mode(S3CapacityMode::ProviderManaged)`. `S3CapacityMode::AwsGeneralPurpose { expected_bucket_owner }` reports `ProviderManaged` (`AwsGeneralPurposeBucket`) only when all of these hold: the endpoint is the AWS S3 HTTPS endpoint for the configured region; the bucket name is not a directory, access-point or Outposts name; and `HeadBucket` with `ExpectedBucketOwner` succeeds, reports the configured region, and reports no directory location type. Any mismatch is an error. The S3 API has no quota operation, so a finite provider quota is not reported. |
 | Custom / Azure | Default implementation, with no I/O. | `Unknown(Unsupported)` |
 
 ## Key Safety

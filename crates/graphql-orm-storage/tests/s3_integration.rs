@@ -284,7 +284,7 @@ async fn s3_capacity_distinguishes_declared_provider_managed_from_unknown() {
     let (endpoint, server) = head_bucket_fixture("HTTP/1.1 200 OK", 2);
     let unknown = fixture_backend(endpoint.clone());
     let managed = fixture_backend(endpoint).with_capacity_mode(S3CapacityMode::ProviderManaged);
-    assert_eq!(unknown.capacity_mode(), S3CapacityMode::Unknown);
+    assert_eq!(unknown.capacity_mode(), &S3CapacityMode::Unknown);
     assert_ne!(unknown.capacity_binding(), managed.capacity_binding());
 
     let unknown_observation = unknown
@@ -342,4 +342,36 @@ async fn s3_capacity_reports_unreachable_bucket_as_an_error() {
         let requests = server.join().expect("fixture thread");
         assert_eq!(requests.len(), 1);
     }
+}
+
+#[tokio::test]
+async fn s3_aws_general_purpose_basis_rejects_non_aws_destinations_without_io() {
+    // Port 9 (discard) on loopback is never contacted: validation fails first.
+    let backend = fixture_backend("http://127.0.0.1:9".to_string()).with_capacity_mode(
+        S3CapacityMode::AwsGeneralPurpose {
+            expected_bucket_owner: "123456789012".to_string(),
+        },
+    );
+    let declared = fixture_backend("http://127.0.0.1:9".to_string())
+        .with_capacity_mode(S3CapacityMode::ProviderManaged);
+    assert_ne!(backend.capacity_binding(), declared.capacity_binding());
+    let other_owner = fixture_backend("http://127.0.0.1:9".to_string()).with_capacity_mode(
+        S3CapacityMode::AwsGeneralPurpose {
+            expected_bucket_owner: "210987654321".to_string(),
+        },
+    );
+    assert_ne!(backend.capacity_binding(), other_owner.capacity_binding());
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        backend.observe_capacity(&CapacityRequest::default()),
+    )
+    .await
+    .expect("validation fails without network I/O")
+    .expect_err("custom endpoint cannot claim the AWS basis");
+    let configuration_error = matches!(
+        &error,
+        StorageError::Provider { backend, retryable: false, .. } if backend == "s3"
+    );
+    assert!(configuration_error, "{error:?}");
 }
