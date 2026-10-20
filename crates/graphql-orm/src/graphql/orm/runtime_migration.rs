@@ -668,6 +668,7 @@ pub struct OwnedPlannedMigration {
     statements: Vec<String>,
     target: OwnedSchemaModel,
     /// Default comparison used to produce the plan; apply rechecks with the same profile.
+    #[cfg_attr(not(any(feature = "sqlite", feature = "postgres")), allow(dead_code))]
     equivalence: DefaultEquivalence,
 }
 impl OwnedPlannedMigration {

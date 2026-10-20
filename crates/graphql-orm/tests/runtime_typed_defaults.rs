@@ -382,8 +382,9 @@ async fn typed_literals_apply_replan_certify_and_create_actual_values() {
     // Reopen through a fresh pool: introspection, not cached state, must agree.
     #[cfg(feature = "postgres")]
     {
-        // A non-UTC session zone (with a seconds-precision historical LMT offset
-        // for year 0001) changes deparsed timestamptz text, never the instant.
+        // A non-UTC database default zone must not change certification: ORM
+        // sessions pin UTC. Other session zones (including seconds-precision
+        // historical LMT offsets) are covered by the comparator's unit tests.
         let db = store.open().await;
         let name: String = sqlx::query_scalar("SELECT current_database()")
             .fetch_one(db.pool())
@@ -404,7 +405,7 @@ async fn typed_literals_apply_replan_certify_and_create_actual_values() {
             .fetch_one(db.pool())
             .await
             .unwrap();
-        assert_eq!(zone, "Asia/Kolkata");
+        assert_eq!(zone, "UTC");
     }
     replan_is_empty(&db, &target, &ownership, "v3").await;
     let environment = Arc::new(

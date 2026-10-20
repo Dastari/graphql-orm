@@ -293,7 +293,8 @@ integer types, finite `f64` (negative zero equal to zero) for floating types, UU
 structure, decoded bytes and timestamptz instant, including offsets with seconds such as
 historical LMT zones. Anything else, including session-dependent output (`DateStyle` other than
 ISO, `bytea_output=escape`, `standard_conforming_strings=off`), is not equivalent and fails
-closed as a planned `AlterColumn` or a certification `BaselineMismatch`.
+closed as a planned `AlterColumn` or a certification `BaselineMismatch`. ORM sessions use the
+driver's UTC/ISO session settings, so a database-level time zone does not affect certification.
 
 The profile changes only whether a column differs. Target rendering, introspected text,
 physical/plan hashes and statement rendering are unchanged. It applies to

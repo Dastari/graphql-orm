@@ -316,8 +316,8 @@ impl ProjectedPlan {
                 continue;
             }
             let key = serde_json::to_string(value).map_err(|_| failed())?;
-            if !keys.contains_key(&key) {
-                keys.insert(key, distinct.len());
+            if let std::collections::btree_map::Entry::Vacant(entry) = keys.entry(key) {
+                entry.insert(distinct.len());
                 distinct.push(value.clone());
             }
         }

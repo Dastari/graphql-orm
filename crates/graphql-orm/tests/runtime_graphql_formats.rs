@@ -111,12 +111,15 @@ fn uuid(n: u8) -> uuid::Uuid {
     uuid::Uuid::from_bytes([n; 16])
 }
 
+/// One recorded projector call: values, selected fields and purpose.
+type SeenCall = (Vec<RuntimeValue>, Vec<String>, RuntimeProjectionPurpose);
+
 /// Example projector: resolves stored file IDs against a host catalogue.
 struct FileProjector {
     contract: RuntimeProjectionContract,
     files: BTreeMap<uuid::Uuid, (String, i64)>,
     calls: AtomicUsize,
-    seen: Mutex<Vec<(Vec<RuntimeValue>, Vec<String>, RuntimeProjectionPurpose)>>,
+    seen: Mutex<Vec<SeenCall>>,
     behaviour: Mutex<Behaviour>,
 }
 #[derive(Clone, Copy, PartialEq)]
