@@ -6,8 +6,8 @@ mod owned_mssql;
 
 use async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
-use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
 use graphql_orm::rust_decimal::Decimal;
+use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio::net::TcpStream;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
@@ -235,8 +235,14 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
         list_json["mssqlJobs"]["edges"][0]["node"]["customer"]["customerName"],
         "Acme"
     );
-    assert_eq!(list_json["mssqlJobs"]["edges"][0]["node"]["amount"], "-0.0001");
-    assert_eq!(list_json["mssqlJobs"]["edges"][0]["node"]["customer"]["creditLimit"], "922337203685477.5807");
+    assert_eq!(
+        list_json["mssqlJobs"]["edges"][0]["node"]["amount"],
+        "-0.0001"
+    );
+    assert_eq!(
+        list_json["mssqlJobs"]["edges"][0]["node"]["customer"]["creditLimit"],
+        "922337203685477.5807"
+    );
 
     let single_response = schema
         .execute(
@@ -265,7 +271,10 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
     assert_eq!(single_json["mssqlJob"]["jobName"], "Valve replacement");
     assert_eq!(single_json["mssqlJob"]["closed"], true);
     assert!(single_json["mssqlJob"]["amount"].is_null());
-    assert_eq!(single_json["mssqlJob"]["customer"]["creditLimit"], "-922337203685477.5808");
+    assert_eq!(
+        single_json["mssqlJob"]["customer"]["creditLimit"],
+        "-922337203685477.5808"
+    );
     assert_eq!(
         single_json["mssqlJob"]["customer"]["customerName"],
         "Globex"

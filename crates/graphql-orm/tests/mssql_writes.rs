@@ -465,7 +465,10 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     )
     .await?;
     assert_eq!(bulk.len(), 2);
-    assert!(bulk.iter().all(|row| row.native_money.to_string() == "900719925474.0993"));
+    assert!(
+        bulk.iter()
+            .all(|row| row.native_money.to_string() == "900719925474.0993")
+    );
     let bounded_filter = || WritableRecordWhereInput {
         external_key: Some(StringFilter {
             contains: Some("bounded-".to_owned()),

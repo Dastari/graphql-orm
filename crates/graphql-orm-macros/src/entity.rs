@@ -7205,12 +7205,23 @@ mod mssql_money_attribute_tests {
             #[graphql_entity(backend = "sqlite", table = "amounts", plural = "Amounts")]
             struct Amount { #[primary_key] id: i64, #[graphql_orm(mssql_money)] value: rust_decimal::Decimal }
         };
-        assert!(generate_graphql_entity(&wrong_backend).unwrap_err().to_string().contains("mssql_money requires backend"));
+        assert!(
+            generate_graphql_entity(&wrong_backend)
+                .unwrap_err()
+                .to_string()
+                .contains("mssql_money requires backend")
+        );
         let conflicting: Field = parse_quote! {
             #[graphql_orm(mssql_money, decimal(precision = 18, scale = 4))]
             value: rust_decimal::Decimal
         };
-        assert!(parse_field_metadata(&conflicting).err().unwrap().to_string().contains("cannot be combined"));
+        assert!(
+            parse_field_metadata(&conflicting)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot be combined")
+        );
         let valid: Field = parse_quote! {
             #[graphql_orm(mssql_money)] value: Option<rust_decimal::Decimal>
         };
@@ -7220,9 +7231,12 @@ mod mssql_money_attribute_tests {
         let wrong_type: Field = parse_quote! {
             #[graphql_orm(mssql_money)] value: String
         };
-        assert!(parse_field_metadata(&wrong_type)
-            .err().unwrap()
-            .to_string()
-            .contains("requires rust_decimal::Decimal"));
+        assert!(
+            parse_field_metadata(&wrong_type)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("requires rust_decimal::Decimal")
+        );
     }
 }

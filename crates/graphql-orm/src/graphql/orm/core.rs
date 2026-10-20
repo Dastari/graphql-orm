@@ -4869,18 +4869,34 @@ mod mssql_money_domain_tests {
     #[test]
     fn exact_money_domain_preserves_portable_decimal_limit() {
         let money = DecimalDef::mssql_money();
-        for text in ["-922337203685477.5808", "922337203685477.5807", "0", "0.0001", "-0.0001"] {
+        for text in [
+            "-922337203685477.5808",
+            "922337203685477.5807",
+            "0",
+            "0.0001",
+            "-0.0001",
+        ] {
             let value = rust_decimal::Decimal::from_str(text).unwrap();
             assert_eq!(money.normalize(value).unwrap(), value);
         }
         for text in ["922337203685477.5808", "-922337203685477.5809", "0.00001"] {
-            assert!(money.normalize(rust_decimal::Decimal::from_str(text).unwrap()).is_err());
+            assert!(
+                money
+                    .normalize(rust_decimal::Decimal::from_str(text).unwrap())
+                    .is_err()
+            );
         }
         assert!(DecimalDef::new(19, 4).is_err());
         assert!(DecimalDef::new(18, 4).is_ok());
-        assert_eq!(serde_json::to_string(&DecimalDef::new(18, 4).unwrap()).unwrap(),
-            r#"{"precision":18,"scale":4}"#);
-        assert_eq!(serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4,"mssql_money":true}"#).unwrap(), money);
+        assert_eq!(
+            serde_json::to_string(&DecimalDef::new(18, 4).unwrap()).unwrap(),
+            r#"{"precision":18,"scale":4}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4,"mssql_money":true}"#)
+                .unwrap(),
+            money
+        );
         assert!(serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4}"#).is_err());
     }
 }
