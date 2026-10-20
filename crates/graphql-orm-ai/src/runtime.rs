@@ -260,6 +260,16 @@ impl AiRuntime {
         })
     }
 
+    /// Whether the exact registered provider freezes its retained-session tool surface.
+    pub(crate) fn provider_freezes_session_tool_surface(
+        &self,
+        provider_kind: &ProviderKind,
+    ) -> bool {
+        self.providers.get(provider_kind).is_some_and(|provider| {
+            provider.provider_kind() == *provider_kind && provider.freezes_session_tool_surface()
+        })
+    }
+
     /// Starts constructing a runtime.
     pub fn builder() -> AiRuntimeBuilder {
         AiRuntimeBuilder::default()

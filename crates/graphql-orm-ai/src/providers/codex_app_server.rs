@@ -1389,6 +1389,12 @@ impl AiProvider for AiCodexAppServerProvider {
         ProviderKind::LocalHarness
     }
 
+    // Dynamic tools are installed once by `thread/start`; bound `turn/start` requests carry
+    // none and are rejected with `FrozenDefinitionMismatch` unless they equal that set.
+    fn freezes_session_tool_surface(&self) -> bool {
+        self.registration.experimental_dynamic_tools()
+    }
+
     fn supports_tool_result_images(&self) -> bool {
         self.registration.experimental_dynamic_tools()
             && self.registration.guarded_tool_result_source_delivery

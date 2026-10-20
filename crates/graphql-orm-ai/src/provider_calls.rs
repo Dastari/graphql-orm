@@ -260,6 +260,9 @@ pub struct AiProviderCallPlan {
     classified_native: bool,
     capability_offering: Option<crate::capability_delivery::AiCapabilityOfferingPlanGuard>,
     native_reset_evidence: Option<Arc<crate::provider_session::AiVerifiedNativeContinuation>>,
+    /// Admitted on the per-turn share only; redeemable solely through a provider session whose
+    /// registered adapter freezes its tool surface.
+    frozen_tool_surface_admission: bool,
     task_context: Option<Arc<crate::AiPreparedTaskContinuationContext>>,
     replan_continuation: Option<Arc<crate::AiAgentContinuation>>,
     task_context_only: bool,
@@ -272,6 +275,116 @@ struct AiPlanToolRuleBinding {
     fingerprint: String,
     maturity: ToolMaturity,
     approval: AiApprovalRule,
+}
+
+/// Input-token admission of one prepared task-context continuation.
+///
+/// Returns `Ok(false)` when the reservation covers the whole sealed figure, and `Ok(true)` when
+/// a provider-retained continuation's reservation covers only the per-turn share (the whole
+/// figure minus the tool surface frozen at registration). The caller must then redeem the
+/// admission only through a provider session that proves the frozen surface.
+fn task_context_budget_admission(
+    reserved_input_tokens: u64,
+    whole_tokens: u64,
+    tool_surface_tokens: u64,
+    provider_retained_continuation: bool,
+) -> Result<bool, AiError> {
+    if reserved_input_tokens >= whole_tokens {
+        return Ok(false);
+    }
+    if provider_retained_continuation
+        && reserved_input_tokens >= whole_tokens.saturating_sub(tool_surface_tokens)
+    {
+        return Ok(true);
+    }
+    Err(AiError::PreTransportBudgetDenied)
+}
+
+#[cfg(test)]
+mod frozen_tool_surface_budget_tests {
+    use super::*;
+
+    // A retained Codex-style request: a large generated catalogue frozen at registration and a
+    // small task-context continuation, sized with the real conservative projection helpers.
+    fn request(tool_count: usize, task_context_bytes: usize) -> ModelRequest {
+        let tool = |index: usize| crate::ModelToolDefinition {
+            tool_id: format!("records.read_{index}"),
+            provider_name: format!("records_read_{index}"),
+            fingerprint: "f".repeat(64),
+            description: "Read one generated record page with bounded filters.".repeat(8),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"first": {"type": "integer"}, "after": {"type": "string"}},
+                "required": ["first"],
+                "additionalProperties": false,
+            }),
+            strict: false,
+            defer_loading: false,
+        };
+        ModelRequest {
+            model: "reviewed-model".to_owned(),
+            instructions: vec!["Continue the approved task.".to_owned()],
+            input: vec![crate::ModelInputBlock::Text {
+                text: "c".repeat(task_context_bytes),
+            }],
+            continuation: None,
+            continuation_mode: ModelContinuationMode::ProviderRetained,
+            tools: (0..tool_count).map(tool).collect(),
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: crate::ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(1_024),
+        }
+    }
+
+    fn figures(request: &ModelRequest) -> (u64, u64) {
+        let kind = ProviderKind::LocalHarness;
+        (
+            request.conservative_provider_egress_tokens(&kind).unwrap(),
+            request
+                .conservative_provider_tool_surface_tokens(&kind)
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn frozen_surface_larger_than_the_reservation_admits_a_small_task_context() {
+        let reservation = 100_000;
+        let (whole, surface) = figures(&request(250, 4_000));
+        assert!(
+            surface > reservation && whole > reservation,
+            "{whole} {surface}"
+        );
+        assert!(whole - surface < reservation);
+        assert!(matches!(
+            task_context_budget_admission(reservation, whole, surface, true),
+            Ok(true)
+        ));
+        // A reservation covering the whole figure keeps the ordinary admission.
+        assert!(matches!(
+            task_context_budget_admission(whole, whole, surface, true),
+            Ok(false)
+        ));
+    }
+
+    #[test]
+    fn task_context_alone_above_the_reservation_is_still_denied() {
+        let reservation = 100_000;
+        let (whole, surface) = figures(&request(250, 120_000));
+        assert!(whole - surface > reservation);
+        assert!(matches!(
+            task_context_budget_admission(reservation, whole, surface, true),
+            Err(AiError::PreTransportBudgetDenied)
+        ));
+        // Without a provider-retained continuation the surface travels with the turn.
+        let (whole, surface) = figures(&request(250, 4_000));
+        assert!(matches!(
+            task_context_budget_admission(reservation, whole, surface, false),
+            Err(AiError::PreTransportBudgetDenied)
+        ));
+    }
 }
 
 impl AiProviderCallPlan {
@@ -374,11 +487,27 @@ impl AiProviderCallPlan {
             classified_native: false,
             capability_offering: None,
             native_reset_evidence: None,
+            frozen_tool_surface_admission: false,
             task_context: None,
             replan_continuation: None,
             task_context_only: false,
             static_offering_reset_receipt: None,
         })
+    }
+
+    /// Whether this continuation was admitted against the per-turn share of a
+    /// retained tool surface frozen at session registration.
+    ///
+    /// True only when the budget input-token estimate is below the whole sealed
+    /// model-inference figure but covers that figure minus
+    /// [`ModelRequest::conservative_provider_tool_surface_tokens`]. Such a plan
+    /// can execute only through
+    /// [`AiProviderCallExecutor::execute_with_provider_session`] with a provider
+    /// whose [`crate::AiProvider::freezes_session_tool_surface`] is true; every
+    /// other path refuses it with [`AiError::PreTransportBudgetDenied`] before
+    /// reserving budget. The sealed manifest still authorizes the whole figure.
+    pub fn admitted_on_frozen_tool_surface_share(&self) -> bool {
+        self.frozen_tool_surface_admission
     }
 
     /// Returns the content-free final request requirement that was sealed into
@@ -871,7 +1000,23 @@ impl AiProviderCallPlan {
                 inference.sources.push(source);
             }
             if plan.budget.estimate.input_tokens < inference.estimated_tokens {
-                return Err(AiError::PreTransportBudgetDenied);
+                // A retained session whose tool surface is frozen at registration sends the
+                // surface once, never per turn. Admit such a continuation on its per-turn share
+                // while the sealed manifest keeps the whole figure; the executor redeems this
+                // only through a provider session whose adapter proves the frozen surface.
+                let surface = plan
+                    .request
+                    .conservative_provider_tool_surface_tokens(&plan.provider_kind)
+                    .map_err(|_| {
+                        AiError::InvalidInput("invalid provider call projection".to_owned())
+                    })?;
+                plan.frozen_tool_surface_admission = task_context_budget_admission(
+                    plan.budget.estimate.input_tokens,
+                    inference.estimated_tokens,
+                    surface,
+                    plan.uses_provider_retained_continuation()
+                        && plan.request.continuation.is_some(),
+                )?;
             }
         }
         plan.task_context = task_context;
@@ -1745,6 +1890,7 @@ impl AiProviderCallPlan {
             classified_native: false,
             capability_offering: None,
             native_reset_evidence: None,
+            frozen_tool_surface_admission: false,
             task_context: None,
             replan_continuation: None,
             task_context_only: false,
@@ -3801,6 +3947,15 @@ impl AiProviderCallExecutor {
         if let Some(offering) = &plan.capability_offering {
             offering.validate()?;
         }
+        // A per-turn-share admission is redeemable only when the registered adapter freezes
+        // its retained tool surface; refuse before any session claim or thread creation.
+        if plan.frozen_tool_surface_admission
+            && !self
+                .runtime
+                .provider_freezes_session_tool_surface(&plan.provider_kind)
+        {
+            return Err(AiError::PreTransportBudgetDenied);
+        }
         if !plan.matches_provider_session_descriptor(session_plan.descriptor())
             || !plan.uses_provider_retained_continuation()
             || dynamic_execution.is_some()
@@ -4233,6 +4388,16 @@ impl AiProviderCallExecutor {
     ) -> Result<AiProviderCallResult, AiError> {
         if let Some(offering) = &plan.capability_offering {
             offering.validate()?;
+        }
+        // Without a bound retained session the whole surface may travel with this turn, so a
+        // per-turn-share admission is refused here, before any reservation or transport.
+        if plan.frozen_tool_surface_admission
+            && (provider_session.is_none()
+                || !self
+                    .runtime
+                    .provider_freezes_session_tool_surface(&plan.provider_kind))
+        {
+            return Err(AiError::PreTransportBudgetDenied);
         }
         let lease = lease_state.lock().await.clone();
         if let Some(context) = &plan.task_context {

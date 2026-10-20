@@ -845,11 +845,15 @@ impl ModelRequest {
     /// the session was registered. It is an egress disclosure ceiling, not a
     /// usage forecast: a large generated tool catalogue can dominate it while
     /// actual per-turn input usage is far lower. Provider-call construction
-    /// seals this whole figure into the model-inference manifest, and the
-    /// prepared task-context and static-offering paths refuse a plan whose
-    /// budget input-token estimate is below it. Use
-    /// [`Self::conservative_provider_tool_surface_tokens`] to separate the
-    /// tool-surface share when sizing or diagnosing a host reservation.
+    /// seals this whole figure into the model-inference manifest. A prepared
+    /// task-context continuation whose budget input-token estimate is below it
+    /// is admitted only when the estimate covers the per-turn share (this
+    /// figure minus [`Self::conservative_provider_tool_surface_tokens`]) of a
+    /// provider-retained continuation, and then executes, including through a
+    /// static-offering reset, only via a provider session whose adapter
+    /// freezes its tool surface at registration; see
+    /// `AiProviderCallPlan::admitted_on_frozen_tool_surface_share`. Every
+    /// other plan still requires the whole figure.
     ///
     /// # Errors
     ///
@@ -868,9 +872,10 @@ impl ModelRequest {
     /// The value uses the same one-token-per-byte rule and per-item overhead,
     /// so it never exceeds the full ceiling; the difference is the per-turn
     /// instructions, input, continuation, output schema, and fixed overhead.
-    /// It is diagnostic sizing information only. It does not change what the
-    /// egress manifest must authorize and proves nothing about whether a
-    /// provider re-sends a frozen tool surface on the wire.
+    /// It does not change what the egress manifest must authorize and proves
+    /// nothing about whether a provider re-sends a frozen tool surface on the
+    /// wire; that proof comes only from the registered adapter's
+    /// [`AiProvider::freezes_session_tool_surface`].
     ///
     /// # Errors
     ///
@@ -3531,6 +3536,20 @@ pub trait AiProvider: Send + Sync {
     /// default denies media-required effects before application execution; JSON references are
     /// never treated as image content.
     fn supports_tool_result_images(&self) -> bool {
+        false
+    }
+
+    /// Whether every turn of a retained provider session reuses the exact tool surface frozen
+    /// when the session was registered, so a bound turn never resends tool definitions.
+    ///
+    /// Returning true lets a classified task-context continuation whose budget reservation
+    /// covers only the per-turn share (`conservative_provider_egress_tokens` minus
+    /// `conservative_provider_tool_surface_tokens`) run through
+    /// `AiProviderCallExecutor::execute_with_provider_session`. Only an adapter whose bound
+    /// turns reject any definition differing from the registration may return true. It grants
+    /// no egress authority: the sealed model-inference manifest still covers the whole surface.
+    /// The default is false.
+    fn freezes_session_tool_surface(&self) -> bool {
         false
     }
 

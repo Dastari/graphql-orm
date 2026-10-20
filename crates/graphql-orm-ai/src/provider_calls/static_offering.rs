@@ -85,7 +85,25 @@ impl AiProviderCallExecutor {
         let inference_tokens = fresh_request
             .conservative_provider_egress_tokens(&plan.provider_kind)
             .map_err(|_| AiError::EgressDenied)?;
-        if plan.budget.estimate.input_tokens < inference_tokens {
+        // A per-turn-share admission re-proves the frozen surface before any cleanup: the fresh
+        // thread installs the whole surface once at registration, and its turn carries only the
+        // per-turn share. Every other plan keeps the whole fresh figure.
+        let required_tokens = if plan.frozen_tool_surface_admission {
+            if !self
+                .runtime
+                .provider_freezes_session_tool_surface(&plan.provider_kind)
+            {
+                return Err(AiError::PreTransportBudgetDenied);
+            }
+            inference_tokens.saturating_sub(
+                fresh_request
+                    .conservative_provider_tool_surface_tokens(&plan.provider_kind)
+                    .map_err(|_| AiError::EgressDenied)?,
+            )
+        } else {
+            inference_tokens
+        };
+        if plan.budget.estimate.input_tokens < required_tokens {
             return Err(AiError::PreTransportBudgetDenied);
         }
         let desired_offering_fingerprint = plan.offering_fingerprint();

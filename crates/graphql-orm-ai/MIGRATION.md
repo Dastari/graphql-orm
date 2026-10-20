@@ -19,6 +19,35 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.108.0 to 0.109.0: frozen retained tool surfaces in task-context budgets
+
+This pre-1.0 minor relaxes one pre-transport budget admission and adds API. No
+schema module, persistence, GraphQL SDL or data migration is involved.
+
+- `AiProvider::freezes_session_tool_surface` is a provided method returning
+  `false`; existing adapters compile unchanged. Return true only from an
+  adapter whose retained-session turns never resend tool definitions and reject
+  any definition differing from the registration. The bundled Codex app-server
+  adapter does so for experimental dynamic-tools registrations.
+- `AiProviderCallPlan::new_continuation_with_classified_capability_surface`
+  previously refused every prepared task-context continuation whose
+  `budget.estimate.input_tokens` was below the sealed model-inference figure,
+  which counts the whole tool surface on every turn. It now admits a
+  provider-retained continuation whose estimate covers the per-turn share
+  (`conservative_provider_egress_tokens - conservative_provider_tool_surface_tokens`)
+  and marks it (`admitted_on_frozen_tool_surface_share`). The egress manifest
+  still seals and authorizes the whole figure.
+- A marked plan runs only through `execute_with_provider_session` with a
+  provider that freezes its surface. `execute`, `execute_with_dynamic_tools`
+  and a non-freezing provider session return `PreTransportBudgetDenied` before
+  any claim, thread, deletion or reservation. Hosts that previously sized
+  reservations to the whole figure see no change; hosts using a frozen Codex
+  catalogue can size the input reservation to the per-turn share.
+- Actual provider usage is still settled from the provider's reported usage.
+  A provider may present a registered tool surface to its model on every turn
+  (often from a prompt cache), so keep the reservation policy's actual-usage
+  bounds in place.
+
 ## 0.107.4 to 0.108.0: classified planner failures
 
 This pre-1.0 minor changes durable failure codes and retry admission. The Rust
