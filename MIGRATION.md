@@ -15,6 +15,12 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.55.0 to 0.55.1: fixture lock refresh
+
+Upgrade ORM/macros together and refresh the lockfile. Only a test-fixture lock
+changed (`graphql-orm-ai` 0.109.0); there is no source, API, SDL, data or schema
+change.
+
 ## 0.54.0 to 0.55.0: typed literal defaults and semantic field formats
 
 Upgrade ORM/macros together. Generated code, SDL of existing schemas, stored data and

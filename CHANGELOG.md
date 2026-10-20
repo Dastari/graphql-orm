@@ -14,6 +14,13 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.55.1 (unreleased)
+
+- Refresh the `backend-coexistence` fixture lock for `graphql-orm-ai` 0.109.0.
+  Align ORM/macros at 0.55.1. No source, public API, generated code, SDL,
+  persistence or behavior change.
+
+
 ## 0.55.0 (unreleased)
 
 - Add typed, bounded runtime literal defaults for UUID, JSON (canonical JSON v1),
