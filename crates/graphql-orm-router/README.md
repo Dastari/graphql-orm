@@ -10,11 +10,10 @@ supersedes: []
 
 # graphql-orm-router
 
-This development branch selects reviewed Auth `0.22.1` source at
+The current workspace selects published Auth `v0.22.1` at
 `86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
-correction. This is preparation, not a published release: replace the reviewed
-revision with its published `v0.22.1` tag and verify one Auth source before
-workspace publication or consuming-product adoption. See the
+correction. Direct Auth consumers must select the same tag and refresh their
+locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
 Version `0.6.3` raises the finite default signed role-catalogue HTTP response

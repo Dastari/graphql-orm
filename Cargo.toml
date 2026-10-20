@@ -30,7 +30,7 @@ license = "MIT"
 repository = "https://github.com/Dastari/graphql-orm"
 
 [workspace.dependencies]
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "86fabec09eea1eec0f675bc150e90e3809734567", version = "0.22.1" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.22.1", version = "0.22.1" }
 arc-swap = "1.7"
 async-graphql = { version = "7", features = ["dataloader", "uuid"] }
 async-graphql-parser = "7"

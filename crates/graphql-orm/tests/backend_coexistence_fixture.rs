@@ -83,9 +83,9 @@ fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
     };
     let tag = field("tag");
     assert_eq!(tag, format!("v{}", field("version")));
-    // The published v0.22.0 tag retains this reviewed full commit. Require
+    // The published v0.22.1 tag retains this reviewed full commit. Require
     // both the published selector and its locked identity in the host graph.
-    let revision = "997707e060bcf5fabf879a5f98146dc2732b1c99";
+    let revision = "86fabec09eea1eec0f675bc150e90e3809734567";
     assert_eq!(agql_auth[0]["version"], field("version"));
     let source = agql_auth[0]["source"]
         .as_str()

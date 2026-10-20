@@ -16,9 +16,9 @@ for historical context.
 
 ## 0.54.1 (unreleased)
 
-- Pair ORM/macros 0.54.1 and AI 0.107.4 with reviewed Auth 0.22.1 source
-  for its finite signed-role-catalogue correction. Replace the preparatory
-  reviewed revision with the published Auth tag before workspace publication.
+- Pair ORM/macros 0.54.1 and AI 0.107.4 with published Auth `v0.22.1` at
+  `86fabec09eea1eec0f675bc150e90e3809734567` for its finite signed-role-catalogue
+  correction. Align direct host fixtures and regenerate their real Cargo locks.
   No generated code, public ORM API, SDL, persistence or AI schema change.
 
 

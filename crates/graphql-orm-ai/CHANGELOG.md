@@ -20,7 +20,7 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 
 ## Unreleased - 0.107.4
 
-- Align with reviewed Auth 0.22.1 and ORM/macros 0.54.1 for finite signed
+- Align with published Auth 0.22.1 and ORM/macros 0.54.1 for finite signed
   role-catalogue capacity. No provider, AI runtime, public API or schema change.
 
 

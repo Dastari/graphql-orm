@@ -17,11 +17,10 @@ published to crates.io.
 
 ## Signed role-catalogue transport bound
 
-ORM/macros 0.54.1, AI 0.107.4 and router 0.6.3 select reviewed Auth 0.22.1
-source at `86fabec09eea1eec0f675bc150e90e3809734567` during preparation. The
-published Auth version tag and one matching source must replace that temporary
-revision before publication or downstream adoption. No immutable version tag
-is claimed by the source preparation.
+ORM/macros 0.54.1, AI 0.107.4 and router 0.6.3 select published Auth `v0.22.1`
+at `86fabec09eea1eec0f675bc150e90e3809734567`. Use this exact tag for direct
+Auth dependencies and refresh all host/fixture locks to one source. A different
+selector for the same commit still creates a second Rust Auth type universe.
 
 Router 0.6.3 accepts complete signed role catalogues up to the finite default
 2 MiB HTTP limit. Explicit lower bounds remain in force. Adopt the coordinated

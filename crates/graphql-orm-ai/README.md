@@ -10,11 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
-This development branch selects reviewed Auth `0.22.1` source at
+The current workspace selects published Auth `v0.22.1` at
 `86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
-correction. This is preparation, not a published release: replace the reviewed
-revision with its published `v0.22.1` tag and verify one Auth source before
-workspace publication or consuming-product adoption. See the
+correction. Direct Auth consumers must select the same tag and refresh their
+locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
 Version `0.107.4` aligns the Auth dependency with the reviewed signed-catalogue
@@ -187,7 +186,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.3", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.4", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,
