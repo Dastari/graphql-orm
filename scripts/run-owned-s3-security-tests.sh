@@ -16,8 +16,10 @@ run_owned_test() {
   local test_name=$2
   shift 2
   local result_log="$result_dir/$target.log"
+  local selector=(--test "$target")
+  if [[ $target == lib ]]; then selector=(--lib); fi
   cargo test -p graphql-orm-storage --locked --color never --no-default-features \
-    --features s3 --test "$target" "$test_name" -- --exact "$@" \
+    --features s3 "${selector[@]}" "$test_name" -- --exact "$@" \
     --color never --test-threads=1 2>&1 | tee "$result_log"
   # HTTPS emits child summaries too. Require the final parent summary, not an
   # earlier child pass, so an empty or incorrectly filtered target fails closed.
@@ -30,4 +32,8 @@ run_owned_test() {
 run_owned_test s3_integration single_attempt_delete_does_not_replay_after_lost_response_and_replacement
 run_owned_test s3_integration s3_capacity_distinguishes_declared_provider_managed_from_unknown
 run_owned_test s3_integration s3_capacity_reports_unreachable_bucket_as_an_error
+run_owned_test s3_integration s3_aws_general_purpose_basis_rejects_non_aws_destinations_without_io
+run_owned_test lib s3::tests::aws_endpoint_must_be_the_https_endpoint_of_the_configured_region
+run_owned_test lib s3::tests::only_general_purpose_bucket_names_qualify
+run_owned_test lib s3::tests::aws_general_purpose_configuration_requires_account_endpoint_and_bucket
 run_owned_test s3_https_transport owned_https_transport_fixture --ignored
