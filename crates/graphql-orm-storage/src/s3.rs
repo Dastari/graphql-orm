@@ -11,6 +11,7 @@ use aws_sdk_s3::{
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 use tokio_util::io::ReaderStream;
 
 use crate::{
@@ -74,9 +75,11 @@ pub enum S3CapacityMode {
     /// bucket and account, for example a public cloud object store without a
     /// bucket quota.
     ///
-    /// Observations report [`CapacityState::ProviderManaged`] after the
-    /// authenticated account reaches the bucket. Consumers must still enforce
-    /// a finite service-owned quota.
+    /// Observations report [`CapacityState::ProviderManaged`] with
+    /// [`ProviderManagedBasis::OperatorDeclared`] after the authenticated
+    /// account reaches the bucket. Reachability does not prove the absence of
+    /// a finite provider quota. Consumers must still enforce a finite
+    /// service-owned quota.
     ProviderManaged,
 }
 
@@ -404,6 +407,7 @@ impl BlobStore for S3StorageBackend {
     ) -> Result<CapacityObservation, StorageError> {
         // Prove the configured account reaches the exact bucket before
         // reporting any state for it.
+        let observed_at = OffsetDateTime::now_utc();
         let head = self
             .client
             .head_bucket()
@@ -420,11 +424,12 @@ impl BlobStore for S3StorageBackend {
             }),
             S3CapacityMode::ProviderManaged => {
                 CapacityState::ProviderManaged(ProviderManagedCapacity {
-                    basis: ProviderManagedBasis::DeclaredAndReachable,
+                    basis: ProviderManagedBasis::OperatorDeclared,
                 })
             }
         };
-        Ok(CapacityObservation::new(self.capacity_binding(), placement, state, request))
+        let binding = self.capacity_binding();
+        Ok(CapacityObservation::new(binding, placement, state, observed_at, request))
     }
 
     async fn put_blob(

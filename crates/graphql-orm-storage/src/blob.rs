@@ -326,7 +326,9 @@ pub trait BlobStore: Send + Sync {
     /// The default reports [`CapacityState::Unknown`] with
     /// [`crate::CapacityUnknownReason::Unsupported`] without provider I/O.
     /// Implementations must observe the configured location with its real
-    /// account, never an unrelated host filesystem or configured value.
+    /// account, never an unrelated host filesystem or configured value. They
+    /// take the observation time before the first provider request and never
+    /// return cached observations.
     ///
     /// # Errors
     ///
@@ -337,7 +339,8 @@ pub trait BlobStore: Send + Sync {
         request: &CapacityRequest,
     ) -> Result<CapacityObservation, StorageError> {
         let state = CapacityState::Unknown(UnknownCapacity::unsupported());
-        Ok(CapacityObservation::new(self.capacity_binding(), None, state, request))
+        let now = OffsetDateTime::now_utc();
+        Ok(CapacityObservation::new(self.capacity_binding(), None, state, now, request))
     }
 }
 

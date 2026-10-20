@@ -89,7 +89,7 @@ async fn local_capacity_observations_expire() {
     let backend = LocalStorageBackend::new(temp.path());
     let observation = backend
         .observe_capacity(&CapacityRequest {
-            validity: Duration::from_secs(1),
+            max_age: Duration::from_secs(1),
         })
         .await
         .expect("observe capacity");

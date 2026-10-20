@@ -306,7 +306,7 @@ async fn s3_capacity_distinguishes_declared_provider_managed_from_unknown() {
     assert_eq!(
         managed_observation.state,
         CapacityState::ProviderManaged(ProviderManagedCapacity {
-            basis: ProviderManagedBasis::DeclaredAndReachable,
+            basis: ProviderManagedBasis::OperatorDeclared,
         })
     );
     assert_eq!(

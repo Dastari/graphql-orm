@@ -18,36 +18,40 @@ use time::OffsetDateTime;
 
 use crate::{StorageBackend, sha256_hex};
 
-/// Default lifetime of a capacity observation.
-pub const DEFAULT_CAPACITY_VALIDITY: Duration = Duration::from_secs(30);
+/// Default maximum age of a capacity observation.
+pub const DEFAULT_CAPACITY_MAX_AGE: Duration = Duration::from_secs(30);
 
-/// Longest lifetime a caller may request for a capacity observation.
-pub const MAX_CAPACITY_VALIDITY: Duration = Duration::from_secs(10 * 60);
+/// Longest maximum age a caller may request for a capacity observation.
+pub const CAPACITY_MAX_AGE_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 const BINDING_DOMAIN: &str = "graphql-orm-storage/capacity-binding/v1";
 
 /// Parameters for one capacity observation.
+///
+/// Every observation performs fresh provider I/O; providers never return a
+/// cached observation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CapacityRequest {
-    /// How long the observation remains valid after it was taken.
+    /// Maximum age of the observation, measured from when the provider
+    /// measurement began rather than when it completed.
     ///
-    /// Values above [`MAX_CAPACITY_VALIDITY`] are clamped to that maximum.
-    pub validity: Duration,
+    /// Values above [`CAPACITY_MAX_AGE_LIMIT`] are clamped to that limit.
+    pub max_age: Duration,
 }
 
 impl Default for CapacityRequest {
     fn default() -> Self {
         Self {
-            validity: DEFAULT_CAPACITY_VALIDITY,
+            max_age: DEFAULT_CAPACITY_MAX_AGE,
         }
     }
 }
 
 impl CapacityRequest {
-    /// Returns the effective, clamped validity.
+    /// Returns the effective, clamped maximum age.
     #[must_use]
-    pub fn effective_validity(&self) -> Duration {
-        self.validity.min(MAX_CAPACITY_VALIDITY)
+    pub fn effective_max_age(&self) -> Duration {
+        self.max_age.min(CAPACITY_MAX_AGE_LIMIT)
     }
 }
 
@@ -117,42 +121,35 @@ pub struct CapacityObservation {
     pub binding: CapacityBinding,
     /// Observed physical placement, when the provider reports one.
     pub placement: Option<CapacityPlacement>,
-    /// When the provider answered.
+    /// When the provider measurement began.
     pub observed_at: OffsetDateTime,
-    /// First instant at which the observation is stale.
+    /// First instant at which the observation is stale: `observed_at` plus
+    /// the effective maximum age.
     pub valid_until: OffsetDateTime,
     /// Observed capacity state.
     pub state: CapacityState,
 }
 
 impl CapacityObservation {
-    /// Builds an observation taken now with the requested validity.
+    /// Builds an observation whose measurement began at `observed_at`.
+    ///
+    /// Providers must take `observed_at` before issuing the first provider
+    /// request, so slow measurements expire earlier rather than later.
     #[must_use]
     pub fn new(
-        binding: CapacityBinding,
-        placement: Option<CapacityPlacement>,
-        state: CapacityState,
-        request: &CapacityRequest,
-    ) -> Self {
-        Self::at(binding, placement, state, OffsetDateTime::now_utc(), request)
-    }
-
-    /// Builds an observation taken at `observed_at`.
-    #[must_use]
-    pub fn at(
         binding: CapacityBinding,
         placement: Option<CapacityPlacement>,
         state: CapacityState,
         observed_at: OffsetDateTime,
         request: &CapacityRequest,
     ) -> Self {
-        let validity = request.effective_validity();
-        let validity = time::Duration::try_from(validity).unwrap_or_default();
+        let max_age = request.effective_max_age();
+        let max_age = time::Duration::try_from(max_age).unwrap_or_default();
         Self {
             binding,
             placement,
             observed_at,
-            valid_until: observed_at.saturating_add(validity),
+            valid_until: observed_at.saturating_add(max_age),
             state,
         }
     }
@@ -303,6 +300,8 @@ pub enum QuotaScope {
     User,
     /// Per-group quota.
     Group,
+    /// Per-project (directory tree) quota.
+    Project,
 }
 
 /// One observed finite quota.
@@ -310,7 +309,7 @@ pub enum QuotaScope {
 pub struct QuotaLimit {
     /// Principal class.
     pub scope: QuotaScope,
-    /// Numeric principal identifier, such as a user or group id.
+    /// Numeric principal identifier, such as a user, group or project id.
     pub principal: u64,
     /// Bytes already charged to the principal.
     pub used_bytes: u64,
@@ -341,9 +340,14 @@ pub struct ProviderManagedCapacity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum ProviderManagedBasis {
-    /// The destination configuration explicitly declares the provider as
-    /// provider-managed, and the authenticated account reached the destination.
-    DeclaredAndReachable,
+    /// The operator declared the destination provider-managed in its
+    /// configuration, and the authenticated account reached the exact
+    /// destination during this observation.
+    ///
+    /// The provider itself did not attest the absence of a finite quota;
+    /// reachability proves access only. Consumers decide whether an operator
+    /// declaration is sufficient for admission.
+    OperatorDeclared,
 }
 
 /// Details for an unknown capacity state.
@@ -416,10 +420,10 @@ mod tests {
     fn validation_rejects_changed_binding_stale_and_future_observations() {
         let observed_at = OffsetDateTime::UNIX_EPOCH + time::Duration::hours(1);
         let request = CapacityRequest {
-            validity: Duration::from_secs(30),
+            max_age: Duration::from_secs(30),
         };
         let observation =
-            CapacityObservation::at(binding("/a"), None, known(5), observed_at, &request);
+            CapacityObservation::new(binding("/a"), None, known(5), observed_at, &request);
 
         let current = observed_at + time::Duration::seconds(29);
         let state = observation.validate_for(&binding("/a"), current);
@@ -441,11 +445,11 @@ mod tests {
     }
 
     #[test]
-    fn validity_is_clamped() {
+    fn max_age_is_clamped() {
         let request = CapacityRequest {
-            validity: Duration::from_secs(86_400),
+            max_age: Duration::from_secs(86_400),
         };
-        let observation = CapacityObservation::at(
+        let observation = CapacityObservation::new(
             binding("/a"),
             None,
             known(1),
@@ -454,7 +458,7 @@ mod tests {
         );
         assert_eq!(
             observation.valid_until - observation.observed_at,
-            time::Duration::try_from(MAX_CAPACITY_VALIDITY).expect("duration")
+            time::Duration::try_from(CAPACITY_MAX_AGE_LIMIT).expect("duration")
         );
     }
 
@@ -463,11 +467,11 @@ mod tests {
         let request = CapacityRequest::default();
         let at = OffsetDateTime::UNIX_EPOCH;
         let volume = |name: &str| Some(CapacityPlacement(name.to_string()));
-        let first = CapacityObservation::at(binding("/a"), volume("v1"), known(1), at, &request);
-        let same = CapacityObservation::at(binding("/a"), volume("v1"), known(2), at, &request);
-        let moved = CapacityObservation::at(binding("/a"), volume("v2"), known(2), at, &request);
-        let other = CapacityObservation::at(binding("/b"), volume("v1"), known(2), at, &request);
-        let absent = CapacityObservation::at(binding("/a"), None, known(2), at, &request);
+        let first = CapacityObservation::new(binding("/a"), volume("v1"), known(1), at, &request);
+        let same = CapacityObservation::new(binding("/a"), volume("v1"), known(2), at, &request);
+        let moved = CapacityObservation::new(binding("/a"), volume("v2"), known(2), at, &request);
+        let other = CapacityObservation::new(binding("/b"), volume("v1"), known(2), at, &request);
+        let absent = CapacityObservation::new(binding("/a"), None, known(2), at, &request);
         assert!(first.same_placement(&same));
         assert!(!first.same_placement(&moved));
         assert!(!first.same_placement(&other));

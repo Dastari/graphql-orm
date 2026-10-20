@@ -23,6 +23,7 @@ use smb::{
     connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
@@ -1702,6 +1703,7 @@ impl BlobStore for SmbStorageBackend {
         &self,
         request: &CapacityRequest,
     ) -> Result<CapacityObservation, StorageError> {
+        let observed_at = OffsetDateTime::now_utc();
         let sample = self.observe_capacity_sample().await?;
         let placement = sample
             .volume_serial
@@ -1712,7 +1714,8 @@ impl BlobStore for SmbStorageBackend {
             physical_available_bytes: Some(sample.actual_available_bytes),
             quota: CapacityQuota::ProviderAccounted,
         });
-        Ok(CapacityObservation::new(self.capacity_binding(), placement, state, request))
+        let binding = self.capacity_binding();
+        Ok(CapacityObservation::new(binding, placement, state, observed_at, request))
     }
 
     async fn put_blob(
@@ -2008,14 +2011,20 @@ impl SmbCapacitySample {
                 )
             })
         };
-        let total_bytes = bytes(info.total_allocation_units)?;
-        let actual_available_bytes = bytes(info.actual_available_allocation_units)?;
-        let caller_available_bytes = bytes(info.caller_available_allocation_units)?;
+        if info.actual_available_allocation_units > info.total_allocation_units
+            || info.caller_available_allocation_units > info.actual_available_allocation_units
+        {
+            return Err(remote_error(
+                StorageProviderErrorKind::Protocol,
+                "capacity",
+                "server reported inconsistent allocation units",
+                false,
+            ));
+        }
         Ok(Self {
-            total_bytes,
-            // The caller can never allocate more than the volume has free.
-            caller_available_bytes: caller_available_bytes.min(actual_available_bytes),
-            actual_available_bytes,
+            total_bytes: bytes(info.total_allocation_units)?,
+            caller_available_bytes: bytes(info.caller_available_allocation_units)?,
+            actual_available_bytes: bytes(info.actual_available_allocation_units)?,
             volume_serial,
         })
     }
@@ -2445,18 +2454,21 @@ mod tests {
         assert_eq!(sample.actual_available_bytes, 40 * 4096);
         assert_eq!(sample.volume_serial, Some(7));
 
-        // A caller value above the physical free space is capped.
-        let capped = SmbCapacitySample::from_full_size(&full_size(100, 90, 40), None)
+        // Zero caller allocation is a known zero, not an unknown.
+        let full = SmbCapacitySample::from_full_size(&full_size(100, 0, 40), None)
             .expect("valid capacity");
-        assert_eq!(capped.caller_available_bytes, 40 * 4096);
+        assert_eq!(full.caller_available_bytes, 0);
     }
 
     #[test]
-    fn capacity_sample_rejects_invalid_units_and_overflow() {
+    fn capacity_sample_rejects_invalid_units_overflow_and_inconsistency() {
         let mut zero_unit = full_size(1, 1, 1);
         zero_unit.bytes_per_sector = 0;
         assert!(SmbCapacitySample::from_full_size(&zero_unit, None).is_err());
         assert!(SmbCapacitySample::from_full_size(&full_size(u64::MAX, 1, 1), None).is_err());
+        // Caller above actual, or actual above total, is inconsistent.
+        assert!(SmbCapacitySample::from_full_size(&full_size(100, 90, 40), None).is_err());
+        assert!(SmbCapacitySample::from_full_size(&full_size(100, 10, 140), None).is_err());
     }
 
     #[test]

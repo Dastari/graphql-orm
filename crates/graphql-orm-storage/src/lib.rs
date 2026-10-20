@@ -62,9 +62,9 @@ pub use blob::{
     BoxedStorageStream, StorageByteStream, collect_storage_stream, validate_blob_key,
 };
 pub use capacity::{
-    CapacityBinding, CapacityObservation, CapacityPlacement, CapacityQuota, CapacityRequest,
-    CapacityState, CapacityUnknownReason, CapacityValidationError, DEFAULT_CAPACITY_VALIDITY,
-    KnownCapacity, MAX_CAPACITY_VALIDITY, ProviderManagedBasis, ProviderManagedCapacity,
+    CAPACITY_MAX_AGE_LIMIT, CapacityBinding, CapacityObservation, CapacityPlacement, CapacityQuota,
+    CapacityRequest, CapacityState, CapacityUnknownReason, CapacityValidationError,
+    DEFAULT_CAPACITY_MAX_AGE, KnownCapacity, ProviderManagedBasis, ProviderManagedCapacity,
     QuotaLimit, QuotaScope, UnknownCapacity,
 };
 pub use checksum::sha256_hex;
