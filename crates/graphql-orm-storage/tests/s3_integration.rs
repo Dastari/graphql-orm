@@ -323,7 +323,7 @@ async fn s3_capacity_distinguishes_declared_provider_managed_from_unknown() {
     );
 
     let requests = server.join().expect("fixture thread");
-    assert_eq!(requests, vec!["HEAD /fixture HTTP/1.1"; 2]);
+    assert_eq!(requests, vec!["HEAD /fixture/ HTTP/1.1"; 2]);
 }
 
 #[tokio::test]
