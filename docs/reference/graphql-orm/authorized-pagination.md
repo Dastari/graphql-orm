@@ -28,6 +28,13 @@ members and obtains them from its current authority and catalogue. A cursor
 never grants authorization. The ORM still evaluates current entity, row and
 field policy on every page.
 
+The resolver must reacquire its complete current owner, source, credential,
+configuration, placement and authority stamps **after** the awaited scan and
+compare them with the context used for that scan before it returns any nodes or
+continuation. If they changed, discard the page and fail closed. The ORM checks
+the supplied binding at cursor decode and runs current row/field policy, but it
+cannot observe host-owned stamp changes during an awaited database read.
+
 The binding must contain 1 to 2048 bytes and is supplied by trusted server
 code, never a browser field. A changed binding rejects an old continuation
 before querying rows. The protected path permits at most 1024 rows per batch,

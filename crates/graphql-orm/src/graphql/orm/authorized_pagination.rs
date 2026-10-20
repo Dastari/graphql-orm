@@ -751,7 +751,11 @@ where
 
     /// Scan a custom resolver page with a complete server-owned context bound
     /// to the confidential continuation. Recreate the context from current
-    /// trusted state on every call; it never grants permission by itself.
+    /// trusted state on every call; it never grants permission by itself. After
+    /// this awaited scan, the resolver must reacquire its current owner and
+    /// authority stamps and compare them with `context` before it releases
+    /// nodes or the continuation. The ORM cannot observe host-owned stamp
+    /// changes that occur during the await.
     ///
     /// # Errors
     /// Returns `CURSOR_INVALID` for an altered, expired or mismatched cursor,

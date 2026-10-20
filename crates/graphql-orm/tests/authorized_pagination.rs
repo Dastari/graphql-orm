@@ -439,6 +439,41 @@ async fn custom_scan_context_binds_each_server_stamp_and_keeps_current_policy() 
 }
 
 #[tokio::test]
+async fn custom_scan_context_rejects_original_credential_and_grant_reversal() {
+    let (db, _, capture) = setup(Mode::Callback, 0, 19).await;
+    let original_state = json!({
+        "snapshot": 1,
+        "original_credential_id": "credential-a",
+        "original_credential_expiry": 1000,
+        "current_grants": ["records.page"],
+        "grant_epoch": 3,
+    });
+    let context = AuthorizedScanContext::new(serde_json::to_vec(&original_state).unwrap()).unwrap();
+    let first = EntityQuery::<VisibilityItem, SqliteBackend>::new()
+        .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { limit: Some(3), ..Default::default() }, &context)
+        .await.unwrap();
+    let cursor = first.page_info.continuation.unwrap();
+    capture.take();
+
+    let mut changed_id = original_state.clone();
+    changed_id["original_credential_id"] = json!("credential-b");
+    let mut changed_expiry = original_state.clone();
+    changed_expiry["original_credential_expiry"] = json!(1001);
+    let mut withdrawn = original_state.clone();
+    withdrawn["current_grants"] = json!([]);
+    withdrawn["grant_epoch"] = json!(4);
+    let mut restored = original_state;
+    restored["grant_epoch"] = json!(5);
+    for state in [changed_id, changed_expiry, withdrawn, restored] {
+        let changed = AuthorizedScanContext::new(serde_json::to_vec(&state).unwrap()).unwrap();
+        assert!(EntityQuery::<VisibilityItem, SqliteBackend>::new()
+            .fetch_authorized_scan_with_context(&db, None, None, AuthorizedScanInput { after: Some(cursor.clone()), limit: Some(3), ..Default::default() }, &changed)
+            .await.is_err());
+        assert!(capture.take().is_empty(), "changed context must fail before a read");
+    }
+}
+
+#[tokio::test]
 async fn custom_scan_context_rotates_keys_and_preserves_empty_residual_pages() {
     let (db, _, _) = setup(Mode::Callback, 40, 19).await;
     let context = AuthorizedScanContext::new(b"dataset=one|owner=one").unwrap();
