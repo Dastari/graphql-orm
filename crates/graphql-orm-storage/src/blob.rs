@@ -11,7 +11,11 @@ use futures_core::Stream;
 use futures_util::{StreamExt, stream};
 use time::OffsetDateTime;
 
-use crate::{StorageBackend, StorageError};
+use crate::{
+    CapacityDomainObservation, DomainState, NamespaceFence, NamespaceId, NamespaceInitialisation,
+    NamespaceObservation, NamespaceState, NamespaceTarget, ObservationEpoch, ScanResult, StorageBackend,
+    StorageError, TopologyScan,
+};
 
 /// Boxed stream of storage byte chunks.
 pub type BoxedStorageStream =
@@ -305,6 +309,97 @@ pub trait BlobStore: Send + Sync {
     /// Returns [`StorageError`] when the key is invalid or the provider cannot
     /// delete the blob.
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError>;
+
+    /// Returns the epoch that identifies this backend instance and connection.
+    ///
+    /// The default has a nil instance identifier, which no fence accepts.
+    fn observation_epoch(&self) -> ObservationEpoch {
+        ObservationEpoch {
+            backend_instance: uuid::Uuid::nil(),
+            connection_generation: 0,
+            root_witness: None,
+        }
+    }
+
+    /// Read-only observation of a namespace marker and an optional bounded topology.
+    ///
+    /// Never writes, never creates a marker and never deletes anything. The
+    /// default reports `Unsupported` without provider I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the configured root itself is unusable.
+    /// Marker read failures are reported as `Unknown` states, not errors.
+    async fn observe_namespace(
+        &self,
+        target: &NamespaceTarget,
+        _scan: &TopologyScan,
+    ) -> Result<NamespaceObservation, StorageError> {
+        Ok(NamespaceObservation {
+            target: target.clone(),
+            state: NamespaceState::Unsupported,
+            root_location: None,
+            ancestors: ScanResult::unsupported(),
+            nested: ScanResult::unsupported(),
+            epoch: self.observation_epoch(),
+            observed_at: OffsetDateTime::now_utc(),
+        })
+    }
+
+    /// Explicit, side-effecting initialisation: one create-if-absent of the
+    /// marker carrying `proposed`, followed by a validated read-back.
+    ///
+    /// After an ambiguous failure, call again with the SAME identity; never
+    /// mint a replacement. The default returns `UnsupportedOperation` without I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the outcome is unknown or the provider fails.
+    async fn initialise_namespace(
+        &self,
+        _target: &NamespaceTarget,
+        _proposed: NamespaceId,
+    ) -> Result<NamespaceInitialisation, StorageError> {
+        Err(StorageError::UnsupportedOperation {
+            operation: "namespace initialisation".to_string(),
+        })
+    }
+
+    /// Read-only provider-derived capacity-domain facts. Default: `Unsupported`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the configured root itself is unusable.
+    async fn observe_capacity_domain(&self) -> Result<CapacityDomainObservation, StorageError> {
+        Ok(CapacityDomainObservation {
+            facts: Vec::new(),
+            state: DomainState::Unsupported,
+            epoch: self.observation_epoch(),
+            observed_at: OffsetDateTime::now_utc(),
+        })
+    }
+
+    /// Writes a blob only while `fence` still matches this destination.
+    ///
+    /// Providers re-validate what they natively can and return a
+    /// non-retryable `PreconditionFailed` ("namespace fence invalidated")
+    /// instead of writing under a stale fence. Never retried automatically.
+    /// The default returns `UnsupportedOperation` without I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the fence is invalid or the write fails.
+    async fn put_blob_fenced(
+        &self,
+        _key: &str,
+        _body: StorageByteStream,
+        _options: BlobPutOptions,
+        _fence: &NamespaceFence,
+    ) -> Result<BlobWriteOutcome, StorageError> {
+        Err(StorageError::UnsupportedOperation {
+            operation: "fenced blob write".to_string(),
+        })
+    }
 }
 
 fn ranged_storage_stream(body: StorageByteStream, skip: u64, length: u64) -> StorageByteStream {

@@ -1,0 +1,269 @@
+use std::{collections::BTreeSet, path::Path, time::Duration};
+
+use bytes::Bytes;
+use graphql_orm_storage::{
+    AncestorScan, BlobPutOptions, BlobStore, DomainState, LocalStorageBackend, NAMESPACE_MARKER,
+    NAMESPACE_MARKER_PUBLISHING, NamespaceFence, NamespaceId, NamespaceInitialisation, NamespaceRelation,
+    NamespaceState, NamespaceTarget, NestedScan, ObjectMetadata, ScanCompleteness, StorageByteStream, StorageError,
+    StreamingObjectStore, TopologyScan, encode_marker, relate_namespaces,
+};
+use tempfile::TempDir;
+
+fn tree(root: &Path) -> BTreeSet<String> {
+    let mut entries = BTreeSet::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path).expect("read dir") {
+            let entry = entry.expect("entry");
+            let bytes = std::fs::read(entry.path()).unwrap_or_default();
+            entries.insert(format!("{}:{}", entry.path().display(), bytes.len()));
+            if entry.file_type().expect("type").is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    entries
+}
+
+fn nested(max_keys: usize) -> TopologyScan {
+    TopologyScan {
+        ancestors: None,
+        nested: Some(NestedScan {
+            max_depth: 8,
+            max_pages: 64,
+            max_keys,
+            max_duration: Duration::from_secs(10),
+        }),
+    }
+}
+
+#[tokio::test]
+async fn local_namespace_lifecycle_reconciles_same_identity_and_never_overwrites() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = LocalStorageBackend::new(temp.path());
+    let root = NamespaceTarget::Root;
+    let scan = TopologyScan::default();
+
+    let first = store.observe_namespace(&root, &scan).await.expect("observe");
+    assert_eq!(first.state, NamespaceState::Uninitialised);
+    assert_eq!(first.ancestors.completeness, ScanCompleteness::NotRequested);
+    assert_eq!(first.nested.completeness, ScanCompleteness::NotRequested);
+
+    let id = NamespaceId::new_random();
+    assert_eq!(store.initialise_namespace(&root, id).await.expect("init"), NamespaceInitialisation::Created(id));
+    assert_eq!(
+        store.initialise_namespace(&root, id).await.expect("retry"),
+        NamespaceInitialisation::AlreadyInitialisedSame(id)
+    );
+    let other = NamespaceId::new_random();
+    assert_eq!(
+        store.initialise_namespace(&root, other).await.expect("other"),
+        NamespaceInitialisation::AlreadyInitialisedOther(id)
+    );
+    assert!(!temp.path().join(NAMESPACE_MARKER_PUBLISHING).exists());
+
+    // A restart (new backend instance, same root) observes the same identity.
+    let restarted = LocalStorageBackend::new(temp.path());
+    let before = store.observe_namespace(&root, &scan).await.expect("observe");
+    let after = restarted.observe_namespace(&root, &scan).await.expect("observe");
+    assert_eq!(after.state, NamespaceState::Initialised { id });
+    assert_ne!(before.epoch.backend_instance, after.epoch.backend_instance);
+    assert_eq!(relate_namespaces(&before, &after), NamespaceRelation::SameNamespace);
+}
+
+#[tokio::test]
+async fn local_observation_never_writes() {
+    let temp = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join("a/b")).expect("dirs");
+    let store = LocalStorageBackend::new(temp.path().join("a"));
+    let before = tree(temp.path());
+    let scan = TopologyScan {
+        ancestors: Some(AncestorScan { max_depth: 1 }),
+        ..nested(1000)
+    };
+    store.observe_namespace(&NamespaceTarget::Root, &scan).await.expect("observe");
+    store.observe_capacity_domain().await.expect("domain");
+    assert_eq!(tree(temp.path()), before);
+}
+
+#[tokio::test]
+async fn reserved_marker_names_are_hidden_and_protected_on_every_mutation_path() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = LocalStorageBackend::new(temp.path());
+    let id = NamespaceId::new_random();
+    store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init");
+    store
+        .put_blob("data/file.bin", StorageByteStream::from_bytes(Bytes::from_static(b"x")), BlobPutOptions::default())
+        .await
+        .expect("ordinary put");
+    assert_eq!(store.list_blobs("").await.expect("list"), vec!["data/file.bin".to_string()]);
+
+    for key in [
+        NAMESPACE_MARKER,
+        NAMESPACE_MARKER_PUBLISHING,
+        "data/.graphql-orm-namespace",
+        ".GRAPHQL-ORM-NAMESPACE",
+        "data/.Graphql-Orm-Namespace.",
+    ] {
+        let body = || StorageByteStream::from_bytes(Bytes::from_static(b"overwrite"));
+        assert!(matches!(
+            store.put_blob(key, body(), BlobPutOptions::default()).await,
+            Err(StorageError::InvalidStorageKey { .. })
+        ));
+        assert!(store.put_blob_if_not_exists(key, body(), BlobPutOptions::default()).await.is_err());
+        assert!(store.delete_blob(key).await.is_err());
+        assert!(store.delete_blob_once(key).await.is_err());
+        assert!(store.get_blob(key).await.is_err());
+        assert!(store.copy_blob("data/file.bin", key).await.is_err());
+        assert!(store.copy_blob(key, "data/copy.bin").await.is_err());
+        assert!(store.put_object_stream("bucket", key, None, ObjectMetadata::default(), body()).await.is_err());
+        assert!(store.create_multipart_object("bucket", key, None, ObjectMetadata::default()).await.is_err());
+        assert!(store.delete_object("bucket", key).await.is_err());
+    }
+    assert!(
+        store
+            .put_object_stream(NAMESPACE_MARKER, "key", None, ObjectMetadata::default(), StorageByteStream::from_bytes(Bytes::from_static(b"x")))
+            .await
+            .is_err()
+    );
+    let state = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    assert_eq!(state.state, NamespaceState::Initialised { id });
+}
+
+#[tokio::test]
+async fn foreign_partial_and_oversized_markers_are_conflicts_not_absence() {
+    let id = NamespaceId::new_random();
+    let canonical = String::from_utf8(encode_marker(id)).expect("utf8");
+    for body in [
+        String::new(),
+        "{\"format\":\"other\"}".to_string(),
+        canonical[..canonical.len() / 2].to_string(),
+        canonical.replace("\"}", ",\"namespace_id\":\"x\"}"),
+        format!("{canonical}trailing"),
+        "x".repeat(4096),
+    ] {
+        let temp = TempDir::new().expect("temp dir");
+        std::fs::write(temp.path().join(NAMESPACE_MARKER), &body).expect("write");
+        let store = LocalStorageBackend::new(temp.path());
+        let observed = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+        assert!(matches!(observed.state, NamespaceState::Conflict { .. }), "{body:?} -> {:?}", observed.state);
+        assert!(matches!(
+            store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init"),
+            NamespaceInitialisation::Conflict { .. }
+        ));
+        assert_eq!(std::fs::read_to_string(temp.path().join(NAMESPACE_MARKER)).expect("read"), body);
+    }
+}
+
+#[tokio::test]
+async fn interrupted_publication_reconciles_only_the_same_identity() {
+    let temp = TempDir::new().expect("temp dir");
+    let id = NamespaceId::new_random();
+    std::fs::write(temp.path().join(NAMESPACE_MARKER_PUBLISHING), encode_marker(id)).expect("write");
+    let store = LocalStorageBackend::new(temp.path());
+    let root = NamespaceTarget::Root;
+    let observed = store.observe_namespace(&root, &TopologyScan::default()).await.expect("observe");
+    assert_eq!(observed.state, NamespaceState::PublicationInProgress);
+    assert!(matches!(
+        store.initialise_namespace(&root, NamespaceId::new_random()).await.expect("other"),
+        NamespaceInitialisation::Conflict { .. }
+    ));
+    assert_eq!(store.initialise_namespace(&root, id).await.expect("same"), NamespaceInitialisation::Created(id));
+    assert!(!temp.path().join(NAMESPACE_MARKER_PUBLISHING).exists());
+}
+
+#[tokio::test]
+async fn bounded_topology_scans_report_completeness() {
+    let temp = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join("child/sub/deeper")).expect("dirs");
+    let parent = LocalStorageBackend::new(temp.path());
+    let parent_id = NamespaceId::new_random();
+    parent.initialise_namespace(&NamespaceTarget::Root, parent_id).await.expect("parent");
+    let sub_id = NamespaceId::new_random();
+    parent
+        .initialise_namespace(&NamespaceTarget::SubPrefix("child/sub".to_string()), sub_id)
+        .await
+        .expect("sub");
+
+    let complete = parent.observe_namespace(&NamespaceTarget::Root, &nested(1000)).await.expect("observe");
+    assert_eq!(complete.nested.completeness, ScanCompleteness::Complete);
+    assert_eq!(complete.nested.found.len(), 1);
+    assert_eq!(complete.nested.found[0].relative_path, "child/sub");
+    assert_eq!(complete.nested.found[0].state, NamespaceState::Initialised { id: sub_id });
+
+    let truncated = parent.observe_namespace(&NamespaceTarget::Root, &nested(1)).await.expect("observe");
+    assert!(matches!(truncated.nested.completeness, ScanCompleteness::Truncated { .. }));
+
+    let child = LocalStorageBackend::new(temp.path().join("child"));
+    let scan = TopologyScan {
+        ancestors: Some(AncestorScan { max_depth: 1 }),
+        nested: None,
+    };
+    let observed = child.observe_namespace(&NamespaceTarget::Root, &scan).await.expect("observe");
+    assert_eq!(observed.state, NamespaceState::Uninitialised);
+    assert_eq!(observed.ancestors.found.len(), 1);
+    assert_eq!(observed.ancestors.found[0].relative_path, "..");
+    assert_eq!(observed.ancestors.found[0].state, NamespaceState::Initialised { id: parent_id });
+}
+
+#[tokio::test]
+async fn copied_marker_is_duplicated_not_an_alias() {
+    let temp = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join("one")).expect("dir");
+    std::fs::create_dir_all(temp.path().join("two")).expect("dir");
+    let one = LocalStorageBackend::new(temp.path().join("one"));
+    let id = NamespaceId::new_random();
+    one.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init");
+    std::fs::copy(temp.path().join("one").join(NAMESPACE_MARKER), temp.path().join("two").join(NAMESPACE_MARKER)).expect("copy");
+    let two = LocalStorageBackend::new(temp.path().join("two"));
+    let a = one.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    let b = two.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    assert_eq!(b.state, NamespaceState::Initialised { id });
+    if cfg!(unix) {
+        assert_eq!(relate_namespaces(&a, &b), NamespaceRelation::Duplicated);
+    }
+}
+
+#[tokio::test]
+async fn fenced_writes_fail_after_marker_or_instance_changes() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = LocalStorageBackend::new(temp.path());
+    let id = NamespaceId::new_random();
+    store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init");
+    let observed = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    let fence = NamespaceFence {
+        target: NamespaceTarget::Root,
+        namespace: id,
+        epoch: observed.epoch.clone(),
+    };
+    let body = || StorageByteStream::from_bytes(Bytes::from_static(b"fenced"));
+    store.put_blob_fenced("data/a", body(), BlobPutOptions::default(), &fence).await.expect("fenced put");
+
+    let other_instance = LocalStorageBackend::new(temp.path());
+    assert!(matches!(
+        other_instance.put_blob_fenced("data/b", body(), BlobPutOptions::default(), &fence).await,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+
+    std::fs::remove_file(temp.path().join(NAMESPACE_MARKER)).expect("remove");
+    std::fs::write(temp.path().join(NAMESPACE_MARKER), encode_marker(NamespaceId::new_random())).expect("replace");
+    assert!(matches!(
+        store.put_blob_fenced("data/c", body(), BlobPutOptions::default(), &fence).await,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+    assert!(!temp.path().join("data/b").exists());
+    assert!(!temp.path().join("data/c").exists());
+}
+
+#[tokio::test]
+async fn capacity_domain_facts_are_partial_and_scoped() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = LocalStorageBackend::new(temp.path());
+    let observed = store.observe_capacity_domain().await.expect("domain");
+    if cfg!(unix) {
+        assert!(matches!(observed.state, DomainState::Partial { .. }));
+        assert_eq!(observed.facts.len(), 2);
+    } else {
+        assert_eq!(observed.state, DomainState::Unsupported);
+    }
+}

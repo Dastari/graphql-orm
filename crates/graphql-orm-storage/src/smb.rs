@@ -18,17 +18,27 @@ use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
     FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
-    FileFullDirectoryInformation, FileRenameInformation, FileStandardInformation, Resource, Status,
-    UncPath, connection::EncryptionMode,
+    FileFsObjectIdInformation, FileFullDirectoryInformation, FileIdInformation, FileRenameInformation,
+    FileStandardInformation, Resource, Status, UncPath, connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
+use crate::namespace::fence_invalidated;
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind, validate_blob_key,
+    CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
+    FoundNamespace, KeyEquivalence, MAX_NAMESPACE_MARKER_BYTES, NAMESPACE_MARKER, NamespaceFence,
+    NamespaceId, NamespaceInitialisation, NamespaceObservation, NamespaceState, NamespaceTarget,
+    ObservationEpoch, ScanCompleteness, ScanResult, StorageBackend, StorageByteStream, StorageError,
+    StorageProviderErrorKind, TopologyScan, decode_marker, encode_marker, is_reserved_key,
+    validate_blob_key, validate_unreserved_key,
 };
+
+/// SMB servers resolve Windows spellings: case, trailing dots/spaces, streams.
+const SMB_KEY_EQUIVALENCE: KeyEquivalence = KeyEquivalence::Windows;
 
 const DEFAULT_PORT: u16 = 445;
 const DEFAULT_TRANSFER_CONCURRENCY: usize = 8;
@@ -386,6 +396,8 @@ struct SmbStorageBackendInner {
     transfer_limit: Arc<Semaphore>,
     directories: DirectoryCache,
     diagnostics: SmbDiagnosticCounters,
+    /// Random per connected backend; part of fence epochs.
+    instance: Uuid,
 }
 
 /// Native SMB2/SMB3 [`BlobStore`] implementation.
@@ -438,6 +450,7 @@ impl SmbStorageBackend {
                     transfer_concurrency,
                 ),
                 diagnostics: SmbDiagnosticCounters::default(),
+                instance: Uuid::new_v4(),
             }),
         })
     }
@@ -1606,12 +1619,136 @@ fn write_create_args(exclusive: bool) -> FileCreateArgs {
 #[async_trait]
 impl BlobStore for SmbStorageBackend {
     async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         self.remove_file_once(key).await
     }
 
     fn backend(&self) -> StorageBackend {
         StorageBackend::Smb
+    }
+
+    fn observation_epoch(&self) -> ObservationEpoch {
+        ObservationEpoch {
+            backend_instance: self.inner.instance,
+            connection_generation: self.inner.client.try_read().map(|client| client.generation).unwrap_or(0),
+            root_witness: None,
+        }
+    }
+
+    async fn observe_namespace(
+        &self,
+        target: &NamespaceTarget,
+        scan: &TopologyScan,
+    ) -> Result<NamespaceObservation, StorageError> {
+        let observed_at = OffsetDateTime::now_utc();
+        let directory = self.namespace_directory(target)?;
+        let state = self.read_marker(&join_share_path(&directory, NAMESPACE_MARKER)).await;
+        let ancestors = match scan.ancestors {
+            Some(ancestors) => self.scan_ancestors(&directory, ancestors.max_depth).await,
+            None => ScanResult::not_requested(),
+        };
+        let nested = match scan.nested {
+            // A bounded remote directory walk is not implemented; never absence.
+            Some(_) => ScanResult::unsupported(),
+            None => ScanResult::not_requested(),
+        };
+        let root_location = match self.directory_identity(&directory).await {
+            Ok(identity) => Some(identity.location_fact()),
+            Err(_) => None,
+        };
+        Ok(NamespaceObservation {
+            target: target.clone(),
+            state,
+            root_location,
+            ancestors,
+            nested,
+            epoch: self.namespace_epoch().await,
+            observed_at,
+        })
+    }
+
+    async fn initialise_namespace(
+        &self,
+        target: &NamespaceTarget,
+        proposed: NamespaceId,
+    ) -> Result<NamespaceInitialisation, StorageError> {
+        let directory = self.namespace_directory(target)?;
+        let marker = join_share_path(&directory, NAMESPACE_MARKER);
+        let relative_key = match target.relative_prefix(SMB_KEY_EQUIVALENCE)? {
+            Some(prefix) => format!("{prefix}/{NAMESPACE_MARKER}"),
+            None => NAMESPACE_MARKER.to_string(),
+        };
+        let existing = self.read_marker(&marker).await;
+        if let NamespaceState::Unknown { reason } = &existing {
+            return Err(StorageError::PreconditionFailed {
+                key: NAMESPACE_MARKER.to_string(),
+                condition: format!("marker state unknown: {reason}"),
+            });
+        }
+        if let Some(result) = settled_initialisation(existing, proposed) {
+            return Ok(result);
+        }
+        // FILE_CREATE at the marker name with delete-on-close until flushed.
+        // Durability is the server's flush semantics; nothing stronger is claimed.
+        match self
+            .write_file(&relative_key, StorageByteStream::from_bytes(encode_marker(proposed)), true)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if is_collision(&error) => {}
+            Err(error) => return Err(error),
+        }
+        match self.read_marker(&marker).await {
+            NamespaceState::Initialised { id } if id == proposed => Ok(NamespaceInitialisation::Created(id)),
+            other => Ok(settled_initialisation(other, proposed).unwrap_or(NamespaceInitialisation::Conflict {
+                reason: "published marker did not read back".to_string(),
+            })),
+        }
+    }
+
+    async fn observe_capacity_domain(&self) -> Result<CapacityDomainObservation, StorageError> {
+        let observed_at = OffsetDateTime::now_utc();
+        let directory = self.namespace_directory(&NamespaceTarget::Root)?;
+        let identity = self.directory_identity(&directory).await?;
+        let mut facts = vec![identity.location_fact()];
+        let mut missing = vec!["quota constraints".to_string()];
+        match identity.store_fact() {
+            Some(store) => facts.push(store),
+            None => missing.push("volume object identifier".to_string()),
+        }
+        Ok(CapacityDomainObservation {
+            facts,
+            state: DomainState::Partial { missing },
+            epoch: self.namespace_epoch().await,
+            observed_at,
+        })
+    }
+
+    async fn put_blob_fenced(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        options: BlobPutOptions,
+        fence: &NamespaceFence,
+    ) -> Result<BlobWriteOutcome, StorageError> {
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
+        if fence.epoch.backend_instance != self.inner.instance {
+            return Err(fence_invalidated(key, "different backend instance"));
+        }
+        let current = self.namespace_epoch().await;
+        if current.connection_generation != fence.epoch.connection_generation {
+            return Err(fence_invalidated(key, "the SMB session reconnected"));
+        }
+        if current.root_witness.is_none() || current.root_witness != fence.epoch.root_witness {
+            return Err(fence_invalidated(key, "configured root was replaced or is unreadable"));
+        }
+        let directory = self.namespace_directory(&fence.target)?;
+        match self.read_marker(&join_share_path(&directory, NAMESPACE_MARKER)).await {
+            NamespaceState::Initialised { id } if id == fence.namespace => {}
+            _ => return Err(fence_invalidated(key, "namespace marker changed")),
+        }
+        // Residual race: a reconnect after this check is not excluded.
+        self.put_blob(key, body, options).await
     }
 
     async fn put_blob(
@@ -1620,7 +1757,7 @@ impl BlobStore for SmbStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         let temp = temp_key(key)?;
         let result = self.write_file(&temp, body, false).await;
         let outcome = match result {
@@ -1645,7 +1782,7 @@ impl BlobStore for SmbStorageBackend {
         body: StorageByteStream,
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         match self.write_file(key, body, true).await {
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) if is_collision(&error) => Ok(None),
@@ -1654,7 +1791,7 @@ impl BlobStore for SmbStorageBackend {
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         let permit = self.transfer_permit().await?;
         let file = self
             .open_file(key, FileAccessMask::new().with_generic_read(true))
@@ -1774,7 +1911,7 @@ impl BlobStore for SmbStorageBackend {
     }
 
     async fn blob_exists(&self, key: &str) -> Result<bool, StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         match self
             .open_file(key, FileAccessMask::new().with_generic_read(true))
             .await
@@ -1796,7 +1933,7 @@ impl BlobStore for SmbStorageBackend {
     }
 
     async fn head_blob(&self, key: &str) -> Result<Option<BlobMetadata>, StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         let file = match self
             .open_file(key, FileAccessMask::new().with_generic_read(true))
             .await
@@ -1847,7 +1984,8 @@ impl BlobStore for SmbStorageBackend {
         }
         let mut keys = self.collect_keys().await?;
         keys.retain(|key| {
-            key.starts_with(prefix)
+            !is_reserved_key(key, SMB_KEY_EQUIVALENCE)
+                && key.starts_with(prefix)
                 && continuation
                     .as_deref()
                     .is_none_or(|token| key.as_str() > token)
@@ -1865,8 +2003,260 @@ impl BlobStore for SmbStorageBackend {
     }
 
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         self.remove_file(key).await
+    }
+}
+
+fn join_share_path(directory: &str, name: &str) -> String {
+    if directory.is_empty() {
+        name.to_string()
+    } else {
+        format!("{directory}/{name}")
+    }
+}
+
+fn settled_initialisation(state: NamespaceState, proposed: NamespaceId) -> Option<NamespaceInitialisation> {
+    match state {
+        NamespaceState::Initialised { id } if id == proposed => Some(NamespaceInitialisation::AlreadyInitialisedSame(id)),
+        NamespaceState::Initialised { id } => Some(NamespaceInitialisation::AlreadyInitialisedOther(id)),
+        NamespaceState::Conflict { reason } => Some(NamespaceInitialisation::Conflict { reason }),
+        _ => None,
+    }
+}
+
+const ZERO_GUID: &str = "00000000-0000-0000-0000-000000000000";
+
+/// Server-reported identity of one directory.
+struct SmbDirectoryIdentity {
+    volume_serial: u64,
+    file_id: u128,
+    volume_object_id: Option<String>,
+}
+
+impl SmbDirectoryIdentity {
+    fn witness(&self) -> String {
+        format!("smb:serial={:x};file={:x}", self.volume_serial, self.file_id)
+    }
+
+    /// The volume object GUID makes the tuple comparable. Without it, server
+    /// name aliasing and non-unique serials leave the scope Unspecified.
+    fn location_fact(&self) -> DomainFact {
+        match &self.volume_object_id {
+            Some(object_id) => DomainFact::RootLocation {
+                provider: StorageBackend::Smb,
+                tuple: vec![
+                    ("volume_object_id".to_string(), object_id.clone()),
+                    ("file_id".to_string(), format!("{:x}", self.file_id)),
+                ],
+                scope: FactScope::StoreIdentity,
+            },
+            None => DomainFact::RootLocation {
+                provider: StorageBackend::Smb,
+                tuple: vec![
+                    ("volume_serial".to_string(), format!("{:x}", self.volume_serial)),
+                    ("file_id".to_string(), format!("{:x}", self.file_id)),
+                ],
+                scope: FactScope::Unspecified,
+            },
+        }
+    }
+
+    fn store_fact(&self) -> Option<DomainFact> {
+        self.volume_object_id.as_ref().map(|object_id| DomainFact::PhysicalStore {
+            provider: StorageBackend::Smb,
+            tuple: vec![("volume_object_id".to_string(), object_id.clone())],
+            scope: FactScope::StoreIdentity,
+        })
+    }
+}
+
+impl SmbStorageBackend {
+    /// Share-relative directory of a namespace target.
+    fn namespace_directory(&self, target: &NamespaceTarget) -> Result<String, StorageError> {
+        let root = self.inner.config.root_prefix.clone().unwrap_or_default();
+        Ok(match (target.relative_prefix(SMB_KEY_EQUIVALENCE)?, root.is_empty()) {
+            (None, _) => root,
+            (Some(relative), true) => relative.to_string(),
+            (Some(relative), false) => format!("{root}/{relative}"),
+        })
+    }
+
+    /// Bounded marker read at a share-relative path: one open, a size check
+    /// before allocation, bounded reads and one overall deadline.
+    async fn read_marker(&self, share_relative: &str) -> NamespaceState {
+        let read = async {
+            let path = match self.share_path() {
+                Ok(path) => path.with_path(share_relative),
+                Err(_) => {
+                    return NamespaceState::Unknown {
+                        reason: "share path invalid".to_string(),
+                    };
+                }
+            };
+            let snapshot = self.client_snapshot().await;
+            let open = FileCreateArgs::make_open_existing(FileAccessMask::new().with_generic_read(true));
+            let resource = match self.with_timeout("namespace_read", snapshot.client.create_file(&path, &open)).await {
+                Ok(resource) => resource,
+                Err(error) if is_not_found(&error) => return NamespaceState::Uninitialised,
+                Err(error) => {
+                    return NamespaceState::Unknown {
+                        reason: format!("marker open failed: {:?}", provider_error_kind(&error)),
+                    };
+                }
+            };
+            let file = match resource {
+                Resource::File(file) => file,
+                other => {
+                    let _ = close_resource(other).await;
+                    return NamespaceState::Conflict {
+                        reason: "marker is not a file".to_string(),
+                    };
+                }
+            };
+            let state = self.read_open_marker(&file).await;
+            let _ = self.with_timeout("close", file.close()).await;
+            state
+        };
+        match tokio::time::timeout(DEFAULT_MARKER_READ_TIMEOUT, read).await {
+            Ok(state) => state,
+            Err(_) => NamespaceState::Unknown {
+                reason: "marker read timed out".to_string(),
+            },
+        }
+    }
+
+    async fn read_open_marker(&self, file: &File) -> NamespaceState {
+        let standard: FileStandardInformation = match self.with_timeout("namespace_read", file.query_info()).await {
+            Ok(standard) => standard,
+            Err(_) => {
+                return NamespaceState::Unknown {
+                    reason: "marker size unreadable".to_string(),
+                };
+            }
+        };
+        let Ok(size) = usize::try_from(standard.end_of_file) else {
+            return NamespaceState::Conflict {
+                reason: "oversized marker".to_string(),
+            };
+        };
+        if size > MAX_NAMESPACE_MARKER_BYTES {
+            return NamespaceState::Conflict {
+                reason: "oversized marker".to_string(),
+            };
+        }
+        let mut buffer = vec![0_u8; size];
+        let mut offset = 0_usize;
+        while offset < size {
+            let read = tokio::time::timeout(
+                self.inner.config.operation_timeout,
+                file.read_block(&mut buffer[offset..], offset as u64, None, false),
+            )
+            .await;
+            match read {
+                Ok(Ok(0)) => {
+                    return NamespaceState::Conflict {
+                        reason: "partial marker".to_string(),
+                    };
+                }
+                Ok(Ok(read)) => offset += read,
+                _ => {
+                    return NamespaceState::Unknown {
+                        reason: "marker read failed".to_string(),
+                    };
+                }
+            }
+        }
+        decode_marker(&buffer)
+    }
+
+    async fn directory_identity(&self, share_relative: &str) -> Result<SmbDirectoryIdentity, StorageError> {
+        let base = self.share_path()?;
+        let target = if share_relative.is_empty() { base } else { base.with_path(share_relative) };
+        let access = DirAccessMask::new()
+            .with_list_directory(true)
+            .with_read_attributes(true)
+            .with_synchronize(true);
+        let snapshot = self.client_snapshot().await;
+        let resource = self
+            .with_timeout(
+                "namespace_identity",
+                snapshot.client.create_file(&target, &FileCreateArgs::make_open_existing(access.into())),
+            )
+            .await?;
+        let directory = match resource {
+            Resource::Directory(directory) => directory,
+            other => {
+                let _ = close_resource(other).await;
+                return Err(remote_error(
+                    StorageProviderErrorKind::Protocol,
+                    "namespace_identity",
+                    "namespace root is not a directory",
+                    false,
+                ));
+            }
+        };
+        let identity = self
+            .with_timeout("namespace_identity", directory.query_info::<FileIdInformation>())
+            .await;
+        // Servers that do not support volume object IDs only omit that fact.
+        let object = self
+            .with_timeout("namespace_identity", directory.query_fs_info::<FileFsObjectIdInformation>())
+            .await;
+        let closed = self.with_timeout("close", directory.close()).await;
+        let identity = identity?;
+        closed?;
+        let volume_object_id = object
+            .ok()
+            .map(|info| info.object_id.to_string())
+            .filter(|object_id| object_id != ZERO_GUID);
+        Ok(SmbDirectoryIdentity {
+            volume_serial: identity.volume_serial_number,
+            file_id: identity.file_id,
+            volume_object_id,
+        })
+    }
+
+    async fn namespace_epoch(&self) -> ObservationEpoch {
+        let generation = self.client_snapshot().await.generation;
+        let witness = match self.namespace_directory(&NamespaceTarget::Root) {
+            Ok(directory) => self.directory_identity(&directory).await.ok().map(|identity| identity.witness()),
+            Err(_) => None,
+        };
+        ObservationEpoch {
+            backend_instance: self.inner.instance,
+            connection_generation: generation,
+            root_witness: witness,
+        }
+    }
+
+    /// Point lookups of markers at each parent directory, up to the share root.
+    async fn scan_ancestors(&self, directory: &str, max_depth: usize) -> ScanResult {
+        let mut found = Vec::new();
+        let mut completeness = ScanCompleteness::Complete;
+        let mut components: Vec<&str> = if directory.is_empty() { Vec::new() } else { directory.split('/').collect() };
+        let mut level = 0_usize;
+        while !components.is_empty() {
+            level += 1;
+            if level > max_depth {
+                completeness = ScanCompleteness::Truncated {
+                    limit: "max_depth".to_string(),
+                };
+                break;
+            }
+            components.pop();
+            let state = self.read_marker(&join_share_path(&components.join("/"), NAMESPACE_MARKER)).await;
+            if let NamespaceState::Unknown { reason } = &state {
+                completeness = ScanCompleteness::Denied { reason: reason.clone() };
+            }
+            if state != NamespaceState::Uninitialised {
+                found.push(FoundNamespace {
+                    relative_path: vec![".."; level].join("/"),
+                    state,
+                });
+            }
+        }
+        ScanResult { completeness, found }
     }
 }
 

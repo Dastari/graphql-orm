@@ -10,6 +10,24 @@ supersedes: []
 
 # Changelog
 
+## Unreleased (namespace identity; version assigned when rebased after the 0.7.6 capacity release)
+
+- Added `BlobStore::observe_namespace`, `initialise_namespace`,
+  `observe_capacity_domain`, `put_blob_fenced` and `observation_epoch`, with
+  non-positive defaults (`Unsupported` or `UnsupportedOperation`, no I/O).
+- Local, SMB and S3 implement durable object-namespace markers:
+  - strict canonical bodies and bounded reads;
+  - explicit create-if-absent publication with same-identity reconciliation;
+  - bounded topology scans with completeness states;
+  - scoped capacity-domain facts and fenced writes.
+  See [namespace identity](docs/namespace-identity.md).
+- Ordinary key paths reject the reserved marker names under each provider's key
+  equivalence (case folding, trailing dots and spaces, SMB streams and short
+  names), and listings hide them. SMB keys containing `:` are now rejected,
+  because they address alternate data streams.
+- No storage key, object format or persisted-data migration is required for
+  existing data.
+
 ## 0.7.5 - 2026-10-18
 
 - Refresh package identity for the maintained Samba fixture and protocol

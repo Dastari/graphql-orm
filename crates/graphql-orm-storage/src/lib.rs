@@ -37,8 +37,11 @@ mod blob;
 mod checksum;
 mod error;
 mod key;
+mod namespace;
 #[cfg(feature = "local")]
 mod local;
+#[cfg(feature = "local")]
+mod local_namespace;
 mod object;
 #[cfg(feature = "s3")]
 mod s3;
@@ -57,6 +60,14 @@ pub use blob::{
 pub use checksum::sha256_hex;
 pub use error::{StorageError, StorageProviderErrorKind};
 pub use key::{build_storage_key, file_extension};
+pub use namespace::{
+    AncestorScan, CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState,
+    FactComparison, FactScope, FoundNamespace, KeyEquivalence, MAX_NAMESPACE_MARKER_BYTES,
+    NAMESPACE_MARKER, NAMESPACE_MARKER_FORMAT, NAMESPACE_MARKER_PUBLISHING, NamespaceFence, NamespaceId,
+    NamespaceInitialisation, NamespaceObservation, NamespaceRelation, NamespaceState, NamespaceTarget,
+    NestedScan, ObservationEpoch, ScanCompleteness, ScanResult, TopologyScan, decode_marker, encode_marker,
+    is_reserved_component, is_reserved_key, relate_namespaces, validate_unreserved_key,
+};
 #[cfg(feature = "local")]
 pub use local::LocalStorageBackend;
 pub use object::{
