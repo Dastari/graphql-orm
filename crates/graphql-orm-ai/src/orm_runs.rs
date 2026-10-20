@@ -283,6 +283,11 @@ impl AiRunCompletion {
     pub fn outcome_code(&self) -> &str {
         &self.outcome_code
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
+    }
 }
 
 /// Bounded result of expired-lease reconciliation.

@@ -19,6 +19,50 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.107.4 to 0.108.0: classified planner failures
+
+This pre-1.0 minor changes durable failure codes and retry admission. The Rust
+API change is additive (`is_initial_planning_failure_code`,
+`ModelRequest::conservative_provider_tool_surface_tokens` and, through
+`graphql-orm-ai-tool-profiles` 0.16.1, `AiError::classification`).
+
+Failure codes written by the coordinators change as follows:
+
+| Site | Planner returned `Err` | Planner returned the wrong phase |
+| --- | --- | --- |
+| Supervised initial | `supervised_initial_plan_failed:<class>` | `supervised_initial_plan_phase_invalid` |
+| Supervised continuation | `supervised_continuation_plan_failed:<class>` | `supervised_continuation_plan_invalid` (unchanged) |
+| Automatic continuation | `automatic_continuation_plan_failed:<class>` | `automatic_continuation_plan_invalid` (unchanged) |
+| Subscription continuation | `subscription_continuation_plan_failed:<class>` | `subscription_continuation_plan_invalid` (unchanged) |
+| Read-only initial | `initial_plan_failed:<class>` | `initial_plan_phase_invalid` (unchanged) |
+| Read-only continuations | `adopted_continuation_plan_failed:<class>`, `continuation_plan_failed:<class>` | unchanged |
+
+`<class>` is `AiError::classification()`, for example `budget_denied`,
+`egress_denied`, `conflict`, `forbidden` or `invalid_configuration`. It names
+the variant only and never carries the error's payload text. Previously the
+supervised sites wrote `supervised_initial_plan_invalid` or
+`*_continuation_plan_invalid` for both cases. Hosts that match exact codes
+should match the part before `:` and treat the suffix as diagnostic detail.
+Each planner error also emits a `tracing` `WARN` event with `run_id`, `code`
+and `error` (the classification); route it with your existing subscriber.
+
+A `Failed` run whose code satisfies `is_initial_planning_failure_code` is now
+offered retry (`admission: "allowed"`) when committed reservations prove no
+provider dispatch was possible. This also applies to existing
+`supervised_initial_plan_invalid` rows, so runs that failed during initial
+planning before this release become retryable once the host cause is fixed.
+Continuation planning failures stay `refused_uncertain`, because an earlier
+turn already crossed the provider boundary.
+
+`conservative_provider_egress_tokens` is unchanged. It still counts every
+tool definition on every turn, including a retained session's frozen tool
+surface. Use `conservative_provider_tool_surface_tokens` to separate that share
+when sizing or diagnosing an input reservation; the full figure remains what
+the inference manifest must authorize.
+
+No data migration, GraphQL SDL or schema-module change is required. AI schema
+module remains 0.72.0.
+
 ## 0.107.3 to 0.107.4: coordinated Auth source
 
 Select one published Auth 0.22.1 source together with the coordinated workspace

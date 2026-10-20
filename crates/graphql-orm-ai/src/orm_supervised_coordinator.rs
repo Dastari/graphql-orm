@@ -12,6 +12,7 @@ use time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::run_state::planner_failure_code;
 use crate::{
     AiAdoptedAutomaticMutationBatch, AiAdoptedSupervisedToolBatch, AiAgentCheckpointWriter,
     AiAgentLoopGuard, AiAgentLoopLimits, AiAgentLoopTurn, AiAgentProviderOutputWriter,
@@ -781,10 +782,19 @@ impl AiSupervisedAgentCoordinator {
             let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
             let plan = match self.planner.initial_plan(&lease).await {
                 Ok(plan) if !plan.is_continuation() => plan,
-                _ => {
-                    return self
-                        .finish_failed(&lease, &guard, "supervised_initial_plan_invalid")
-                        .await;
+                Err(error) => {
+                    let code =
+                        planner_failure_code(&lease, "supervised_initial_plan_failed", &error);
+                    return self.finish_failed(&lease, &guard, &code).await;
+                }
+                Ok(_) => {
+                    let code = "supervised_initial_plan_phase_invalid";
+                    tracing::warn!(
+                        run_id = %lease.run_id().0,
+                        code,
+                        "AI run planner returned a continuation for an initial turn"
+                    );
+                    return self.finish_failed(&lease, &guard, code).await;
                 }
             };
             self.execute_turn(
@@ -915,7 +925,12 @@ impl AiSupervisedAgentCoordinator {
             {
                 plan
             }
-            _ => {
+            Err(error) => {
+                let code =
+                    planner_failure_code(&lease, "supervised_continuation_plan_failed", &error);
+                return self.finish_failed(&lease, &guard, &code).await;
+            }
+            Ok(_) => {
                 return self
                     .finish_failed(&lease, &guard, "supervised_continuation_plan_invalid")
                     .await;
@@ -955,7 +970,12 @@ impl AiSupervisedAgentCoordinator {
             {
                 plan
             }
-            _ => {
+            Err(error) => {
+                let code =
+                    planner_failure_code(&lease, "automatic_continuation_plan_failed", &error);
+                return self.finish_failed(&lease, &guard, &code).await;
+            }
+            Ok(_) => {
                 return self
                     .finish_failed(&lease, &guard, "automatic_continuation_plan_invalid")
                     .await;
@@ -995,7 +1015,12 @@ impl AiSupervisedAgentCoordinator {
             {
                 plan
             }
-            _ => {
+            Err(error) => {
+                let code =
+                    planner_failure_code(&lease, "subscription_continuation_plan_failed", &error);
+                return self.finish_failed(&lease, &guard, &code).await;
+            }
+            Ok(_) => {
                 return self
                     .finish_failed(&lease, &guard, "subscription_continuation_plan_invalid")
                     .await;
@@ -2272,7 +2297,7 @@ mod tests {
     };
 
     struct TestRunControl {
-        finishes: Mutex<Vec<AiRunState>>,
+        finishes: Mutex<Vec<(AiRunState, String, Option<String>)>>,
     }
 
     impl TestRunControl {
@@ -2286,7 +2311,18 @@ mod tests {
             self.finishes
                 .lock()
                 .expect("test finish lock should not be poisoned")
-                .clone()
+                .iter()
+                .map(|(state, _, _)| *state)
+                .collect()
+        }
+
+        fn final_codes(&self) -> Vec<(String, Option<String>)> {
+            self.finishes
+                .lock()
+                .expect("test finish lock should not be poisoned")
+                .iter()
+                .map(|(_, outcome, error)| (outcome.clone(), error.clone()))
+                .collect()
         }
     }
 
@@ -2308,7 +2344,11 @@ mod tests {
             self.finishes
                 .lock()
                 .expect("test finish lock should not be poisoned")
-                .push(completion.final_state());
+                .push((
+                    completion.final_state(),
+                    completion.outcome_code().to_owned(),
+                    completion.test_error_code().map(str::to_owned),
+                ));
             Ok(())
         }
     }
@@ -4346,6 +4386,292 @@ mod tests {
                 crate::AiProviderRunBinding::from_lease(claim.lease()).unwrap(),
                 crate::AiProviderRunCloseReason::RecoveryRequired
             )]
+        );
+    }
+
+    /// Planner whose initial and continuation plans both return one error.
+    struct FailingPlanner {
+        error: fn() -> AiError,
+    }
+
+    #[async_trait]
+    impl AiSupervisedAgentTurnPlanner for FailingPlanner {
+        async fn initial_plan(&self, _: &AiRunLease) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            Err((self.error)())
+        }
+
+        async fn continuation_plan(
+            &self,
+            _: &AiRunLease,
+            _: u32,
+            _: AiAgentContinuation,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            Err((self.error)())
+        }
+    }
+
+    /// Planner that returns a continuation plan for an initial turn.
+    struct ContinuationAsInitialPlanner;
+
+    #[async_trait]
+    impl AiSupervisedAgentTurnPlanner for ContinuationAsInitialPlanner {
+        async fn initial_plan(
+            &self,
+            lease: &AiRunLease,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            AiSupervisedAgentTurnPlan::new(
+                AiProviderCallPlan::test_supervised_plan(lease, test_scope(), true),
+                test_route(),
+                test_rules(test_scope()),
+                false,
+            )
+        }
+
+        async fn continuation_plan(
+            &self,
+            _: &AiRunLease,
+            _: u32,
+            _: AiAgentContinuation,
+        ) -> Result<AiSupervisedAgentTurnPlan, AiError> {
+            Err(AiError::Conflict)
+        }
+    }
+
+    /// Captures `warn!` events as rendered field lists for the current thread.
+    #[derive(Clone, Default)]
+    struct WarningCapture(Arc<Mutex<Vec<String>>>);
+
+    impl WarningCapture {
+        fn events(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    struct FieldRenderer<'a>(&'a mut String);
+
+    impl tracing::field::Visit for FieldRenderer<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={:?} ", field.name(), value);
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            use std::fmt::Write as _;
+            let _ = write!(self.0, "{}={} ", field.name(), value);
+        }
+    }
+
+    impl tracing::Subscriber for WarningCapture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut rendered = String::new();
+            event.record(&mut FieldRenderer(&mut rendered));
+            self.0.lock().unwrap().push(rendered);
+        }
+
+        fn enter(&self, _: &tracing::span::Id) {}
+
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn coordinator_with_planner(
+        run: Arc<TestRunControl>,
+        provider: Arc<TestProviderExecutor>,
+        control: Arc<TestCheckpointControl>,
+        planner: Arc<dyn AiSupervisedAgentTurnPlanner>,
+    ) -> AiSupervisedAgentCoordinator {
+        AiSupervisedAgentCoordinator::new(
+            run,
+            provider,
+            Arc::new(TestOutputWriter),
+            Arc::new(TestCheckpointWriter {
+                provider_checkpoints: AtomicUsize::new(0),
+            }),
+            control,
+            Arc::new(TestApprovalStager {
+                calls: AtomicUsize::new(0),
+                saw_checkpoint: AtomicBool::new(false),
+            }),
+            unused_automatic(),
+            unused_resume(),
+            Arc::new(TestRuleResolver),
+            planner,
+            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+            limits(),
+        )
+    }
+
+    fn idle_provider() -> Arc<TestProviderExecutor> {
+        Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::new()),
+            require_checkpoint_cleared: false,
+            calls: AtomicUsize::new(0),
+            closed: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn empty_checkpoints() -> Arc<TestCheckpointControl> {
+        Arc::new(TestCheckpointControl {
+            adopted: Mutex::new(None),
+            consumed: AtomicBool::new(false),
+        })
+    }
+
+    #[tokio::test]
+    async fn initial_planner_errors_are_persisted_by_variant_logged_and_retryable() {
+        type PlannerErrorCase = (fn() -> AiError, &'static str);
+        let cases: [PlannerErrorCase; 7] = [
+            (|| AiError::BudgetDenied, "budget_denied"),
+            (|| AiError::EgressDenied, "egress_denied"),
+            (|| AiError::Conflict, "conflict"),
+            (|| AiError::Forbidden, "forbidden"),
+            (
+                || AiError::InvalidConfiguration("private host detail".to_owned()),
+                "invalid_configuration",
+            ),
+            (
+                || AiError::InvalidInput("private host detail".to_owned()),
+                "invalid_input",
+            ),
+            (
+                || AiError::PreTransportBudgetDenied,
+                "pre_transport_budget_denied",
+            ),
+        ];
+        for (error, classification) in cases {
+            let lease = AiRunLease::test_running(principal_reference());
+            let run = Arc::new(TestRunControl::new());
+            let provider = idle_provider();
+            let coordinator = coordinator_with_planner(
+                run.clone(),
+                provider.clone(),
+                empty_checkpoints(),
+                Arc::new(FailingPlanner { error }),
+            );
+            let capture = WarningCapture::default();
+            let outcome = {
+                let _guard = tracing::subscriber::set_default(capture.clone());
+                coordinator
+                    .execute_claimed(&lease)
+                    .await
+                    .expect("a planner refusal is a durable terminal failure")
+            };
+
+            assert_eq!(
+                outcome,
+                AiSupervisedAgentRunOutcome::Failed {
+                    provider_turns: 0,
+                    total_tool_calls: 0,
+                }
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+            let code = format!("supervised_initial_plan_failed:{classification}");
+            assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+            assert_eq!(run.final_codes(), vec![(code.clone(), Some(code.clone()))]);
+            let warnings = capture.events();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains(&format!("run_id={}", lease.run_id().0)));
+            assert!(warnings[0].contains("code=supervised_initial_plan_failed"));
+            assert!(warnings[0].contains(&format!("error={classification}")));
+            assert!(!warnings[0].contains("private host detail"));
+            // Planning precedes every reservation, so committed rows show no
+            // possible dispatch and the client is offered a retry.
+            assert_eq!(
+                crate::classify_run_retry(
+                    crate::AiRunRetryEvidence {
+                        terminal: crate::AiRunTerminalEvent::Failed,
+                        produced_assistant_output: false,
+                        provider_dispatch_possible: false,
+                    },
+                    Some(&code),
+                ),
+                crate::AiRunRetryAdmission::Allowed
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_continuation_plan_is_a_distinct_logged_failure() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = idle_provider();
+        let coordinator = coordinator_with_planner(
+            run.clone(),
+            provider.clone(),
+            empty_checkpoints(),
+            Arc::new(ContinuationAsInitialPlanner),
+        );
+        let capture = WarningCapture::default();
+        {
+            let _guard = tracing::subscriber::set_default(capture.clone());
+            coordinator
+                .execute_claimed(&lease)
+                .await
+                .expect("a phase-invalid plan is a durable terminal failure");
+        }
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        let code = "supervised_initial_plan_phase_invalid".to_owned();
+        assert_eq!(run.final_codes(), vec![(code.clone(), Some(code.clone()))]);
+        let warnings = capture.events();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains(&format!("code={code}")));
+        assert!(crate::is_initial_planning_failure_code(&code));
+    }
+
+    #[tokio::test]
+    async fn continuation_planner_error_is_persisted_by_variant_and_stays_refused() {
+        let base = AiRunLease::test_running(principal_reference());
+        let checkpoint_id = Uuid::new_v4();
+        let claimed = base.test_with_checkpoint(checkpoint_id);
+        let control = Arc::new(TestCheckpointControl {
+            adopted: Mutex::new(Some(adopted_checkpoint(&base, checkpoint_id))),
+            consumed: AtomicBool::new(false),
+        });
+        let run = Arc::new(TestRunControl::new());
+        let provider = idle_provider();
+        let coordinator = coordinator_with_planner(
+            run.clone(),
+            provider.clone(),
+            control.clone(),
+            Arc::new(FailingPlanner {
+                error: || AiError::BudgetDenied,
+            }),
+        );
+
+        coordinator
+            .execute_claimed(&claimed)
+            .await
+            .expect("a continuation planner refusal is a durable terminal failure");
+
+        assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+        assert!(!control.consumed.load(Ordering::SeqCst));
+        let code = "supervised_continuation_plan_failed:budget_denied".to_owned();
+        assert_eq!(run.final_codes(), vec![(code.clone(), Some(code.clone()))]);
+        // An earlier turn already crossed the provider boundary, so this run
+        // is not proven safe to author again.
+        assert!(!crate::is_initial_planning_failure_code(&code));
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                    provider_dispatch_possible: true,
+                },
+                Some(&code),
+            ),
+            crate::AiRunRetryAdmission::RefusedUncertain
         );
     }
 

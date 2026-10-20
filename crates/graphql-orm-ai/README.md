@@ -16,6 +16,12 @@ correction. Direct Auth consumers must select the same tag and refresh their
 locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
+Version `0.108.0` records which `AiError` a turn planner returned as a
+`<site>_plan_failed:<classification>` failure code and logs it, splits the
+supervised initial-plan phase error into its own code, and admits retry of an
+initial planning failure when no provider dispatch was possible. Hosts that
+match failure codes must update; see [MIGRATION.md](MIGRATION.md).
+
 Version `0.107.4` aligns the Auth dependency with the reviewed signed-catalogue
 correction and ORM/macros 0.54.1. Runtime policy, provider APIs and the
 `AI_SCHEMA_MODULE_VERSION` are unchanged; see [MIGRATION.md](MIGRATION.md).
@@ -186,7 +192,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.107.4", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.108.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

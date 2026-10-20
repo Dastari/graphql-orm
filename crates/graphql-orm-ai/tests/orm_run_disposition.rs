@@ -582,6 +582,99 @@ async fn an_unclassified_failure_is_not_retryable() {
 }
 
 #[tokio::test]
+async fn an_initial_planning_failure_records_its_error_class_and_admits_retry() {
+    let fixture = fixture().await;
+    let session = session(&fixture).await;
+    let code = "supervised_initial_plan_failed:budget_denied";
+    let sent = failed_run(&fixture, session.id, AiRunState::Failed, code, Some(code)).await;
+
+    let page = fixture
+        .sessions
+        .session_event_page(&fixture.owner, AiSessionId(session.id), 0, 500)
+        .await
+        .expect("events should replay");
+    let failure = failure_record(&page, "run_failed");
+    assert_eq!(failure["code"], serde_json::json!(code));
+    assert_eq!(failure["retryable"], serde_json::json!(true));
+    assert_eq!(failure["admission"], serde_json::json!("allowed"));
+
+    fixture
+        .dispositions
+        .retry_run(
+            &fixture.owner,
+            RetryAiRunInput {
+                session_id: session.id,
+                run_id: sent.run_id,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("a planning failure without provider dispatch should admit retry");
+}
+
+#[tokio::test]
+async fn a_legacy_initial_plan_invalid_failure_admits_retry() {
+    let fixture = fixture().await;
+    let session = session(&fixture).await;
+    let code = "supervised_initial_plan_invalid";
+    failed_run(&fixture, session.id, AiRunState::Failed, code, Some(code)).await;
+
+    let page = fixture
+        .sessions
+        .session_event_page(&fixture.owner, AiSessionId(session.id), 0, 500)
+        .await
+        .expect("events should replay");
+    let failure = failure_record(&page, "run_failed");
+    assert_eq!(failure["admission"], serde_json::json!("allowed"));
+}
+
+#[test]
+fn initial_planning_failure_codes_require_evidence_and_known_shapes() {
+    let evidence = |provider_dispatch_possible| AiRunRetryEvidence {
+        terminal: AiRunTerminalEvent::Failed,
+        produced_assistant_output: false,
+        provider_dispatch_possible,
+    };
+    for code in [
+        "supervised_initial_plan_failed",
+        "supervised_initial_plan_failed:egress_denied",
+        "supervised_initial_plan_phase_invalid",
+        "supervised_initial_plan_invalid",
+        "initial_plan_failed:invalid_configuration",
+        "initial_plan_phase_invalid",
+    ] {
+        assert!(is_initial_planning_failure_code(code), "{code}");
+        assert_eq!(
+            classify_run_retry(evidence(false), Some(code)),
+            AiRunRetryAdmission::Allowed,
+            "{code}"
+        );
+        // An earlier possible dispatch keeps the fail-closed refusal.
+        assert_eq!(
+            classify_run_retry(evidence(true), Some(code)),
+            AiRunRetryAdmission::RefusedUncertain,
+            "{code}"
+        );
+    }
+    for code in [
+        "supervised_continuation_plan_failed:budget_denied",
+        "automatic_continuation_plan_failed:conflict",
+        "continuation_plan_failed:conflict",
+        "supervised_initial_plan_phase_invalid:conflict",
+        "supervised_initial_plan_failed:",
+        "supervised_initial_plan_failed:Budget",
+        "supervised_initial_plan_failed:a:b",
+    ] {
+        assert!(!is_initial_planning_failure_code(code), "{code}");
+        assert_eq!(
+            classify_run_retry(evidence(false), Some(code)),
+            AiRunRetryAdmission::RefusedUncertain,
+            "{code}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_revoked_principal_cannot_dispose_of_a_failure() {
     let fixture = fixture().await;
     let session = session(&fixture).await;

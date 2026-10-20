@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.107.4"
+version = "0.108.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1419,13 +1419,14 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
+ "tracing",
  "url",
  "uuid",
 ]
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",

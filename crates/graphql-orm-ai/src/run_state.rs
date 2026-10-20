@@ -374,7 +374,10 @@ pub struct AiRunRetryEvidence {
 ///   produce a second answer.
 /// - `Failed` is retryable only for an explicitly proven-clean code. An absent
 ///   or unrecognized code is refused, because an unclassified failure is
-///   exactly the case where safety cannot be proven.
+///   exactly the case where safety cannot be proven. A failure while building
+///   the initial provider plan (see [`is_initial_planning_failure_code`]) is
+///   additionally admitted when committed rows prove that no provider dispatch
+///   was possible, under the same evidence rule as `RecoveryRequired`.
 pub fn classify_run_retry(
     evidence: AiRunRetryEvidence,
     outcome_code: Option<&str>,
@@ -403,6 +406,12 @@ pub fn classify_run_retry(
             }
             match outcome_code {
                 Some(code) if is_retryable_failure_code(code) => AiRunRetryAdmission::Allowed,
+                Some(code)
+                    if is_initial_planning_failure_code(code)
+                        && !evidence.provider_dispatch_possible =>
+                {
+                    AiRunRetryAdmission::Allowed
+                }
                 _ => AiRunRetryAdmission::RefusedUncertain,
             }
         }
@@ -428,6 +437,75 @@ const fn is_retryable_failure_code(code: &str) -> bool {
             | b"provider_native_item_rejected"
             | b"runtime_not_ready"
     )
+}
+
+/// Returns whether `code` records a failure to build a run's initial
+/// provider plan.
+///
+/// These failures happen before any provider turn, budget reservation, or
+/// egress for that plan. Retry admission still requires committed evidence
+/// that no provider dispatch was possible for the run, so an unexpected
+/// earlier dispatch keeps the fail-closed refusal.
+///
+/// Accepted codes are `supervised_initial_plan_failed`,
+/// `supervised_initial_plan_phase_invalid`, `initial_plan_failed`, and
+/// `initial_plan_phase_invalid`, each optionally qualified as
+/// `<code>:<classification>` with an [`AiError::classification`] value, plus
+/// the legacy `supervised_initial_plan_invalid` written before the split.
+///
+/// [`AiError::classification`]: crate::AiError::classification
+pub fn is_initial_planning_failure_code(code: &str) -> bool {
+    let (base, classification) = match code.split_once(':') {
+        Some((base, classification)) => (base, Some(classification)),
+        None => (code, None),
+    };
+    let qualified_base = matches!(
+        base,
+        "supervised_initial_plan_failed" | "initial_plan_failed"
+    );
+    match classification {
+        None => {
+            qualified_base
+                || matches!(
+                    base,
+                    "supervised_initial_plan_phase_invalid"
+                        | "initial_plan_phase_invalid"
+                        | "supervised_initial_plan_invalid"
+                )
+        }
+        Some(classification) => qualified_base && valid_error_classification(classification),
+    }
+}
+
+/// Builds the durable failure code for a planner error and logs it.
+///
+/// The result is `<code>:<classification>` where the suffix names the
+/// [`crate::AiError`] variant without any payload text, so the run row,
+/// attempt outcome, and terminal event record which refusal the planner
+/// returned. The warning carries the run ID and the same classification;
+/// it never includes the error's display text.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub(crate) fn planner_failure_code(
+    lease: &crate::AiRunLease,
+    code: &str,
+    error: &crate::AiError,
+) -> String {
+    let classification = error.classification();
+    tracing::warn!(
+        run_id = %lease.run_id().0,
+        code,
+        error = classification,
+        "AI run planner refused to build a provider turn"
+    );
+    format!("{code}:{classification}")
+}
+
+fn valid_error_classification(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
 }
 
 /// Bounded, content-free failure record a client may render.

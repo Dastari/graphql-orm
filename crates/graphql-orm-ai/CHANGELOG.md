@@ -18,6 +18,39 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.108.0
+
+### Changed
+
+- Supervised and read-only coordinators no longer collapse a planner error
+  into one opaque code. A planner `Err` now finishes the run as
+  `<site>_plan_failed:<classification>`, where the suffix is
+  `AiError::classification()` (for example
+  `supervised_initial_plan_failed:budget_denied`). It lands on the run row,
+  the immutable attempt outcome and the terminal-event failure record, and the
+  coordinator emits a `tracing` warning with the run ID and classification.
+  Payload text from the error is never recorded.
+- A supervised initial plan that is unexpectedly a continuation now fails as
+  `supervised_initial_plan_phase_invalid`, matching the read-only
+  `initial_plan_phase_invalid`. The former `supervised_initial_plan_invalid`
+  is no longer written. Supervised, automatic and subscription continuation
+  planner errors use `*_continuation_plan_failed:<classification>`; a
+  mismatched continuation plan keeps `*_continuation_plan_invalid`.
+- Retry admission for a `Failed` run whose code records an initial planning
+  failure (`is_initial_planning_failure_code`), including legacy
+  `supervised_initial_plan_invalid` rows, is `allowed` when committed
+  reservations prove no provider dispatch was possible, instead of
+  `refused_uncertain`. Any possible dispatch still refuses. Continuation
+  planning failures remain refused.
+
+### Added
+
+- `is_initial_planning_failure_code` names the pre-dispatch planning codes.
+- `ModelRequest::conservative_provider_tool_surface_tokens` reports the share
+  of the conservative egress token ceiling taken by tool definitions. The
+  `conservative_provider_egress_tokens` documentation now states that the
+  ceiling counts a frozen retained tool surface on every turn.
+
 ## Unreleased - 0.107.4
 
 - Align with published Auth 0.22.1 and ORM/macros 0.54.1 for finite signed

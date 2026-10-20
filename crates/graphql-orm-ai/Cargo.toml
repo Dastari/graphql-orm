@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.107.4"
+version = "0.108.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -60,6 +60,7 @@ subtle = "2"
 thiserror = "2"
 time = { version = "0.3", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 

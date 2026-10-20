@@ -9,6 +9,7 @@ use time::Duration;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::run_state::planner_failure_code;
 use crate::{
     AiAgentContinuation, AiAgentLoopGuard, AiAgentLoopLimits, AiAgentLoopTurn,
     AiAgentRuleResolution, AiApplicationToolCallContext, AiError, AiPersistedApplicationToolCall,
@@ -1525,10 +1526,10 @@ impl AiReadOnlyAgentCoordinator {
                 {
                     plan
                 }
-                Err(_) => {
-                    return self
-                        .finish_failed(&lease, &guard, "adopted_continuation_plan_failed")
-                        .await;
+                Err(error) => {
+                    let code =
+                        planner_failure_code(&lease, "adopted_continuation_plan_failed", &error);
+                    return self.finish_failed(&lease, &guard, &code).await;
                 }
                 Ok(_) => {
                     return self
@@ -1559,15 +1560,18 @@ impl AiReadOnlyAgentCoordinator {
             let guard = AiAgentLoopGuard::new(&lease, self.limits.loop_limits);
             let plan = match self.planner.initial_plan(&lease).await {
                 Ok(plan) if !plan.is_continuation() => plan,
-                Err(_) => {
-                    return self
-                        .finish_failed(&lease, &guard, "initial_plan_failed")
-                        .await;
+                Err(error) => {
+                    let code = planner_failure_code(&lease, "initial_plan_failed", &error);
+                    return self.finish_failed(&lease, &guard, &code).await;
                 }
                 Ok(_) => {
-                    return self
-                        .finish_failed(&lease, &guard, "initial_plan_phase_invalid")
-                        .await;
+                    let code = "initial_plan_phase_invalid";
+                    tracing::warn!(
+                        run_id = %lease.run_id().0,
+                        code,
+                        "AI run planner returned a continuation for an initial turn"
+                    );
+                    return self.finish_failed(&lease, &guard, code).await;
                 }
             };
             (guard, plan, AiRuleRunUsage::default())
@@ -2185,10 +2189,10 @@ impl AiReadOnlyAgentCoordinator {
                         .await
                     {
                         Ok(plan) if plan.is_continuation() => plan,
-                        Err(_) => {
-                            return self
-                                .finish_failed(&lease, &guard, "continuation_plan_failed")
-                                .await;
+                        Err(error) => {
+                            let code =
+                                planner_failure_code(&lease, "continuation_plan_failed", &error);
+                            return self.finish_failed(&lease, &guard, &code).await;
                         }
                         Ok(_) => {
                             return self
@@ -3982,6 +3986,73 @@ mod tests {
             mode,
             AiReadOnlyAgentTurnMode::ExperimentalDynamicTools(_)
         ));
+    }
+
+    struct BudgetDeniedChatPlanner;
+
+    #[async_trait]
+    impl AiReadOnlyAgentTurnPlanner for BudgetDeniedChatPlanner {
+        async fn initial_plan(&self, _: &AiRunLease) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            Err(AiError::BudgetDenied)
+        }
+
+        async fn continuation_plan(
+            &self,
+            _: &AiRunLease,
+            _: u32,
+            _: AiAgentContinuation,
+        ) -> Result<AiReadOnlyAgentTurnPlan, AiError> {
+            Err(AiError::BudgetDenied)
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_planner_error_records_its_variant_and_admits_retry() {
+        let lease = AiRunLease::test_running(principal_reference());
+        let run = Arc::new(TestRunControl::new());
+        let provider = Arc::new(TestProviderExecutor {
+            responses: Mutex::new(VecDeque::new()),
+            delay: None,
+        });
+        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+        let coordinator = AiReadOnlyAgentCoordinator::new(
+            run.clone(),
+            provider.clone(),
+            forbidden.clone(),
+            Arc::new(TestOutputWriter),
+            forbidden.clone(),
+            Arc::new(TestCheckpointWriter),
+            Arc::new(TestRuleResolver),
+            Arc::new(BudgetDeniedChatPlanner),
+            limits(50),
+        );
+
+        let outcome = coordinator
+            .execute_claimed(&lease)
+            .await
+            .expect("a planner refusal is a clean terminal failure");
+
+        assert!(matches!(
+            outcome,
+            Failed {
+                provider_turns: 0,
+                total_tool_calls: 0,
+            }
+        ));
+        let code = "initial_plan_failed:budget_denied";
+        assert_eq!(run.final_codes(), vec![code.to_owned()]);
+        assert_eq!(provider.remaining_responses(), 0);
+        assert_eq!(
+            crate::classify_run_retry(
+                crate::AiRunRetryEvidence {
+                    terminal: crate::AiRunTerminalEvent::Failed,
+                    produced_assistant_output: false,
+                    provider_dispatch_possible: false,
+                },
+                Some(code),
+            ),
+            crate::AiRunRetryAdmission::Allowed
+        );
     }
 
     #[tokio::test]

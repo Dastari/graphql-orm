@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## [0.16.1] - 2026-10-20
+
+### Added
+
+- `AiError::classification` returns a distinct, payload-free lower-snake-case
+  name for every variant, so durable outcomes and logs can record which
+  refusal occurred where `public_code` deliberately groups variants.
+
 ## [0.16.0] - 2026-10-13
 
 ### Changed
