@@ -393,7 +393,10 @@ impl BlobStore for S3StorageBackend {
                 ("endpoint_url", self.config.endpoint_url.as_str()),
                 ("region", self.config.region.as_str()),
                 ("bucket", self.config.bucket.as_str()),
-                ("key_prefix", self.config.key_prefix.as_deref().unwrap_or("")),
+                (
+                    "key_prefix",
+                    self.config.key_prefix.as_deref().unwrap_or(""),
+                ),
                 ("access_key_id", self.config.access_key_id.as_str()),
                 ("path_style", path_style),
                 ("capacity_mode", self.capacity_mode.as_str()),
@@ -429,7 +432,13 @@ impl BlobStore for S3StorageBackend {
             }
         };
         let binding = self.capacity_binding();
-        Ok(CapacityObservation::new(binding, placement, state, observed_at, request))
+        Ok(CapacityObservation::new(
+            binding,
+            placement,
+            state,
+            observed_at,
+            request,
+        ))
     }
 
     async fn put_blob(

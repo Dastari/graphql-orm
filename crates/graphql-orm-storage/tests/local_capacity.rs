@@ -57,7 +57,10 @@ async fn local_capacity_binding_tracks_the_configured_root() {
         first_backend.capacity_binding(),
         LocalStorageBackend::new(first.path()).capacity_binding()
     );
-    assert_ne!(first_backend.capacity_binding(), second_backend.capacity_binding());
+    assert_ne!(
+        first_backend.capacity_binding(),
+        second_backend.capacity_binding()
+    );
 
     let observation = first_backend
         .observe_capacity(&CapacityRequest::default())

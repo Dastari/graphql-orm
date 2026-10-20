@@ -1205,12 +1205,18 @@ impl SmbStorageBackend {
         directory: &Directory,
     ) -> Result<SmbCapacitySample, StorageError> {
         let full_size = self
-            .with_timeout("capacity", directory.query_fs_info::<FileFsFullSizeInformation>())
+            .with_timeout(
+                "capacity",
+                directory.query_fs_info::<FileFsFullSizeInformation>(),
+            )
             .await?;
         // The volume serial binds the observation to its placement. A server
         // that declines this query only omits the placement.
         let volume = self
-            .with_timeout("capacity", directory.query_fs_info::<FileFsVolumeInformation>())
+            .with_timeout(
+                "capacity",
+                directory.query_fs_info::<FileFsVolumeInformation>(),
+            )
             .await;
         let volume_serial = match volume {
             Ok(volume) => Some(volume.volume_serial_number),
@@ -1715,7 +1721,13 @@ impl BlobStore for SmbStorageBackend {
             quota: CapacityQuota::ProviderAccounted,
         });
         let binding = self.capacity_binding();
-        Ok(CapacityObservation::new(binding, placement, state, observed_at, request))
+        Ok(CapacityObservation::new(
+            binding,
+            placement,
+            state,
+            observed_at,
+            request,
+        ))
     }
 
     async fn put_blob(
@@ -2045,7 +2057,10 @@ fn smb_capacity_binding(config: &SmbStorageConfig) -> CapacityBinding {
             ("account", account.as_str()),
             ("min_dialect", dialect.as_str()),
             ("require_signing", bool_component(config.require_signing)),
-            ("require_encryption", bool_component(config.require_encryption)),
+            (
+                "require_encryption",
+                bool_component(config.require_encryption),
+            ),
         ],
     )
 }
@@ -2490,7 +2505,10 @@ mod tests {
         assert_ne!(base, changed(|c| c.domain = Some("OTHER".to_string())));
         assert_ne!(base, changed(|c| c.share = "other-share".to_string()));
         assert_ne!(base, changed(|c| c.port = 1445));
-        assert_ne!(base, changed(|c| c.require_encryption = !c.require_encryption));
+        assert_ne!(
+            base,
+            changed(|c| c.require_encryption = !c.require_encryption)
+        );
     }
 
     #[test]

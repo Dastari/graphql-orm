@@ -340,7 +340,13 @@ pub trait BlobStore: Send + Sync {
     ) -> Result<CapacityObservation, StorageError> {
         let state = CapacityState::Unknown(UnknownCapacity::unsupported());
         let now = OffsetDateTime::now_utc();
-        Ok(CapacityObservation::new(self.capacity_binding(), None, state, now, request))
+        Ok(CapacityObservation::new(
+            self.capacity_binding(),
+            None,
+            state,
+            now,
+            request,
+        ))
     }
 }
 

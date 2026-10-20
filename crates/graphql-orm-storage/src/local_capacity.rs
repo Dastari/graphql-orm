@@ -49,7 +49,13 @@ pub(crate) async fn observe(
             message: format!("capacity observation task failed: {error}"),
             retryable: true,
         })??;
-    Ok(CapacityObservation::new(binding, placement, state, observed_at, &request))
+    Ok(CapacityObservation::new(
+        binding,
+        placement,
+        state,
+        observed_at,
+        &request,
+    ))
 }
 
 #[cfg(unix)]
@@ -513,7 +519,10 @@ mod linux {
         }
         // SAFETY: fstatfs succeeded and initialised the structure.
         let stats = unsafe { stats.assume_init() };
-        matches!(super::widen(stats.f_type), EXT4_SUPER_MAGIC | XFS_SUPER_MAGIC)
+        matches!(
+            super::widen(stats.f_type),
+            EXT4_SUPER_MAGIC | XFS_SUPER_MAGIC
+        )
     }
 
     #[cfg(test)]
