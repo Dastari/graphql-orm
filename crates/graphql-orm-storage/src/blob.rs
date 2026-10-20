@@ -400,6 +400,34 @@ pub trait BlobStore: Send + Sync {
             operation: "fenced blob write".to_string(),
         })
     }
+
+    /// Conditional, single-attempt, fenced publication: creates `key` only if
+    /// it is absent, and only while `fence` still matches the destination.
+    ///
+    /// `key` must lie inside `fence.target`. The provider re-validates the
+    /// target-root witness and marker, and (where it has sessions) binds the
+    /// create, write and publication to the fenced session; it never replays
+    /// into a reconnected session. `Ok(None)` means the key already exists:
+    /// the caller must compare it with its own once-prepared body and must not
+    /// overwrite it. Any error after the create may have reached the provider
+    /// leaves the outcome unknown: never resend into another namespace or
+    /// session, and never treat the original as uncommitted. The default
+    /// returns `UnsupportedOperation` without I/O.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the fence is invalid or the publication fails.
+    async fn put_blob_if_not_exists_fenced(
+        &self,
+        _key: &str,
+        _body: StorageByteStream,
+        _options: BlobPutOptions,
+        _fence: &NamespaceFence,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        Err(StorageError::UnsupportedOperation {
+            operation: "conditional fenced blob write".to_string(),
+        })
+    }
 }
 
 fn ranged_storage_stream(body: StorageByteStream, skip: u64, length: u64) -> StorageByteStream {

@@ -16,7 +16,8 @@ use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::namespace::fence_invalidated;
+use crate::namespace::{ScanDeadline, fence_invalidated, require_key_in_target};
+use crate::{AncestorScan, NestedScan};
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
@@ -465,7 +466,8 @@ impl S3StorageBackend {
         }
     }
 
-    async fn scan_ancestors(&self, prefix: &str, max_depth: usize) -> ScanResult {
+    async fn scan_ancestors(&self, prefix: &str, scan: AncestorScan) -> ScanResult {
+        let deadline = ScanDeadline::after(scan.max_duration);
         let mut found = Vec::new();
         let mut completeness = ScanCompleteness::Complete;
         let mut components: Vec<&str> = if prefix.is_empty() {
@@ -476,17 +478,23 @@ impl S3StorageBackend {
         let mut level = 0_usize;
         // The bucket root is the authority boundary.
         while !components.is_empty() {
-            level += 1;
-            if level > max_depth {
+            if level == scan.max_depth {
                 completeness = ScanCompleteness::Truncated {
                     limit: "max_depth".to_string(),
                 };
                 break;
             }
+            level += 1;
             components.pop();
-            let state = self
-                .read_marker(&marker_key_in(&components.join("/")))
-                .await;
+            let Some(state) = deadline
+                .bound(self.read_marker(&marker_key_in(&components.join("/"))))
+                .await
+            else {
+                completeness = ScanCompleteness::Truncated {
+                    limit: "max_duration".to_string(),
+                };
+                break;
+            };
             if let NamespaceState::Unknown { reason } = &state {
                 completeness = ScanCompleteness::Denied {
                     reason: reason.clone(),
@@ -505,43 +513,47 @@ impl S3StorageBackend {
         }
     }
 
-    async fn scan_nested(&self, prefix: &str, scan: crate::NestedScan) -> ScanResult {
-        let started = std::time::Instant::now();
+    /// Bounded nested scan: every await is bounded by the remaining original
+    /// deadline, and pages, keys, depth, bytes and results are all budgeted.
+    async fn scan_nested(&self, prefix: &str, scan: NestedScan) -> ScanResult {
+        let deadline = ScanDeadline::after(scan.max_duration);
         let own_marker = marker_key_in(prefix);
+        let marker_suffix = format!("/{NAMESPACE_MARKER}");
         let list_prefix = if prefix.is_empty() {
             String::new()
         } else {
             format!("{prefix}/")
         };
+        let truncated = |limit: &str| ScanCompleteness::Truncated {
+            limit: limit.to_string(),
+        };
         let mut found = Vec::new();
         let mut completeness = ScanCompleteness::Complete;
         let mut continuation = None;
-        let (mut pages, mut keys) = (0_usize, 0_usize);
-        loop {
-            if started.elapsed() > scan.max_duration {
-                completeness = ScanCompleteness::Truncated {
-                    limit: "max_duration".to_string(),
-                };
-                break;
-            }
+        let (mut pages, mut keys, mut bytes) = (0_usize, 0_usize, 0_usize);
+        'scan: loop {
             pages += 1;
             if pages > scan.max_pages {
-                completeness = ScanCompleteness::Truncated {
-                    limit: "max_pages".to_string(),
-                };
+                completeness = truncated("max_pages");
                 break;
             }
-            let output = match self
-                .client
-                .list_objects_v2()
-                .bucket(&self.config.bucket)
-                .prefix(&list_prefix)
-                .set_continuation_token(continuation.take())
-                .send()
-                .await
-            {
-                Ok(output) => output,
-                Err(error) => {
+            let listing = deadline
+                .bound(
+                    self.client
+                        .list_objects_v2()
+                        .bucket(&self.config.bucket)
+                        .prefix(&list_prefix)
+                        .set_continuation_token(continuation.take())
+                        .send(),
+                )
+                .await;
+            let output = match listing {
+                None => {
+                    completeness = truncated("max_duration");
+                    break;
+                }
+                Some(Ok(output)) => output,
+                Some(Err(error)) => {
                     let reason = if s3_is_denied(&error) {
                         "listing denied"
                     } else {
@@ -556,28 +568,38 @@ impl S3StorageBackend {
             for object in output.contents() {
                 keys += 1;
                 if keys > scan.max_keys {
-                    completeness = ScanCompleteness::Truncated {
-                        limit: "max_keys".to_string(),
-                    };
-                    break;
+                    completeness = truncated("max_keys");
+                    break 'scan;
                 }
                 let Some(key) = object.key() else { continue };
-                if key == own_marker || !key.ends_with(&format!("/{NAMESPACE_MARKER}")) {
+                if key == own_marker || !key.ends_with(&marker_suffix) {
                     continue;
                 }
                 let relative = key
                     .strip_prefix(&list_prefix)
                     .unwrap_or(key)
-                    .strip_suffix(&format!("/{NAMESPACE_MARKER}"))
+                    .strip_suffix(&marker_suffix)
                     .unwrap_or_default()
                     .to_string();
                 if relative.split('/').count() > scan.max_depth {
-                    completeness = ScanCompleteness::Truncated {
-                        limit: "max_depth".to_string(),
-                    };
+                    completeness = truncated("max_depth");
                     continue;
                 }
-                let state = self.read_marker(key).await;
+                bytes = bytes
+                    .saturating_add(relative.len())
+                    .saturating_add(MAX_NAMESPACE_MARKER_BYTES);
+                if bytes > scan.max_bytes {
+                    completeness = truncated("max_bytes");
+                    break 'scan;
+                }
+                if found.len() == scan.max_results {
+                    completeness = truncated("max_results");
+                    break 'scan;
+                }
+                let Some(state) = deadline.bound(self.read_marker(key)).await else {
+                    completeness = truncated("max_duration");
+                    break 'scan;
+                };
                 if let NamespaceState::Unknown { reason } = &state {
                     completeness = ScanCompleteness::Denied {
                         reason: reason.clone(),
@@ -588,9 +610,6 @@ impl S3StorageBackend {
                     state,
                 });
             }
-            if matches!(completeness, ScanCompleteness::Truncated { .. }) {
-                break;
-            }
             match output.next_continuation_token() {
                 Some(token) => continuation = Some(token.to_string()),
                 None => break,
@@ -600,6 +619,21 @@ impl S3StorageBackend {
         ScanResult {
             completeness,
             found,
+        }
+    }
+
+    /// Configuration-only fence: endpoint aliasing or bucket recreation cannot
+    /// be detected by a generic S3 endpoint.
+    async fn check_fence(&self, key: &str, fence: &NamespaceFence) -> Result<(), StorageError> {
+        self.provider_key(key)?;
+        require_key_in_target(key, &fence.target)?;
+        if fence.epoch.backend_instance != self.instance {
+            return Err(fence_invalidated(key, "different backend instance"));
+        }
+        let marker = marker_key_in(&self.namespace_prefix(&fence.target)?);
+        match self.read_marker(&marker).await {
+            NamespaceState::Initialised { id } if id == fence.namespace => Ok(()),
+            _ => Err(fence_invalidated(key, "namespace marker changed")),
         }
     }
 }
@@ -619,11 +653,12 @@ impl BlobStore for S3StorageBackend {
         target: &NamespaceTarget,
         scan: &TopologyScan,
     ) -> Result<NamespaceObservation, StorageError> {
+        scan.validate()?;
         let observed_at = OffsetDateTime::now_utc();
         let prefix = self.namespace_prefix(target)?;
         let state = self.read_marker(&marker_key_in(&prefix)).await;
         let ancestors = match scan.ancestors {
-            Some(ancestors) => self.scan_ancestors(&prefix, ancestors.max_depth).await,
+            Some(ancestors) => self.scan_ancestors(&prefix, ancestors).await,
             None => ScanResult::not_requested(),
         };
         let nested = match scan.nested {
@@ -715,19 +750,20 @@ impl BlobStore for S3StorageBackend {
         options: BlobPutOptions,
         fence: &NamespaceFence,
     ) -> Result<BlobWriteOutcome, StorageError> {
-        self.provider_key(key)?;
-        if fence.epoch.backend_instance != self.instance {
-            return Err(fence_invalidated(key, "different backend instance"));
-        }
-        // Configuration-only fence: endpoint aliasing or bucket recreation
-        // cannot be detected by a generic S3 endpoint.
-        let marker = marker_key_in(&self.namespace_prefix(&fence.target)?);
-        match self.read_marker(&marker).await {
-            NamespaceState::Initialised { id } if id == fence.namespace => {
-                self.put_blob(key, body, options).await
-            }
-            _ => Err(fence_invalidated(key, "namespace marker changed")),
-        }
+        self.check_fence(key, fence).await?;
+        self.put_blob(key, body, options).await
+    }
+
+    async fn put_blob_if_not_exists_fenced(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        options: BlobPutOptions,
+        fence: &NamespaceFence,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        // If-None-Match create after a configuration-only fence check.
+        self.check_fence(key, fence).await?;
+        self.put_blob_if_not_exists(key, body, options).await
     }
 
     async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {

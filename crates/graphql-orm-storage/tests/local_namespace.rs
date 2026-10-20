@@ -33,6 +33,8 @@ fn nested(max_keys: usize) -> TopologyScan {
             max_depth: 8,
             max_pages: 64,
             max_keys,
+            max_bytes: 1 << 20,
+            max_results: 1000,
             max_duration: Duration::from_secs(10),
         }),
     }
@@ -97,7 +99,10 @@ async fn local_observation_never_writes() {
     let store = LocalStorageBackend::new(temp.path().join("a"));
     let before = tree(temp.path());
     let scan = TopologyScan {
-        ancestors: Some(AncestorScan { max_depth: 1 }),
+        ancestors: Some(AncestorScan {
+            max_depth: 1,
+            max_duration: Duration::from_secs(10),
+        }),
         ..nested(1000)
     };
     store
@@ -293,7 +298,10 @@ async fn bounded_topology_scans_report_completeness() {
 
     let child = LocalStorageBackend::new(temp.path().join("child"));
     let scan = TopologyScan {
-        ancestors: Some(AncestorScan { max_depth: 1 }),
+        ancestors: Some(AncestorScan {
+            max_depth: 1,
+            max_duration: Duration::from_secs(10),
+        }),
         nested: None,
     };
     let observed = child
@@ -398,4 +406,160 @@ async fn capacity_domain_facts_are_partial_and_scoped() {
     } else {
         assert_eq!(observed.state, DomainState::Unsupported);
     }
+}
+
+
+fn scan_with(nested: NestedScan) -> TopologyScan {
+    TopologyScan {
+        ancestors: None,
+        nested: Some(nested),
+    }
+}
+
+fn wide_scan() -> NestedScan {
+    NestedScan {
+        max_depth: 8,
+        max_pages: 1000,
+        max_keys: 100_000,
+        max_bytes: 1 << 20,
+        max_results: 1000,
+        max_duration: Duration::from_secs(10),
+    }
+}
+
+#[tokio::test]
+async fn fenced_keys_must_stay_inside_the_target_and_its_witnessed_root() {
+    let temp = TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(temp.path().join("a")).expect("dir");
+    let store = LocalStorageBackend::new(temp.path());
+    let target = NamespaceTarget::SubPrefix("a".to_string());
+    let id = NamespaceId::new_random();
+    store.initialise_namespace(&target, id).await.expect("init");
+    let observed = store.observe_namespace(&target, &TopologyScan::default()).await.expect("observe");
+    let fence = NamespaceFence {
+        target: target.clone(),
+        namespace: id,
+        epoch: observed.epoch.clone(),
+    };
+    let body = || StorageByteStream::from_bytes(Bytes::from_static(b"x"));
+    for outside in ["b/object", "a-sibling/object", "a", "object"] {
+        assert!(
+            matches!(
+                store.put_blob_fenced(outside, body(), BlobPutOptions::default(), &fence).await,
+                Err(StorageError::PreconditionFailed { .. })
+            ),
+            "{outside}"
+        );
+        assert!(store.put_blob_if_not_exists_fenced(outside, body(), BlobPutOptions::default(), &fence).await.is_err());
+    }
+    store.put_blob_fenced("a/object", body(), BlobPutOptions::default(), &fence).await.expect("inside");
+
+    // Replacing the target directory with one carrying a copied marker
+    // changes the target-root witness, so the fence is invalidated.
+    std::fs::rename(temp.path().join("a"), temp.path().join("a-old")).expect("rename");
+    std::fs::create_dir_all(temp.path().join("a")).expect("dir");
+    std::fs::copy(temp.path().join("a-old").join(NAMESPACE_MARKER), temp.path().join("a").join(NAMESPACE_MARKER)).expect("copy");
+    assert!(matches!(
+        store.put_blob_fenced("a/after", body(), BlobPutOptions::default(), &fence).await,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+    assert!(!temp.path().join("a/after").exists());
+}
+
+#[tokio::test]
+async fn conditional_fenced_publication_never_overwrites() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = LocalStorageBackend::new(temp.path());
+    let id = NamespaceId::new_random();
+    store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init");
+    let observed = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    let fence = NamespaceFence {
+        target: NamespaceTarget::Root,
+        namespace: id,
+        epoch: observed.epoch.clone(),
+    };
+    let first = store
+        .put_blob_if_not_exists_fenced("data/immutable", StorageByteStream::from_bytes(Bytes::from_static(b"one")), BlobPutOptions::default(), &fence)
+        .await
+        .expect("first");
+    assert!(first.is_some());
+    let second = store
+        .put_blob_if_not_exists_fenced("data/immutable", StorageByteStream::from_bytes(Bytes::from_static(b"two")), BlobPutOptions::default(), &fence)
+        .await
+        .expect("second");
+    assert!(second.is_none());
+    assert_eq!(std::fs::read(temp.path().join("data/immutable")).expect("read"), b"one");
+}
+
+#[tokio::test]
+async fn scans_enforce_deadline_byte_result_and_limit_bounds() {
+    let temp = TempDir::new().expect("temp dir");
+    for index in 0..200 {
+        std::fs::create_dir_all(temp.path().join(format!("dir-{index:03}"))).expect("dir");
+    }
+    let store = LocalStorageBackend::new(temp.path());
+    for index in 0..3 {
+        store
+            .initialise_namespace(&NamespaceTarget::SubPrefix(format!("dir-{index:03}")), NamespaceId::new_random())
+            .await
+            .expect("sub");
+    }
+    let root = NamespaceTarget::Root;
+
+    // A single wide directory still stops at the original deadline.
+    let expired = NestedScan {
+        max_duration: Duration::ZERO,
+        ..wide_scan()
+    };
+    let observed = store.observe_namespace(&root, &scan_with(expired)).await.expect("observe");
+    assert!(matches!(observed.nested.completeness, ScanCompleteness::Truncated { .. }));
+
+    let bytes = NestedScan {
+        max_bytes: 64,
+        ..wide_scan()
+    };
+    let observed = store.observe_namespace(&root, &scan_with(bytes)).await.expect("observe");
+    assert!(matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_bytes"));
+
+    let results = NestedScan {
+        max_results: 1,
+        ..wide_scan()
+    };
+    let observed = store.observe_namespace(&root, &scan_with(results)).await.expect("observe");
+    assert!(matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_results"));
+    assert_eq!(observed.nested.found.len(), 1);
+
+    let complete = store.observe_namespace(&root, &scan_with(wide_scan())).await.expect("observe");
+    assert_eq!(complete.nested.completeness, ScanCompleteness::Complete);
+    assert_eq!(complete.nested.found.len(), 3);
+
+    // Overflowing or unreasonable limits are rejected, never clamped.
+    let overflowing = TopologyScan {
+        ancestors: Some(AncestorScan {
+            max_depth: usize::MAX,
+            max_duration: Duration::from_secs(1),
+        }),
+        nested: None,
+    };
+    assert!(store.observe_namespace(&root, &overflowing).await.is_err());
+    let too_long = scan_with(NestedScan {
+        max_duration: Duration::from_secs(86_400),
+        ..wide_scan()
+    });
+    assert!(store.observe_namespace(&root, &too_long).await.is_err());
+}
+
+#[tokio::test]
+async fn temp_sweep_never_enters_reserved_names() {
+    let temp = TempDir::new().expect("temp dir");
+    let reserved = temp.path().join(NAMESPACE_MARKER);
+    std::fs::create_dir_all(&reserved).expect("reserved dir");
+    std::fs::write(reserved.join("child.uploading"), b"x").expect("write");
+    std::fs::create_dir_all(temp.path().join("data")).expect("dir");
+    std::fs::write(temp.path().join("data/old.uploading"), b"x").expect("write");
+    let store = LocalStorageBackend::new(temp.path());
+    let removed = store.sweep_temp_files(Duration::ZERO).await.expect("sweep");
+    assert_eq!(removed, 1);
+    assert!(reserved.join("child.uploading").exists());
+    assert!(!temp.path().join("data/old.uploading").exists());
 }

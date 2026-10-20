@@ -11,10 +11,7 @@
 //! still applies. Path checks and fences cannot exclude a concurrent local
 //! actor replacing paths between a check and a use.
 
-use std::{
-    path::{Path, PathBuf},
-    time::Instant,
-};
+use std::path::{Path, PathBuf};
 
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,11 +23,17 @@ use crate::{
     NAMESPACE_MARKER_PUBLISHING, NamespaceFence, NamespaceId, NamespaceInitialisation,
     NamespaceObservation, NamespaceState, NamespaceTarget, ObservationEpoch, ScanCompleteness,
     ScanResult, StorageBackend, StorageError, TopologyScan, decode_marker, encode_marker,
-    namespace::fence_invalidated,
+    namespace::{ScanDeadline, fence_invalidated, require_key_in_target},
 };
+use crate::{AncestorScan, NestedScan};
 
 /// Local roots may be case-insensitive, so reserved names are case-folded.
+#[cfg(not(windows))]
 pub(crate) const LOCAL_KEY_EQUIVALENCE: KeyEquivalence = KeyEquivalence::CaseFolding;
+
+/// On Windows, local paths also resolve alternate data streams and 8.3 names.
+#[cfg(windows)]
+pub(crate) const LOCAL_KEY_EQUIVALENCE: KeyEquivalence = KeyEquivalence::Windows;
 
 const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
 
@@ -178,12 +181,19 @@ async fn require_directory(dir: &Path) -> Result<(), StorageError> {
     }
 }
 
+fn truncated(limit: &str) -> ScanCompleteness {
+    ScanCompleteness::Truncated {
+        limit: limit.to_string(),
+    }
+}
+
 #[cfg(unix)]
-async fn scan_ancestors(dir: &Path, max_depth: usize) -> ScanResult {
-    let Ok((device, _)) = device_inode(dir).await else {
+async fn scan_ancestors(dir: &Path, scan: AncestorScan) -> ScanResult {
+    let deadline = ScanDeadline::after(scan.max_duration);
+    let Some(Ok((device, _))) = deadline.bound(device_inode(dir)).await else {
         return ScanResult {
             completeness: ScanCompleteness::Denied {
-                reason: "namespace root identity unreadable".to_string(),
+                reason: "namespace root identity unreadable or deadline reached".to_string(),
             },
             found: Vec::new(),
         };
@@ -191,17 +201,13 @@ async fn scan_ancestors(dir: &Path, max_depth: usize) -> ScanResult {
     let mut found = Vec::new();
     let mut completeness = ScanCompleteness::Complete;
     let mut current = dir.to_path_buf();
-    for level in 1..=max_depth + 1 {
-        let Some(parent) = current.parent().map(Path::to_path_buf) else {
+    let mut level = 0_usize;
+    while let Some(parent) = current.parent().map(Path::to_path_buf) {
+        let Some(identity) = deadline.bound(device_inode(&parent)).await else {
+            completeness = truncated("max_duration");
             break;
         };
-        if level > max_depth {
-            completeness = ScanCompleteness::Truncated {
-                limit: "max_depth".to_string(),
-            };
-            break;
-        }
-        match device_inode(&parent).await {
+        match identity {
             // The filesystem holding the root is the authority boundary.
             Ok((parent_device, _)) if parent_device != device => break,
             Ok(_) => {}
@@ -212,11 +218,18 @@ async fn scan_ancestors(dir: &Path, max_depth: usize) -> ScanResult {
                 break;
             }
         }
-        let state = marker_state(&parent).await;
+        if level == scan.max_depth {
+            // A same-filesystem parent exists beyond the requested depth.
+            completeness = truncated("max_depth");
+            break;
+        }
+        level += 1;
+        let Some(state) = deadline.bound(marker_state(&parent)).await else {
+            completeness = truncated("max_duration");
+            break;
+        };
         if let NamespaceState::Unknown { reason } = &state {
-            completeness = ScanCompleteness::Denied {
-                reason: reason.clone(),
-            };
+            completeness = ScanCompleteness::Denied { reason: reason.clone() };
         }
         if state != NamespaceState::Uninitialised {
             found.push(FoundNamespace {
@@ -226,40 +239,36 @@ async fn scan_ancestors(dir: &Path, max_depth: usize) -> ScanResult {
         }
         current = parent;
     }
-    ScanResult {
-        completeness,
-        found,
-    }
+    ScanResult { completeness, found }
 }
 
 #[cfg(not(unix))]
-async fn scan_ancestors(_dir: &Path, _max_depth: usize) -> ScanResult {
+async fn scan_ancestors(_dir: &Path, _scan: AncestorScan) -> ScanResult {
     ScanResult::unsupported()
 }
 
-async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
-    let started = Instant::now();
+/// Bounded nested scan: every await is bounded by the remaining original
+/// deadline, and pages, entries, depth, bytes and results are all budgeted.
+/// Reaching any limit reports `Truncated`, never a completed absence.
+async fn scan_nested(dir: &Path, scan: NestedScan) -> ScanResult {
+    let deadline = ScanDeadline::after(scan.max_duration);
     let mut found = Vec::new();
     let mut completeness = ScanCompleteness::Complete;
     let mut stack = vec![(dir.to_path_buf(), 0_usize)];
-    let (mut pages, mut keys) = (0_usize, 0_usize);
+    let (mut pages, mut keys, mut bytes) = (0_usize, 0_usize, 0_usize);
     'scan: while let Some((path, depth)) = stack.pop() {
-        if started.elapsed() > scan.max_duration {
-            completeness = ScanCompleteness::Truncated {
-                limit: "max_duration".to_string(),
-            };
-            break;
-        }
         pages += 1;
         if pages > scan.max_pages {
-            completeness = ScanCompleteness::Truncated {
-                limit: "max_pages".to_string(),
-            };
+            completeness = truncated("max_pages");
             break;
         }
-        let mut entries = match tokio::fs::read_dir(&path).await {
-            Ok(entries) => entries,
-            Err(error) => {
+        let mut entries = match deadline.bound(tokio::fs::read_dir(&path)).await {
+            None => {
+                completeness = truncated("max_duration");
+                break;
+            }
+            Some(Ok(entries)) => entries,
+            Some(Err(error)) => {
                 completeness = ScanCompleteness::Denied {
                     reason: format!("directory unreadable: {}", error.kind()),
                 };
@@ -267,10 +276,14 @@ async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
             }
         };
         loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
+            let entry = match deadline.bound(entries.next_entry()).await {
+                None => {
+                    completeness = truncated("max_duration");
+                    break 'scan;
+                }
+                Some(Ok(Some(entry))) => entry,
+                Some(Ok(None)) => break,
+                Some(Err(error)) => {
                     completeness = ScanCompleteness::Denied {
                         reason: format!("directory listing failed: {}", error.kind()),
                     };
@@ -279,15 +292,18 @@ async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
             };
             keys += 1;
             if keys > scan.max_keys {
-                completeness = ScanCompleteness::Truncated {
-                    limit: "max_keys".to_string(),
-                };
+                completeness = truncated("max_keys");
                 break 'scan;
             }
-            if entry.file_name() == INTERNAL_STORAGE_DIR {
+            let name = entry.file_name();
+            if name == INTERNAL_STORAGE_DIR {
                 continue;
             }
-            let Ok(file_type) = entry.file_type().await else {
+            let Some(file_type) = deadline.bound(entry.file_type()).await else {
+                completeness = truncated("max_duration");
+                break 'scan;
+            };
+            let Ok(file_type) = file_type else {
                 completeness = ScanCompleteness::Denied {
                     reason: "entry type unreadable".to_string(),
                 };
@@ -295,33 +311,40 @@ async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
             };
             if file_type.is_symlink() {
                 // Ordinary operations follow links; the scan does not, so it is incomplete.
-                completeness = ScanCompleteness::Truncated {
-                    limit: "symbolic link not followed".to_string(),
-                };
+                completeness = truncated("symbolic link not followed");
                 continue;
             }
             if !file_type.is_dir() {
                 continue;
             }
             let child = entry.path();
-            if depth + 1 > scan.max_depth {
-                completeness = ScanCompleteness::Truncated {
-                    limit: "max_depth".to_string(),
-                };
+            let relative = child
+                .strip_prefix(dir)
+                .unwrap_or(&child)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if depth.saturating_add(1) > scan.max_depth {
+                completeness = truncated("max_depth");
                 continue;
             }
-            let state = marker_state(&child).await;
+            bytes = bytes.saturating_add(relative.len());
+            if bytes > scan.max_bytes {
+                completeness = truncated("max_bytes");
+                break 'scan;
+            }
+            let Some(state) = deadline.bound(marker_state(&child)).await else {
+                completeness = truncated("max_duration");
+                break 'scan;
+            };
+            bytes = bytes.saturating_add(MAX_NAMESPACE_MARKER_BYTES);
             if let NamespaceState::Unknown { reason } = &state {
-                completeness = ScanCompleteness::Denied {
-                    reason: reason.clone(),
-                };
+                completeness = ScanCompleteness::Denied { reason: reason.clone() };
             }
             if state != NamespaceState::Uninitialised {
-                let relative = child
-                    .strip_prefix(dir)
-                    .unwrap_or(&child)
-                    .to_string_lossy()
-                    .replace('\\', "/");
+                if found.len() == scan.max_results {
+                    completeness = truncated("max_results");
+                    break 'scan;
+                }
                 found.push(FoundNamespace {
                     relative_path: relative,
                     state,
@@ -331,10 +354,7 @@ async fn scan_nested(dir: &Path, scan: crate::NestedScan) -> ScanResult {
         }
     }
     found.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    ScanResult {
-        completeness,
-        found,
-    }
+    ScanResult { completeness, found }
 }
 
 pub(crate) async fn observe(
@@ -343,12 +363,13 @@ pub(crate) async fn observe(
     target: &NamespaceTarget,
     scan: &TopologyScan,
 ) -> Result<NamespaceObservation, StorageError> {
+    scan.validate()?;
     let observed_at = OffsetDateTime::now_utc();
     let dir = namespace_dir(root, target)?;
     require_directory(&dir).await?;
     let state = marker_state(&dir).await;
     let ancestors = match scan.ancestors {
-        Some(ancestors) => scan_ancestors(&dir, ancestors.max_depth).await,
+        Some(ancestors) => scan_ancestors(&dir, ancestors).await,
         None => ScanResult::not_requested(),
     };
     let nested = match scan.nested {
@@ -361,7 +382,9 @@ pub(crate) async fn observe(
         root_location: location_fact(&dir).await,
         ancestors,
         nested,
-        epoch: epoch(root, instance).await,
+        // The witness is the TARGET root, so a replaced sub-prefix directory
+        // invalidates fences even when it carries a copied marker.
+        epoch: epoch(&dir, instance).await,
         observed_at,
     })
 }
@@ -524,17 +547,15 @@ pub(crate) async fn check_fence(
     fence: &NamespaceFence,
     key: &str,
 ) -> Result<(), StorageError> {
+    require_key_in_target(key, &fence.target)?;
     if fence.epoch.backend_instance != instance {
         return Err(fence_invalidated(key, "different backend instance"));
     }
-    let current = root_witness(root).await;
-    if current.is_none() || current != fence.epoch.root_witness {
-        return Err(fence_invalidated(
-            key,
-            "configured root was replaced or is unreadable",
-        ));
-    }
     let dir = namespace_dir(root, &fence.target)?;
+    let current = root_witness(&dir).await;
+    if current.is_none() || current != fence.epoch.root_witness {
+        return Err(fence_invalidated(key, "target root was replaced or is unreadable"));
+    }
     match marker_state(&dir).await {
         NamespaceState::Initialised { id } if id == fence.namespace => Ok(()),
         _ => Err(fence_invalidated(key, "namespace marker changed")),

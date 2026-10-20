@@ -30,7 +30,8 @@ provider evidence. Neither is an admission, custody or write-authority decision.
 | `observe_namespace(target, scan)` | Read-only. It never creates, repairs or deletes anything. |
 | `initialise_namespace(target, proposed)` | Explicit. One create-if-absent of the marker, then a validated read-back. |
 | `observe_capacity_domain()` | Read-only. |
-| `put_blob_fenced(key, body, options, fence)` | Writes only while the fence still matches. |
+| `put_blob_fenced(key, body, options, fence)` | Overwriting write, only while the fence still matches. `UnsupportedOperation` on SMB. |
+| `put_blob_if_not_exists_fenced(key, body, options, fence)` | Create-only write while the fence still matches. `Ok(None)` means the key already existed and nothing was written. |
 
 `new`, `connect`, `probe`, listing, reads and capacity paths never write a marker.
 
@@ -74,7 +75,7 @@ replacement.
 | Provider | Publication | Durability claim |
 | --- | --- | --- |
 | Local | Write and `fsync` `.graphql-orm-namespace.publishing`, hard-link it to the marker (fails if present), `fsync` the parent directory, then remove the temporary file. | Durable after the directory `fsync` on Unix. Weaker elsewhere. |
-| SMB | `FILE_CREATE` at the marker name, held delete-on-close until flushed, then close. | The server's flush semantics only. |
+| SMB | Exclusive `FILE_CREATE` at the marker name, write every byte, flush, then close. A collision means another writer won, and the result is read back. A crash mid-write leaves a partial marker, which reads as `Conflict`, never as absence. | The server's flush semantics only. |
 | S3 | `PutObject` with `If-None-Match: *`. A 412 means another writer won, and the result is read back. | The provider's acknowledgement. |
 
 The ordinary `put_blob_if_not_exists` path is not reused for markers.
@@ -86,7 +87,16 @@ The ordinary `put_blob_if_not_exists` path is not reused for markers.
   - Local: the filesystem holding the root (same device).
   - SMB: the share root.
   - S3: the bucket root.
-- **Nested scans** are bounded by depth, pages, keys and time.
+- **Nested scans** are bounded by depth, pages, keys, bytes held, results
+  returned and time.
+- **Limits are validated, never clamped.** `observe_namespace` rejects a scan
+  whose limits exceed `MAX_SCAN_DEPTH` (64), `MAX_SCAN_ITEMS` (pages or keys,
+  10 000 000), `MAX_SCAN_BYTES` (64 MiB), `MAX_SCAN_RESULTS` (100 000) or
+  `MAX_SCAN_DURATION` (600 s) with `PreconditionFailed`, before any I/O.
+- **One deadline per scan.** `max_duration` starts when the scan starts. Every
+  directory read, entry, listing page and marker read awaits only the remaining
+  time, so a single wide directory or a slow provider still stops on time.
+- Reaching any limit reports `Truncated { limit }`, naming the limit.
 - Every scan reports a `ScanCompleteness` value: `Complete`, `Truncated`,
   `Denied`, `Unsupported` or `NotRequested`. Only `Complete` with no markers is
   evidence of absence.
@@ -104,11 +114,13 @@ equivalence:
 | Equivalence | Provider | Rule |
 | --- | --- | --- |
 | `Exact` | S3 | Byte-exact. |
-| `CaseFolding` | Local (roots may be case-insensitive) | Case-folded, with trailing dots and spaces trimmed. |
+| `CaseFolding` | Local on non-Windows hosts (roots may be case-insensitive) | Case-folded, with trailing dots and spaces trimmed. |
+| `Windows` | Local on Windows hosts | As SMB below. |
 | `Windows` | SMB | Case-folded and trimmed. Any `:` (alternate data stream) is refused. 8.3 short-name forms such as `GRAPHQ~1`, which may resolve to a reserved name, are refused as unprovable. |
 
 Markers are hidden from ordinary listings. Hiding never turns a partial scan
-into a negative.
+into a negative. The local temporary-file sweep never enters or removes
+anything under a reserved name.
 
 ## Domain facts and equality
 
@@ -135,14 +147,25 @@ different physical stores.
 ## Fences
 
 Observations carry an `ObservationEpoch`: the backend instance, the connection
-generation and a root witness. `put_blob_fenced` re-validates before writing and
-returns a non-retryable `PreconditionFailed` ("namespace fence invalidated").
-Callers must re-observe.
+generation and a witness of the observed **target** root (not the store root).
+A fence binds a target, a namespace ID and that epoch.
+
+Every fenced write first requires the key to lie inside the fence's target, at
+a component boundary: for `SubPrefix("a")`, `a/x` is inside, while `a`,
+`a-sibling/x` and `b/x` are refused. `Root` contains every key. It then
+re-validates the epoch and the marker, and returns a non-retryable
+`PreconditionFailed` ("namespace fence invalidated") on any mismatch. Callers
+must re-observe.
 
 | Provider | What the fence re-validates | Residual risk |
 | --- | --- | --- |
-| Local | Root device/inode and the marker. | A root replacement between the check and the write is not excluded. |
-| SMB | The reconnect generation, root file identity and the marker. | A reconnect after the check is not excluded. |
-| S3 | The marker only (configuration-only). | Endpoint aliasing and bucket recreation are undetectable. |
+| Local | Backend instance, target directory identity (device and inode on Unix) and the marker. A target replaced by a directory with a copied marker is refused. | Check-then-act: a replacement between the check and the write is not excluded. |
+| SMB | Backend instance, connection generation, target directory identity (volume object ID or `none`, volume serial and file ID) and the marker. The fenced create never reconnects: the generation is checked again before parent creation, before the create, and at the publication point, and any reconnect fails the write. | Overwriting fenced writes are `UnsupportedOperation`, because a rename cannot be bound to the session. |
+| S3 | Backend instance and the marker only (configuration-only). | Endpoint aliasing, bucket recreation and concurrent marker replacement are undetectable. |
+
+`put_blob_if_not_exists_fenced` never overwrites. If it returns `Ok(None)`,
+read the existing object and compare it with your own body. If the outcome is
+unknown (a retryable or ambiguous error), never resend a different body under
+the same key; observe the key first.
 
 No atomic remote exclusion is claimed.

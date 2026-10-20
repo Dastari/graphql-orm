@@ -20,6 +20,10 @@ supersedes: []
   data streams.
 - Initialisation is an explicit write. Call it only under the consumer's own
   provider-write authorisation.
+- `AncestorScan` and `NestedScan` literals must set the new `max_duration`,
+  `max_bytes` and `max_results` fields. Out-of-range limits are rejected.
+- On SMB, use `put_blob_if_not_exists_fenced`; the overwriting `put_blob_fenced`
+  is `UnsupportedOperation`.
 
 ## 0.7.4 to 0.7.5: maintained protocol-validation package identity
 

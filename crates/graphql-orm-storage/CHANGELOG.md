@@ -25,6 +25,17 @@ supersedes: []
   equivalence (case folding, trailing dots and spaces, SMB streams and short
   names), and listings hide them. SMB keys containing `:` are now rejected,
   because they address alternate data streams.
+- Added `BlobStore::put_blob_if_not_exists_fenced`, a create-only fenced write.
+  Fenced writes require the key to lie inside the fence's target, and the
+  epoch witnesses the observed target root. On SMB the create is session-bound
+  and never reconnects, and the overwriting `put_blob_fenced` is
+  `UnsupportedOperation`.
+- `AncestorScan` gains `max_duration`, and `NestedScan` gains `max_bytes` and
+  `max_results`. Scan limits are validated against the new `MAX_SCAN_*`
+  constants, and one deadline bounds every await of a scan.
+- Local stores on Windows hosts use the `Windows` key equivalence. The local
+  temporary-file sweep skips reserved names. SMB marker publication no longer
+  uses delete-on-close.
 - No storage key, object format or persisted-data migration is required for
   existing data.
 

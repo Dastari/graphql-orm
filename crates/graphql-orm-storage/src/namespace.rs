@@ -140,21 +140,122 @@ pub struct TopologyScan {
 /// Ancestor scan limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AncestorScan {
-    /// Maximum number of ancestor levels to inspect.
+    /// Maximum number of ancestor levels to inspect (at most [`MAX_SCAN_DEPTH`]).
     pub max_depth: usize,
+    /// Wall-clock budget for the whole ancestor scan (at most [`MAX_SCAN_DURATION`]).
+    pub max_duration: Duration,
 }
 
 /// Nested scan limits. Every limit is enforced; reaching one reports `Truncated`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NestedScan {
-    /// Maximum directory or prefix depth below the root.
+    /// Maximum directory or prefix depth below the root (at most [`MAX_SCAN_DEPTH`]).
     pub max_depth: usize,
     /// Maximum provider listing pages or directory reads.
     pub max_pages: usize,
     /// Maximum keys or directory entries examined.
     pub max_keys: usize,
-    /// Wall-clock budget for the whole scan.
+    /// Maximum bytes of marker bodies plus recorded paths held by the scan.
+    pub max_bytes: usize,
+    /// Maximum number of found markers returned.
+    pub max_results: usize,
+    /// Wall-clock budget for the whole scan, enforced on every await.
     pub max_duration: Duration,
+}
+
+/// Largest accepted scan depth.
+pub const MAX_SCAN_DEPTH: usize = 64;
+/// Largest accepted page or key budget.
+pub const MAX_SCAN_ITEMS: usize = 10_000_000;
+/// Largest accepted byte budget.
+pub const MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
+/// Largest accepted result budget.
+pub const MAX_SCAN_RESULTS: usize = 100_000;
+/// Largest accepted scan duration.
+pub const MAX_SCAN_DURATION: Duration = Duration::from_secs(600);
+
+impl TopologyScan {
+    /// Rejects unreasonable or overflowing limits instead of clamping them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::PreconditionFailed`] for any limit above its maximum.
+    pub fn validate(&self) -> Result<(), StorageError> {
+        let invalid = |condition: &str| StorageError::PreconditionFailed {
+            key: String::new(),
+            condition: format!("topology scan limit out of range: {condition}"),
+        };
+        if let Some(ancestors) = self.ancestors {
+            if ancestors.max_depth > MAX_SCAN_DEPTH {
+                return Err(invalid("ancestor max_depth"));
+            }
+            if ancestors.max_duration > MAX_SCAN_DURATION {
+                return Err(invalid("ancestor max_duration"));
+            }
+        }
+        if let Some(nested) = self.nested {
+            if nested.max_depth > MAX_SCAN_DEPTH {
+                return Err(invalid("nested max_depth"));
+            }
+            if nested.max_pages > MAX_SCAN_ITEMS || nested.max_keys > MAX_SCAN_ITEMS {
+                return Err(invalid("nested max_pages/max_keys"));
+            }
+            if nested.max_bytes > MAX_SCAN_BYTES {
+                return Err(invalid("nested max_bytes"));
+            }
+            if nested.max_results > MAX_SCAN_RESULTS {
+                return Err(invalid("nested max_results"));
+            }
+            if nested.max_duration > MAX_SCAN_DURATION {
+                return Err(invalid("nested max_duration"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Monotonic deadline shared by every await of one scan.
+#[derive(Clone, Copy, Debug)]
+#[cfg(any(feature = "local", feature = "s3", feature = "smb"))]
+pub(crate) struct ScanDeadline(std::time::Instant);
+
+#[cfg(any(feature = "local", feature = "s3", feature = "smb"))]
+impl ScanDeadline {
+    pub(crate) fn after(budget: Duration) -> Self {
+        Self(std::time::Instant::now() + budget)
+    }
+
+    /// Remaining time, or `None` once the deadline has passed.
+    pub(crate) fn remaining(&self) -> Option<Duration> {
+        self.0.checked_duration_since(std::time::Instant::now()).filter(|left| !left.is_zero())
+    }
+
+    /// Runs one await within the remaining budget; `None` means the deadline was reached.
+    pub(crate) async fn bound<F: std::future::Future>(&self, future: F) -> Option<F::Output> {
+        let remaining = self.remaining()?;
+        tokio::time::timeout(remaining, future).await.ok()
+    }
+}
+
+/// Requires a fenced data key to lie inside the fence's target namespace, at
+/// an exact component boundary. Root targets contain every key of the store.
+///
+/// # Errors
+///
+/// Returns a non-retryable fence invalidation for keys outside the target.
+#[cfg_attr(not(any(feature = "local", feature = "s3", feature = "smb")), allow(dead_code))]
+pub(crate) fn require_key_in_target(key: &str, target: &NamespaceTarget) -> Result<(), StorageError> {
+    match target {
+        NamespaceTarget::Root => Ok(()),
+        NamespaceTarget::SubPrefix(prefix) => {
+            let inside = key.strip_prefix(prefix.as_str()).is_some_and(|rest| rest.starts_with('/') && rest.len() > 1);
+            if inside {
+                Ok(())
+            } else {
+                Err(fence_invalidated(key, "key is outside the fenced target namespace"))
+            }
+        }
+    }
 }
 
 /// Completeness of a topology scan. Only `Complete` is evidence of absence.
@@ -227,7 +328,9 @@ pub struct ObservationEpoch {
     pub backend_instance: Uuid,
     /// Provider reconnect counter, where the provider has one (SMB); otherwise 0.
     pub connection_generation: u64,
-    /// Redaction-safe witness of the opened root, where available.
+    /// Redaction-safe witness of the observed TARGET root (the configured
+    /// root or the selected sub-prefix directory), where the provider has one.
+    /// Fences compare it with the target root at operation time.
     pub root_witness: Option<String>,
 }
 

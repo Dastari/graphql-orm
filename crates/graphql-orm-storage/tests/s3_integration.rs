@@ -407,3 +407,75 @@ async fn s3_namespace_foreign_marker_is_conflict_and_reserved_keys_never_reach_t
     assert_eq!(log.len(), 2);
     assert!(log.iter().all(|line| line.starts_with("GET ")));
 }
+
+#[tokio::test]
+async fn s3_fences_and_scan_limits_fail_before_any_request() {
+    use graphql_orm_storage::{
+        AncestorScan, NamespaceFence, NamespaceId, NamespaceTarget, NestedScan, TopologyScan,
+    };
+    use std::time::Duration;
+
+    // Nothing listens here; every assertion below must fail locally.
+    let store = namespace_backend("http://127.0.0.1:9".to_string());
+    let fence = NamespaceFence {
+        target: NamespaceTarget::SubPrefix("a".to_string()),
+        namespace: NamespaceId::new_random(),
+        epoch: store.observation_epoch(),
+    };
+    for outside in ["b/object", "a-sibling/object", "a", "object"] {
+        let body = || StorageByteStream::from_bytes(Bytes::from_static(b"x"));
+        assert!(
+            matches!(
+                store
+                    .put_blob_fenced(outside, body(), BlobPutOptions::default(), &fence)
+                    .await,
+                Err(StorageError::PreconditionFailed { .. })
+            ),
+            "{outside}"
+        );
+        assert!(
+            matches!(
+                store
+                    .put_blob_if_not_exists_fenced(outside, body(), BlobPutOptions::default(), &fence)
+                    .await,
+                Err(StorageError::PreconditionFailed { .. })
+            ),
+            "{outside}"
+        );
+    }
+    let other_instance = NamespaceFence {
+        epoch: namespace_backend("http://127.0.0.1:9".to_string()).observation_epoch(),
+        ..fence.clone()
+    };
+    assert!(matches!(
+        store
+            .put_blob_if_not_exists_fenced(
+                "a/object",
+                StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+                BlobPutOptions::default(),
+                &other_instance,
+            )
+            .await,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+    let overflowing = TopologyScan {
+        ancestors: Some(AncestorScan {
+            max_depth: usize::MAX,
+            max_duration: Duration::from_secs(1),
+        }),
+        nested: Some(NestedScan {
+            max_depth: 1,
+            max_pages: usize::MAX,
+            max_keys: usize::MAX,
+            max_bytes: usize::MAX,
+            max_results: usize::MAX,
+            max_duration: Duration::MAX,
+        }),
+    };
+    assert!(matches!(
+        store
+            .observe_namespace(&NamespaceTarget::Root, &overflowing)
+            .await,
+        Err(StorageError::PreconditionFailed { .. })
+    ));
+}

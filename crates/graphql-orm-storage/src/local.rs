@@ -19,7 +19,7 @@ use crate::{
     NamespaceInitialisation, NamespaceObservation, NamespaceTarget, ObjectContentRange, ObjectInfo,
     ObjectMetadata, ObjectRangeBody, ObjectStorage, ObservationEpoch, StorageBackend,
     StorageByteStream, StorageError, StorageObjectBody, StoredObject, StreamingObjectStore,
-    TopologyScan, collect_storage_stream, is_reserved_key, validate_blob_key,
+    TopologyScan, collect_storage_stream, is_reserved_component, is_reserved_key, validate_blob_key,
     validate_object_bucket, validate_unreserved_key,
 };
 
@@ -69,6 +69,11 @@ impl LocalStorageBackend {
         let mut stack = vec![self.root.clone()];
 
         while let Some(path) = stack.pop() {
+            // Reserved marker names (and anything beneath one) are never
+            // traversed or removed by the sweep.
+            if path != self.root && self.is_reserved_path(&path) {
+                continue;
+            }
             let metadata = match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -92,6 +97,16 @@ impl LocalStorageBackend {
         }
 
         Ok(removed)
+    }
+
+    fn is_reserved_path(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root)
+            .map(|relative| {
+                relative.components().any(|component| {
+                    is_reserved_component(&component.as_os_str().to_string_lossy(), LOCAL_KEY_EQUIVALENCE)
+                })
+            })
+            .unwrap_or(true)
     }
 
     fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
@@ -177,6 +192,20 @@ impl BlobStore for LocalStorageBackend {
         // Residual race: the root can be replaced between this check and the write.
         crate::local_namespace::check_fence(&self.root, self.instance, fence, key).await?;
         self.put_blob(key, body, options).await
+    }
+
+    async fn put_blob_if_not_exists_fenced(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        options: BlobPutOptions,
+        fence: &NamespaceFence,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        self.path_for(key)?;
+        // The create itself is atomic (temporary file plus hard link). The
+        // root can still be replaced between the fence check and the create.
+        crate::local_namespace::check_fence(&self.root, self.instance, fence, key).await?;
+        self.put_blob_if_not_exists(key, body, options).await
     }
 
     async fn put_blob(

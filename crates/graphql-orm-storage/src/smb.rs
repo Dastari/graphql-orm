@@ -27,7 +27,8 @@ use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
-use crate::namespace::fence_invalidated;
+use crate::namespace::{ScanDeadline, fence_invalidated, require_key_in_target};
+use crate::AncestorScan;
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
@@ -891,12 +892,14 @@ impl SmbStorageBackend {
         key: &str,
         body: StorageByteStream,
         exclusive: bool,
+        fence_generation: Option<u64>,
     ) -> Result<BlobWriteOutcome, StorageError> {
         let mut upload = UploadDiagnosticGuard::new(Arc::clone(&self.inner));
         let _permit = self.transfer_permit().await?;
         let args = write_create_args(exclusive);
         let (file, generation, request_limit) =
-            self.create_write_file(key, &args, !exclusive).await?;
+            self.create_write_file(key, &args, !exclusive, fence_generation)
+                .await?;
         let target = if exclusive {
             WriteCleanupTarget::ExclusiveHandle
         } else {
@@ -915,7 +918,7 @@ impl SmbStorageBackend {
             )
             .await
         {
-            if error.is_retryable() {
+            if error.is_retryable() && fence_generation.is_none() {
                 let _ = self.reconnect_after(generation).await;
             }
             cleanup.cleanup().await;
@@ -945,7 +948,7 @@ impl SmbStorageBackend {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                if error.is_retryable() {
+                if error.is_retryable() && fence_generation.is_none() {
                     let _ = self.reconnect_after(generation).await;
                 }
                 cleanup.cleanup().await;
@@ -961,11 +964,19 @@ impl SmbStorageBackend {
         };
 
         if let Err(error) = self.with_io_timeout("flush", cleanup.file().flush()).await {
-            if error.is_retryable() {
+            if error.is_retryable() && fence_generation.is_none() {
                 let _ = self.reconnect_after(generation).await;
             }
             cleanup.cleanup().await;
             return Err(error);
+        }
+        // Publication point: the delete-on-close guard is cleared only while the
+        // fenced session is still the current one.
+        if let Some(expected) = fence_generation
+            && self.client_snapshot().await.generation != expected
+        {
+            cleanup.cleanup().await;
+            return Err(fence_invalidated(key, "the SMB session reconnected before publication"));
         }
         if let Err(error) = self
             .with_timeout(
@@ -976,14 +987,14 @@ impl SmbStorageBackend {
             )
             .await
         {
-            if error.is_retryable() {
+            if error.is_retryable() && fence_generation.is_none() {
                 let _ = self.reconnect_after(generation).await;
             }
             cleanup.cleanup().await;
             return Err(error);
         }
         if let Err(error) = self.with_timeout("close", cleanup.file().close()).await {
-            if error.is_retryable() {
+            if error.is_retryable() && fence_generation.is_none() {
                 let _ = self.reconnect_after(generation).await;
             }
             cleanup.cleanup().await;
@@ -1006,11 +1017,21 @@ impl SmbStorageBackend {
         key: &str,
         args: &FileCreateArgs,
         replay_safe: bool,
+        fence_generation: Option<u64>,
     ) -> Result<(File, u64, usize), StorageError> {
+        let fenced_session_changed = |generation: u64| {
+            fence_generation.is_some_and(|expected| expected != generation)
+        };
         for path_attempt in 0..2 {
+            if fenced_session_changed(self.client_snapshot().await.generation) {
+                return Err(fence_invalidated(key, "the SMB session reconnected before create"));
+            }
             self.ensure_parent_directories(key).await?;
             let path = self.remote_path(key)?;
             let snapshot = self.client_snapshot().await;
+            if fenced_session_changed(snapshot.generation) {
+                return Err(fence_invalidated(key, "the SMB session reconnected before create"));
+            }
             let result = self
                 .with_timeout("create", snapshot.client.create_file(&path, args))
                 .await;
@@ -1033,6 +1054,10 @@ impl SmbStorageBackend {
                 }
                 Err(error) if path_attempt == 0 && is_not_found(&error) => {
                     self.inner.directories.clear().await;
+                }
+                // Under a fence the session is never repaired or replayed.
+                Err(error) if error.is_retryable() && fence_generation.is_some() => {
+                    return Err(error);
                 }
                 Err(error) if error.is_retryable() => {
                     self.reconnect_after(snapshot.generation).await?;
@@ -1646,13 +1671,14 @@ impl BlobStore for SmbStorageBackend {
         target: &NamespaceTarget,
         scan: &TopologyScan,
     ) -> Result<NamespaceObservation, StorageError> {
+        scan.validate()?;
         let observed_at = OffsetDateTime::now_utc();
         let directory = self.namespace_directory(target)?;
         let state = self
             .read_marker(&join_share_path(&directory, NAMESPACE_MARKER))
             .await;
         let ancestors = match scan.ancestors {
-            Some(ancestors) => self.scan_ancestors(&directory, ancestors.max_depth).await,
+            Some(ancestors) => self.scan_ancestors(&directory, ancestors).await,
             None => ScanResult::not_requested(),
         };
         let nested = match scan.nested {
@@ -1670,7 +1696,8 @@ impl BlobStore for SmbStorageBackend {
             root_location,
             ancestors,
             nested,
-            epoch: self.namespace_epoch().await,
+            // The witness is the TARGET directory, including its volume object ID.
+            epoch: self.namespace_epoch(&directory).await,
             observed_at,
         })
     }
@@ -1696,20 +1723,8 @@ impl BlobStore for SmbStorageBackend {
         if let Some(result) = settled_initialisation(existing, proposed) {
             return Ok(result);
         }
-        // FILE_CREATE at the marker name with delete-on-close until flushed.
-        // Durability is the server's flush semantics; nothing stronger is claimed.
-        match self
-            .write_file(
-                &relative_key,
-                StorageByteStream::from_bytes(encode_marker(proposed)),
-                true,
-            )
-            .await
-        {
-            Ok(_) => {}
-            Err(error) if is_collision(&error) => {}
-            Err(error) => return Err(error),
-        }
+        self.publish_marker(&relative_key, &encode_marker(proposed))
+            .await?;
         match self.read_marker(&marker).await {
             NamespaceState::Initialised { id } if id == proposed => {
                 Ok(NamespaceInitialisation::Created(id))
@@ -1735,33 +1750,61 @@ impl BlobStore for SmbStorageBackend {
         Ok(CapacityDomainObservation {
             facts,
             state: DomainState::Partial { missing },
-            epoch: self.namespace_epoch().await,
+            epoch: self.namespace_epoch(&directory).await,
             observed_at,
         })
     }
 
+    /// Overwriting fenced writes are Unsupported on SMB: they publish through
+    /// a temporary file and a rename that cannot be bound to one session.
+    /// Use `put_blob_if_not_exists_fenced`, which is session-bound.
     async fn put_blob_fenced(
         &self,
         key: &str,
-        body: StorageByteStream,
-        options: BlobPutOptions,
-        fence: &NamespaceFence,
+        _body: StorageByteStream,
+        _options: BlobPutOptions,
+        _fence: &NamespaceFence,
     ) -> Result<BlobWriteOutcome, StorageError> {
         validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
+        Err(StorageError::UnsupportedOperation {
+            operation: "overwriting fenced write on SMB (rename cannot be session-bound)"
+                .to_string(),
+        })
+    }
+
+    /// Session-bound conditional publication.
+    ///
+    /// The fence's connection generation must equal the current one when the
+    /// fence is checked, before the parent directories and the exclusive
+    /// create, and again at the publication point (clearing delete-on-close).
+    /// The write uses the handle of that session only. Under a fence the
+    /// session is never repaired or replayed: any change or retryable failure
+    /// returns an error, and the outcome may be unknown. The external
+    /// limitation remains that a server-side retarget of the share root
+    /// between checks is not excluded.
+    async fn put_blob_if_not_exists_fenced(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        _options: BlobPutOptions,
+        fence: &NamespaceFence,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
+        require_key_in_target(key, &fence.target)?;
         if fence.epoch.backend_instance != self.inner.instance {
             return Err(fence_invalidated(key, "different backend instance"));
         }
-        let current = self.namespace_epoch().await;
+        let directory = self.namespace_directory(&fence.target)?;
+        let current = self.namespace_epoch(&directory).await;
         if current.connection_generation != fence.epoch.connection_generation {
             return Err(fence_invalidated(key, "the SMB session reconnected"));
         }
         if current.root_witness.is_none() || current.root_witness != fence.epoch.root_witness {
             return Err(fence_invalidated(
                 key,
-                "configured root was replaced or is unreadable",
+                "target root was replaced or is unreadable",
             ));
         }
-        let directory = self.namespace_directory(&fence.target)?;
         match self
             .read_marker(&join_share_path(&directory, NAMESPACE_MARKER))
             .await
@@ -1769,8 +1812,14 @@ impl BlobStore for SmbStorageBackend {
             NamespaceState::Initialised { id } if id == fence.namespace => {}
             _ => return Err(fence_invalidated(key, "namespace marker changed")),
         }
-        // Residual race: a reconnect after this check is not excluded.
-        self.put_blob(key, body, options).await
+        match self
+            .write_file(key, body, true, Some(fence.epoch.connection_generation))
+            .await
+        {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(error) if is_collision(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn put_blob(
@@ -1781,7 +1830,7 @@ impl BlobStore for SmbStorageBackend {
     ) -> Result<BlobWriteOutcome, StorageError> {
         validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
         let temp = temp_key(key)?;
-        let result = self.write_file(&temp, body, false).await;
+        let result = self.write_file(&temp, body, false, None).await;
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -1805,7 +1854,7 @@ impl BlobStore for SmbStorageBackend {
         _options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         validate_unreserved_key(key, SMB_KEY_EQUIVALENCE)?;
-        match self.write_file(key, body, true).await {
+        match self.write_file(key, body, true, None).await {
             Ok(outcome) => Ok(Some(outcome)),
             Err(error) if is_collision(&error) => Ok(None),
             Err(error) => Err(error),
@@ -2066,8 +2115,10 @@ struct SmbDirectoryIdentity {
 impl SmbDirectoryIdentity {
     fn witness(&self) -> String {
         format!(
-            "smb:serial={:x};file={:x}",
-            self.volume_serial, self.file_id
+            "smb:volume_object={};serial={:x};file={:x}",
+            self.volume_object_id.as_deref().unwrap_or("none"),
+            self.volume_serial,
+            self.file_id
         )
     }
 
@@ -2311,16 +2362,13 @@ impl SmbStorageBackend {
         ))
     }
 
-    async fn namespace_epoch(&self) -> ObservationEpoch {
+    async fn namespace_epoch(&self, directory: &str) -> ObservationEpoch {
         let generation = self.client_snapshot().await.generation;
-        let witness = match self.namespace_directory(&NamespaceTarget::Root) {
-            Ok(directory) => self
-                .directory_identity(&directory)
-                .await
-                .ok()
-                .map(|identity| identity.witness()),
-            Err(_) => None,
-        };
+        let witness = self
+            .directory_identity(directory)
+            .await
+            .ok()
+            .map(|identity| identity.witness());
         ObservationEpoch {
             backend_instance: self.inner.instance,
             connection_generation: generation,
@@ -2328,8 +2376,10 @@ impl SmbStorageBackend {
         }
     }
 
-    /// Point lookups of markers at each parent directory, up to the share root.
-    async fn scan_ancestors(&self, directory: &str, max_depth: usize) -> ScanResult {
+    /// Point lookups of markers at each parent directory, up to the share
+    /// root, each bounded by the remaining original deadline.
+    async fn scan_ancestors(&self, directory: &str, scan: AncestorScan) -> ScanResult {
+        let deadline = ScanDeadline::after(scan.max_duration);
         let mut found = Vec::new();
         let mut completeness = ScanCompleteness::Complete;
         let mut components: Vec<&str> = if directory.is_empty() {
@@ -2339,17 +2389,23 @@ impl SmbStorageBackend {
         };
         let mut level = 0_usize;
         while !components.is_empty() {
-            level += 1;
-            if level > max_depth {
+            if level == scan.max_depth {
                 completeness = ScanCompleteness::Truncated {
                     limit: "max_depth".to_string(),
                 };
                 break;
             }
+            level += 1;
             components.pop();
-            let state = self
-                .read_marker(&join_share_path(&components.join("/"), NAMESPACE_MARKER))
-                .await;
+            let Some(state) = deadline
+                .bound(self.read_marker(&join_share_path(&components.join("/"), NAMESPACE_MARKER)))
+                .await
+            else {
+                completeness = ScanCompleteness::Truncated {
+                    limit: "max_duration".to_string(),
+                };
+                break;
+            };
             if let NamespaceState::Unknown { reason } = &state {
                 completeness = ScanCompleteness::Denied {
                     reason: reason.clone(),
@@ -2366,6 +2422,59 @@ impl SmbStorageBackend {
             completeness,
             found,
         }
+    }
+
+    /// Marker-specific publication: an exclusive FILE_CREATE at the marker
+    /// name, a bounded write, a flush and a close, with NO delete-on-close
+    /// guard. A marker another observer could have read is therefore never
+    /// deleted. Any failure after the create leaves the outcome unknown; a
+    /// partial body stays visible as `Conflict`. Recovery is a retry with the
+    /// SAME identity. Durability is the server's flush semantics only.
+    async fn publish_marker(&self, relative_key: &str, bytes: &[u8]) -> Result<(), StorageError> {
+        let args = write_create_args(true);
+        let (file, _generation, _limit) =
+            match self.create_write_file(relative_key, &args, false, None).await {
+                Ok(created) => created,
+                // Another writer created it first; the caller reads it back.
+                Err(error) if is_collision(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            };
+        let mut written = 0_usize;
+        let mut failure = None;
+        while written < bytes.len() {
+            match self
+                .with_io_timeout(
+                    "marker_write",
+                    file.write_block(&bytes[written..], written as u64, None),
+                )
+                .await
+            {
+                Ok(0) => {
+                    failure = Some(remote_error(
+                        StorageProviderErrorKind::Protocol,
+                        "marker_write",
+                        "server accepted no marker bytes",
+                        false,
+                    ));
+                    break;
+                }
+                Ok(count) => written += count,
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if failure.is_none()
+            && let Err(error) = self.with_io_timeout("marker_flush", file.flush()).await
+        {
+            failure = Some(error);
+        }
+        let closed = self.with_timeout("close", file.close()).await;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        closed
     }
 }
 
