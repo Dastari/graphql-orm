@@ -211,14 +211,20 @@ fn compare(report: &str, golden: &str) {
         return;
     }
     let expected = std::fs::read_to_string(&path).unwrap();
-    for (line, (actual, expected)) in report.lines().zip(expected.lines()).enumerate() {
+    // Goldens were captured with `runtime-graphql`; without that feature the
+    // report has no SDL lines, and every other line must still match exactly.
+    let expected = expected
+        .lines()
+        .filter(|line| cfg!(feature = "runtime-graphql") || !line.starts_with("sdl="))
+        .collect::<Vec<_>>();
+    let actual = report.lines().collect::<Vec<_>>();
+    for (line, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
         assert_eq!(actual, expected, "golden {golden} line {}", line + 1);
     }
-    assert_eq!(
-        report.lines().count(),
-        expected.lines().count(),
-        "golden {golden}"
-    );
+    assert_eq!(actual.len(), expected.len(), "golden {golden}");
+    if cfg!(feature = "runtime-graphql") {
+        assert!(actual.iter().any(|line| line.starts_with("sdl=")));
+    }
 }
 
 #[cfg(feature = "sqlite")]
