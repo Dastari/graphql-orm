@@ -27,8 +27,8 @@ use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
-use crate::namespace::{ScanDeadline, fence_invalidated, require_key_in_target};
 use crate::AncestorScan;
+use crate::namespace::{ScanDeadline, fence_invalidated, require_key_in_target};
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
@@ -897,9 +897,9 @@ impl SmbStorageBackend {
         let mut upload = UploadDiagnosticGuard::new(Arc::clone(&self.inner));
         let _permit = self.transfer_permit().await?;
         let args = write_create_args(exclusive);
-        let (file, generation, request_limit) =
-            self.create_write_file(key, &args, !exclusive, fence_generation)
-                .await?;
+        let (file, generation, request_limit) = self
+            .create_write_file(key, &args, !exclusive, fence_generation)
+            .await?;
         let target = if exclusive {
             WriteCleanupTarget::ExclusiveHandle
         } else {
@@ -976,7 +976,10 @@ impl SmbStorageBackend {
             && self.client_snapshot().await.generation != expected
         {
             cleanup.cleanup().await;
-            return Err(fence_invalidated(key, "the SMB session reconnected before publication"));
+            return Err(fence_invalidated(
+                key,
+                "the SMB session reconnected before publication",
+            ));
         }
         if let Err(error) = self
             .with_timeout(
@@ -1019,18 +1022,23 @@ impl SmbStorageBackend {
         replay_safe: bool,
         fence_generation: Option<u64>,
     ) -> Result<(File, u64, usize), StorageError> {
-        let fenced_session_changed = |generation: u64| {
-            fence_generation.is_some_and(|expected| expected != generation)
-        };
+        let fenced_session_changed =
+            |generation: u64| fence_generation.is_some_and(|expected| expected != generation);
         for path_attempt in 0..2 {
             if fenced_session_changed(self.client_snapshot().await.generation) {
-                return Err(fence_invalidated(key, "the SMB session reconnected before create"));
+                return Err(fence_invalidated(
+                    key,
+                    "the SMB session reconnected before create",
+                ));
             }
             self.ensure_parent_directories(key).await?;
             let path = self.remote_path(key)?;
             let snapshot = self.client_snapshot().await;
             if fenced_session_changed(snapshot.generation) {
-                return Err(fence_invalidated(key, "the SMB session reconnected before create"));
+                return Err(fence_invalidated(
+                    key,
+                    "the SMB session reconnected before create",
+                ));
             }
             let result = self
                 .with_timeout("create", snapshot.client.create_file(&path, args))
@@ -2432,13 +2440,15 @@ impl SmbStorageBackend {
     /// SAME identity. Durability is the server's flush semantics only.
     async fn publish_marker(&self, relative_key: &str, bytes: &[u8]) -> Result<(), StorageError> {
         let args = write_create_args(true);
-        let (file, _generation, _limit) =
-            match self.create_write_file(relative_key, &args, false, None).await {
-                Ok(created) => created,
-                // Another writer created it first; the caller reads it back.
-                Err(error) if is_collision(&error) => return Ok(()),
-                Err(error) => return Err(error),
-            };
+        let (file, _generation, _limit) = match self
+            .create_write_file(relative_key, &args, false, None)
+            .await
+        {
+            Ok(created) => created,
+            // Another writer created it first; the caller reads it back.
+            Err(error) if is_collision(&error) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let mut written = 0_usize;
         let mut failure = None;
         while written < bytes.len() {

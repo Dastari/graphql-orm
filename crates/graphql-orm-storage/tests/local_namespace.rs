@@ -408,7 +408,6 @@ async fn capacity_domain_facts_are_partial_and_scoped() {
     }
 }
 
-
 fn scan_with(nested: NestedScan) -> TopologyScan {
     TopologyScan {
         ancestors: None,
@@ -435,7 +434,10 @@ async fn fenced_keys_must_stay_inside_the_target_and_its_witnessed_root() {
     let target = NamespaceTarget::SubPrefix("a".to_string());
     let id = NamespaceId::new_random();
     store.initialise_namespace(&target, id).await.expect("init");
-    let observed = store.observe_namespace(&target, &TopologyScan::default()).await.expect("observe");
+    let observed = store
+        .observe_namespace(&target, &TopologyScan::default())
+        .await
+        .expect("observe");
     let fence = NamespaceFence {
         target: target.clone(),
         namespace: id,
@@ -445,22 +447,38 @@ async fn fenced_keys_must_stay_inside_the_target_and_its_witnessed_root() {
     for outside in ["b/object", "a-sibling/object", "a", "object"] {
         assert!(
             matches!(
-                store.put_blob_fenced(outside, body(), BlobPutOptions::default(), &fence).await,
+                store
+                    .put_blob_fenced(outside, body(), BlobPutOptions::default(), &fence)
+                    .await,
                 Err(StorageError::PreconditionFailed { .. })
             ),
             "{outside}"
         );
-        assert!(store.put_blob_if_not_exists_fenced(outside, body(), BlobPutOptions::default(), &fence).await.is_err());
+        assert!(
+            store
+                .put_blob_if_not_exists_fenced(outside, body(), BlobPutOptions::default(), &fence)
+                .await
+                .is_err()
+        );
     }
-    store.put_blob_fenced("a/object", body(), BlobPutOptions::default(), &fence).await.expect("inside");
+    store
+        .put_blob_fenced("a/object", body(), BlobPutOptions::default(), &fence)
+        .await
+        .expect("inside");
 
     // Replacing the target directory with one carrying a copied marker
     // changes the target-root witness, so the fence is invalidated.
     std::fs::rename(temp.path().join("a"), temp.path().join("a-old")).expect("rename");
     std::fs::create_dir_all(temp.path().join("a")).expect("dir");
-    std::fs::copy(temp.path().join("a-old").join(NAMESPACE_MARKER), temp.path().join("a").join(NAMESPACE_MARKER)).expect("copy");
+    std::fs::copy(
+        temp.path().join("a-old").join(NAMESPACE_MARKER),
+        temp.path().join("a").join(NAMESPACE_MARKER),
+    )
+    .expect("copy");
     assert!(matches!(
-        store.put_blob_fenced("a/after", body(), BlobPutOptions::default(), &fence).await,
+        store
+            .put_blob_fenced("a/after", body(), BlobPutOptions::default(), &fence)
+            .await,
         Err(StorageError::PreconditionFailed { .. })
     ));
     assert!(!temp.path().join("a/after").exists());
@@ -471,24 +489,43 @@ async fn conditional_fenced_publication_never_overwrites() {
     let temp = TempDir::new().expect("temp dir");
     let store = LocalStorageBackend::new(temp.path());
     let id = NamespaceId::new_random();
-    store.initialise_namespace(&NamespaceTarget::Root, id).await.expect("init");
-    let observed = store.observe_namespace(&NamespaceTarget::Root, &TopologyScan::default()).await.expect("observe");
+    store
+        .initialise_namespace(&NamespaceTarget::Root, id)
+        .await
+        .expect("init");
+    let observed = store
+        .observe_namespace(&NamespaceTarget::Root, &TopologyScan::default())
+        .await
+        .expect("observe");
     let fence = NamespaceFence {
         target: NamespaceTarget::Root,
         namespace: id,
         epoch: observed.epoch.clone(),
     };
     let first = store
-        .put_blob_if_not_exists_fenced("data/immutable", StorageByteStream::from_bytes(Bytes::from_static(b"one")), BlobPutOptions::default(), &fence)
+        .put_blob_if_not_exists_fenced(
+            "data/immutable",
+            StorageByteStream::from_bytes(Bytes::from_static(b"one")),
+            BlobPutOptions::default(),
+            &fence,
+        )
         .await
         .expect("first");
     assert!(first.is_some());
     let second = store
-        .put_blob_if_not_exists_fenced("data/immutable", StorageByteStream::from_bytes(Bytes::from_static(b"two")), BlobPutOptions::default(), &fence)
+        .put_blob_if_not_exists_fenced(
+            "data/immutable",
+            StorageByteStream::from_bytes(Bytes::from_static(b"two")),
+            BlobPutOptions::default(),
+            &fence,
+        )
         .await
         .expect("second");
     assert!(second.is_none());
-    assert_eq!(std::fs::read(temp.path().join("data/immutable")).expect("read"), b"one");
+    assert_eq!(
+        std::fs::read(temp.path().join("data/immutable")).expect("read"),
+        b"one"
+    );
 }
 
 #[tokio::test]
@@ -500,7 +537,10 @@ async fn scans_enforce_deadline_byte_result_and_limit_bounds() {
     let store = LocalStorageBackend::new(temp.path());
     for index in 0..3 {
         store
-            .initialise_namespace(&NamespaceTarget::SubPrefix(format!("dir-{index:03}")), NamespaceId::new_random())
+            .initialise_namespace(
+                &NamespaceTarget::SubPrefix(format!("dir-{index:03}")),
+                NamespaceId::new_random(),
+            )
             .await
             .expect("sub");
     }
@@ -511,25 +551,44 @@ async fn scans_enforce_deadline_byte_result_and_limit_bounds() {
         max_duration: Duration::ZERO,
         ..wide_scan()
     };
-    let observed = store.observe_namespace(&root, &scan_with(expired)).await.expect("observe");
-    assert!(matches!(observed.nested.completeness, ScanCompleteness::Truncated { .. }));
+    let observed = store
+        .observe_namespace(&root, &scan_with(expired))
+        .await
+        .expect("observe");
+    assert!(matches!(
+        observed.nested.completeness,
+        ScanCompleteness::Truncated { .. }
+    ));
 
     let bytes = NestedScan {
         max_bytes: 64,
         ..wide_scan()
     };
-    let observed = store.observe_namespace(&root, &scan_with(bytes)).await.expect("observe");
-    assert!(matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_bytes"));
+    let observed = store
+        .observe_namespace(&root, &scan_with(bytes))
+        .await
+        .expect("observe");
+    assert!(
+        matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_bytes")
+    );
 
     let results = NestedScan {
         max_results: 1,
         ..wide_scan()
     };
-    let observed = store.observe_namespace(&root, &scan_with(results)).await.expect("observe");
-    assert!(matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_results"));
+    let observed = store
+        .observe_namespace(&root, &scan_with(results))
+        .await
+        .expect("observe");
+    assert!(
+        matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_results")
+    );
     assert_eq!(observed.nested.found.len(), 1);
 
-    let complete = store.observe_namespace(&root, &scan_with(wide_scan())).await.expect("observe");
+    let complete = store
+        .observe_namespace(&root, &scan_with(wide_scan()))
+        .await
+        .expect("observe");
     assert_eq!(complete.nested.completeness, ScanCompleteness::Complete);
     assert_eq!(complete.nested.found.len(), 3);
 

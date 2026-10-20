@@ -17,6 +17,7 @@ use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
 
+use crate::{AncestorScan, NestedScan};
 use crate::{
     CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState, FactScope,
     FoundNamespace, KeyEquivalence, MAX_NAMESPACE_MARKER_BYTES, NAMESPACE_MARKER,
@@ -25,7 +26,6 @@ use crate::{
     ScanResult, StorageBackend, StorageError, TopologyScan, decode_marker, encode_marker,
     namespace::{ScanDeadline, fence_invalidated, require_key_in_target},
 };
-use crate::{AncestorScan, NestedScan};
 
 /// Local roots may be case-insensitive, so reserved names are case-folded.
 #[cfg(not(windows))]
@@ -229,7 +229,9 @@ async fn scan_ancestors(dir: &Path, scan: AncestorScan) -> ScanResult {
             break;
         };
         if let NamespaceState::Unknown { reason } = &state {
-            completeness = ScanCompleteness::Denied { reason: reason.clone() };
+            completeness = ScanCompleteness::Denied {
+                reason: reason.clone(),
+            };
         }
         if state != NamespaceState::Uninitialised {
             found.push(FoundNamespace {
@@ -239,7 +241,10 @@ async fn scan_ancestors(dir: &Path, scan: AncestorScan) -> ScanResult {
         }
         current = parent;
     }
-    ScanResult { completeness, found }
+    ScanResult {
+        completeness,
+        found,
+    }
 }
 
 #[cfg(not(unix))]
@@ -338,7 +343,9 @@ async fn scan_nested(dir: &Path, scan: NestedScan) -> ScanResult {
             };
             bytes = bytes.saturating_add(MAX_NAMESPACE_MARKER_BYTES);
             if let NamespaceState::Unknown { reason } = &state {
-                completeness = ScanCompleteness::Denied { reason: reason.clone() };
+                completeness = ScanCompleteness::Denied {
+                    reason: reason.clone(),
+                };
             }
             if state != NamespaceState::Uninitialised {
                 if found.len() == scan.max_results {
@@ -354,7 +361,10 @@ async fn scan_nested(dir: &Path, scan: NestedScan) -> ScanResult {
         }
     }
     found.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    ScanResult { completeness, found }
+    ScanResult {
+        completeness,
+        found,
+    }
 }
 
 pub(crate) async fn observe(
@@ -554,7 +564,10 @@ pub(crate) async fn check_fence(
     let dir = namespace_dir(root, &fence.target)?;
     let current = root_witness(&dir).await;
     if current.is_none() || current != fence.epoch.root_witness {
-        return Err(fence_invalidated(key, "target root was replaced or is unreadable"));
+        return Err(fence_invalidated(
+            key,
+            "target root was replaced or is unreadable",
+        ));
     }
     match marker_state(&dir).await {
         NamespaceState::Initialised { id } if id == fence.namespace => Ok(()),

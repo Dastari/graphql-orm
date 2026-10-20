@@ -19,8 +19,8 @@ use crate::{
     NamespaceInitialisation, NamespaceObservation, NamespaceTarget, ObjectContentRange, ObjectInfo,
     ObjectMetadata, ObjectRangeBody, ObjectStorage, ObservationEpoch, StorageBackend,
     StorageByteStream, StorageError, StorageObjectBody, StoredObject, StreamingObjectStore,
-    TopologyScan, collect_storage_stream, is_reserved_component, is_reserved_key, validate_blob_key,
-    validate_object_bucket, validate_unreserved_key,
+    TopologyScan, collect_storage_stream, is_reserved_component, is_reserved_key,
+    validate_blob_key, validate_object_bucket, validate_unreserved_key,
 };
 
 const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
@@ -103,7 +103,10 @@ impl LocalStorageBackend {
         path.strip_prefix(&self.root)
             .map(|relative| {
                 relative.components().any(|component| {
-                    is_reserved_component(&component.as_os_str().to_string_lossy(), LOCAL_KEY_EQUIVALENCE)
+                    is_reserved_component(
+                        &component.as_os_str().to_string_lossy(),
+                        LOCAL_KEY_EQUIVALENCE,
+                    )
                 })
             })
             .unwrap_or(true)

@@ -436,7 +436,12 @@ async fn s3_fences_and_scan_limits_fail_before_any_request() {
         assert!(
             matches!(
                 store
-                    .put_blob_if_not_exists_fenced(outside, body(), BlobPutOptions::default(), &fence)
+                    .put_blob_if_not_exists_fenced(
+                        outside,
+                        body(),
+                        BlobPutOptions::default(),
+                        &fence
+                    )
                     .await,
                 Err(StorageError::PreconditionFailed { .. })
             ),

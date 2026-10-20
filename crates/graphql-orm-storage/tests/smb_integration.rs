@@ -514,20 +514,37 @@ async fn samba_namespace_marker_lifecycle_and_reserved_aliases() {
     let payload = |bytes: &'static [u8]| StorageByteStream::from_bytes(Bytes::from_static(bytes));
     // Overwriting fenced writes are honestly Unsupported on SMB.
     assert!(matches!(
-        store.put_blob_fenced("data/overwrite", payload(b"o"), BlobPutOptions::default(), &fence).await,
+        store
+            .put_blob_fenced(
+                "data/overwrite",
+                payload(b"o"),
+                BlobPutOptions::default(),
+                &fence
+            )
+            .await,
         Err(StorageError::UnsupportedOperation { .. })
     ));
     // Session-bound conditional publication: create once, never overwrite.
     assert!(
         store
-            .put_blob_if_not_exists_fenced("data/fenced", payload(b"f"), BlobPutOptions::default(), &fence)
+            .put_blob_if_not_exists_fenced(
+                "data/fenced",
+                payload(b"f"),
+                BlobPutOptions::default(),
+                &fence
+            )
             .await
             .expect("fenced create")
             .is_some()
     );
     assert!(
         store
-            .put_blob_if_not_exists_fenced("data/fenced", payload(b"g"), BlobPutOptions::default(), &fence)
+            .put_blob_if_not_exists_fenced(
+                "data/fenced",
+                payload(b"g"),
+                BlobPutOptions::default(),
+                &fence
+            )
             .await
             .expect("fenced existing")
             .is_none()
@@ -539,13 +556,23 @@ async fn samba_namespace_marker_lifecycle_and_reserved_aliases() {
     };
     assert!(
         store
-            .put_blob_if_not_exists_fenced("other/x", payload(b"x"), BlobPutOptions::default(), &sub_fence)
+            .put_blob_if_not_exists_fenced(
+                "other/x",
+                payload(b"x"),
+                BlobPutOptions::default(),
+                &sub_fence
+            )
             .await
             .is_err()
     );
     assert!(
         restarted
-            .put_blob_if_not_exists_fenced("data/stale", payload(b"s"), BlobPutOptions::default(), &fence)
+            .put_blob_if_not_exists_fenced(
+                "data/stale",
+                payload(b"s"),
+                BlobPutOptions::default(),
+                &fence
+            )
             .await
             .is_err()
     );
@@ -612,7 +639,10 @@ async fn samba_reconnects_after_server_restart() {
         .await
         .expect("initialise before restart");
     let observed = store
-        .observe_namespace(&graphql_orm_storage::NamespaceTarget::Root, &graphql_orm_storage::TopologyScan::default())
+        .observe_namespace(
+            &graphql_orm_storage::NamespaceTarget::Root,
+            &graphql_orm_storage::TopologyScan::default(),
+        )
         .await
         .expect("observe before restart");
     let stale_fence = graphql_orm_storage::NamespaceFence {
@@ -678,7 +708,12 @@ async fn samba_reconnects_after_server_restart() {
             .await
             .is_err()
     );
-    assert!(!store.blob_exists("reconnect/fenced.bin").await.expect("inspect"));
+    assert!(
+        !store
+            .blob_exists("reconnect/fenced.bin")
+            .await
+            .expect("inspect")
+    );
     let before = store.diagnostics().await.directory_create_requests;
     store
         .put_blob(

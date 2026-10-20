@@ -227,7 +227,9 @@ impl ScanDeadline {
 
     /// Remaining time, or `None` once the deadline has passed.
     pub(crate) fn remaining(&self) -> Option<Duration> {
-        self.0.checked_duration_since(std::time::Instant::now()).filter(|left| !left.is_zero())
+        self.0
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|left| !left.is_zero())
     }
 
     /// Runs one await within the remaining budget; `None` means the deadline was reached.
@@ -243,16 +245,27 @@ impl ScanDeadline {
 /// # Errors
 ///
 /// Returns a non-retryable fence invalidation for keys outside the target.
-#[cfg_attr(not(any(feature = "local", feature = "s3", feature = "smb")), allow(dead_code))]
-pub(crate) fn require_key_in_target(key: &str, target: &NamespaceTarget) -> Result<(), StorageError> {
+#[cfg_attr(
+    not(any(feature = "local", feature = "s3", feature = "smb")),
+    allow(dead_code)
+)]
+pub(crate) fn require_key_in_target(
+    key: &str,
+    target: &NamespaceTarget,
+) -> Result<(), StorageError> {
     match target {
         NamespaceTarget::Root => Ok(()),
         NamespaceTarget::SubPrefix(prefix) => {
-            let inside = key.strip_prefix(prefix.as_str()).is_some_and(|rest| rest.starts_with('/') && rest.len() > 1);
+            let inside = key
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1);
             if inside {
                 Ok(())
             } else {
-                Err(fence_invalidated(key, "key is outside the fenced target namespace"))
+                Err(fence_invalidated(
+                    key,
+                    "key is outside the fenced target namespace",
+                ))
             }
         }
     }
