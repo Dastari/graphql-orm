@@ -32,6 +32,8 @@ struct WritableRecord {
     payload: Vec<u8>,
     #[graphql_orm(decimal(precision = 12, scale = 2))]
     amount: rust_decimal::Decimal,
+    #[graphql_orm(mssql_money)]
+    native_money: rust_decimal::Decimal,
     #[graphql_orm(version, default = "0")]
     #[filterable(type = "number")]
     version: i64,
@@ -213,6 +215,7 @@ fn writable_input(external_key: &str, value: i64) -> CreateWritableRecordInput {
         active: true,
         payload: vec![1, 2, 3],
         amount: rust_decimal::Decimal::new(1234, 2),
+        native_money: "900719925474.0993".parse().unwrap(),
     }
 }
 
@@ -249,6 +252,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
             active BIT NOT NULL,
             payload VARBINARY(MAX) NOT NULL,
             amount DECIMAL(12,2) NOT NULL,
+            native_money MONEY NOT NULL,
             version BIGINT NOT NULL DEFAULT (0)
         );
         CREATE TABLE dbo.GraphqlOrmCompositeRecords (
@@ -385,6 +389,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     assert!(!first.id.is_empty());
     assert_eq!(first.version, 0);
     assert_eq!(first.amount, rust_decimal::Decimal::new(1234, 2));
+    assert_eq!(first.native_money.to_string(), "900719925474.0993");
 
     let updated = WritableRecord::update_by_id(
         &database,
@@ -397,6 +402,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     .await?
     .expect("inserted row should update");
     assert_eq!(updated.value, 2);
+    assert_eq!(updated.native_money.to_string(), "900719925474.0993");
 
     let upsert = WritableRecord::upsert(
         &database,
@@ -410,6 +416,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     .await?;
     assert_eq!(upsert.action, ChangeAction::Updated);
     assert_eq!(upsert.entity.value, 3);
+    assert_eq!(upsert.entity.native_money.to_string(), "900719925474.0993");
 
     let cas = WritableRecord::compare_and_swap(
         &database,
@@ -433,6 +440,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     };
     assert_eq!(cas.version, 1);
     assert_eq!(cas.value, 4);
+    assert_eq!(cas.native_money.to_string(), "900719925474.0993");
     assert!(matches!(
         WritableRecord::compare_and_swap(
             &database,
@@ -457,6 +465,7 @@ async fn external_writable_mssql_dml_and_transactions_are_native_and_atomic()
     )
     .await?;
     assert_eq!(bulk.len(), 2);
+    assert!(bulk.iter().all(|row| row.native_money.to_string() == "900719925474.0993"));
     let bounded_filter = || WritableRecordWhereInput {
         external_key: Some(StringFilter {
             contains: Some("bounded-".to_owned()),
