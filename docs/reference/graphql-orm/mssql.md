@@ -472,6 +472,14 @@ The MSSQL backend supports these common scalar shapes for generated reads and wr
 - fixed decimals declared with `#[graphql_orm(decimal(precision = P, scale = S))]` and mapped to
   `rust_decimal::Decimal`; the portable declaration permits precision `1..=18` and
   `scale <= precision`
+- native `MONEY` declared with `#[graphql_orm(mssql_money)]` on a
+  `rust_decimal::Decimal` or `Option<Decimal>` field. The generated read
+  projection casts the identifier-safe column to `DECIMAL(19,4)` under the
+  original alias before TDS decoding. Values must have scale 4 or less and a
+  signed 64-bit scaled mantissa (`-922337203685477.5808` through
+  `922337203685477.5807`); input/default validation never rounds. This
+  annotation is SQL Server only and cannot be combined with portable
+  `decimal(...)` metadata. It neither changes source schema nor permits DDL.
 - JSON values serialized into compatible text columns and decoded with strict JSON validation
 
 SQL Server-specific types such as `xml`, `hierarchyid`,

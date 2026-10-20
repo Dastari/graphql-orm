@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.56.0 (unreleased)
+
+- Add the SQL Server-only `#[graphql_orm(mssql_money)]` field domain for exact
+  native `MONEY` values as `rust_decimal::Decimal`. Generated entity, relation,
+  bulk and typed projection reads cast the selected column to `DECIMAL(19,4)`
+  under its original alias before TDS decoding. Validation enforces scale four
+  and the signed 64-bit scaled mantissa without rounding. Portable decimal
+  precision remains capped at 18; existing declarations and cursor formats are
+  unchanged. SQL Server typed read projections are now supported.
+
 ## 0.55.1 (unreleased)
 
 - Refresh the `backend-coexistence` fixture lock for `graphql-orm-ai` 0.109.0.

@@ -10,7 +10,7 @@ supersedes: []
 
 # Typed Read Projections
 
-Typed projections are repository-only DTOs generated from an exact subset of one managed entity.
+Typed projections are repository-only DTOs generated from an exact subset of one entity.
 They are intended for least-privilege reads where fetching an excluded column—even if it is later
 discarded—would be unacceptable.
 
@@ -63,9 +63,14 @@ a different projection is an explicit declaration; its generated `Debug` impleme
 `[redacted]` for fields marked `sensitive` or `#[backup(redact)]`.
 
 Projection names and fields are checked during macro expansion. Empty projections, duplicates,
-unknown/non-persisted fields, schema-only entities, unsupported backends, and `private = false` are
+unknown/non-persisted fields, schema-only entities, and `private = false` are
 rejected. Because the DTO is generated from the entity rather than supplied by the application, a
 different DTO field type cannot be declared.
+
+SQL Server projections support externally owned read-only entities. A selected
+field annotated `mssql_money` is cast to `DECIMAL(19,4)` under its original
+column alias before exact `Decimal` decoding. The cast applies only to the
+selected field; excluded columns are not fetched.
 
 ## Repository reads
 

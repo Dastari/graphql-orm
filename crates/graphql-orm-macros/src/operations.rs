@@ -4,10 +4,10 @@ use crate::backend::{
     resolve_backend,
 };
 use crate::entity::{
-    FieldMetadata, is_bool_type, is_byte_vec_type, is_option_type, is_serde_json_value_or_option,
-    is_string_type, is_uuid_type, is_vec_type, maybe_wrap_write_transform, option_inner_type,
-    parse_entity_metadata, parse_field_metadata, resolver_auth_mode_tokens,
-    spatial_geometry_type_tokens, type_path_last_ident,
+    FieldMetadata, decimal_definition_tokens, is_bool_type, is_byte_vec_type, is_option_type,
+    is_serde_json_value_or_option, is_string_type, is_uuid_type, is_vec_type,
+    maybe_wrap_write_transform, option_inner_type, parse_entity_metadata, parse_field_metadata,
+    resolver_auth_mode_tokens, spatial_geometry_type_tokens, type_path_last_ident,
 };
 use crate::naming::{
     apply_graphql_case, graphql_field_name, selected_argument_case, selected_field_case,
@@ -924,10 +924,8 @@ fn push_create_input_sql_value_tokens(
     meta: &FieldMetadata,
     error_ty: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    if let Some((precision, scale)) = meta.decimal {
-        let definition = quote! {
-            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
-        };
+    if meta.decimal.is_some() {
+        let definition = decimal_definition_tokens(meta);
         if is_option_type(field_type) {
             quote! {
                 match #field_access {
@@ -1267,6 +1265,7 @@ pub(crate) fn generate_graphql_operations(
     let backend_writable = backend != BackendKind::Mssql
         || entity_meta.schema_policy.as_deref() == Some("external_writable");
     let backend_marker = backend_marker_tokens(backend);
+    let is_mssql = backend == BackendKind::Mssql;
     let pool_type = backend_pool_type_tokens(backend);
 
     let undeclared_operation_authorization = match entity_meta.auth.as_deref() {
@@ -2960,10 +2959,8 @@ pub(crate) fn generate_graphql_operations(
                     update_field_checks_graphql.push(update_tokens.clone());
                     update_field_checks_repo.push(update_tokens);
                 }
-            } else if let Some((precision, scale)) = meta.decimal {
-                let definition = quote! {
-                    ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
-                };
+            } else if meta.decimal.is_some() {
+                let definition = decimal_definition_tokens(&meta);
                 let graphql_tokens = if is_already_optional {
                     quote! {
                         if let Some(ref value) = input.#field_name {
@@ -4035,9 +4032,17 @@ pub(crate) fn generate_graphql_operations(
     let cas_update_sql = if backend == BackendKind::Mssql {
         quote! {
             {
-                let output_columns = <Self as DatabaseEntity>::column_names()
+                let output_columns = <Self as ::graphql_orm::graphql::orm::DatabaseSchema>::columns()
                     .iter()
-                    .map(|column| format!("INSERTED.{}", dialect.quote_identifier_path(column)))
+                    .map(|column| {
+                        let quoted = dialect.quote_identifier_path(column.name);
+                        let source = format!("INSERTED.{quoted}");
+                        if column.decimal.is_some_and(|definition| definition.is_mssql_money()) {
+                            format!("CAST({source} AS DECIMAL(19,4)) AS {quoted}")
+                        } else {
+                            source
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -5291,7 +5296,13 @@ pub(crate) fn generate_graphql_operations(
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow, OrmBackend, SqlDialect};
                     let dialect = <#backend_marker as OrmBackend>::DIALECT;
                     let columns = Self::column_names().iter()
-                        .map(|column| dialect.quote_identifier_path(column))
+                        .map(|column| {
+                            if #is_mssql {
+                                (*column).to_string()
+                            } else {
+                                dialect.quote_identifier_path(column)
+                            }
+                        })
                         .collect::<Vec<_>>().join(", ");
                     let sql = format!(
                         "SELECT {columns} FROM {}{} WHERE {}{}",
