@@ -493,15 +493,14 @@ async fn s3_fences_and_scan_limits_fail_before_any_request() {
 /// read is answered; a single-object PUT either loses its response (`lost`) or
 /// returns 503; multipart create succeeds, every part returns 503 and abort
 /// succeeds.
-fn mutation_fixture(
-    marker: Vec<u8>,
-    lose_put_response: bool,
-) -> (
-    String,
-    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-    std::thread::JoinHandle<()>,
-) {
+struct MutationFixture {
+    endpoint: String,
+    log: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    server: std::thread::JoinHandle<()>,
+}
+
+fn mutation_fixture(marker: Vec<u8>, lose_put_response: bool) -> MutationFixture {
     use std::{
         io::{BufRead, BufReader, Read, Write},
         net::TcpListener,
@@ -645,7 +644,12 @@ fn mutation_fixture(
             let _ = stream.write_all(&response);
         }
     });
-    (endpoint, log, done, server)
+    MutationFixture {
+        endpoint,
+        log,
+        done,
+        server,
+    }
 }
 
 fn count(log: &std::sync::Mutex<Vec<String>>, entry: &str) -> usize {
@@ -671,7 +675,12 @@ async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries()
 
     for lose in [true, false] {
         // Fenced conditional create: exactly one PUT, never resent.
-        let (endpoint, log, done, server) = mutation_fixture(encode_marker(id), lose);
+        let MutationFixture {
+            endpoint,
+            log,
+            done,
+            server,
+        } = mutation_fixture(encode_marker(id), lose);
         let store = namespace_backend(endpoint);
         let error = store
             .put_blob_if_not_exists_fenced(
@@ -717,7 +726,12 @@ async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries()
     }
 
     // The same fixture detects resends: the ordinary API keeps SDK retries.
-    let (endpoint, log, done, server) = mutation_fixture(encode_marker(id), false);
+    let MutationFixture {
+        endpoint,
+        log,
+        done,
+        server,
+    } = mutation_fixture(encode_marker(id), false);
     let store = namespace_backend(endpoint);
     assert!(
         store
