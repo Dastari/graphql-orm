@@ -332,11 +332,12 @@ async fn scan_nested(dir: &Path, scan: NestedScan) -> ScanResult {
                 completeness = truncated("max_depth");
                 continue;
             }
-            // The path and the largest admissible marker read are charged
-            // before the read, so no outcome (including Complete) exceeds max_bytes.
+            // The path and the whole bounded marker read (the 1 KiB body plus
+            // the one-byte overflow probe) are charged before the read, so no
+            // outcome (including Complete or Conflict) exceeds max_bytes.
             bytes = bytes
                 .saturating_add(relative.len())
-                .saturating_add(MAX_NAMESPACE_MARKER_BYTES);
+                .saturating_add(MAX_NAMESPACE_MARKER_BYTES + 1);
             if bytes > scan.max_bytes {
                 completeness = truncated("max_bytes");
                 break 'scan;

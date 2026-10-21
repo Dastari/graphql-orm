@@ -271,17 +271,40 @@ fn namespace_fixture(
             let mut parts = line.split_whitespace();
             let method = parts.next().expect("method").to_string();
             let target = parts.next().expect("target").to_string();
-            let path = target
-                .split('?')
-                .next()
-                .expect("path")
-                .trim_start_matches("/fixture/")
-                .to_string();
-            log.push(format!(
-                "{method} {path} if-none-match={}",
-                header("if-none-match").unwrap_or_default()
-            ));
+            let (raw_path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
+            let path = raw_path.trim_start_matches("/fixture/").to_string();
+            let listing = method == "GET" && query.contains("list-type=2");
+            log.push(if listing {
+                "LIST".to_string()
+            } else {
+                format!(
+                    "{method} {path} if-none-match={}",
+                    header("if-none-match").unwrap_or_default()
+                )
+            });
             let response = match method.as_str() {
+                "GET" if listing => {
+                    let prefix = query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix("prefix="))
+                        .unwrap_or_default()
+                        .replace("%2F", "/");
+                    let contents: String = objects
+                        .iter()
+                        .filter(|(key, _)| key.starts_with(&prefix))
+                        .map(|(key, body)| {
+                            format!("<Contents><Key>{key}</Key><Size>{}</Size></Contents>", body.len())
+                        })
+                        .collect();
+                    let body = format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>fixture</Name><Prefix>{prefix}</Prefix><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"
+                    );
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .into_bytes()
+                }
                 "GET" => match objects.get(&path) {
                     Some(object) => {
                         let end = object.len().min(1025);
@@ -762,4 +785,64 @@ async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries()
     assert_eq!(count(&log, "POST tenant/data/large complete"), 0);
     done.store(true, Ordering::SeqCst);
     server.join().expect("fixture thread");
+}
+
+#[tokio::test]
+async fn s3_nested_byte_budget_charges_the_marker_overflow_probe() {
+    use graphql_orm_storage::{
+        MAX_NAMESPACE_MARKER_BYTES, NamespaceId, NamespaceState, NamespaceTarget, NestedScan,
+        ScanCompleteness, TopologyScan, encode_marker,
+    };
+    use std::time::Duration;
+
+    // One child "c", last entry: 1 byte of path plus the ranged read of the
+    // 1 KiB body and the one-byte overflow probe.
+    let charge = 1 + MAX_NAMESPACE_MARKER_BYTES + 1;
+    let scan = |max_bytes| TopologyScan {
+        ancestors: None,
+        nested: Some(NestedScan {
+            max_depth: 8,
+            max_pages: 10,
+            max_keys: 100,
+            max_bytes,
+            max_results: 10,
+            max_duration: Duration::from_secs(10),
+        }),
+    };
+    let valid = encode_marker(NamespaceId::new_random());
+    let oversized = vec![b'x'; 2 * MAX_NAMESPACE_MARKER_BYTES];
+    for (marker, conflict) in [(valid, false), (oversized, true)] {
+        // Requests: own marker GET and LIST per observation, plus the child
+        // marker GET only when the budget admits it.
+        let child = String::from("tenant/c/.graphql-orm-namespace");
+        let (endpoint, server) = namespace_fixture(vec![(child, marker)], 5);
+        let store = namespace_backend(endpoint);
+        let observed = store
+            .observe_namespace(&NamespaceTarget::Root, &scan(charge - 1))
+            .await
+            .expect("observe");
+        assert!(
+            matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_bytes"),
+            "conflict={conflict}"
+        );
+        assert!(observed.nested.found.is_empty());
+        let observed = store
+            .observe_namespace(&NamespaceTarget::Root, &scan(charge))
+            .await
+            .expect("observe");
+        assert_eq!(observed.nested.completeness, ScanCompleteness::Complete);
+        assert_eq!(observed.nested.found.len(), 1);
+        assert_eq!(
+            matches!(observed.nested.found[0].state, NamespaceState::Conflict { .. }),
+            conflict
+        );
+        let log = server.join().expect("fixture thread");
+        let marker_reads = log
+            .iter()
+            .filter(|line| line.starts_with("GET tenant/c/"))
+            .count();
+        // The under-budget observation never read the child marker.
+        assert_eq!(marker_reads, 1, "{log:?}");
+        assert_eq!(log.iter().filter(|line| *line == "LIST").count(), 2);
+    }
 }

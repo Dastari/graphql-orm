@@ -215,8 +215,9 @@ The script uses the S3 feature without provider defaults and selects the exact
 test in `s3_integration`, the owned-fixture namespace tests
 (`s3_namespace_initialise_is_conditional_and_reconciles_same_identity`,
 `s3_namespace_foreign_marker_is_conflict_and_reserved_keys_never_reach_the_provider`,
-`s3_fences_and_scan_limits_fail_before_any_request` and
-`s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries`), then the ignored
+`s3_fences_and_scan_limits_fail_before_any_request`,
+`s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries` and
+`s3_nested_byte_budget_charges_the_marker_overflow_probe`), then the ignored
 `owned_https_transport_fixture`
 parent in `s3_https_transport`. It never runs the environment-configured
 real-service round trip or invokes the HTTPS child entry point on its own.

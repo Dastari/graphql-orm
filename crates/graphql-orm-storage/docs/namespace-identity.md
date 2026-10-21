@@ -96,9 +96,11 @@ The ordinary `put_blob_if_not_exists` path is not reused for markers.
 - **One deadline per scan.** `max_duration` starts when the scan starts. Every
   directory read, entry, listing page and marker read awaits only the remaining
   time, so a single wide directory or a slow provider still stops on time.
-- **Bytes are charged before the read.** Each candidate directory is charged
-  its recorded path plus the largest admissible marker read (1 KiB) before the
-  marker is read, so no outcome, including `Complete`, exceeds `max_bytes`.
+- **Bytes are charged before the read.** Each candidate is charged its
+  recorded path plus the whole bounded marker read before the marker is read:
+  the 1 KiB body plus the one-byte overflow probe (1025 bytes). No outcome,
+  including `Complete` or a `Conflict` marker, exceeds `max_bytes`. Parsing
+  still accepts at most 1 KiB.
 - Reaching any limit reports `Truncated { limit }`, naming the limit.
 - Every scan reports a `ScanCompleteness` value: `Complete`, `Truncated`,
   `Denied`, `Unsupported` or `NotRequested`. Only `Complete` with no markers is

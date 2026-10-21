@@ -691,9 +691,11 @@ impl S3StorageBackend {
                     completeness = truncated("max_depth");
                     continue;
                 }
+                // The ranged read takes the 1 KiB body plus a one-byte overflow
+                // probe; both are charged before the read.
                 bytes = bytes
                     .saturating_add(relative.len())
-                    .saturating_add(MAX_NAMESPACE_MARKER_BYTES);
+                    .saturating_add(MAX_NAMESPACE_MARKER_BYTES + 1);
                 if bytes > scan.max_bytes {
                     completeness = truncated("max_bytes");
                     break 'scan;

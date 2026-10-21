@@ -625,39 +625,58 @@ async fn temp_sweep_never_enters_reserved_names() {
 
 #[tokio::test]
 async fn nested_byte_budget_is_charged_before_the_last_marker_read() {
-    let temp = TempDir::new().expect("temp dir");
-    std::fs::create_dir_all(temp.path().join("c")).expect("only child");
-    let store = LocalStorageBackend::new(temp.path());
-    store
-        .initialise_namespace(
-            &NamespaceTarget::SubPrefix("c".to_string()),
-            NamespaceId::new_random(),
-        )
-        .await
-        .expect("child marker");
-    let root = NamespaceTarget::Root;
-    // One child, last entry: path "c" (1 byte) plus the 1 KiB marker allowance.
-    let charge = 1 + graphql_orm_storage::MAX_NAMESPACE_MARKER_BYTES;
-    let short = NestedScan {
-        max_bytes: charge - 1,
-        ..wide_scan()
-    };
-    let observed = store
-        .observe_namespace(&root, &scan_with(short))
-        .await
-        .expect("observe");
-    assert!(
-        matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_bytes")
-    );
-    assert!(observed.nested.found.is_empty());
-    let exact = NestedScan {
-        max_bytes: charge,
-        ..wide_scan()
-    };
-    let observed = store
-        .observe_namespace(&root, &scan_with(exact))
-        .await
-        .expect("observe");
-    assert_eq!(observed.nested.completeness, ScanCompleteness::Complete);
-    assert_eq!(observed.nested.found.len(), 1);
+    // One child, last entry: path "c" (1 byte) plus the bounded marker read,
+    // which is the 1 KiB body plus the one-byte overflow probe.
+    let charge = 1 + graphql_orm_storage::MAX_NAMESPACE_MARKER_BYTES + 1;
+    let oversized = vec![b'x'; 2 * graphql_orm_storage::MAX_NAMESPACE_MARKER_BYTES];
+    for marker in [None, Some(oversized)] {
+        let temp = TempDir::new().expect("temp dir");
+        std::fs::create_dir_all(temp.path().join("c")).expect("only child");
+        let store = LocalStorageBackend::new(temp.path());
+        match &marker {
+            None => {
+                store
+                    .initialise_namespace(
+                        &NamespaceTarget::SubPrefix("c".to_string()),
+                        NamespaceId::new_random(),
+                    )
+                    .await
+                    .expect("child marker");
+            }
+            Some(bytes) => {
+                std::fs::write(temp.path().join("c").join(NAMESPACE_MARKER), bytes)
+                    .expect("oversized marker");
+            }
+        }
+        let root = NamespaceTarget::Root;
+        let short = NestedScan {
+            max_bytes: charge - 1,
+            ..wide_scan()
+        };
+        let observed = store
+            .observe_namespace(&root, &scan_with(short))
+            .await
+            .expect("observe");
+        assert!(
+            matches!(&observed.nested.completeness, ScanCompleteness::Truncated { limit } if limit == "max_bytes"),
+            "oversized={}",
+            marker.is_some()
+        );
+        assert!(observed.nested.found.is_empty());
+        let exact = NestedScan {
+            max_bytes: charge,
+            ..wide_scan()
+        };
+        let observed = store
+            .observe_namespace(&root, &scan_with(exact))
+            .await
+            .expect("observe");
+        assert_eq!(observed.nested.completeness, ScanCompleteness::Complete);
+        assert_eq!(observed.nested.found.len(), 1);
+        // The overflow probe is charged even though parsing reports Conflict.
+        assert_eq!(
+            matches!(observed.nested.found[0].state, NamespaceState::Conflict { .. }),
+            marker.is_some()
+        );
+    }
 }
