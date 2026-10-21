@@ -13,8 +13,8 @@ use std::fmt;
 use chrono::{SecondsFormat, Timelike, Utc};
 
 use super::{
-    CollectionId, FieldId, NoDefaultBackend, OrmBackend, RelationCardinality, RelationId,
-    RuntimeFieldFormat, RuntimeValueKind, SchemaFingerprint, ValidatedRuntimeSchema,
+    CollectionId, DecimalValue, FieldId, NoDefaultBackend, OrmBackend, RelationCardinality,
+    RelationId, RuntimeFieldFormat, RuntimeValueKind, SchemaFingerprint, ValidatedRuntimeSchema,
 };
 
 /// Serialized format version for [`RuntimeRecord`].
@@ -366,6 +366,10 @@ pub enum RuntimeValue {
     Bytes(Vec<u8>),
     /// Canonical UTC RFC 3339 date-time.
     DateTime(RuntimeDateTime),
+    /// Exact decimal with its definition. JSON carries the canonical string
+    /// with exactly `scale` fractional digits, never a number:
+    /// `{"decimal": {"value": "12.50", "definition": {"precision": 12, "scale": 2}}}`.
+    Decimal(#[serde(with = "super::runtime_decimal::value_serde")] DecimalValue),
 }
 
 impl RuntimeValue {
@@ -381,6 +385,7 @@ impl RuntimeValue {
             Self::Json(_) => Some(RuntimeValueKind::Json),
             Self::Bytes(_) => Some(RuntimeValueKind::Bytes),
             Self::DateTime(_) => Some(RuntimeValueKind::DateTime),
+            Self::Decimal(value) => Some(RuntimeValueKind::Decimal(value.definition())),
         }
     }
 }
@@ -1033,6 +1038,27 @@ impl RuntimeRecord {
         }
     }
 
+    /// Read a selected non-null exact decimal; never converted through `f64`.
+    pub fn decimal(
+        &self,
+        field: &RuntimeFieldHandle,
+    ) -> Result<rust_decimal::Decimal, RuntimeRecordError> {
+        self.decimal_value(field).map(DecimalValue::value)
+    }
+
+    /// Read a selected non-null exact decimal with its definition.
+    pub fn decimal_value(
+        &self,
+        field: &RuntimeFieldHandle,
+    ) -> Result<DecimalValue, RuntimeRecordError> {
+        match self.typed_value(field, field.value_kind)? {
+            RuntimeValue::Decimal(value) => Ok(*value),
+            _ => Err(
+                RuntimeRecordError::new(RuntimeRecordErrorCode::WrongValueKind).for_field(field),
+            ),
+        }
+    }
+
     /// Read a selected non-null finite float.
     pub fn float(&self, field: &RuntimeFieldHandle) -> Result<f64, RuntimeRecordError> {
         match self.typed_value(field, RuntimeValueKind::Float)? {
@@ -1141,6 +1167,23 @@ where
         .map_err(|error| map_sqlx_decode_error(field, error))
 }
 
+/// A stored decimal outside its definition (for example written by another
+/// client) is rejected, never rounded.
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn decimal_value(
+    field: &RuntimeFieldHandle,
+    definition: super::DecimalDef,
+    value: rust_decimal::Decimal,
+) -> Result<RuntimeValue, RuntimeRecordError> {
+    DecimalValue::new(value, definition)
+        .map(RuntimeValue::Decimal)
+        .map_err(|error| {
+            RuntimeRecordError::new(RuntimeRecordErrorCode::InvalidValue)
+                .for_field(field)
+                .with_source(error)
+        })
+}
+
 #[cfg(feature = "sqlite")]
 impl RuntimeRowDecoder for super::SqliteBackend {
     const RUNTIME_ROW_DECODING_SUPPORTED: bool = true;
@@ -1194,6 +1237,15 @@ impl RuntimeRowDecoder for super::SqliteBackend {
                     .map_err(|error| error.for_field(field)),
                 None => Ok(RuntimeValue::Null),
             },
+            // SQLite stores the scaled mantissa as an integer.
+            RuntimeValueKind::Decimal(definition) => {
+                match sqlite_get_optional::<i64>(row, field)? {
+                    Some(value) => {
+                        decimal_value(field, definition, definition.from_scaled_i64(value))
+                    }
+                    None => Ok(RuntimeValue::Null),
+                }
+            }
         }
     }
 }
@@ -1251,6 +1303,12 @@ impl RuntimeRowDecoder for super::PostgresBackend {
                     .map(RuntimeDateTime::from_utc)
                     .map(RuntimeValue::DateTime)
                     .unwrap_or(RuntimeValue::Null))
+            }
+            RuntimeValueKind::Decimal(definition) => {
+                match postgres_get_optional::<rust_decimal::Decimal>(row, field)? {
+                    Some(value) => decimal_value(field, definition, value),
+                    None => Ok(RuntimeValue::Null),
+                }
             }
         }
     }

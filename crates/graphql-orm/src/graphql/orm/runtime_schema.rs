@@ -47,8 +47,8 @@ use super::{
 };
 
 use super::core::{
-    BackupValueKind, ColumnBackupPolicy, DeletePolicy, EntityMetadata, FieldMetadata, IndexMethod,
-    RelationChangePropagation, SchemaPolicy, fnv1a64,
+    BackupValueKind, ColumnBackupPolicy, DecimalDef, DeletePolicy, EntityMetadata, FieldMetadata,
+    IndexMethod, RelationChangePropagation, SchemaPolicy, fnv1a64,
 };
 
 /// Maximum length accepted for physical identifiers; the portable bound across supported
@@ -147,6 +147,9 @@ stable_id!(
 ///
 /// Unlike [`BackupValueKind`], date-time is first-class: backends choose the storage
 /// representation, and later slices generate date scalars/filters from it.
+///
+/// Unit kinds serialize as plain strings (`"integer"`); [`Self::Decimal`]
+/// serializes as `{"decimal": {"precision": p, "scale": s}}`.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -160,9 +163,23 @@ pub enum RuntimeValueKind {
     Json,
     Bytes,
     DateTime,
+    /// Exact fixed-precision decimal with the portable static definition:
+    /// a scaled `i64` on SQLite, `NUMERIC(p,s)` on PostgreSQL. Values are never
+    /// rounded; see [`parse_runtime_decimal`](super::parse_runtime_decimal).
+    Decimal(DecimalDef),
 }
 
 impl RuntimeValueKind {
+    /// Canonical identity spelling: [`Self::as_str`], or `decimal(p,s)`.
+    pub fn canonical_name(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Decimal(definition) => {
+                format!("decimal({},{})", definition.precision(), definition.scale()).into()
+            }
+            kind => kind.as_str().into(),
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
@@ -173,6 +190,7 @@ impl RuntimeValueKind {
             Self::Json => "json",
             Self::Bytes => "bytes",
             Self::DateTime => "datetime",
+            Self::Decimal(_) => "decimal",
         }
     }
 }
@@ -1025,6 +1043,14 @@ impl RuntimeSchema {
                     field.effective_classification(collection),
                     field.export,
                 ));
+                if field.generated && matches!(field.value_kind, RuntimeValueKind::Decimal(_)) {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        "decimal fields cannot be generated".to_string(),
+                        cid,
+                        subject,
+                    ));
+                }
             }
 
             // Primary key.
@@ -1057,6 +1083,14 @@ impl RuntimeSchema {
                         diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                             RuntimeSchemaDiagnosticCode::NullablePrimaryKeyField,
                             format!("primary_key field `{key_field}` must not be nullable"),
+                            cid,
+                            Some(key_field.as_str()),
+                        ));
+                    }
+                    Some(field) if matches!(field.value_kind, RuntimeValueKind::Decimal(_)) => {
+                        diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                            RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                            format!("primary_key field `{key_field}` cannot be a decimal"),
                             cid,
                             Some(key_field.as_str()),
                         ));
@@ -1240,6 +1274,21 @@ impl RuntimeSchema {
                         ));
                     }
                     if let (Some(source), Some(target)) = (source, target) {
+                        if [source, target]
+                            .iter()
+                            .any(|field| matches!(field.value_kind, RuntimeValueKind::Decimal(_)))
+                        {
+                            diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                                RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                                format!(
+                                    "key pair `{}`/`{}` uses a decimal field; decimals cannot be \
+                                     relation keys",
+                                    pair.source, pair.target
+                                ),
+                                cid,
+                                subject,
+                            ));
+                        }
                         if source.value_kind != target.value_kind {
                             diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                                 RuntimeSchemaDiagnosticCode::RelationKeyTypeMismatch,
@@ -1522,7 +1571,7 @@ impl ValidatedRuntimeSchema {
                     "|api={}|column={}|kind={}|nullable={}|unique={}|filterable={}|sortable={}|generated={}|default={}",
                     field.api_name,
                     field.physical_column,
-                    field.value_kind.as_str(),
+                    field.value_kind.canonical_name(),
                     field.nullable,
                     field.unique,
                     field.filterable,
@@ -1679,6 +1728,9 @@ const EPOCH_DEFAULT_EXPRESSIONS: &[&str] = &[
 ];
 
 fn convert_default(raw: &str, kind: RuntimeValueKind) -> Option<RuntimeDefault> {
+    if let RuntimeValueKind::Decimal(definition) = kind {
+        return convert_decimal_default(raw, definition);
+    }
     if EPOCH_DEFAULT_EXPRESSIONS.contains(&raw) {
         return (kind == RuntimeValueKind::Integer).then_some(RuntimeDefault::CurrentTimestamp);
     }
@@ -1703,6 +1755,19 @@ fn convert_default(raw: &str, kind: RuntimeValueKind) -> Option<RuntimeDefault> 
     literal.then(|| RuntimeDefault::Literal(raw.to_owned()))
 }
 
+/// Static decimal defaults are backend SQL: the scaled mantissa on SQLite and
+/// the normalized literal (with `scale` fractional digits) elsewhere. With a
+/// non-zero scale, only the latter contains a point; with scale 0 they agree.
+fn convert_decimal_default(raw: &str, definition: DecimalDef) -> Option<RuntimeDefault> {
+    let value = if definition.scale() > 0 && !raw.contains('.') {
+        let mantissa = raw.parse::<i64>().ok()?;
+        super::DecimalValue::new(definition.from_scaled_i64(mantissa), definition).ok()?
+    } else {
+        super::parse_runtime_decimal(definition, raw).ok()?
+    };
+    Some(RuntimeDefault::decimal(value))
+}
+
 fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
     if field.is_date_time {
         return Some(RuntimeValueKind::DateTime);
@@ -1711,10 +1776,9 @@ fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
         BackupValueKind::Bool => Some(RuntimeValueKind::Boolean),
         BackupValueKind::Integer => Some(RuntimeValueKind::Integer),
         BackupValueKind::Float => Some(RuntimeValueKind::Float),
-        // Runtime-authored decimal fields are not yet supported. Static entity
-        // metadata retains the exact definition and uses its public scalar
-        // representation when projected into the runtime schema.
-        BackupValueKind::Decimal => Some(RuntimeValueKind::String),
+        // The exact definition describes the real storage: a scaled integer on
+        // SQLite, `NUMERIC(p,s)` on PostgreSQL.
+        BackupValueKind::Decimal => field.decimal.map(RuntimeValueKind::Decimal),
         BackupValueKind::String => Some(RuntimeValueKind::String),
         BackupValueKind::Uuid => Some(RuntimeValueKind::Uuid),
         BackupValueKind::Json => Some(RuntimeValueKind::Json),

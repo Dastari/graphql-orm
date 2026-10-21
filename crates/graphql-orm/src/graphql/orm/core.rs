@@ -119,7 +119,7 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
 /// The precision ceiling of 18 is deliberate: it permits the same value to be
 /// represented losslessly as a scaled `i64` on SQLite and as `NUMERIC` or
 /// `DECIMAL` on PostgreSQL and SQL Server.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize)]
 #[serde(into = "DecimalDefWire")]
 pub struct DecimalDef {
     precision: u8,

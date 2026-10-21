@@ -549,14 +549,24 @@ fn validate_literal(
     Ok(())
 }
 
+/// Kinds with ordered comparisons and ranges.
+pub(crate) fn range_kind(kind: RuntimeValueKind) -> bool {
+    matches!(
+        kind,
+        RuntimeValueKind::Integer
+            | RuntimeValueKind::Float
+            | RuntimeValueKind::DateTime
+            | RuntimeValueKind::String
+            | RuntimeValueKind::Decimal(_)
+    )
+}
+
 fn compare_supported(kind: RuntimeValueKind, op: RuntimeScalarOperator) -> bool {
     use RuntimeScalarOperator as O;
     use RuntimeValueKind as K;
     match op {
         O::Eq | O::Ne => !matches!(kind, K::Json),
-        O::Lt | O::Lte | O::Gt | O::Gte => {
-            matches!(kind, K::Integer | K::Float | K::DateTime | K::String)
-        }
+        O::Lt | O::Lte | O::Gt | O::Gte => range_kind(kind),
         O::Contains | O::StartsWith | O::EndsWith => matches!(kind, K::String),
     }
 }
@@ -686,13 +696,7 @@ impl ValidatedRuntimeSchema {
         if !field.filterable() {
             return Err(RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidFilter).field(field));
         }
-        if !matches!(
-            field.value_kind(),
-            RuntimeValueKind::Integer
-                | RuntimeValueKind::Float
-                | RuntimeValueKind::DateTime
-                | RuntimeValueKind::String
-        ) {
+        if !range_kind(field.value_kind()) {
             return Err(
                 RuntimeQueryError::new(RuntimeQueryErrorCode::UnsupportedOperator).field(field),
             );
@@ -1148,6 +1152,8 @@ pub(crate) fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
         RuntimeValue::Json(value) => Some(SqlValue::Json(value.clone())),
         RuntimeValue::Bytes(value) => Some(SqlValue::Bytes(value.clone())),
         RuntimeValue::DateTime(value) => Some(SqlValue::String(value.as_str().to_string())),
+        // A scaled `i64` on SQLite and native `NUMERIC` on PostgreSQL.
+        RuntimeValue::Decimal(value) => Some(SqlValue::Decimal(*value)),
     }
 }
 

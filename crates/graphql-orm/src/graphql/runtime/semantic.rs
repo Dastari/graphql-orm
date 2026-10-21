@@ -48,6 +48,10 @@ pub(super) fn scalar_description(kind: RuntimeValueKind) -> &'static str {
         RuntimeValueKind::Boolean => "Boolean value",
         RuntimeValueKind::Float => "Finite double-precision number",
         RuntimeValueKind::String => "UTF-8 text",
+        RuntimeValueKind::Decimal(_) => {
+            "Exact decimal; output as a string with exactly the field's scale of fractional \
+             digits. Input is a decimal string or an integer and is never rounded"
+        }
     }
 }
 
@@ -77,6 +81,7 @@ pub(super) fn compares(kind: RuntimeValueKind) -> bool {
             | RuntimeValueKind::Float
             | RuntimeValueKind::String
             | RuntimeValueKind::DateTime
+            | RuntimeValueKind::Decimal(_)
     )
 }
 

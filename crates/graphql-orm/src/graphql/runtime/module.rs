@@ -610,6 +610,18 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
                 self = self.register(ty)?;
             }
         }
+        let decimal = module
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .flat_map(|c| &c.fields)
+            .any(|f| matches!(f.value_kind, RuntimeValueKind::Decimal(_)));
+        if decimal && !self.names.contains("Decimal") {
+            for ty in super::schema::decimal_helpers() {
+                self = self.register(ty)?;
+            }
+        }
         if module.options.mutations.is_some() {
             let factory = self
                 .mutation_fields

@@ -32,11 +32,22 @@ enum Class {
     Jsonb,
     Bytea,
     Timestamptz,
+    Numeric,
 }
 
 impl Class {
     fn of(sql_type: &str) -> Option<Self> {
-        Some(match sql_type.trim().to_ascii_lowercase().as_str() {
+        let sql_type = sql_type.trim().to_ascii_lowercase();
+        // Runtime decimals target `NUMERIC(p,s)`; PostgreSQL reports `numeric(p,s)`.
+        if sql_type == "numeric"
+            || sql_type
+                .strip_prefix("numeric(")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .is_some_and(|args| args.bytes().all(|b| b.is_ascii_digit() || b == b','))
+        {
+            return Some(Self::Numeric);
+        }
+        Some(match sql_type.as_str() {
             "boolean" | "bool" => Self::Boolean,
             "bigint" | "integer" | "smallint" | "int" | "int8" | "int4" | "int2" => Self::Integer,
             "double precision" | "real" | "float8" | "float4" => Self::Float,
@@ -57,11 +68,15 @@ impl Class {
             Self::Jsonb => &["jsonb"],
             Self::Bytea => &["bytea"],
             Self::Timestamptz => &["timestamp with time zone", "timestamptz"],
+            Self::Numeric => &["numeric"],
         }
     }
 
     fn bare_tokens(self) -> bool {
-        matches!(self, Self::Boolean | Self::Integer | Self::Float)
+        matches!(
+            self,
+            Self::Boolean | Self::Integer | Self::Float | Self::Numeric
+        )
     }
 }
 
@@ -82,6 +97,11 @@ pub(super) fn postgres_typed_defaults_equal(
         Class::Boolean => live.eq_ignore_ascii_case(&target),
         Class::Integer => live.parse::<i64>().ok()? == target.parse::<i64>().ok()?,
         Class::Float => float_bits(&live)? == float_bits(&target)?,
+        // Exact value comparison; `12.5` and `12.50` are the same NUMERIC value.
+        Class::Numeric => {
+            rust_decimal::Decimal::from_str_exact(&live).ok()?
+                == rust_decimal::Decimal::from_str_exact(&target).ok()?
+        }
         Class::Uuid => uuid::Uuid::parse_str(&live).ok()? == uuid::Uuid::parse_str(&target).ok()?,
         Class::Jsonb => {
             serde_json::from_str::<serde_json::Value>(&live).ok()?
@@ -250,6 +270,10 @@ mod tests {
                 "'0001-01-01T00:00:00.000000Z'::timestamptz",
             ),
             ("BOOLEAN", "true", "TRUE"),
+            ("NUMERIC(12,2)", "12.50", "12.50"),
+            ("NUMERIC(12,2)", "'-12.50'::numeric", "-12.50"),
+            ("numeric(12,2)", "0.00", "0.00"),
+            ("NUMERIC(18,0)", "999999999999999999", "999999999999999999"),
         ] {
             assert_eq!(
                 equal(sql_type, live, target),
@@ -264,6 +288,8 @@ mod tests {
         for (sql_type, live, target) in [
             ("BIGINT", "'-1'::integer", "1"),
             ("DOUBLE PRECISION", "'-1.5'::numeric", "1.5"),
+            ("NUMERIC(12,2)", "'-12.50'::numeric", "12.50"),
+            ("NUMERIC(12,2)", "12.51", "12.50"),
             (
                 "UUID",
                 "'67e55044-10b1-426f-9247-bb680e5fe0c8'::uuid",
@@ -307,6 +333,8 @@ mod tests {
             ("TEXT", "'x'::text", "'x'"),
             ("JSONB", r#"'{"a": 1}'::json"#, r#"'{"a":1}'::jsonb"#),
             ("DOUBLE PRECISION", "'NaN'::double precision", "1.0"),
+            ("NUMERIC(12,2)", "'NaN'::numeric", "1.00"),
+            ("NUMERIC(12,2)", "'1.5'::text", "1.50"),
         ] {
             assert_ne!(
                 equal(sql_type, live, target),

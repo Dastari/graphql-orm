@@ -2508,11 +2508,12 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "async-graphql",
  "chacha20poly1305",
  "chrono",
+ "convert_case 0.7.1",
  "futures",
  "geo",
  "geo-types",
@@ -2531,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.55.1"
+version = "0.56.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -2542,7 +2543,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "serde",
  "serde_json",

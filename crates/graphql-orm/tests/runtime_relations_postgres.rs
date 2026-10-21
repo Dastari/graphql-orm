@@ -47,6 +47,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
         format_version: 1,
         collections: vec![
             RuntimeCollection {
+                classification: None,
+                description: None,
                 id: cid("pg_customers"),
                 api_type_name: "PgCustomer".into(),
                 api_plural_name: "PgCustomers".into(),
@@ -88,6 +90,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 }],
             },
             RuntimeCollection {
+                classification: None,
+                description: None,
                 id: cid("pg_contacts"),
                 api_type_name: "PgContact".into(),
                 api_plural_name: "PgContacts".into(),

@@ -19,6 +19,7 @@ mod owned_foreign_keys;
 mod owned_schema;
 mod query;
 mod rls;
+mod runtime_decimal;
 mod runtime_description;
 mod runtime_format;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -55,6 +56,12 @@ pub use operation_metadata::*;
 pub use owned_schema::{IndexModel, IndexPredicateModel, OwnedSchemaModel, OwnedTableModel};
 pub use query::*;
 pub use rls::*;
+#[cfg(feature = "runtime-graphql")]
+pub(crate) use runtime_decimal::runtime_decimal_syntax;
+pub use runtime_decimal::{
+    MAX_RUNTIME_DECIMAL_TEXT_BYTES, RuntimeDecimalError, RuntimeDecimalProblem,
+    canonical_runtime_decimal, parse_runtime_decimal, runtime_decimal_from_integer,
+};
 pub use runtime_format::*;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub use runtime_key_read::*;

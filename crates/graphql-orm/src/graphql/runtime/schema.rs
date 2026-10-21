@@ -131,39 +131,59 @@ pub(super) fn helpers(limits: RuntimeScalarLimits) -> Vec<Type> {
             .into(),
     );
     for kind in [Boolean, Integer, Float, String, Uuid, Json, Bytes, DateTime] {
-        let member = |op: &str, ty: TypeRef| {
-            InputValue::new(op, ty).description(super::semantic::filter_member_description(op))
-        };
-        let mut filter = InputObject::new(filter_name(kind))
-            .description(format!("Filter on one {} value", kind.as_str()))
-            .field(member("isNull", TypeRef::named("Boolean")));
-        if kind != Json {
-            for op in ["eq", "ne"] {
-                filter = filter.field(member(op, TypeRef::named(scalar::name(kind))));
-            }
-            for op in ["in", "notIn"] {
-                filter = filter.field(member(op, TypeRef::named_nn_list(scalar::name(kind))));
-            }
-        }
-        if super::semantic::compares(kind) {
-            for op in ["lt", "lte", "gt", "gte"] {
-                filter = filter.field(member(op, TypeRef::named(scalar::name(kind))));
-            }
-        }
-        if kind == String {
-            for op in ["contains", "startsWith", "endsWith"] {
-                filter = filter.field(member(op, TypeRef::named("String")));
-            }
-        }
-        result.push(filter.into());
+        result.push(filter(kind).into());
     }
     result
+}
+/// The `Decimal` scalar and its filter, registered only by compositions that
+/// contain a decimal field so other schemas keep their exact SDL.
+pub(super) fn decimal_helpers() -> Vec<Type> {
+    let kind = RuntimeValueKind::Decimal(DecimalDef::new(18, 0).expect("valid definition"));
+    vec![
+        Scalar::new(scalar::name(kind))
+            .description(super::semantic::scalar_description(kind))
+            .validator(|value| match value {
+                Value::String(text) => runtime_decimal_syntax(text),
+                Value::Number(number) => number.is_i64() || number.is_u64(),
+                _ => false,
+            })
+            .into(),
+        filter(kind).into(),
+    ]
+}
+fn filter(kind: RuntimeValueKind) -> InputObject {
+    let member = |op: &str, ty: TypeRef| {
+        InputValue::new(op, ty).description(super::semantic::filter_member_description(op))
+    };
+    let mut filter = InputObject::new(filter_name(kind))
+        .description(format!("Filter on one {} value", kind.as_str()))
+        .field(member("isNull", TypeRef::named("Boolean")));
+    if kind != RuntimeValueKind::Json {
+        for op in ["eq", "ne"] {
+            filter = filter.field(member(op, TypeRef::named(scalar::name(kind))));
+        }
+        for op in ["in", "notIn"] {
+            filter = filter.field(member(op, TypeRef::named_nn_list(scalar::name(kind))));
+        }
+    }
+    if super::semantic::compares(kind) {
+        for op in ["lt", "lte", "gt", "gte"] {
+            filter = filter.field(member(op, TypeRef::named(scalar::name(kind))));
+        }
+    }
+    if kind == RuntimeValueKind::String {
+        for op in ["contains", "startsWith", "endsWith"] {
+            filter = filter.field(member(op, TypeRef::named("String")));
+        }
+    }
+    filter
 }
 pub(super) fn filter_name(kind: RuntimeValueKind) -> String {
     let name = match kind {
         RuntimeValueKind::Boolean => "RuntimeBoolean",
         RuntimeValueKind::Float => "RuntimeFloat",
         RuntimeValueKind::String => "RuntimeString",
+        RuntimeValueKind::Decimal(_) => "RuntimeDecimal",
         _ => scalar::name(kind),
     };
     format!("{name}Filter")
