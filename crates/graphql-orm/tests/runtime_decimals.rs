@@ -255,14 +255,19 @@ fn decimal_kind_identity_validation_and_defaults() {
     );
     // The static-only SQL Server MONEY domain is never a runtime decimal.
     let mut with_money = definition(false, 2);
-    with_money.collections[0].fields[1].value_kind = RuntimeValueKind::Decimal(DecimalDef::mssql_money());
-    assert!(with_money
-        .validate()
-        .unwrap_err()
-        .diagnostics()
-        .iter()
-        .any(|d| d.code == RuntimeSchemaDiagnosticCode::UnsupportedCapability
-            && d.subject.as_deref() == Some("amount")));
+    with_money.collections[0].fields[1].value_kind =
+        RuntimeValueKind::Decimal(DecimalDef::mssql_money());
+    assert!(
+        with_money
+            .validate()
+            .unwrap_err()
+            .diagnostics()
+            .iter()
+            .any(
+                |d| d.code == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+                    && d.subject.as_deref() == Some("amount")
+            )
+    );
     let schema = definition(false, 2).validate().unwrap();
     let canonical = String::from_utf8(schema.canonical_bytes()).unwrap();
     assert!(canonical.contains("|kind=decimal(12,2)|"));
