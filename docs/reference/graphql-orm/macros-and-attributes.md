@@ -122,6 +122,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(version)]` | optimistic-version field; is not writable and is omitted from inputs |
 | `#[graphql_orm(default = "SQL expression" | false)]` | explicit SQL default or disables the implicit default; one declaration only |
 | `#[graphql_orm(decimal(precision = P, scale = S))]` | required for `rust_decimal::Decimal`; portable precision is 1 through 18 and scale must not exceed precision |
+| `#[graphql_orm(mssql_money)]` | SQL Server only: exact native `MONEY` field as `rust_decimal::Decimal` or `Option<Decimal>`; scale 4 and signed 64-bit scaled range; cannot be combined with `decimal(...)` |
 | `#[graphql_orm(auto_generated = bool)]` | declares whether the value is database-generated |
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
 | `#[transform(write = "…", read = "…")]` | names generated write/read transforms |

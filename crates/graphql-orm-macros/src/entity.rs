@@ -1215,6 +1215,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) serde_name: Option<String>,
     pub(crate) db_column: Option<String>,
     pub(crate) decimal: Option<(u8, u8)>,
+    pub(crate) mssql_money: bool,
     pub(crate) description: Option<String>,
     pub(crate) classification: Option<String>,
     pub(crate) non_exportable: bool,
@@ -1284,6 +1285,15 @@ pub(crate) struct FieldMetadata {
     pub(crate) subscribe: bool,
     pub(crate) read_policy: Option<String>,
     pub(crate) write_policy: Option<String>,
+}
+
+pub(crate) fn decimal_definition_tokens(meta: &FieldMetadata) -> proc_macro2::TokenStream {
+    if meta.mssql_money {
+        quote! { ::graphql_orm::graphql::orm::DecimalDef::mssql_money() }
+    } else {
+        let (precision, scale) = meta.decimal.expect("validated decimal metadata");
+        quote! { ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale) }
+    }
 }
 
 #[derive(Clone)]
@@ -1389,6 +1399,7 @@ impl Default for FieldMetadata {
             serde_name: None,
             db_column: None,
             decimal: None,
+            mssql_money: false,
             description: None,
             classification: None,
             non_exportable: false,
@@ -1983,6 +1994,11 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             let value = nested.value()?;
                             let lit: syn::LitStr = value.parse()?;
                             meta.db_column = Some(lit.value());
+                        } else if nested.path.is_ident("mssql_money") {
+                            if meta.mssql_money {
+                                return Err(syn::Error::new(nested.path.span(), "mssql_money may only be declared once per field"));
+                            }
+                            meta.mssql_money = true;
                         } else if nested.path.is_ident("decimal") {
                             if meta.decimal.is_some() {
                                 return Err(syn::Error::new(
@@ -2428,6 +2444,21 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
 
     let field_type = option_inner_type(&field.ty).unwrap_or(&field.ty);
     let is_decimal = type_path_last_ident(field_type).is_some_and(|ident| ident == "Decimal");
+    if meta.mssql_money {
+        if !is_decimal {
+            return Err(syn::Error::new_spanned(
+                field,
+                "mssql_money requires rust_decimal::Decimal or Option<rust_decimal::Decimal>",
+            ));
+        }
+        if meta.decimal.is_some() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "mssql_money cannot be combined with decimal metadata",
+            ));
+        }
+        meta.decimal = Some((19, 4));
+    }
     if is_decimal && meta.decimal.is_none() {
         return Err(syn::Error::new_spanned(
             field,
@@ -2930,6 +2961,16 @@ fn generate_entity_impl(
     };
 
     let entity_name_lit = struct_name.to_string();
+    if backend != BackendKind::Mssql {
+        for field in fields {
+            if parse_field_metadata(field)?.mssql_money {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "mssql_money requires backend = \"mssql\"",
+                ));
+            }
+        }
+    }
     let schema_only = schema_only_override || entity_meta.schema_only;
     validate_host_timestamp_fields(
         fields,
@@ -2979,12 +3020,6 @@ fn generate_entity_impl(
                 ));
             }
         }
-    }
-    if backend == BackendKind::Mssql && !entity_meta.projections.is_empty() {
-        return Err(syn::Error::new_spanned(
-            input,
-            "typed projections are generated only for sqlite and postgres backends",
-        ));
     }
     let backup_enabled = entity_meta.backup_enabled.unwrap_or(true);
     let append_only = entity_meta.append_only;
@@ -3816,10 +3851,11 @@ fn generate_entity_impl(
                 let type_name = type_path_last_ident(scalar_type)
                     .map(ToString::to_string)
                     .unwrap_or_default();
-                let kind = if let Some((precision, scale)) = field_meta.decimal {
+                let kind = if field_meta.decimal.is_some() {
+                    let definition = decimal_definition_tokens(&field_meta);
                     quote! {
                         ::graphql_orm::graphql::orm::AggregateFieldKind::Decimal(
-                            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
+                            #definition
                         )
                     }
                 } else if matches!(
@@ -4140,10 +4176,9 @@ fn generate_entity_impl(
         let sql_type = rust_type_to_sql_type(backend, field_type, &field_meta);
         let decimal_tokens = field_meta
             .decimal
-            .map(|(precision, scale)| {
-                quote! {
-                    Some(::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale))
-                }
+            .map(|_| {
+                let definition = decimal_definition_tokens(&field_meta);
+                quote! { Some(#definition) }
             })
             .unwrap_or_else(|| quote! { None });
         let spatial_tokens = if let Some(spatial) = &field_meta.spatial {
@@ -4179,6 +4214,11 @@ fn generate_entity_impl(
             quote! {
                 Some(::graphql_orm::graphql::orm::SpatialColumnDef::geometry(#geometry_type, #srid))
             }
+        } else if field_meta.mssql_money {
+            column_names.push(format!(
+                "CAST({db_col_sql} AS DECIMAL(19,4)) AS {db_col_sql}"
+            ));
+            quote! { None }
         } else {
             column_names.push(db_col_sql.clone());
             quote! { None }
@@ -5539,7 +5579,12 @@ fn generate_projection_definitions(
                     .db_column
                     .clone()
                     .unwrap_or_else(|| ident.to_string());
-                backend_quote_identifier_path(backend, &db_column)
+                let quoted = backend_quote_identifier_path(backend, &db_column);
+                if selected.meta.mssql_money {
+                    format!("CAST({quoted} AS DECIMAL(19,4)) AS {quoted}")
+                } else {
+                    quoted
+                }
             })
             .collect::<Vec<_>>();
         let selected_field_names = selected
@@ -5812,22 +5857,20 @@ fn generate_filter_field(
 
     match filter_type {
         "decimal" => {
-            let Some((precision, scale)) = field_meta.decimal else {
+            let Some(_) = field_meta.decimal else {
                 return Err(syn::Error::new(
                     field_name.span(),
                     "filterable(type = \"decimal\") requires decimal metadata",
                 ));
             };
+            let definition = decimal_definition_tokens(field_meta);
             let input = quote! {
                 #[graphql(name = #graphql_name)]
                 pub #filter_field_name: Option<::graphql_orm::graphql::filters::DecimalFilter>,
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    let definition = ::graphql_orm::graphql::orm::DecimalDef::macro_validated(
-                        #precision,
-                        #scale,
-                    );
+                    let definition = #definition;
                     for (value, operator) in [
                         (f.eq, "="),
                         (f.ne, "!="),
@@ -6494,21 +6537,27 @@ fn generate_row_field_assignment(
             #field_name: #bool_expr,
         });
     }
-    if let Some((precision, scale)) = meta.decimal {
+    if meta.decimal.is_some() {
         if let Some(inner_type) = option_inner_type(field_type) {
             return generate_option_row_field_assignment(
                 backend, field_name, inner_type, db_col, meta,
             );
         }
-        let definition = quote! {
-            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
-        };
+        let definition = decimal_definition_tokens(meta);
         let value = match backend {
             BackendKind::Sqlite => quote! {{
                 let value: i64 = row.try_get(#db_col)?;
                 #definition.from_scaled_i64(value)
             }},
-            BackendKind::Postgres | BackendKind::Mssql => quote! { row.try_get(#db_col)? },
+            BackendKind::Postgres => quote! { row.try_get(#db_col)? },
+            BackendKind::Mssql if meta.mssql_money => quote! {{
+                let value: ::graphql_orm::rust_decimal::Decimal = row.try_get(#db_col)?;
+                #definition.normalize(value).map_err(|error| ::graphql_orm::sqlx::Error::ColumnDecode {
+                    index: #db_col.to_string(),
+                    source: Box::new(error),
+                })?
+            }},
+            BackendKind::Mssql => quote! { row.try_get(#db_col)? },
         };
         return Ok(quote! { #field_name: #value, });
     }
@@ -6659,16 +6708,24 @@ fn generate_option_row_field_assignment(
                 .map_err(|e| ::graphql_orm::sqlx::Error::Decode(e.into()))?
         }}
     };
-    if let Some((precision, scale)) = meta.decimal {
-        let definition = quote! {
-            ::graphql_orm::graphql::orm::DecimalDef::macro_validated(#precision, #scale)
-        };
+    if meta.decimal.is_some() {
+        let definition = decimal_definition_tokens(meta);
         let value = match backend {
             BackendKind::Sqlite => quote! {{
                 let value: Option<i64> = row.try_get(#db_col)?;
                 value.map(|value| #definition.from_scaled_i64(value))
             }},
-            BackendKind::Postgres | BackendKind::Mssql => quote! { row.try_get(#db_col)? },
+            BackendKind::Postgres => quote! { row.try_get(#db_col)? },
+            BackendKind::Mssql if meta.mssql_money => quote! {{
+                let value: Option<::graphql_orm::rust_decimal::Decimal> = row.try_get(#db_col)?;
+                value.map(|value| #definition.normalize(value))
+                    .transpose()
+                    .map_err(|error| ::graphql_orm::sqlx::Error::ColumnDecode {
+                        index: #db_col.to_string(),
+                        source: Box::new(error),
+                    })?
+            }},
+            BackendKind::Mssql => quote! { row.try_get(#db_col)? },
         };
         return Ok(quote! { #field_name: #value, });
     }
@@ -6950,6 +7007,9 @@ pub(crate) fn rust_type_to_sql_type(
         }
         .to_string();
     }
+    if meta.mssql_money {
+        return "MONEY".to_string();
+    }
     if let Some((precision, scale)) = meta.decimal {
         return match backend {
             BackendKind::Sqlite => "INTEGER".to_string(),
@@ -7050,6 +7110,10 @@ fn decimal_default_sql(
     normalized.rescale(u32::from(scale));
     if normalized != parsed
         || normalized.mantissa().unsigned_abs().to_string().len() > usize::from(precision)
+        || (backend == BackendKind::Mssql
+            && precision == 19
+            && scale == 4
+            && i64::try_from(normalized.mantissa()).is_err())
     {
         return Err(syn::Error::new(
             span,
@@ -7127,5 +7191,52 @@ mod host_timestamp_tests {
         let explicit: Field = parse_quote!(#[primary_key] key: String);
         let fields = syn::punctuated::Punctuated::from_iter([explicit, inferred]);
         assert!(validate_host_timestamp_fields(&fields, true).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod mssql_money_attribute_tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn rejects_wrong_backend_and_conflicting_decimal_metadata() {
+        let wrong_backend: DeriveInput = parse_quote! {
+            #[graphql_entity(backend = "sqlite", table = "amounts", plural = "Amounts")]
+            struct Amount { #[primary_key] id: i64, #[graphql_orm(mssql_money)] value: rust_decimal::Decimal }
+        };
+        assert!(
+            generate_graphql_entity(&wrong_backend)
+                .unwrap_err()
+                .to_string()
+                .contains("mssql_money requires backend")
+        );
+        let conflicting: Field = parse_quote! {
+            #[graphql_orm(mssql_money, decimal(precision = 18, scale = 4))]
+            value: rust_decimal::Decimal
+        };
+        assert!(
+            parse_field_metadata(&conflicting)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot be combined")
+        );
+        let valid: Field = parse_quote! {
+            #[graphql_orm(mssql_money)] value: Option<rust_decimal::Decimal>
+        };
+        let parsed = parse_field_metadata(&valid).unwrap();
+        assert_eq!(parsed.decimal, Some((19, 4)));
+        assert!(parsed.mssql_money);
+        let wrong_type: Field = parse_quote! {
+            #[graphql_orm(mssql_money)] value: String
+        };
+        assert!(
+            parse_field_metadata(&wrong_type)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("requires rust_decimal::Decimal")
+        );
     }
 }

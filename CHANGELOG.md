@@ -14,6 +14,25 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.57.0 (unreleased)
+
+- Add the SQL Server-only `#[graphql_orm(mssql_money)]` field domain for exact
+  native `MONEY` values as `rust_decimal::Decimal`. Generated entity, relation,
+  bulk and typed projection reads cast the selected column to `DECIMAL(19,4)`
+  under its original alias before TDS decoding. Validation enforces scale four
+  and the signed 64-bit scaled mantissa without rounding. Portable decimal
+  precision remains capped at 18; existing declarations and cursor formats are
+  unchanged. SQL Server typed read projections are now supported.
+- Test-only: the owned SQL Server fixture never pulls by default
+  (`GRAPHQL_ORM_TEST_MSSQL_PULL=missing` opts in), runs without swap, with a
+  1024-task PID limit, one bounded 16 MiB json-file log, and an optional
+  writable-layer bound (`GRAPHQL_ORM_TEST_MSSQL_STORAGE_SIZE`, for example
+  `8G`, rejected by Docker where the storage driver cannot enforce it).
+  An optional `GRAPHQL_ORM_TEST_RUN_TOKEN` adds a `graphql-orm.test-run`
+  label, and `GRAPHQL_ORM_TEST_MSSQL_EVIDENCE_DIR` receives each exact
+  container ID by exclusive creation, so an external controller can clean up
+  only the containers its run created.
+
 ## 0.56.0 (unreleased)
 
 Companion macros crate: `graphql-orm-macros` **0.56.0** (version alignment only).

@@ -15,6 +15,18 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
+
+Upgrade `graphql-orm` and `graphql-orm-macros` together. For an existing SQL
+Server `MONEY` column mapped to `rust_decimal::Decimal`, use
+`#[graphql_orm(mssql_money)]` instead of a portable `decimal(...)` declaration.
+The generated SELECT projects `CAST([column] AS DECIMAL(19,4)) AS [column]` so
+the driver receives an exact Numeric value. The annotation rejects non-SQL
+Server backends and values outside the native MONEY range; it cannot be mixed
+with portable decimal metadata. Existing portable Decimal fields, GraphQL SDL,
+source tables and stored data are unchanged. No data or schema migration is
+needed; in particular this feature performs no DDL against external tables.
+
 ## 0.55.1 to 0.56.0: runtime descriptions and exact decimals
 
 Upgrade ORM/macros together with `graphql-orm-operation-catalog` 0.4.1 and refresh the

@@ -124,6 +124,7 @@ pub fn composite_key_id(values: &[SqlValue]) -> String {
 pub struct DecimalDef {
     precision: u8,
     scale: u8,
+    mssql_money: bool,
 }
 
 #[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
@@ -131,6 +132,12 @@ pub struct DecimalDef {
 struct DecimalDefWire {
     precision: u8,
     scale: u8,
+    #[serde(default, skip_serializing_if = "is_false")]
+    mssql_money: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl From<DecimalDef> for DecimalDefWire {
@@ -138,6 +145,7 @@ impl From<DecimalDef> for DecimalDefWire {
         Self {
             precision: value.precision,
             scale: value.scale,
+            mssql_money: value.mssql_money,
         }
     }
 }
@@ -148,7 +156,16 @@ impl<'de> serde::Deserialize<'de> for DecimalDef {
         Deserializer: serde::Deserializer<'de>,
     {
         let wire = DecimalDefWire::deserialize(deserializer)?;
-        Self::new(wire.precision, wire.scale).map_err(serde::de::Error::custom)
+        if wire.mssql_money {
+            if (wire.precision, wire.scale) != (19, 4) {
+                return Err(serde::de::Error::custom(
+                    "invalid SQL Server MONEY definition",
+                ));
+            }
+            Ok(Self::mssql_money())
+        } else {
+            Self::new(wire.precision, wire.scale).map_err(serde::de::Error::custom)
+        }
     }
 }
 
@@ -161,7 +178,29 @@ impl DecimalDef {
         if precision == 0 || precision > Self::MAXIMUM_PORTABLE_PRECISION || scale > precision {
             return Err(DecimalConfigurationError);
         }
-        Ok(Self { precision, scale })
+        Ok(Self {
+            precision,
+            scale,
+            mssql_money: false,
+        })
+    }
+
+    /// Exact SQL Server MONEY domain: scale four and a signed 64-bit mantissa.
+    /// This definition is not portable to an ordinary DECIMAL(19,4) column.
+    /// Generated entities use it only with the SQL Server backend. Hand-built
+    /// entities must supply their own exact MONEY cast and row decoder and must
+    /// not attach this definition to SQLite or PostgreSQL columns.
+    pub const fn mssql_money() -> Self {
+        Self {
+            precision: 19,
+            scale: 4,
+            mssql_money: true,
+        }
+    }
+
+    /// Whether this definition represents SQL Server MONEY.
+    pub const fn is_mssql_money(self) -> bool {
+        self.mssql_money
     }
 
     /// Creates a definition already validated by a trusted macro.
@@ -195,6 +234,9 @@ impl DecimalDef {
         }
         let digits = normalized.mantissa().unsigned_abs().to_string().len();
         if digits > usize::from(self.precision) {
+            return Err(DecimalValueError::Precision);
+        }
+        if self.mssql_money && i64::try_from(normalized.mantissa()).is_err() {
             return Err(DecimalValueError::Precision);
         }
         Ok(normalized)
@@ -4820,4 +4862,44 @@ pub struct MigrationApplicationMetadata {
     pub target_schema_hash: String,
     pub plan_hash: String,
     pub policy: SchemaPolicy,
+}
+
+#[cfg(test)]
+mod mssql_money_domain_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn exact_money_domain_preserves_portable_decimal_limit() {
+        let money = DecimalDef::mssql_money();
+        for text in [
+            "-922337203685477.5808",
+            "922337203685477.5807",
+            "0",
+            "0.0001",
+            "-0.0001",
+        ] {
+            let value = rust_decimal::Decimal::from_str(text).unwrap();
+            assert_eq!(money.normalize(value).unwrap(), value);
+        }
+        for text in ["922337203685477.5808", "-922337203685477.5809", "0.00001"] {
+            assert!(
+                money
+                    .normalize(rust_decimal::Decimal::from_str(text).unwrap())
+                    .is_err()
+            );
+        }
+        assert!(DecimalDef::new(19, 4).is_err());
+        assert!(DecimalDef::new(18, 4).is_ok());
+        assert_eq!(
+            serde_json::to_string(&DecimalDef::new(18, 4).unwrap()).unwrap(),
+            r#"{"precision":18,"scale":4}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4,"mssql_money":true}"#)
+                .unwrap(),
+            money
+        );
+        assert!(serde_json::from_str::<DecimalDef>(r#"{"precision":19,"scale":4}"#).is_err());
+    }
 }
