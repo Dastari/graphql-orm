@@ -39,6 +39,7 @@ guidance for the core ORM package.
 - [Binary keys and indexes](binary-keys-and-indexes.md)
 - [Resolver operation metadata](resolver-operation-metadata.md)
 - [Pagination migration](pagination-migration.md)
+- [Protected authorized pagination](authorized-pagination.md)
 - [Typed grouped aggregates](typed-aggregates.md)
 
 ## Choose a path
