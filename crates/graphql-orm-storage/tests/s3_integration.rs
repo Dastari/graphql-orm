@@ -415,8 +415,9 @@ async fn s3_fences_and_scan_limits_fail_before_any_request() {
     };
     use std::time::Duration;
 
-    // Nothing listens here; every assertion below must fail locally.
-    let store = namespace_backend("http://127.0.0.1:9".to_string());
+    // An owned fixture that must record no request at all.
+    let (endpoint, server) = namespace_fixture(Vec::new(), 1);
+    let store = namespace_backend(endpoint.clone());
     let fence = NamespaceFence {
         target: NamespaceTarget::SubPrefix("a".to_string()),
         namespace: NamespaceId::new_random(),
@@ -449,7 +450,7 @@ async fn s3_fences_and_scan_limits_fail_before_any_request() {
         );
     }
     let other_instance = NamespaceFence {
-        epoch: namespace_backend("http://127.0.0.1:9".to_string()).observation_epoch(),
+        epoch: namespace_backend(endpoint).observation_epoch(),
         ..fence.clone()
     };
     assert!(matches!(
@@ -483,4 +484,7 @@ async fn s3_fences_and_scan_limits_fail_before_any_request() {
             .await,
         Err(StorageError::PreconditionFailed { .. })
     ));
+    // Containment, instance and limit checks run before any provider request.
+    let log = server.join().expect("fixture thread");
+    assert!(log.is_empty(), "{log:?}");
 }
