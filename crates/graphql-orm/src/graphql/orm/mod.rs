@@ -19,6 +19,7 @@ mod owned_foreign_keys;
 mod owned_schema;
 mod query;
 mod rls;
+mod runtime_description;
 mod runtime_format;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod runtime_key_read;

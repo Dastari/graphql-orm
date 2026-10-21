@@ -35,6 +35,9 @@ fn relation_id(value: &str) -> RelationId {
 
 fn field(id: &str, column: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: field_id(id),
         api_name: id.to_string(),
         physical_column: column.to_string(),
@@ -62,6 +65,8 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
         format_version: 1,
         collections: vec![
             RuntimeCollection {
+                classification: None,
+                description: None,
                 id: collection_id("customers"),
                 api_type_name: "Customer".to_string(),
                 api_plural_name: "Customers".to_string(),
@@ -88,6 +93,9 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                     parent_id.clone(),
                 ],
                 relations: vec![RuntimeRelation {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id: relation_id("customer_parent"),
                     api_name: "parent".to_string(),
                     target: collection_id("accounts"),
@@ -107,6 +115,8 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                 }],
             },
             RuntimeCollection {
+                description: None,
+                classification: None,
                 id: collection_id("accounts"),
                 api_type_name: "Account".to_string(),
                 api_plural_name: "Accounts".to_string(),

@@ -203,6 +203,18 @@ where
     Ok(out)
 }
 
+/// SDL with block descriptions and all whitespace removed, so only the
+/// described shape is compared.
+fn without_descriptions(sdl: &str) -> String {
+    let mut out = String::new();
+    let mut parts = sdl.split("\"\"\"");
+    while let Some(text) = parts.next() {
+        out.extend(text.chars().filter(|c| !c.is_whitespace()));
+        parts.next();
+    }
+    out
+}
+
 fn compare(report: &str, golden: &str) {
     let path = format!("{}/tests/goldens/{golden}", env!("CARGO_MANIFEST_DIR"));
     if std::env::var_os("GRAPHQL_ORM_CAPTURE_GOLDENS").is_some() {
@@ -219,6 +231,22 @@ fn compare(report: &str, golden: &str) {
         .collect::<Vec<_>>();
     let actual = report.lines().collect::<Vec<_>>();
     for (line, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+        // 0.56 describes every runtime type, field and root. The 0.50.2 SDL
+        // must be unchanged apart from those descriptions.
+        if let (Some(actual), Some(expected)) =
+            (actual.strip_prefix("sdl="), expected.strip_prefix("sdl="))
+        {
+            let actual: String = serde_json::from_str(actual).unwrap();
+            let expected: String = serde_json::from_str(expected).unwrap();
+            assert!(actual.contains("\"\"\""), "runtime SDL is described");
+            assert_eq!(
+                without_descriptions(&actual),
+                without_descriptions(&expected),
+                "golden {golden} line {} differs beyond descriptions",
+                line + 1
+            );
+            continue;
+        }
         assert_eq!(actual, expected, "golden {golden} line {}", line + 1);
     }
     assert_eq!(actual.len(), expected.len(), "golden {golden}");

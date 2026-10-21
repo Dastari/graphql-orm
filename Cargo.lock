@@ -3122,6 +3122,7 @@ dependencies = [
  "base64",
  "chacha20poly1305",
  "chrono",
+ "convert_case 0.7.1",
  "futures",
  "geo",
  "geo-types",
@@ -3227,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

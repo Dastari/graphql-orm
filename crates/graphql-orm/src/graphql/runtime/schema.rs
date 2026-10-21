@@ -43,19 +43,24 @@ pub(super) fn output(name: &str, ty: TypeRef) -> Field {
     })
 }
 pub(super) fn page_args(field: Field, object: &str) -> Field {
-    field
-        .argument(InputValue::new(
-            "where",
-            TypeRef::named(format!("{object}WhereInput")),
-        ))
-        .argument(InputValue::new(
-            "orderBy",
-            TypeRef::named_nn_list(format!("{object}OrderInput")),
-        ))
-        .argument(InputValue::new("first", TypeRef::named("Int")))
-        .argument(InputValue::new("after", TypeRef::named("String")))
-        .argument(InputValue::new("last", TypeRef::named("Int")))
-        .argument(InputValue::new("before", TypeRef::named("String")))
+    super::semantic::page_arguments(object)
+        .into_iter()
+        .fold(field, |field, (name, ty)| {
+            field.argument(
+                InputValue::new(name, type_ref(&ty))
+                    .description(super::semantic::argument_description(name)),
+            )
+        })
+}
+/// Parse a generated `Name`, `Name!` or `[Name!]` reference.
+pub(super) fn type_ref(ty: &str) -> TypeRef {
+    if let Some(inner) = ty.strip_prefix('[').and_then(|ty| ty.strip_suffix("!]")) {
+        TypeRef::named_nn_list(inner)
+    } else if let Some(inner) = ty.strip_suffix('!') {
+        TypeRef::named_nn(inner)
+    } else {
+        TypeRef::named(ty)
+    }
 }
 pub(super) fn root_field(name: &str, object: &str) -> Field {
     page_args(
@@ -74,7 +79,8 @@ pub(super) fn root_field(name: &str, object: &str) -> Field {
                     Ok(Some(field_value(value.clone())))
                 })
             },
-        ),
+        )
+        .description(super::semantic::list_description(object)),
         object,
     )
 }
@@ -84,52 +90,69 @@ pub(super) fn helpers(limits: RuntimeScalarLimits) -> Vec<Type> {
     for kind in [Integer, Uuid, Json, Bytes, DateTime] {
         result.push(
             Scalar::new(scalar::name(kind))
+                .description(super::semantic::scalar_description(kind))
                 .validator(move |value| scalar::decode(kind, value, limits).is_ok())
                 .into(),
         );
     }
     result.push(
         Enum::new("RuntimeOrderDirection")
-            .item(EnumItem::new("ASC"))
-            .item(EnumItem::new("DESC"))
+            .description("Sort direction")
+            .item(EnumItem::new("ASC").description("Ascending"))
+            .item(EnumItem::new("DESC").description("Descending"))
             .into(),
     );
     result.push(
         Enum::new("RuntimeNullPlacement")
-            .item(EnumItem::new("FIRST"))
-            .item(EnumItem::new("LAST"))
+            .description("Placement of null values in an ordering")
+            .item(EnumItem::new("FIRST").description("Null values first"))
+            .item(EnumItem::new("LAST").description("Null values last"))
             .into(),
     );
     result.push(
         Object::new("RuntimePageInfo")
-            .field(output("hasNextPage", TypeRef::named_nn("Boolean")))
-            .field(output("hasPreviousPage", TypeRef::named_nn("Boolean")))
-            .field(output("startCursor", TypeRef::named("String")))
-            .field(output("endCursor", TypeRef::named("String")))
+            .description("Pagination state of one page")
+            .field(
+                output("hasNextPage", TypeRef::named_nn("Boolean"))
+                    .description("Whether more records follow this page"),
+            )
+            .field(
+                output("hasPreviousPage", TypeRef::named_nn("Boolean"))
+                    .description("Whether records precede this page"),
+            )
+            .field(
+                output("startCursor", TypeRef::named("String"))
+                    .description("Cursor of the first record in this page"),
+            )
+            .field(
+                output("endCursor", TypeRef::named("String"))
+                    .description("Cursor of the last record in this page"),
+            )
             .into(),
     );
     for kind in [Boolean, Integer, Float, String, Uuid, Json, Bytes, DateTime] {
+        let member = |op: &str, ty: TypeRef| {
+            InputValue::new(op, ty).description(super::semantic::filter_member_description(op))
+        };
         let mut filter = InputObject::new(filter_name(kind))
-            .field(InputValue::new("isNull", TypeRef::named("Boolean")));
+            .description(format!("Filter on one {} value", kind.as_str()))
+            .field(member("isNull", TypeRef::named("Boolean")));
         if kind != Json {
             for op in ["eq", "ne"] {
-                filter = filter.field(InputValue::new(op, TypeRef::named(scalar::name(kind))));
+                filter = filter.field(member(op, TypeRef::named(scalar::name(kind))));
             }
             for op in ["in", "notIn"] {
-                filter = filter.field(InputValue::new(
-                    op,
-                    TypeRef::named_nn_list(scalar::name(kind)),
-                ));
+                filter = filter.field(member(op, TypeRef::named_nn_list(scalar::name(kind))));
             }
         }
-        if matches!(kind, Integer | Float | String | DateTime) {
+        if super::semantic::compares(kind) {
             for op in ["lt", "lte", "gt", "gte"] {
-                filter = filter.field(InputValue::new(op, TypeRef::named(scalar::name(kind))));
+                filter = filter.field(member(op, TypeRef::named(scalar::name(kind))));
             }
         }
         if kind == String {
             for op in ["contains", "startsWith", "endsWith"] {
-                filter = filter.field(InputValue::new(op, TypeRef::named("String")));
+                filter = filter.field(member(op, TypeRef::named("String")));
             }
         }
         result.push(filter.into());
@@ -149,21 +172,23 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
     let mut result = Vec::new();
     for c in &module.schema.schema().collections {
         let name = module.object_name(c);
-        let mut object = Object::new(&name);
+        let mut object = Object::new(&name).description(c.effective_description());
         let mut filter = InputObject::new(format!("{name}WhereInput"))
-            .field(InputValue::new(
-                "and",
-                TypeRef::named_nn_list(format!("{name}WhereInput")),
-            ))
-            .field(InputValue::new(
-                "or",
-                TypeRef::named_nn_list(format!("{name}WhereInput")),
-            ))
-            .field(InputValue::new(
-                "not",
-                TypeRef::named(format!("{name}WhereInput")),
-            ));
-        let mut order_enum = Enum::new(format!("{name}OrderField"));
+            .description(format!("Filter {name} records"))
+            .field(
+                InputValue::new("and", TypeRef::named_nn_list(format!("{name}WhereInput")))
+                    .description("Matches when every filter matches"),
+            )
+            .field(
+                InputValue::new("or", TypeRef::named_nn_list(format!("{name}WhereInput")))
+                    .description("Matches when any filter matches"),
+            )
+            .field(
+                InputValue::new("not", TypeRef::named(format!("{name}WhereInput")))
+                    .description("Matches when the filter does not match"),
+            );
+        let mut order_enum =
+            Enum::new(format!("{name}OrderField")).description(format!("Sortable {name} fields"));
         for f in &c.fields {
             // A projected field outputs its host object; everything else stays scalar.
             let (name, nullable) = match module.projection(&f.id) {
@@ -178,15 +203,16 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
             } else {
                 TypeRef::named_nn(name)
             };
-            object = object.field(output(&f.api_name, ty));
+            let description = f.effective_description();
+            object = object.field(output(&f.api_name, ty).description(&description));
             if f.filterable {
-                filter = filter.field(InputValue::new(
-                    &f.api_name,
-                    TypeRef::named(filter_name(f.value_kind)),
-                ));
+                filter = filter.field(
+                    InputValue::new(&f.api_name, TypeRef::named(filter_name(f.value_kind)))
+                        .description(&description),
+                );
             }
             if f.sortable {
-                order_enum = order_enum.item(EnumItem::new(&f.api_name));
+                order_enum = order_enum.item(EnumItem::new(&f.api_name).description(description));
             }
         }
         for relation in &c.relations {
@@ -208,7 +234,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
                         &target,
                     ),
                 };
-                object = object.field(field);
+                object = object.field(field.description(relation.effective_description()));
             }
         }
         result.extend([
@@ -216,30 +242,42 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
             filter.into(),
             order_enum.into(),
             InputObject::new(format!("{name}OrderInput"))
-                .field(InputValue::new(
-                    "field",
-                    TypeRef::named_nn(format!("{name}OrderField")),
-                ))
-                .field(InputValue::new(
-                    "direction",
-                    TypeRef::named("RuntimeOrderDirection"),
-                ))
-                .field(InputValue::new(
-                    "nulls",
-                    TypeRef::named("RuntimeNullPlacement"),
-                ))
+                .description(format!("One {name} ordering term"))
+                .field(
+                    InputValue::new("field", TypeRef::named_nn(format!("{name}OrderField")))
+                        .description("Field to order by"),
+                )
+                .field(
+                    InputValue::new("direction", TypeRef::named("RuntimeOrderDirection"))
+                        .description("Sort direction"),
+                )
+                .field(
+                    InputValue::new("nulls", TypeRef::named("RuntimeNullPlacement"))
+                        .description("Placement of null values"),
+                )
                 .into(),
             Object::new(format!("{name}Edge"))
-                .field(output("cursor", TypeRef::named_nn("String")))
-                .field(output("node", TypeRef::named_nn(&name)))
+                .description(format!("One {name} record in a page"))
+                .field(
+                    output("cursor", TypeRef::named_nn("String"))
+                        .description("Opaque cursor of this record"),
+                )
+                .field(output("node", TypeRef::named_nn(&name)).description("The record"))
                 .into(),
             Object::new(format!("{name}Connection"))
-                .field(output(
-                    "edges",
-                    TypeRef::named_nn_list_nn(format!("{name}Edge")),
-                ))
-                .field(output("pageInfo", TypeRef::named_nn("RuntimePageInfo")))
-                .field(output("totalCount", TypeRef::named_nn("RuntimeInt64")))
+                .description(format!("A page of {name} records"))
+                .field(
+                    output("edges", TypeRef::named_nn_list_nn(format!("{name}Edge")))
+                        .description("Records in this page"),
+                )
+                .field(
+                    output("pageInfo", TypeRef::named_nn("RuntimePageInfo"))
+                        .description("Pagination state of this page"),
+                )
+                .field(
+                    output("totalCount", TypeRef::named_nn("RuntimeInt64"))
+                        .description("Number of records matching the filter"),
+                )
                 .into(),
         ]);
     }

@@ -39,6 +39,9 @@ struct StringSample {
 
 fn field(name: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: FieldId::new(name).unwrap(),
         api_name: name.into(),
         physical_column: name.into(),
@@ -56,6 +59,8 @@ fn schema() -> ValidatedRuntimeSchema {
     RuntimeSchema {
         format_version: 1,
         collections: vec![RuntimeCollection {
+            description: None,
+            classification: None,
             id: CollectionId::new("samples").unwrap(),
             api_type_name: "StringSample".into(),
             api_plural_name: "StringSamples".into(),

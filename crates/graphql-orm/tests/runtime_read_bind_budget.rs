@@ -19,6 +19,8 @@ fn schema() -> ValidatedRuntimeSchema {
     RuntimeSchema {
         format_version: 1,
         collections: vec![RuntimeCollection {
+            classification: None,
+            description: None,
             id: CollectionId::new("budget").unwrap(),
             api_type_name: "Budget".into(),
             api_plural_name: "Budgets".into(),
@@ -32,6 +34,9 @@ fn schema() -> ValidatedRuntimeSchema {
             ]
             .into_iter()
             .map(|(name, kind)| RuntimeField {
+                description: None,
+                classification: None,
+                export: None,
                 id: field_id(name),
                 api_name: name.into(),
                 physical_column: name.into(),

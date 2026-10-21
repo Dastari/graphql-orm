@@ -64,6 +64,7 @@ field-case-upper = ["graphql-orm-macros/field-case-upper"]
 base64 = { version = "0.22", optional = true }
 async-trait = { version = "0.1", optional = true }
 chacha20poly1305 = "0.10"
+convert_case = { workspace = true }
 quick-xml = { version = "0.41", optional = true }
 agql-auth = { workspace = true, optional = true }
 async-graphql = { version = "7", features = ["dataloader", "uuid", "decimal"] }

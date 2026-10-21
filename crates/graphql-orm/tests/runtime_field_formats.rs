@@ -32,6 +32,9 @@ fn format(namespace: &str, version: u16) -> RuntimeFieldFormat {
 
 fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: FieldId::new(id).unwrap(),
         api_name: id.into(),
         physical_column: id.into(),
@@ -52,6 +55,8 @@ fn schema(avatar: Option<RuntimeFieldFormat>) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            description: None,
+            classification: None,
             id: CollectionId::new("profiles").unwrap(),
             api_type_name: "Profile".into(),
             api_plural_name: "Profiles".into(),

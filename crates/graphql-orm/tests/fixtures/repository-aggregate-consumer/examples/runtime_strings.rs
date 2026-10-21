@@ -30,6 +30,9 @@ mod supported {
     }
     fn field(name: &str, nullable: bool) -> RuntimeField {
         RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(name).unwrap(),
             api_name: name.into(),
             physical_column: name.into(),
@@ -92,6 +95,8 @@ mod supported {
         let schema = RuntimeSchema {
             format_version: 1,
             collections: vec![RuntimeCollection {
+                description: None,
+                classification: None,
                 id: collection_id.clone(),
                 api_type_name: "PrivateHistory".into(),
                 api_plural_name: "PrivateStringHistory".into(),

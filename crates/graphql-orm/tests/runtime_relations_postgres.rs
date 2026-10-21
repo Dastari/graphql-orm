@@ -21,6 +21,9 @@ fn fid(value: &str) -> FieldId {
 
 fn field(id: &str, kind: RuntimeValueKind) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: fid(id),
         api_name: id.to_string(),
         physical_column: id.to_string(),
@@ -57,6 +60,9 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field("pg_customer_status", RuntimeValueKind::String),
                 ],
                 relations: vec![RuntimeRelation {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id: RelationId::new("pg_customer_contacts").unwrap(),
                     api_name: "contacts".into(),
                     target: cid("pg_contacts"),
@@ -97,6 +103,9 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field("pg_contact_payload", RuntimeValueKind::Bytes),
                 ],
                 relations: vec![RuntimeRelation {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id: RelationId::new("pg_contact_notes").unwrap(),
                     api_name: "notes".into(),
                     target: cid("pg_notes"),
@@ -116,6 +125,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 }],
             },
             RuntimeCollection {
+                description: None,
+                classification: None,
                 id: cid("pg_notes"),
                 api_type_name: "PgNote".into(),
                 api_plural_name: "PgNotes".into(),

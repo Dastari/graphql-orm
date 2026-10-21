@@ -40,7 +40,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::{RuntimeDefaultError, RuntimeDefaultProblem, RuntimeFieldFormat, RuntimeFormatProblem};
+use super::runtime_description::{classification_problem, semantic_token};
+use super::{
+    GraphqlSemanticClassification, GraphqlSemanticExport, RuntimeDefaultError,
+    RuntimeDefaultProblem, RuntimeFieldFormat, RuntimeFormatProblem, validate_semantic_description,
+};
 
 use super::core::{
     BackupValueKind, ColumnBackupPolicy, DeletePolicy, EntityMetadata, FieldMetadata, IndexMethod,
@@ -236,6 +240,16 @@ pub struct RuntimeField {
     /// identities byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<RuntimeFieldFormat>,
+    /// Optional public description shared by GraphQL and the semantic catalogue;
+    /// see [`RuntimeField::effective_description`]. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional classification; inherits the collection's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<GraphqlSemanticClassification>,
+    /// Optional export disposition; `exportable` unless secret when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<GraphqlSemanticExport>,
 }
 
 /// Cardinality of a runtime relation from the declaring collection's perspective.
@@ -283,6 +297,16 @@ pub struct RuntimeRelation {
     pub enforce_foreign_key: bool,
     /// Delete behavior; only meaningful on the foreign-key-enforcing side.
     pub on_delete: Option<DeletePolicy>,
+    /// Optional public description shared by GraphQL and the semantic catalogue;
+    /// see [`RuntimeRelation::effective_description`]. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional classification; inherits the collection's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<GraphqlSemanticClassification>,
+    /// Optional export disposition; `exportable` unless secret when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<GraphqlSemanticExport>,
 }
 
 /// Owned runtime definition of one secondary index.
@@ -323,6 +347,14 @@ pub struct RuntimeCollection {
     pub composite_unique: Vec<Vec<FieldId>>,
     /// Deterministic default ordering.
     pub default_order: Vec<RuntimeOrderTerm>,
+    /// Optional public description shared by GraphQL and the semantic catalogue;
+    /// see [`RuntimeCollection::effective_description`]. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional default classification of the collection's members; `internal`
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<GraphqlSemanticClassification>,
 }
 
 /// The serialized IR format version this crate reads and writes.
@@ -387,6 +419,11 @@ pub enum RuntimeSchemaDiagnosticCode {
     RetentionRequiresAppendOnly,
     /// A semantic field format descriptor is invalid.
     InvalidFormat,
+    /// A public description is empty, untrimmed, longer than 1024 bytes or
+    /// contains control or directional-formatting characters.
+    InvalidDescription,
+    /// A classification weakens its collection's, or a secret member is exportable.
+    InvalidClassification,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -418,6 +455,8 @@ impl RuntimeSchemaDiagnosticCode {
             Self::UnsupportedDefault => "unsupported_default",
             Self::InvalidDefaultOrder => "invalid_default_order",
             Self::InvalidFormat => "invalid_format",
+            Self::InvalidDescription => "invalid_description",
+            Self::InvalidClassification => "invalid_classification",
         }
     }
 }
@@ -633,6 +672,64 @@ fn target_key_is_unique(target: &RuntimeCollection, referenced: &BTreeSet<&Field
         .any(|group| group.iter().collect::<BTreeSet<_>>() == *referenced)
 }
 
+fn invalid_description(
+    collection: &CollectionId,
+    subject: Option<&str>,
+) -> RuntimeSchemaDiagnostic {
+    RuntimeSchemaDiagnostic::scoped(
+        RuntimeSchemaDiagnosticCode::InvalidDescription,
+        "description must be trimmed, non-empty, at most 1024 bytes and free of control or \
+         directional-formatting characters"
+            .to_string(),
+        collection,
+        subject,
+    )
+}
+
+/// Value-free description and classification diagnostics of one field or relation.
+fn semantic_member_diagnostics(
+    collection: &RuntimeCollection,
+    subject: Option<&str>,
+    description: Option<&str>,
+    classification: GraphqlSemanticClassification,
+    export: Option<GraphqlSemanticExport>,
+) -> Vec<RuntimeSchemaDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if description.is_some_and(|text| validate_semantic_description(text).is_err()) {
+        diagnostics.push(invalid_description(&collection.id, subject));
+    }
+    if let Some(problem) = classification_problem(collection, classification, export) {
+        diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+            RuntimeSchemaDiagnosticCode::InvalidClassification,
+            problem.to_string(),
+            &collection.id,
+            subject,
+        ));
+    }
+    diagnostics
+}
+
+/// Semantic members join the ID-bearing identity only when present.
+fn push_semantic_members(
+    out: &mut String,
+    description: Option<&str>,
+    classification: Option<GraphqlSemanticClassification>,
+    export: Option<GraphqlSemanticExport>,
+) {
+    if let Some(description) = description {
+        out.push_str("|description=");
+        out.push_str(&serde_json::to_string(description).expect("strings always serialize"));
+    }
+    if let Some(classification) = classification {
+        out.push_str("|classification=");
+        out.push_str(&semantic_token(&classification));
+    }
+    if let Some(export) = export {
+        out.push_str("|export=");
+        out.push_str(&semantic_token(&export));
+    }
+}
+
 impl RuntimeSchema {
     /// Validates the schema, returning every diagnostic found rather than the first.
     ///
@@ -802,6 +899,13 @@ impl RuntimeSchema {
                     None,
                 ));
             }
+            if collection
+                .description
+                .as_deref()
+                .is_some_and(|text| validate_semantic_description(text).is_err())
+            {
+                diagnostics.push(invalid_description(cid, None));
+            }
             if !valid_physical_name(&collection.physical_table) {
                 diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                     RuntimeSchemaDiagnosticCode::InvalidPhysicalName,
@@ -914,6 +1018,13 @@ impl RuntimeSchema {
                         .with_detail(RuntimeSchemaDiagnosticDetail::Format(error.problem())),
                     );
                 }
+                diagnostics.extend(semantic_member_diagnostics(
+                    collection,
+                    subject,
+                    field.description.as_deref(),
+                    field.effective_classification(collection),
+                    field.export,
+                ));
             }
 
             // Primary key.
@@ -1043,6 +1154,13 @@ impl RuntimeSchema {
             let mut relation_api_names = BTreeSet::new();
             for relation in &collection.relations {
                 let subject = Some(relation.id.as_str());
+                diagnostics.extend(semantic_member_diagnostics(
+                    collection,
+                    subject,
+                    relation.description.as_deref(),
+                    relation.effective_classification(collection),
+                    relation.export,
+                ));
                 if !valid_graphql_name(&relation.api_name) {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::InvalidApiName,
@@ -1358,6 +1476,14 @@ impl ValidatedRuntimeSchema {
             if collection.retention_purge {
                 out.push_str("|retention_purge=true");
             }
+            if with_ids {
+                push_semantic_members(
+                    &mut out,
+                    collection.description.as_deref(),
+                    collection.classification,
+                    None,
+                );
+            }
             out.push('\n');
 
             out.push_str(&format!(
@@ -1414,6 +1540,14 @@ impl ValidatedRuntimeSchema {
                             .expect("strings always serialize"),
                     );
                 }
+                if with_ids {
+                    push_semantic_members(
+                        &mut out,
+                        field.description.as_deref(),
+                        field.classification,
+                        field.export,
+                    );
+                }
                 out.push('\n');
             }
 
@@ -1459,7 +1593,7 @@ impl ValidatedRuntimeSchema {
                     .map(|policy| policy.as_sql().to_ascii_lowercase())
                     .unwrap_or_else(|| "none".to_string());
                 out.push_str(&format!(
-                    "|api={}|target={}|keys={}|cardinality={}|fk={}|on_delete={}\n",
+                    "|api={}|target={}|keys={}|cardinality={}|fk={}|on_delete={}",
                     relation.api_name,
                     target,
                     pairs,
@@ -1467,6 +1601,15 @@ impl ValidatedRuntimeSchema {
                     relation.enforce_foreign_key,
                     on_delete
                 ));
+                if with_ids {
+                    push_semantic_members(
+                        &mut out,
+                        relation.description.as_deref(),
+                        relation.classification,
+                        relation.export,
+                    );
+                }
+                out.push('\n');
             }
 
             let mut indexes: Vec<&RuntimeIndex> = collection.indexes.iter().collect();
@@ -1730,6 +1873,9 @@ impl RuntimeSchema {
                     },
                 };
                 fields.push(RuntimeField {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id,
                     api_name: field.api_name.to_string(),
                     physical_column: field.name.to_string(),
@@ -1832,6 +1978,9 @@ impl RuntimeSchema {
                     ));
                 }
                 relations.push(RuntimeRelation {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id,
                     api_name: relation.field_name.to_string(),
                     target,
@@ -1916,6 +2065,8 @@ impl RuntimeSchema {
             };
 
             collections.push(RuntimeCollection {
+                description: None,
+                classification: None,
                 id: cid,
                 api_type_name: entity.entity_name.to_string(),
                 api_plural_name: entity.plural_name.to_string(),

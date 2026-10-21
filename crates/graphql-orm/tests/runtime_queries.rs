@@ -18,6 +18,9 @@ fn fid(value: &str) -> FieldId {
 
 fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: fid(id),
         api_name: id.to_string(),
         physical_column: id.to_string(),
@@ -37,6 +40,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     RuntimeSchema {
         format_version: 1,
         collections: vec![RuntimeCollection {
+            description: None,
+            classification: None,
             id: cid("customers"),
             api_type_name: "Customer".to_string(),
             api_plural_name: "Customers".to_string(),

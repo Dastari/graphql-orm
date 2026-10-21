@@ -26,6 +26,8 @@ fn definition(composite: bool) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            classification: None,
+            description: None,
             id: cid(),
             api_type_name: "Record".into(),
             api_plural_name: "Records".into(),
@@ -45,6 +47,9 @@ fn definition(composite: bool) -> RuntimeSchema {
             ]
             .into_iter()
             .map(|(name, kind)| RuntimeField {
+                description: None,
+                classification: None,
+                export: None,
                 id: fid(name),
                 api_name: name.into(),
                 physical_column: name.into(),
