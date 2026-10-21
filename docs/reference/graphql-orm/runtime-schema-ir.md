@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -20,11 +20,14 @@ and `IndexId`.
 
 - `RuntimeSchema` → `RuntimeCollection` → `RuntimeField` / `RuntimeRelation` / `RuntimeIndex`.
 - `RuntimeValueKind`: `boolean`, `integer`, `float`, `string`, `uuid`, `json`, `bytes`,
-  `datetime`. Date-time is first-class here; backends choose the storage representation.
+  `datetime` and `decimal(DecimalDef)`. Date-time is first-class here; backends choose the
+  storage representation. See [exact decimals](#exact-decimals).
 - `RuntimeDefault`: a `Literal` in the canonical text grammar of the field's value kind, or
   the database-evaluated `CurrentTimestamp`. See [typed literal defaults](#typed-literal-defaults).
 - `RuntimeField::format`: an optional owned semantic descriptor. See
   [semantic field formats](#semantic-field-formats).
+- `description`, `classification` and `export` on collections, fields and relations. See
+  [descriptions, classification and export](#descriptions-classification-and-export).
 - Relations hold ordered `RelationKeyPair` lists, so source/target key arity mismatches are
   unrepresentable. Delete behavior (`restrict`/`cascade`/`set_null`) belongs only on the
   foreign-key-enforcing side.
@@ -141,6 +144,73 @@ for a descriptor-only revision; certification introspects and needs no DDL. Read
 Runtime GraphQL serves a formatted field only through an explicit plain-scalar allowance or a
 reviewed projector; see [formatted fields](runtime-graphql.md#formatted-fields-and-host-projections).
 
+## Descriptions, classification and export
+
+Collections, fields and relations accept one optional public `description`. It is the only
+description: runtime GraphQL emits it in SDL and introspection and the runtime semantic
+catalogue publishes the same text to AI capability indexes. There is no AI-only description.
+Collections also accept a default `classification`; fields and relations accept a
+`classification` and an `export` disposition. The types are the catalogue's
+`GraphqlSemanticClassification` (`public` < `internal` < `confidential` < `restricted` <
+`secret`) and `GraphqlSemanticExport` (`exportable`, `never_export`).
+
+Defaults match the static derives, through `effective_description`,
+`effective_classification` and `effective_export`:
+
+| Member | When absent |
+| --- | --- |
+| description | humanized API name (`createdAt` → `Created At`, `Invoice` → `Invoice`) |
+| collection classification | `internal` |
+| field/relation classification | the collection's |
+| export | `exportable`, or `never_export` when the effective classification is `secret` |
+
+Validation uses the catalogue rule (`validate_semantic_description`): trimmed, non-empty, at
+most 1024 bytes and no control or directional-formatting characters (`InvalidDescription`).
+A field or relation may only strengthen its collection's classification, and a `secret` member
+cannot be `exportable` (`InvalidClassification`). Diagnostics never echo the text.
+
+Identity follows the format precedent. Present members join the ID-bearing canonical lines as
+`|description="…"|classification=…|export=…`, so `canonical_bytes()` and `fingerprint()`
+change (a classification change must rebind `expectedSchema`, cursors and catalogues). They are
+semantic, not structural: `structural_fingerprint()`, the physical target, plan hashes,
+migration history and DDL are unaffected. Absent members are omitted from serialization.
+Static conversion leaves them absent.
+
+## Exact decimals
+
+`RuntimeValueKind::Decimal(DecimalDef)` exposes the static portable decimal: precision
+1..=18 and scale ≤ precision, validated by `DecimalDef::new` and on deserialization. It
+serializes as `{"decimal": {"precision": 12, "scale": 2}}` (unit kinds stay plain strings)
+and renders canonically as `|kind=decimal(12,2)|`; the definition is structural.
+
+| | SQLite | PostgreSQL |
+| --- | --- | --- |
+| declared type | `INTEGER_DECIMAL(p,s)` (INTEGER affinity) | `NUMERIC(p,s)` |
+| stored value | scaled `i64` mantissa (`12.50` → `1250`), as static decimals | native numeric |
+| literal default DDL | scaled mantissa (`DEFAULT 1250`) | canonical literal (`DEFAULT 12.50`) |
+
+Values are `RuntimeValue::Decimal(DecimalValue)` and are never rounded: input needing more
+scale or precision is rejected, and a stored value outside the definition fails decoding.
+Read them with `RuntimeRecord::decimal` (`rust_decimal::Decimal`) or `decimal_value`; there is
+no `f64` path.
+
+Text uses one strict grammar everywhere (`parse_runtime_decimal`): optional `-`, digits
+without redundant leading zeros, optional `.` and digits; no `+`, exponent, whitespace or
+separators. Lossless trailing zeros are accepted (`"1.500"` at scale 2). Output — GraphQL,
+JSON records and values, defaults — is `canonical_runtime_decimal`: exactly `scale`
+fractional digits, unsigned zero (`"12.50"`, `"-0.05"`, `"0.00"`). JSON carries
+`{"decimal": {"value": "12.50", "definition": {…}}}` with the value always a string; parsing
+accepts the same strict text or an integer.
+
+Defaults: `RuntimeDefault::decimal(DecimalValue)` or `RuntimeDefault::decimal_text(def,
+"12.5")` (canonicalized to `"12.50"`, without a direct `rust_decimal` dependency). A literal
+must be the canonical spelling. `CurrentTimestamp` is invalid for decimals. Decimal fields
+cannot be primary keys, relation keys or generated (`UnsupportedCapability`).
+
+Queries support `eq`, `ne`, `in`, `not_in`, `lt`, `lte`, `gt`, `gte`, `between`, null checks,
+ordering and keyset cursors. A changed definition is refused by owned planning; see
+[runtime migrations](runtime-migrations.md#exact-decimals-0560).
+
 ## Static conversion
 
 `RuntimeSchema::from_static_entities(&[&EntityMetadata])` converts derive-generated metadata into
@@ -155,6 +225,9 @@ derives and available on `ColumnDef`/`FieldMetadata`:
 - `is_sortable` — the derive generated an order-input term;
 - `is_date_time` — the column is a `#[date_field]`; its `logical_type` remains `String` so backup
   and existing schema hashes are unaffected.
+
+Static decimal columns convert to `RuntimeValueKind::Decimal` with their definition, and their
+backend default SQL to the canonical literal.
 
 Static append-only entities declared with `retention_purge = "..."` convert with
 `RuntimeCollection::retention_purge = true`; that bit participates in canonical and structural

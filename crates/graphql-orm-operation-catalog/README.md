@@ -3,7 +3,7 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-10-21
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -25,7 +25,7 @@ row, field, resolver, provider-egress, or database policy.
 
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.0" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.1" }
 serde_json = "1"
 ```
 
@@ -56,6 +56,15 @@ contract for safe public descriptions and typed API shape. Use
 `graphql_orm_semantic_catalog()` from `schema_roots!`, then call
 `extension_payload()` or, with `router-protocol`,
 `router_protocol_extension()`.
+
+## Compose runtime descriptors
+
+Version 0.4.1 adds construction for schemas that have no static operation
+catalogue, such as runtime-composed GraphQL: `validate_semantic_description`
+exposes the single description rule shared by every catalogue,
+`GraphqlSemanticOperationDescriptor::generated` builds an ORM-generated root
+(mutations start `Prohibited`), and `GraphqlSemanticCatalog::compose_descriptors`
+composes entities and operations with full validation.
 
 ## Compose descriptors in generated code
 

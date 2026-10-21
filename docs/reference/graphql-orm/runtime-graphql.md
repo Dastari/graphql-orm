@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -155,6 +155,46 @@ carry no ciphertext, plaintext, crypto source error or caller values. Tokens gra
 no access. Hosts may include a policy revision in their trusted partition to revoke
 old cursors; otherwise current row policies still apply to resumed pages.
 
+## Descriptions and the semantic catalogue
+
+Every generated type, field, relation, enum value, input member and root carries a
+description, so SDL and introspection are complete. Collection, field and relation text is
+the IR's [effective description](runtime-schema-ir.md#descriptions-classification-and-export)
+(declared, else the humanized name); filter, order and mutation input members repeat their
+field's text. Roots use the static derive wording (`Page through Invoice records`,
+`Create one Invoice records`) and arguments the static rule (`orderBy` → `Order by`). Host
+root objects (`Query`, `Mutation`) are host-named and undescribed.
+
+```rust,ignore
+let (schema, catalog) = RuntimeGraphqlComposer::new(database, "Query", limits)?
+    .mutation_root("Mutation")?
+    .install(module)?
+    .query_field(host_root.semantic(host_descriptor)?)?
+    .finish_with_semantic_catalog()?;
+// The catalogue compiles as AI capabilities with no separate input.
+let queries = AiGraphqlQueryCapabilityCatalog::compile(id, target, &schema.sdl(), &catalog, limits)?;
+```
+
+`finish_with_semantic_catalog` returns a `GraphqlSemanticCatalog` containing, per installed
+collection, one entity named by its GraphQL object (`RuntimeGraphqlModule::semantic_entities`)
+and its generated roots (`semantic_operations`):
+
+- scalar fields with their effective description, classification and export, the exact
+  runtime filter operators (`notIn` has no catalogue operator and is not advertised),
+  `sortable`, and no grouping or aggregates (runtime GraphQL has none);
+- to-one relations as relationships; to-many relations are connection-typed and
+  projector-served fields return host objects, so neither is advertised;
+- one `KeysetList` query per collection (`first`/`after`/`last`/`before` arguments are kept)
+  and the enabled create/update/delete mutations, which are
+  `AiMutationExecutionPolicy::Prohibited`.
+
+Host roots must be described: `RuntimeHostField::semantic(descriptor)` (field and argument
+names must match; its description and argument descriptions become the SDL text),
+`subscription_semantic` for a host subscription root, and `semantic_entity` for host result
+objects. Otherwise `finish_with_semantic_catalog` fails with `semantic_descriptor_missing`;
+`finish()` still builds the schema alone. The catalogue binds no authority: runtime read and
+write authorities remain authoritative.
+
 ## Exact scalar wire forms
 
 | Kind | GraphQL wire representation |
@@ -166,6 +206,7 @@ old cursors; otherwise current row policies still apply to resumed pages.
 | DateTime | `RuntimeDateTime`: RFC3339 input, UTC `YYYY-MM-DDTHH:MM:SS.ffffffZ` output; existing microsecond rounding |
 | Float | finite GraphQL Float, existing RuntimeFloat normalization |
 | Boolean/String | ordinary GraphQL Boolean/String, no string normalization |
+| Decimal | `Decimal` (the static decimal scalar name): strict decimal string or integer input for the field's definition, float numbers rejected; output the canonical string with exactly `scale` fractional digits. Registered with `RuntimeDecimalFilter` only when a composition has a decimal field |
 
 JSON whitespace/key spelling need not round-trip; the supported serde_json::Value
 must. Integer JSON tokens must fit i64 (negative) or u64 (nonnegative), and

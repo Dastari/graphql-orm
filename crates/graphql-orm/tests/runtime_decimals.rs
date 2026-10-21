@@ -864,7 +864,6 @@ mod graphql {
                     })
                     .order_by(StaticLedgerOrderByInput {
                         amount: Some(direction),
-                        ..Default::default()
                     })
                     .fetch_all()
                     .await
@@ -892,7 +891,6 @@ mod graphql {
             StaticLedger::query(&db)
                 .order_by(StaticLedgerOrderByInput {
                     amount: Some(OrderDirection::Asc),
-                    ..Default::default()
                 })
                 .fetch_all()
                 .await
