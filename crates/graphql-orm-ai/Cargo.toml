@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.109.0"
+version = "0.109.1"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -65,5 +65,6 @@ url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+graphql-orm = { workspace = true, features = ["runtime-graphql"] }
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

@@ -40,11 +40,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use super::{RuntimeDefaultError, RuntimeDefaultProblem, RuntimeFieldFormat, RuntimeFormatProblem};
+use super::runtime_description::{classification_problem, semantic_token};
+use super::{
+    GraphqlSemanticClassification, GraphqlSemanticExport, RuntimeDefaultError,
+    RuntimeDefaultProblem, RuntimeFieldFormat, RuntimeFormatProblem, validate_semantic_description,
+};
 
 use super::core::{
-    BackupValueKind, ColumnBackupPolicy, DeletePolicy, EntityMetadata, FieldMetadata, IndexMethod,
-    RelationChangePropagation, SchemaPolicy, fnv1a64,
+    BackupValueKind, ColumnBackupPolicy, DecimalDef, DeletePolicy, EntityMetadata, FieldMetadata,
+    IndexMethod, RelationChangePropagation, SchemaPolicy, fnv1a64,
 };
 
 /// Maximum length accepted for physical identifiers; the portable bound across supported
@@ -143,6 +147,9 @@ stable_id!(
 ///
 /// Unlike [`BackupValueKind`], date-time is first-class: backends choose the storage
 /// representation, and later slices generate date scalars/filters from it.
+///
+/// Unit kinds serialize as plain strings (`"integer"`); [`Self::Decimal`]
+/// serializes as `{"decimal": {"precision": p, "scale": s}}`.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -156,9 +163,23 @@ pub enum RuntimeValueKind {
     Json,
     Bytes,
     DateTime,
+    /// Exact fixed-precision decimal with the portable static definition:
+    /// a scaled `i64` on SQLite, `NUMERIC(p,s)` on PostgreSQL. Values are never
+    /// rounded; see [`parse_runtime_decimal`](super::parse_runtime_decimal).
+    Decimal(DecimalDef),
 }
 
 impl RuntimeValueKind {
+    /// Canonical identity spelling: [`Self::as_str`], or `decimal(p,s)`.
+    pub fn canonical_name(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Decimal(definition) => {
+                format!("decimal({},{})", definition.precision(), definition.scale()).into()
+            }
+            kind => kind.as_str().into(),
+        }
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
@@ -169,6 +190,7 @@ impl RuntimeValueKind {
             Self::Json => "json",
             Self::Bytes => "bytes",
             Self::DateTime => "datetime",
+            Self::Decimal(_) => "decimal",
         }
     }
 }
@@ -236,6 +258,16 @@ pub struct RuntimeField {
     /// identities byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<RuntimeFieldFormat>,
+    /// Optional public description shared by GraphQL and the semantic catalogue;
+    /// see [`RuntimeField::effective_description`]. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional classification; inherits the collection's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<GraphqlSemanticClassification>,
+    /// Optional export disposition; `exportable` unless secret when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<GraphqlSemanticExport>,
 }
 
 /// Cardinality of a runtime relation from the declaring collection's perspective.
@@ -283,6 +315,16 @@ pub struct RuntimeRelation {
     pub enforce_foreign_key: bool,
     /// Delete behavior; only meaningful on the foreign-key-enforcing side.
     pub on_delete: Option<DeletePolicy>,
+    /// Optional public description shared by GraphQL and the semantic catalogue;
+    /// see [`RuntimeRelation::effective_description`]. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional classification; inherits the collection's when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<GraphqlSemanticClassification>,
+    /// Optional export disposition; `exportable` unless secret when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export: Option<GraphqlSemanticExport>,
 }
 
 /// Owned runtime definition of one secondary index.
@@ -323,6 +365,14 @@ pub struct RuntimeCollection {
     pub composite_unique: Vec<Vec<FieldId>>,
     /// Deterministic default ordering.
     pub default_order: Vec<RuntimeOrderTerm>,
+    /// Optional public description shared by GraphQL and the semantic catalogue;
+    /// see [`RuntimeCollection::effective_description`]. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional default classification of the collection's members; `internal`
+    /// when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<GraphqlSemanticClassification>,
 }
 
 /// The serialized IR format version this crate reads and writes.
@@ -387,6 +437,11 @@ pub enum RuntimeSchemaDiagnosticCode {
     RetentionRequiresAppendOnly,
     /// A semantic field format descriptor is invalid.
     InvalidFormat,
+    /// A public description is empty, untrimmed, longer than 1024 bytes or
+    /// contains control or directional-formatting characters.
+    InvalidDescription,
+    /// A classification weakens its collection's, or a secret member is exportable.
+    InvalidClassification,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -418,6 +473,8 @@ impl RuntimeSchemaDiagnosticCode {
             Self::UnsupportedDefault => "unsupported_default",
             Self::InvalidDefaultOrder => "invalid_default_order",
             Self::InvalidFormat => "invalid_format",
+            Self::InvalidDescription => "invalid_description",
+            Self::InvalidClassification => "invalid_classification",
         }
     }
 }
@@ -633,6 +690,64 @@ fn target_key_is_unique(target: &RuntimeCollection, referenced: &BTreeSet<&Field
         .any(|group| group.iter().collect::<BTreeSet<_>>() == *referenced)
 }
 
+fn invalid_description(
+    collection: &CollectionId,
+    subject: Option<&str>,
+) -> RuntimeSchemaDiagnostic {
+    RuntimeSchemaDiagnostic::scoped(
+        RuntimeSchemaDiagnosticCode::InvalidDescription,
+        "description must be trimmed, non-empty, at most 1024 bytes and free of control or \
+         directional-formatting characters"
+            .to_string(),
+        collection,
+        subject,
+    )
+}
+
+/// Value-free description and classification diagnostics of one field or relation.
+fn semantic_member_diagnostics(
+    collection: &RuntimeCollection,
+    subject: Option<&str>,
+    description: Option<&str>,
+    classification: GraphqlSemanticClassification,
+    export: Option<GraphqlSemanticExport>,
+) -> Vec<RuntimeSchemaDiagnostic> {
+    let mut diagnostics = Vec::new();
+    if description.is_some_and(|text| validate_semantic_description(text).is_err()) {
+        diagnostics.push(invalid_description(&collection.id, subject));
+    }
+    if let Some(problem) = classification_problem(collection, classification, export) {
+        diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+            RuntimeSchemaDiagnosticCode::InvalidClassification,
+            problem.to_string(),
+            &collection.id,
+            subject,
+        ));
+    }
+    diagnostics
+}
+
+/// Semantic members join the ID-bearing identity only when present.
+fn push_semantic_members(
+    out: &mut String,
+    description: Option<&str>,
+    classification: Option<GraphqlSemanticClassification>,
+    export: Option<GraphqlSemanticExport>,
+) {
+    if let Some(description) = description {
+        out.push_str("|description=");
+        out.push_str(&serde_json::to_string(description).expect("strings always serialize"));
+    }
+    if let Some(classification) = classification {
+        out.push_str("|classification=");
+        out.push_str(&semantic_token(&classification));
+    }
+    if let Some(export) = export {
+        out.push_str("|export=");
+        out.push_str(&semantic_token(&export));
+    }
+}
+
 impl RuntimeSchema {
     /// Validates the schema, returning every diagnostic found rather than the first.
     ///
@@ -802,6 +917,13 @@ impl RuntimeSchema {
                     None,
                 ));
             }
+            if collection
+                .description
+                .as_deref()
+                .is_some_and(|text| validate_semantic_description(text).is_err())
+            {
+                diagnostics.push(invalid_description(cid, None));
+            }
             if !valid_physical_name(&collection.physical_table) {
                 diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                     RuntimeSchemaDiagnosticCode::InvalidPhysicalName,
@@ -914,6 +1036,21 @@ impl RuntimeSchema {
                         .with_detail(RuntimeSchemaDiagnosticDetail::Format(error.problem())),
                     );
                 }
+                diagnostics.extend(semantic_member_diagnostics(
+                    collection,
+                    subject,
+                    field.description.as_deref(),
+                    field.effective_classification(collection),
+                    field.export,
+                ));
+                if field.generated && matches!(field.value_kind, RuntimeValueKind::Decimal(_)) {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        "decimal fields cannot be generated".to_string(),
+                        cid,
+                        subject,
+                    ));
+                }
             }
 
             // Primary key.
@@ -946,6 +1083,14 @@ impl RuntimeSchema {
                         diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                             RuntimeSchemaDiagnosticCode::NullablePrimaryKeyField,
                             format!("primary_key field `{key_field}` must not be nullable"),
+                            cid,
+                            Some(key_field.as_str()),
+                        ));
+                    }
+                    Some(field) if matches!(field.value_kind, RuntimeValueKind::Decimal(_)) => {
+                        diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                            RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                            format!("primary_key field `{key_field}` cannot be a decimal"),
                             cid,
                             Some(key_field.as_str()),
                         ));
@@ -1043,6 +1188,13 @@ impl RuntimeSchema {
             let mut relation_api_names = BTreeSet::new();
             for relation in &collection.relations {
                 let subject = Some(relation.id.as_str());
+                diagnostics.extend(semantic_member_diagnostics(
+                    collection,
+                    subject,
+                    relation.description.as_deref(),
+                    relation.effective_classification(collection),
+                    relation.export,
+                ));
                 if !valid_graphql_name(&relation.api_name) {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::InvalidApiName,
@@ -1122,6 +1274,21 @@ impl RuntimeSchema {
                         ));
                     }
                     if let (Some(source), Some(target)) = (source, target) {
+                        if [source, target]
+                            .iter()
+                            .any(|field| matches!(field.value_kind, RuntimeValueKind::Decimal(_)))
+                        {
+                            diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                                RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                                format!(
+                                    "key pair `{}`/`{}` uses a decimal field; decimals cannot be \
+                                     relation keys",
+                                    pair.source, pair.target
+                                ),
+                                cid,
+                                subject,
+                            ));
+                        }
                         if source.value_kind != target.value_kind {
                             diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                                 RuntimeSchemaDiagnosticCode::RelationKeyTypeMismatch,
@@ -1358,6 +1525,14 @@ impl ValidatedRuntimeSchema {
             if collection.retention_purge {
                 out.push_str("|retention_purge=true");
             }
+            if with_ids {
+                push_semantic_members(
+                    &mut out,
+                    collection.description.as_deref(),
+                    collection.classification,
+                    None,
+                );
+            }
             out.push('\n');
 
             out.push_str(&format!(
@@ -1396,7 +1571,7 @@ impl ValidatedRuntimeSchema {
                     "|api={}|column={}|kind={}|nullable={}|unique={}|filterable={}|sortable={}|generated={}|default={}",
                     field.api_name,
                     field.physical_column,
-                    field.value_kind.as_str(),
+                    field.value_kind.canonical_name(),
                     field.nullable,
                     field.unique,
                     field.filterable,
@@ -1412,6 +1587,14 @@ impl ValidatedRuntimeSchema {
                     out.push_str(
                         &serde_json::to_string(&format.canonical())
                             .expect("strings always serialize"),
+                    );
+                }
+                if with_ids {
+                    push_semantic_members(
+                        &mut out,
+                        field.description.as_deref(),
+                        field.classification,
+                        field.export,
                     );
                 }
                 out.push('\n');
@@ -1459,7 +1642,7 @@ impl ValidatedRuntimeSchema {
                     .map(|policy| policy.as_sql().to_ascii_lowercase())
                     .unwrap_or_else(|| "none".to_string());
                 out.push_str(&format!(
-                    "|api={}|target={}|keys={}|cardinality={}|fk={}|on_delete={}\n",
+                    "|api={}|target={}|keys={}|cardinality={}|fk={}|on_delete={}",
                     relation.api_name,
                     target,
                     pairs,
@@ -1467,6 +1650,15 @@ impl ValidatedRuntimeSchema {
                     relation.enforce_foreign_key,
                     on_delete
                 ));
+                if with_ids {
+                    push_semantic_members(
+                        &mut out,
+                        relation.description.as_deref(),
+                        relation.classification,
+                        relation.export,
+                    );
+                }
+                out.push('\n');
             }
 
             let mut indexes: Vec<&RuntimeIndex> = collection.indexes.iter().collect();
@@ -1536,6 +1728,9 @@ const EPOCH_DEFAULT_EXPRESSIONS: &[&str] = &[
 ];
 
 fn convert_default(raw: &str, kind: RuntimeValueKind) -> Option<RuntimeDefault> {
+    if let RuntimeValueKind::Decimal(definition) = kind {
+        return convert_decimal_default(raw, definition);
+    }
     if EPOCH_DEFAULT_EXPRESSIONS.contains(&raw) {
         return (kind == RuntimeValueKind::Integer).then_some(RuntimeDefault::CurrentTimestamp);
     }
@@ -1560,6 +1755,19 @@ fn convert_default(raw: &str, kind: RuntimeValueKind) -> Option<RuntimeDefault> 
     literal.then(|| RuntimeDefault::Literal(raw.to_owned()))
 }
 
+/// Static decimal defaults are backend SQL: the scaled mantissa on SQLite and
+/// the normalized literal (with `scale` fractional digits) elsewhere. With a
+/// non-zero scale, only the latter contains a point; with scale 0 they agree.
+fn convert_decimal_default(raw: &str, definition: DecimalDef) -> Option<RuntimeDefault> {
+    let value = if definition.scale() > 0 && !raw.contains('.') {
+        let mantissa = raw.parse::<i64>().ok()?;
+        super::DecimalValue::new(definition.from_scaled_i64(mantissa), definition).ok()?
+    } else {
+        super::parse_runtime_decimal(definition, raw).ok()?
+    };
+    Some(RuntimeDefault::decimal(value))
+}
+
 fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
     if field.is_date_time {
         return Some(RuntimeValueKind::DateTime);
@@ -1568,10 +1776,9 @@ fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
         BackupValueKind::Bool => Some(RuntimeValueKind::Boolean),
         BackupValueKind::Integer => Some(RuntimeValueKind::Integer),
         BackupValueKind::Float => Some(RuntimeValueKind::Float),
-        // Runtime-authored decimal fields are not yet supported. Static entity
-        // metadata retains the exact definition and uses its public scalar
-        // representation when projected into the runtime schema.
-        BackupValueKind::Decimal => Some(RuntimeValueKind::String),
+        // The exact definition describes the real storage: a scaled integer on
+        // SQLite, `NUMERIC(p,s)` on PostgreSQL.
+        BackupValueKind::Decimal => field.decimal.map(RuntimeValueKind::Decimal),
         BackupValueKind::String => Some(RuntimeValueKind::String),
         BackupValueKind::Uuid => Some(RuntimeValueKind::Uuid),
         BackupValueKind::Json => Some(RuntimeValueKind::Json),
@@ -1730,6 +1937,9 @@ impl RuntimeSchema {
                     },
                 };
                 fields.push(RuntimeField {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id,
                     api_name: field.api_name.to_string(),
                     physical_column: field.name.to_string(),
@@ -1832,6 +2042,9 @@ impl RuntimeSchema {
                     ));
                 }
                 relations.push(RuntimeRelation {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id,
                     api_name: relation.field_name.to_string(),
                     target,
@@ -1916,6 +2129,8 @@ impl RuntimeSchema {
             };
 
             collections.push(RuntimeCollection {
+                description: None,
+                classification: None,
                 id: cid,
                 api_type_name: entity.entity_name.to_string(),
                 api_plural_name: entity.plural_name.to_string(),

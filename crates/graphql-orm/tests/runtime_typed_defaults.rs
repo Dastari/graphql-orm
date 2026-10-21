@@ -195,6 +195,9 @@ fn matrix() -> Vec<(&'static str, RuntimeValueKind, bool, RuntimeDefault)> {
 
 fn definition() -> RuntimeSchema {
     let mut fields = vec![RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: FieldId::new("id").unwrap(),
         api_name: "id".into(),
         physical_column: "id".into(),
@@ -209,6 +212,9 @@ fn definition() -> RuntimeSchema {
     }];
     for (column, kind, nullable, default) in matrix() {
         fields.push(RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(column).unwrap(),
             api_name: column.replace('_', ""),
             physical_column: column.into(),
@@ -225,6 +231,8 @@ fn definition() -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            description: None,
+            classification: None,
             id: CollectionId::new(TABLE).unwrap(),
             api_type_name: "TypedDefault".into(),
             api_plural_name: "TypedDefaults".into(),

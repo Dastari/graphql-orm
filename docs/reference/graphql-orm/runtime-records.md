@@ -3,7 +3,7 @@ title: "Runtime values, records, handles, and row decoding"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -118,6 +118,7 @@ they are trusted outputs intended for ORM query renderers.
 | JSON | validated JSON `TEXT` | native `JSON` / `JSONB` |
 | bytes | `BLOB` | `BYTEA` |
 | datetime | RFC 3339 `TEXT` | `TIMESTAMPTZ` |
+| decimal(p,s) | scaled `i64` in `INTEGER_DECIMAL(p,s)` | `NUMERIC(p,s)` / `rust_decimal::Decimal` |
 
 Both decoders use typed driver decoding. They do not fall back to text guesses
 when a backend column has the wrong type. SQLite and PostgreSQL set

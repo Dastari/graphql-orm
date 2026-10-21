@@ -85,6 +85,9 @@ fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
         .find(|item| item.physical_table == SESSIONS)
         .ok_or(AiError::PersistenceFailed)?;
     collection.relations.push(RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
         id: safe(RelationId::new(REQUESTS))?,
         api_name: REQUESTS.to_owned(),
         target: safe(CollectionId::new(EVENTS))?,

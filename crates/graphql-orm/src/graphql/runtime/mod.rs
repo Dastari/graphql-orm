@@ -54,6 +54,7 @@ pub use projection::{
     RuntimeProjectionPurpose, RuntimeProjectionResults,
 };
 mod schema;
+mod semantic;
 pub use execution::{
     RuntimeGraphqlRequest, RuntimeReadAuthority, RuntimeReadCheck, RuntimeReadGrant,
 };

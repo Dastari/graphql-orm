@@ -20,7 +20,11 @@
 
 use std::fmt;
 
-use super::{RuntimeDateTime, RuntimeDefault, RuntimeFloat, RuntimeValue, RuntimeValueKind};
+use super::{
+    DecimalDef, DecimalValue, RuntimeDateTime, RuntimeDecimalError, RuntimeDecimalProblem,
+    RuntimeDefault, RuntimeFloat, RuntimeValue, RuntimeValueKind, canonical_runtime_decimal,
+    parse_runtime_decimal,
+};
 
 /// Maximum canonical JSON default text in bytes.
 pub const MAX_JSON_DEFAULT_BYTES: usize = 16 * 1024;
@@ -195,6 +199,28 @@ impl RuntimeDefault {
         Ok(Self::Literal(value.as_str().to_owned()))
     }
 
+    /// Canonical decimal literal with exactly the definition's scale, for
+    /// example `"12.50"`. The value's definition must equal the field's.
+    pub fn decimal(value: DecimalValue) -> Self {
+        Self::Literal(canonical_runtime_decimal(value))
+    }
+
+    /// Canonical decimal literal from catalog text, without a direct
+    /// `rust_decimal` dependency. Input follows the strict runtime decimal
+    /// grammar (`"12.5"` becomes `"12.50"` for scale 2); values that need more
+    /// scale or precision are rejected, never rounded.
+    ///
+    /// # Errors
+    ///
+    /// [`RuntimeDefaultProblem::Malformed`] for text outside the grammar,
+    /// [`RuntimeDefaultProblem::UnsupportedPrecision`] for excess scale and
+    /// [`RuntimeDefaultProblem::OutOfRange`] for excess precision.
+    pub fn decimal_text(definition: DecimalDef, text: &str) -> Checked<Self> {
+        parse_runtime_decimal(definition, text)
+            .map(Self::decimal)
+            .map_err(decimal_problem)
+    }
+
     /// Validate this default against `kind` and return the typed value the
     /// backends produce when a create input omits the field.
     ///
@@ -257,7 +283,23 @@ fn typed_literal(text: &str, kind: RuntimeValueKind) -> Checked<RuntimeValue> {
                 .map(RuntimeValue::DateTime)
                 .map_err(|_| RuntimeDefaultError::new(P::ImpossibleDateTime))
         }
+        // A new kind: only the canonical spelling is a literal.
+        RuntimeValueKind::Decimal(definition) => {
+            let value = parse_runtime_decimal(definition, text).map_err(decimal_problem)?;
+            if canonical_runtime_decimal(value) != text {
+                return fail(P::NonCanonical);
+            }
+            Ok(RuntimeValue::Decimal(value))
+        }
     }
+}
+
+fn decimal_problem(error: RuntimeDecimalError) -> RuntimeDefaultError {
+    RuntimeDefaultError::new(match error.problem() {
+        RuntimeDecimalProblem::Scale => RuntimeDefaultProblem::UnsupportedPrecision,
+        RuntimeDecimalProblem::Precision => RuntimeDefaultProblem::OutOfRange,
+        _ => RuntimeDefaultProblem::Malformed,
+    })
 }
 
 // ----- canonical date-time -------------------------------------------------

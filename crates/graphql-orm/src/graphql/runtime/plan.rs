@@ -799,6 +799,8 @@ mod checked_compatibility_tests {
                 primary_key: vec![FieldId::new("id").unwrap()],
                 append_only: false,
                 retention_purge: false,
+                description: None,
+                classification: None,
                 fields: [
                     ("id", RuntimeValueKind::Integer, false),
                     ("text", RuntimeValueKind::String, true),
@@ -809,6 +811,9 @@ mod checked_compatibility_tests {
                 ]
                 .into_iter()
                 .map(|(n, k, filterable)| RuntimeField {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id: FieldId::new(n).unwrap(),
                     api_name: n.into(),
                     physical_column: n.into(),

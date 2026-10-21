@@ -394,8 +394,9 @@ impl RuntimeGraphqlModule {
 /// Root field whose actual name is checked by the composer.
 pub struct RuntimeHostField {
     pub(super) name: String,
-    pub(super) field: Field,
-    arguments: BTreeSet<String>,
+    field: Field,
+    arguments: Vec<(String, InputValue)>,
+    semantic: Option<GraphqlSemanticOperationDescriptor>,
 }
 impl RuntimeHostField {
     pub fn new<F>(name: impl Into<String>, ty: TypeRef, resolver: F) -> Self
@@ -406,7 +407,8 @@ impl RuntimeHostField {
         Self {
             field: Field::new(&name, ty, resolver),
             name,
-            arguments: BTreeSet::new(),
+            arguments: Vec::new(),
+            semantic: None,
         }
     }
     /// Add a checked host argument without exposing the root field's name.
@@ -417,15 +419,84 @@ impl RuntimeHostField {
         default: Option<async_graphql::Value>,
     ) -> Result<Self, RuntimeGraphqlError> {
         let name = name.into();
-        if !valid_name(&name, false) || !self.arguments.insert(name.clone()) {
+        if !valid_name(&name, false) || self.arguments.iter().any(|(known, _)| known == &name) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
-        let mut input = InputValue::new(name, ty);
+        let mut input = InputValue::new(&name, ty);
         if let Some(default) = default {
             input = input.default_value(default);
         }
-        self.field = self.field.argument(input);
+        self.arguments.push((name, input));
         Ok(self)
+    }
+    /// Describe this root for the semantic catalogue. The descriptor's
+    /// description and argument descriptions become the SDL descriptions, so
+    /// GraphQL and the catalogue carry one text. Its field name and argument
+    /// names must match this field exactly; the operation kind is checked when
+    /// the field is added to a root.
+    pub fn semantic(
+        mut self,
+        descriptor: GraphqlSemanticOperationDescriptor,
+    ) -> Result<Self, RuntimeGraphqlError> {
+        let declared = descriptor
+            .arguments
+            .iter()
+            .map(|argument| argument.graphql_name.as_str())
+            .collect::<BTreeSet<_>>();
+        let actual = self
+            .arguments
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
+        if descriptor.field_name != self.name
+            || declared != actual
+            || declared.len() != descriptor.arguments.len()
+        {
+            return Err(RuntimeGraphqlError::new("invalid_semantic_catalog"));
+        }
+        self.semantic = Some(descriptor);
+        Ok(self)
+    }
+    /// The finished field and its descriptor, checked against a root kind.
+    pub(super) fn into_parts(
+        self,
+        kind: GraphqlOperationKind,
+    ) -> Result<(String, Field, Option<GraphqlSemanticOperationDescriptor>), RuntimeGraphqlError>
+    {
+        if self.semantic.as_ref().is_some_and(|d| d.kind != kind) {
+            return Err(RuntimeGraphqlError::new("invalid_semantic_catalog"));
+        }
+        let mut field = self.field;
+        if let Some(descriptor) = &self.semantic {
+            field = field.description(&descriptor.description);
+        }
+        for (name, mut input) in self.arguments {
+            if let Some(argument) = self.semantic.as_ref().and_then(|d| {
+                d.arguments
+                    .iter()
+                    .find(|argument| argument.graphql_name == name)
+            }) {
+                input = input.description(&argument.description);
+            }
+            field = field.argument(input);
+        }
+        Ok((self.name, field, self.semantic))
+    }
+}
+/// Semantic catalogue state collected during composition.
+#[derive(Default)]
+pub(super) struct SemanticParts {
+    pub(super) entities: Vec<GraphqlEntitySemanticMetadata>,
+    pub(super) operations: Vec<GraphqlSemanticOperationDescriptor>,
+    pub(super) undescribed: bool,
+    pub(super) subscription_described: bool,
+}
+impl SemanticParts {
+    pub(super) fn root(&mut self, descriptor: Option<GraphqlSemanticOperationDescriptor>) {
+        match descriptor {
+            Some(descriptor) => self.operations.push(descriptor),
+            None => self.undescribed = true,
+        }
     }
 }
 /// Checked dynamic composition. It never accepts an opaque raw builder callback.
@@ -445,6 +516,7 @@ pub struct RuntimeGraphqlComposer<B: RuntimeReadBackend> {
     limits: RuntimeGraphqlLimits,
     protection: Option<super::execution::Protection>,
     projected_types: BTreeMap<String, super::RuntimeProjectedObject>,
+    pub(super) semantic: SemanticParts,
 }
 impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
     pub fn new(
@@ -482,14 +554,24 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             limits,
             protection: None,
             projected_types: BTreeMap::new(),
+            semantic: SemanticParts::default(),
         })
     }
     pub fn query_field(mut self, spec: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
-        if !valid_name(&spec.name, false) || !self.roots.insert(spec.name) {
+        let (name, field, semantic) = spec.into_parts(GraphqlOperationKind::Query)?;
+        if !valid_name(&name, false) || !self.roots.insert(name) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
-        self.query = self.query.field(spec.field);
+        self.query = self.query.field(field);
+        self.semantic.root(semantic);
         Ok(self)
+    }
+    /// Add a host result object's semantic entity to the catalogue built by
+    /// [`Self::finish_with_semantic_catalog`]. Register the GraphQL type itself
+    /// with [`Self::register`].
+    pub fn semantic_entity(mut self, entity: GraphqlEntitySemanticMetadata) -> Self {
+        self.semantic.entities.push(entity);
+        self
     }
     pub fn register(mut self, ty: Type) -> Result<Self, RuntimeGraphqlError> {
         let name = match &ty {
@@ -525,6 +607,18 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         bounded_schema(&module.schema, self.limits.max_schema_bytes)?;
         if self.modules.is_empty() {
             for ty in super::schema::helpers(self.limits.scalars) {
+                self = self.register(ty)?;
+            }
+        }
+        let decimal = module
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .flat_map(|c| &c.fields)
+            .any(|f| matches!(f.value_kind, RuntimeValueKind::Decimal(_)));
+        if decimal && !self.names.contains("Decimal") {
+            for ty in super::schema::decimal_helpers() {
                 self = self.register(ty)?;
             }
         }
@@ -572,6 +666,10 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
                 .query
                 .field(super::schema::root_field(&root, &module.object_name(c)));
         }
+        self.semantic.entities.extend(module.semantic_entities());
+        self.semantic
+            .operations
+            .extend(module.semantic_operations()?);
         self.modules.push(module);
         Ok(self)
     }
@@ -634,6 +732,19 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         self.subscription_name = Some(root.type_name().to_owned());
         self.register(root.into())
     }
+    /// Describe one field of the host subscription root for the semantic
+    /// catalogue. A composition with a subscription root needs at least one.
+    pub fn subscription_semantic(
+        mut self,
+        descriptor: GraphqlSemanticOperationDescriptor,
+    ) -> Result<Self, RuntimeGraphqlError> {
+        if descriptor.kind != GraphqlOperationKind::Subscription {
+            return Err(RuntimeGraphqlError::new("invalid_semantic_catalog"));
+        }
+        self.semantic.operations.push(descriptor);
+        self.semantic.subscription_described = true;
+        Ok(self)
+    }
     pub fn limit_depth(mut self, limit: usize) -> Self {
         self.limits.max_depth = self.limits.max_depth.min(limit);
         self
@@ -641,6 +752,29 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
     pub fn limit_complexity(mut self, limit: usize) -> Self {
         self.limits.max_selections = self.limits.max_selections.min(limit);
         self
+    }
+
+    /// Finish the schema and its semantic catalogue.
+    ///
+    /// The catalogue holds every installed module's entities and roots plus
+    /// the host's declared roots and result entities, so AI capability indexes
+    /// cover runtime collections with no separate input. Fails with
+    /// `semantic_descriptor_missing` when a host root lacks
+    /// [`RuntimeHostField::semantic`] or a subscription root lacks
+    /// [`Self::subscription_semantic`].
+    pub fn finish_with_semantic_catalog(
+        mut self,
+    ) -> Result<(Schema, GraphqlSemanticCatalog), RuntimeGraphqlError> {
+        let semantic = std::mem::take(&mut self.semantic);
+        if semantic.undescribed
+            || (self.subscription_name.is_some() && !semantic.subscription_described)
+        {
+            return Err(RuntimeGraphqlError::new("semantic_descriptor_missing"));
+        }
+        let catalog =
+            GraphqlSemanticCatalog::compose_descriptors(semantic.entities, semantic.operations)
+                .map_err(|_| RuntimeGraphqlError::new("invalid_semantic_catalog"))?;
+        Ok((self.finish()?, catalog))
     }
 
     pub fn finish(mut self) -> Result<Schema, RuntimeGraphqlError> {

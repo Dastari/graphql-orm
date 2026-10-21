@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.56.0 adds runtime descriptions, classification and export with a runtime
+semantic catalogue, and an exact runtime decimal kind; see the
+[workspace migration](../../MIGRATION.md#0551-to-0560-runtime-descriptions-and-exact-decimals).
+Macro output is unchanged.
+
 Version 0.55.1 refreshes the backend-coexistence fixture lock for graphql-orm-ai
 0.109.0. Source, public API, generated code, SDL and persistence are unchanged.
 

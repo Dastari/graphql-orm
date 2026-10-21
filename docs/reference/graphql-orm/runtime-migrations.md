@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -333,6 +333,22 @@ read/write/schema-policy contracts remain unchanged. Unsupported runtime IR
 semantics continue to be rejected by its existing validator/conversion; do not
 substitute arbitrary SQL fragments. The dependency environment does not implement
 record writes, cascade mutations, catalog activation or durable event replay.
+
+### Exact decimals (0.56.0)
+
+[Decimal fields](runtime-schema-ir.md#exact-decimals) target `INTEGER_DECIMAL(p,s)` on
+SQLite (INTEGER affinity, scaled `i64` mantissa) and `NUMERIC(p,s)` on PostgreSQL. Literal
+defaults render as the scaled mantissa (`DEFAULT 1250`) and the canonical literal
+(`DEFAULT 12.50`). PostgreSQL deparses `numeric` constants as `12.50` or `'-12.50'::numeric`;
+owned planning compares them by value, so `AddColumn` with a decimal default applies,
+replans as a no-op and certifies.
+
+Because the definition is part of the declared type, a precision or scale change is a
+detectable column-type change. Owned planning refuses it, and any change to or from a decimal
+type, with `InvalidPhysicalContract` before any statement: a SQLite rebuild would copy scaled
+mantissas unchanged (`12.50` would read as `1.250` at scale 3), and a PostgreSQL type change
+rounds when the scale narrows. Certification of a changed definition fails. Add a new field and
+copy values explicitly.
 
 ## Released repository capability compatibility
 

@@ -16,6 +16,10 @@ correction. Direct Auth consumers must select the same tag and refresh their
 locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
+Version `0.109.1` aligns with ORM/macros 0.56.0; runtime-composed GraphQL
+collections reach capability indexes through the runtime semantic catalogue
+with no AI-specific input. There is no AI API or schema change.
+
 Version `0.109.0` admits a prepared task-context continuation whose input
 reservation covers only the per-turn share of a retained tool surface frozen at
 session registration (for example a large Codex app-server `dynamicTools`
@@ -199,7 +203,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.109.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.109.1", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

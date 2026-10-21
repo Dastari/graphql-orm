@@ -69,6 +69,9 @@ mod example {
 
     fn field(id: &str, kind: RuntimeValueKind, format: Option<RuntimeFieldFormat>) -> RuntimeField {
         RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(id).unwrap(),
             api_name: id.into(),
             physical_column: id.into(),
@@ -89,6 +92,8 @@ mod example {
         let definition = RuntimeSchema {
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
             collections: vec![RuntimeCollection {
+                description: None,
+                classification: None,
                 id: CollectionId::new("members")?,
                 api_type_name: "Member".into(),
                 api_plural_name: "Members".into(),

@@ -294,6 +294,9 @@ async fn sqlite_guards_baseline_removed_ownership_and_rollback()
         .await?;
     let mut definition = schema().schema().clone();
     definition.collections[0].fields.push(RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: FieldId::new("required")?,
         api_name: "required".into(),
         physical_column: "required".into(),
@@ -664,6 +667,9 @@ async fn sqlite_composite_keys_all_runtime_types_and_timestamp_defaults()
         ),
     ] {
         collection.fields.push(RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(id)?,
             api_name: id.into(),
             physical_column: id.into(),
@@ -924,6 +930,9 @@ async fn postgres_competing_baselines_destructive_guards_and_atomic_failure()
         .await?;
     let mut definition = schema().schema().clone();
     definition.collections[0].fields.push(RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: FieldId::new("required")?,
         api_name: "required".into(),
         physical_column: "required".into(),
@@ -1914,6 +1923,9 @@ async fn datetime_fixed_point<B: RuntimeMigrationBackend>(
         .take(if matrix { 4 } else { 1 })
         {
             collection.fields.push(RuntimeField {
+                description: None,
+                classification: None,
+                export: None,
                 id: FieldId::new(name)?,
                 api_name: name.into(),
                 physical_column: name.into(),
@@ -2015,6 +2027,9 @@ async fn owned_string_defaults_fixed_point<B: RuntimeMigrationBackend>(
         collection.fields.truncate(1);
         collection.indexes.clear();
         collection.fields.push(RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new("value")?,
             api_name: "value".into(),
             physical_column: "value".into(),

@@ -15,6 +15,64 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.55.1 to 0.56.0: runtime descriptions and exact decimals
+
+Upgrade ORM/macros together with `graphql-orm-operation-catalog` 0.4.1 and refresh the
+lockfile. Static derives, generated code, static SDL, stored data and existing serialized
+runtime schemas are unchanged; no automatic database migration is needed.
+
+Source changes for direct IR/runtime users:
+
+- `RuntimeCollection` gains `description` and `classification`; `RuntimeField` and
+  `RuntimeRelation` gain `description`, `classification` and `export`, all `Option`. Struct
+  literals add `None` for each (or use `..existing`). Absent members are omitted from
+  serialization, so stored documents and every identity of an unchanged schema stay
+  byte-identical. Readers older than 0.56.0 reject documents that use the new members or the
+  decimal kind.
+- `RuntimeValueKind` gains `Decimal(DecimalDef)` and `RuntimeValue` gains
+  `Decimal(DecimalValue)`; exhaustive matches need new arms. `RuntimeValueKind` stays `Copy`
+  and `Ord`; `DecimalDef` now derives `PartialOrd`/`Ord`. Canonical identity spells a decimal
+  kind with `RuntimeValueKind::canonical_name()` (`decimal(12,2)`).
+- `RuntimeSchemaDiagnosticCode` gains `InvalidDescription` and `InvalidClassification`.
+  Decimal primary keys, relation keys and generated decimals are `UnsupportedCapability`.
+- `RuntimeHostField` arguments are now attached when the field is added to a root; the
+  public builder API is unchanged.
+
+Behaviour changes:
+
+- Runtime GraphQL SDL and introspection now carry descriptions for every generated type,
+  field, relation, enum value, input member and root. Only descriptions are added: names,
+  types, arguments and defaults are identical (the 0.50.2 SDL goldens still match once
+  descriptions are removed). Refresh any committed SDL snapshots.
+- `RuntimeSchema::from_static_entities` now converts a static decimal column to
+  `RuntimeValueKind::Decimal(def)` instead of `String`, and its default to the canonical
+  decimal literal. This changes `structural_fingerprint()` only for converted static schemas
+  containing decimal columns; compare against catalog schemas that declare the same decimal
+  kind.
+- Owned/runtime planning refuses an in-place change of a decimal field's precision or scale
+  and any change to or from a decimal column type (`InvalidPhysicalContract`): a SQLite rebuild
+  would copy scaled mantissas unchanged and PostgreSQL rounds when the scale narrows. Add a new
+  field and copy values explicitly. On PostgreSQL, `numeric(p,s)` constant defaults compare by
+  value, which only removes spurious default-only differences.
+- Adding, editing or removing a description, classification or export changes
+  `fingerprint()` and requires a new runtime mutation environment and fresh client
+  `expectedSchema`, but no DDL.
+
+Adopting the semantic catalogue:
+
+- Call `RuntimeGraphqlComposer::finish_with_semantic_catalog()` instead of `finish()` to obtain
+  the `GraphqlSemanticCatalog`. Every host query/mutation root then needs
+  `RuntimeHostField::semantic(descriptor)`, a host subscription root needs
+  `subscription_semantic`, and host result objects can be added with `semantic_entity`;
+  otherwise it returns `semantic_descriptor_missing`. Plain `finish()` is unchanged.
+- To-many relations (connections) and projector-served fields are not advertised in the
+  catalogue. Generated runtime mutations are `AiMutationExecutionPolicy::Prohibited`.
+
+See the [runtime schema IR](docs/reference/graphql-orm/runtime-schema-ir.md#descriptions-classification-and-export),
+[runtime decimals](docs/reference/graphql-orm/runtime-schema-ir.md#exact-decimals) and
+[runtime GraphQL](docs/reference/graphql-orm/runtime-graphql.md#descriptions-and-the-semantic-catalogue)
+references.
+
 ## 0.55.0 to 0.55.1: fixture lock refresh
 
 Upgrade ORM/macros together and refresh the lockfile. Only a test-fixture lock

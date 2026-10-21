@@ -14,6 +14,53 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.56.0 (unreleased)
+
+Companion macros crate: `graphql-orm-macros` **0.56.0** (version alignment only).
+Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
+
+- Runtime collections, fields and relations accept an optional `description`,
+  `classification` and (fields/relations) `export`, validated with the static
+  rule (`validate_semantic_description`) and defaulting exactly as the static
+  derives: humanized names, `internal`, inherited classification that may only
+  strengthen, and `never_export` for `secret` members. Present members join
+  `canonical_bytes()`/`fingerprint()`; structural fingerprints, physical
+  targets, plan hashes and DDL are unaffected. Absent members are omitted, so
+  existing serialized schemas and identities are byte-identical.
+- Runtime GraphQL describes every generated type, field, relation, enum value,
+  input member and root. Collection, field and relation text is the effective IR
+  description; roots and arguments use the static derive wording.
+  Introspection returns the same text.
+- `RuntimeGraphqlComposer::finish_with_semantic_catalog` returns the schema with
+  its `GraphqlSemanticCatalog`: every installed collection's entity (scalar
+  fields and to-one relations with filter/order facts, classification and
+  export) and generated roots (`KeysetList` queries; prohibited-by-default
+  mutations). Host roots declare descriptors with `RuntimeHostField::semantic`,
+  `subscription_semantic` and `semantic_entity`; undescribed host roots fail
+  closed. The catalogue compiles as an AI query-capability catalogue and
+  capability index without separate input.
+- Add `RuntimeValueKind::Decimal(DecimalDef)` and
+  `RuntimeValue::Decimal(DecimalValue)` with the static precision ceiling (18):
+  scaled `i64` storage declared `INTEGER_DECIMAL(p,s)` on SQLite and
+  `NUMERIC(p,s)` on PostgreSQL. Values are never rounded. Text input uses one
+  strict grammar (`parse_runtime_decimal`); output, GraphQL and JSON use the
+  canonical string with exactly `scale` fractional digits
+  (`canonical_runtime_decimal`). Add `RuntimeDefault::{decimal, decimal_text}`
+  and `RuntimeRecord::{decimal, decimal_value}`.
+- Runtime GraphQL serves decimals as the `Decimal` scalar (string or integer
+  input, float numbers rejected) with `RuntimeDecimalFilter` (`eq`, `ne`, `in`,
+  `notIn`, `lt`, `lte`, `gt`, `gte`, `isNull`); queries also support `between`,
+  ordering and keyset cursors. The scalar and filter are registered only for
+  compositions containing a decimal field.
+- Owned/runtime planning compares PostgreSQL `numeric(p,s)` constant defaults by
+  value and refuses, with `InvalidPhysicalContract`, any in-place change of a
+  decimal column's definition or a change to or from a decimal type.
+- `RuntimeSchema::from_static_entities` converts static decimal columns to
+  `RuntimeValueKind::Decimal` (previously `String`) with their defaults.
+- Operation catalogue 0.4.1 adds `validate_semantic_description`,
+  `GraphqlSemanticOperationDescriptor::generated` and
+  `GraphqlSemanticCatalog::compose_descriptors`.
+
 ## 0.55.1 (unreleased)
 
 - Refresh the `backend-coexistence` fixture lock for `graphql-orm-ai` 0.109.0.

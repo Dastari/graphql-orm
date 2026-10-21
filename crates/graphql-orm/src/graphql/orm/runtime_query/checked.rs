@@ -167,13 +167,7 @@ impl Intent {
                 let supported = f.value_kind() != RuntimeValueKind::Json
                     && match op {
                         RuntimeFilterOperator::Scalar(op) => compare_supported(f.value_kind(), *op),
-                        RuntimeFilterOperator::Between => matches!(
-                            f.value_kind(),
-                            RuntimeValueKind::Integer
-                                | RuntimeValueKind::Float
-                                | RuntimeValueKind::String
-                                | RuntimeValueKind::DateTime
-                        ),
+                        RuntimeFilterOperator::Between => super::range_kind(f.value_kind()),
                         _ => true,
                     };
                 if !supported {
@@ -560,13 +554,7 @@ impl RuntimeFilterBuilder {
             let supported = match op {
                 RuntimeFilterOperator::Scalar(op) => compare_supported(field.value_kind(), op),
                 RuntimeFilterOperator::List(_) => field.value_kind() != RuntimeValueKind::Json,
-                RuntimeFilterOperator::Between => matches!(
-                    field.value_kind(),
-                    RuntimeValueKind::Integer
-                        | RuntimeValueKind::Float
-                        | RuntimeValueKind::String
-                        | RuntimeValueKind::DateTime
-                ),
+                RuntimeFilterOperator::Between => super::range_kind(field.value_kind()),
                 _ => true,
             };
             if !supported {
@@ -781,6 +769,7 @@ fn compare_values(a: &RuntimeValue, b: &RuntimeValue) -> Result<Ordering, Runtim
         (RuntimeValue::Uuid(a), RuntimeValue::Uuid(b)) => Some(a.as_bytes().cmp(b.as_bytes())),
         (RuntimeValue::Bytes(a), RuntimeValue::Bytes(b)) => Some(a.cmp(b)),
         (RuntimeValue::DateTime(a), RuntimeValue::DateTime(b)) => Some(a.as_str().cmp(b.as_str())),
+        (RuntimeValue::Decimal(a), RuntimeValue::Decimal(b)) => Some(a.value().cmp(&b.value())),
         _ => None,
     };
     result.ok_or(RuntimeFilterError::new(

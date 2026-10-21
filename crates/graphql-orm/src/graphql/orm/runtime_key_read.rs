@@ -387,6 +387,9 @@ mod tests {
     }
     fn request() -> RuntimeKeyReadRequest {
         let field = |name: &str, kind| RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(name).unwrap(),
             api_name: name.into(),
             physical_column: name.into(),
@@ -402,6 +405,8 @@ mod tests {
         let schema = RuntimeSchema {
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
             collections: vec![RuntimeCollection {
+                description: None,
+                classification: None,
                 id: CollectionId::new("rows").unwrap(),
                 api_type_name: "Row".into(),
                 api_plural_name: "Rows".into(),

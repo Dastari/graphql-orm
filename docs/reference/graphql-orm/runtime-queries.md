@@ -3,7 +3,7 @@ title: "Runtime select, filter, order, and keyset reads"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-21
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -133,13 +133,14 @@ predicates. For reusable caller filters, follow the separately checked
 | Operator | Kinds |
 | --- | --- |
 | `runtime_is_null` | every kind |
-| `eq`, `ne` | boolean, integer, finite float, string, UUID, bytes, datetime |
-| `in`, `not_in` | the same seven scalar kinds |
-| `lt`, `lte`, `gt`, `gte`, `between` | integer, finite float, datetime, string |
+| `eq`, `ne` | boolean, integer, finite float, string, UUID, bytes, datetime, decimal |
+| `in`, `not_in` | the same eight scalar kinds |
+| `lt`, `lte`, `gt`, `gte`, `between` | integer, finite float, datetime, string, decimal |
 | `contains`, `starts_with`, `ends_with` | string, case-sensitive |
 | JSON | `is_null` only |
 
-Operator names are enums, never host strings. Null literals are rejected by
+Decimal operands must carry the field's exact `DecimalDef`; GraphQL input is
+parsed for the field and rejected, never rounded, outside it. Operator names are enums, never host strings. Null literals are rejected by
 value operators; use `runtime_is_null`. Lists cannot contain null and are
 bounded. JSON equality is deferred because SQLite JSON text and PostgreSQL
 JSONB do not share one proven numeric and object-key equality contract.

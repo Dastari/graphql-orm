@@ -1,5 +1,8 @@
 use super::RuntimeGraphqlError;
-use crate::graphql::orm::{RuntimeDateTime, RuntimeFloat, RuntimeValue, RuntimeValueKind};
+use crate::graphql::orm::{
+    RuntimeDateTime, RuntimeFloat, RuntimeValue, RuntimeValueKind, canonical_runtime_decimal,
+    parse_runtime_decimal, runtime_decimal_from_integer,
+};
 use async_graphql::Value;
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -149,8 +152,23 @@ pub(super) fn decode(
                 json_bounds(&json, limits)?;
                 Ok(RuntimeValue::Json(json))
             }
+            // Exact text for the field's definition; never rounded.
+            RuntimeValueKind::Decimal(definition) => parse_runtime_decimal(definition, v)
+                .map(RuntimeValue::Decimal)
+                .map_err(|_| invalid()),
             _ => Err(invalid()),
         },
+        // Integers are exact; floating numbers are rejected rather than rounded.
+        (RuntimeValueKind::Decimal(definition), Value::Number(v)) => {
+            let integer = v
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| v.as_u64().map(i128::from))
+                .ok_or_else(invalid)?;
+            runtime_decimal_from_integer(definition, integer)
+                .map(RuntimeValue::Decimal)
+                .map_err(|_| invalid())
+        }
         _ => Err(invalid()),
     }
 }
@@ -172,6 +190,7 @@ pub(super) fn encode(
         }
         RuntimeValue::Uuid(v) => Value::String(v.to_string()),
         RuntimeValue::DateTime(v) => Value::String(v.as_str().to_owned()),
+        RuntimeValue::Decimal(v) => Value::String(canonical_runtime_decimal(*v)),
         RuntimeValue::Bytes(v) => {
             if v.len() > limits.max_decoded_bytes {
                 return Err(invalid());
@@ -223,6 +242,8 @@ pub(super) const fn name(kind: RuntimeValueKind) -> &'static str {
         RuntimeValueKind::Json => "RuntimeJson",
         RuntimeValueKind::Bytes => "RuntimeBytes",
         RuntimeValueKind::DateTime => "RuntimeDateTime",
+        // The same scalar name as static `rust_decimal::Decimal` fields.
+        RuntimeValueKind::Decimal(_) => "Decimal",
     }
 }
 

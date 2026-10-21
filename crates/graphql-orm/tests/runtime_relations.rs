@@ -17,6 +17,9 @@ fn fid(value: &str) -> FieldId {
 
 fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: fid(id),
         api_name: id.to_string(),
         physical_column: id.to_string(),
@@ -39,6 +42,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
         format_version: 1,
         collections: vec![
             RuntimeCollection {
+                classification: None,
+                description: None,
                 id: cid("customers"),
                 api_type_name: "Customer".into(),
                 api_plural_name: "Customers".into(),
@@ -53,6 +58,9 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 ],
                 relations: vec![
                     RuntimeRelation {
+                        description: None,
+                        classification: None,
+                        export: None,
                         id: RelationId::new("customer_contacts").unwrap(),
                         api_name: "contacts".into(),
                         target: cid("contacts"),
@@ -65,6 +73,9 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                         on_delete: None,
                     },
                     RuntimeRelation {
+                        description: None,
+                        classification: None,
+                        export: None,
                         id: RelationId::new("customer_primary_contact").unwrap(),
                         api_name: "primaryContact".into(),
                         target: cid("contacts"),
@@ -85,6 +96,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 }],
             },
             RuntimeCollection {
+                classification: None,
+                description: None,
                 id: cid("contacts"),
                 api_type_name: "Contact".into(),
                 api_plural_name: "Contacts".into(),
@@ -99,6 +112,9 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field("secret", RuntimeValueKind::Bytes, false),
                 ],
                 relations: vec![RuntimeRelation {
+                    description: None,
+                    classification: None,
+                    export: None,
                     id: RelationId::new("contact_notes").unwrap(),
                     api_name: "notes".into(),
                     target: cid("notes"),
@@ -118,6 +134,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 }],
             },
             RuntimeCollection {
+                description: None,
+                classification: None,
                 id: cid("notes"),
                 api_type_name: "Note".into(),
                 api_plural_name: "Notes".into(),

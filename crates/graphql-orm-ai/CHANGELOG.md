@@ -18,6 +18,14 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.109.1
+
+- Align with ORM/macros 0.56.0 and operation catalogue 0.4.1. A new test proves
+  a runtime-composed GraphQL collection reaches `AiGraphqlQueryCapabilityCatalog`
+  and `AiCapabilityIndex` through the runtime semantic catalogue with its
+  description, classification and export. No provider, AI runtime, public API or
+  schema change; AI schema module unchanged.
+
 ## Unreleased - 0.109.0
 
 ### Changed

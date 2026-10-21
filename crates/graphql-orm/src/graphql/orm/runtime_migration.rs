@@ -327,7 +327,7 @@ impl ValidatedRuntimeSchema {
                     .map(|field| {
                         Ok(ColumnModel {
                             name: field.physical_column.clone(),
-                            sql_type: runtime_sql_type(B::DIALECT, field.value_kind).into(),
+                            sql_type: runtime_sql_type(B::DIALECT, field.value_kind),
                             spatial: None,
                             nullable: field.nullable,
                             is_primary_key: collection.primary_key.contains(&field.id),
@@ -469,7 +469,19 @@ impl ValidatedRuntimeSchema {
         Ok(target)
     }
 }
-fn runtime_sql_type(backend: DatabaseBackend, kind: RuntimeValueKind) -> &'static str {
+fn runtime_sql_type(backend: DatabaseBackend, kind: RuntimeValueKind) -> String {
+    // SQLite stores the scaled mantissa with INTEGER affinity (the name contains
+    // `INT`). Carrying precision and scale in the declared type makes a
+    // definition change a detectable column-type change instead of a silent
+    // reinterpretation of stored mantissas.
+    if let RuntimeValueKind::Decimal(definition) = kind {
+        let (precision, scale) = (definition.precision(), definition.scale());
+        return match backend {
+            DatabaseBackend::Sqlite => format!("INTEGER_DECIMAL({precision},{scale})"),
+            DatabaseBackend::Postgres => format!("NUMERIC({precision},{scale})"),
+            _ => format!("DECIMAL({precision},{scale})"),
+        };
+    }
     match (backend, kind) {
         (DatabaseBackend::Postgres, RuntimeValueKind::Boolean) => "BOOLEAN",
         (_, RuntimeValueKind::Boolean | RuntimeValueKind::Integer)
@@ -487,6 +499,7 @@ fn runtime_sql_type(backend: DatabaseBackend, kind: RuntimeValueKind) -> &'stati
         (DatabaseBackend::Postgres, RuntimeValueKind::DateTime) => "TIMESTAMPTZ",
         _ => "TEXT",
     }
+    .to_owned()
 }
 fn runtime_default(
     backend: DatabaseBackend,
@@ -520,6 +533,24 @@ fn runtime_default(
                 }
                 (RuntimeValueKind::Json | RuntimeValueKind::DateTime, DatabaseBackend::Sqlite) => {
                     quoted()
+                }
+                // The canonical literal on PostgreSQL; the scaled mantissa on SQLite.
+                (
+                    RuntimeValueKind::Decimal(_),
+                    DatabaseBackend::Sqlite | DatabaseBackend::Postgres,
+                ) => {
+                    let Ok(RuntimeTypedDefault::Value(RuntimeValue::Decimal(decimal))) =
+                        default.typed(field.value_kind)
+                    else {
+                        return Err(rejection(
+                            RuntimeMigrationDiagnosticCode::UnsupportedDefault,
+                        ));
+                    };
+                    if backend == DatabaseBackend::Sqlite {
+                        decimal.scaled_i64().to_string()
+                    } else {
+                        value.clone()
+                    }
                 }
                 (RuntimeValueKind::Bytes, DatabaseBackend::Sqlite | DatabaseBackend::Postgres) => {
                     let Ok(RuntimeTypedDefault::Value(RuntimeValue::Bytes(bytes))) =
@@ -1240,6 +1271,13 @@ fn scoped_current(
             .collect(),
     }
 }
+/// A fixed-precision decimal column type with explicit precision and scale.
+fn decimal_sql_type(sql_type: &str) -> bool {
+    let sql_type = sql_type.trim().to_ascii_lowercase();
+    ["integer_decimal(", "numeric(", "decimal("]
+        .iter()
+        .any(|prefix| sql_type.starts_with(prefix))
+}
 fn validate_owned_effects(
     backend: DatabaseBackend,
     current: &OwnedSchemaModel,
@@ -1279,6 +1317,23 @@ fn validate_owned_effects(
                 return Err(rejection(
                     RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
                 ));
+            }
+            // A decimal definition change, or a change to or from a decimal, is
+            // never applied in place: a SQLite rebuild would copy scaled
+            // mantissas unchanged and a PostgreSQL type change rounds when the
+            // scale narrows. Hosts add a new field and copy values explicitly.
+            for before in &table.columns {
+                if let Some(after) = wanted
+                    .columns
+                    .iter()
+                    .find(|column| column.name == before.name)
+                    && (decimal_sql_type(&before.sql_type) || decimal_sql_type(&after.sql_type))
+                    && !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+                {
+                    return Err(rejection(
+                        RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+                    ));
+                }
             }
         }
         // Unmanaged incoming dependencies prevent destructive/structural target changes.

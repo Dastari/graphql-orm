@@ -49,6 +49,9 @@ fn definition() -> RuntimeSchema {
         ),
     ] {
         fields.push(RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(name).unwrap(),
             api_name: name.into(),
             physical_column: name.into(),
@@ -65,6 +68,8 @@ fn definition() -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            description: None,
+            classification: None,
             id: CollectionId::new("records").unwrap(),
             api_type_name: "Record".into(),
             api_plural_name: "Records".into(),
@@ -877,6 +882,9 @@ async fn generated_uuid_json_null_bytes_and_exact_values_use_existing_runtime_ty
         ("bytes", RuntimeValueKind::Bytes),
     ] {
         schema.collections[0].fields.push(RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new(name).unwrap(),
             api_name: name.into(),
             physical_column: name.into(),
@@ -1009,6 +1017,9 @@ async fn incoming_modifying_dependencies_fail_closed_while_restrict_remains_usab
     ] {
         let mut schema = definition();
         schema.collections[0].fields.push(RuntimeField {
+            description: None,
+            classification: None,
+            export: None,
             id: FieldId::new("parent").unwrap(),
             api_name: "parent".into(),
             physical_column: "parent".into(),
@@ -1022,6 +1033,9 @@ async fn incoming_modifying_dependencies_fail_closed_while_restrict_remains_usab
             format: None,
         });
         schema.collections[0].relations.push(RuntimeRelation {
+            description: None,
+            classification: None,
+            export: None,
             id: RelationId::new("parent_link").unwrap(),
             api_name: "parentLink".into(),
             target: CollectionId::new("records").unwrap(),

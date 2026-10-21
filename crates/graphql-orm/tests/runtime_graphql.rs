@@ -123,6 +123,9 @@ fn fid(s: &str) -> FieldId {
 }
 fn field(id: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: fid(id),
         api_name: name.into(),
         physical_column: name.to_lowercase(),
@@ -138,6 +141,8 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -> Runtim
 }
 fn schema() -> Arc<ValidatedRuntimeSchema> {
     let mut parent = RuntimeCollection {
+        description: None,
+        classification: None,
         id: cid("parent"),
         api_type_name: "Parent".into(),
         api_plural_name: "Parents".into(),
@@ -159,6 +164,8 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         default_order: vec![],
     };
     let mut child = RuntimeCollection {
+        description: None,
+        classification: None,
         id: cid("child"),
         api_type_name: "Child".into(),
         api_plural_name: "Children".into(),
@@ -178,6 +185,9 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         default_order: vec![],
     };
     child.relations.push(RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
         id: RelationId::new("parent").unwrap(),
         api_name: "parent".into(),
         target: parent.id.clone(),
@@ -196,6 +206,9 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         on_delete: None,
     });
     parent.relations.push(RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
         id: RelationId::new("children").unwrap(),
         api_name: "children".into(),
         target: child.id.clone(),

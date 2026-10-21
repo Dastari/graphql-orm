@@ -64,23 +64,31 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
         let name = module.object_name(c);
         types.push(
             Object::new(format!("{name}MutationPayload"))
-                .field(super::schema::output("record", TypeRef::named(&name)))
+                .description(format!("Result of one {name} mutation"))
+                .field(
+                    super::schema::output("record", TypeRef::named(&name))
+                        .description("The authorized record, when the mutation returns one"),
+                )
                 .into(),
         );
         if options.create {
-            let mut input = InputObject::new(format!("Create{name}Input"));
+            let mut input = InputObject::new(format!("Create{name}Input"))
+                .description(format!("Values of a new {name} record"));
             let mut count = 0;
             for f in c.fields.iter().filter(|f| !f.generated) {
                 let required =
                     !f.nullable && (f.default.is_none() || c.primary_key.contains(&f.id));
-                input = input.field(InputValue::new(
-                    &f.api_name,
-                    if required {
-                        TypeRef::named_nn(super::scalar::name(f.value_kind))
-                    } else {
-                        TypeRef::named(super::scalar::name(f.value_kind))
-                    },
-                ));
+                input = input.field(
+                    InputValue::new(
+                        &f.api_name,
+                        if required {
+                            TypeRef::named_nn(super::scalar::name(f.value_kind))
+                        } else {
+                            TypeRef::named(super::scalar::name(f.value_kind))
+                        },
+                    )
+                    .description(f.effective_description()),
+                );
                 count += 1;
             }
             if count == 0 {
@@ -89,17 +97,22 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
             types.push(input.into());
         }
         if options.update {
-            let mut input = InputObject::new(format!("Update{name}Input"));
+            let mut input = InputObject::new(format!("Update{name}Input")).description(format!(
+                "Changed values of one {name} record; omitted fields are unchanged"
+            ));
             let mut count = 0;
             for f in c
                 .fields
                 .iter()
                 .filter(|f| !f.generated && !c.primary_key.contains(&f.id))
             {
-                input = input.field(InputValue::new(
-                    &f.api_name,
-                    TypeRef::named(super::scalar::name(f.value_kind)),
-                ));
+                input = input.field(
+                    InputValue::new(
+                        &f.api_name,
+                        TypeRef::named(super::scalar::name(f.value_kind)),
+                    )
+                    .description(f.effective_description()),
+                );
                 count += 1;
             }
             if count == 0 {
@@ -108,17 +121,21 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
             types.push(input.into());
         }
         if options.update || options.delete {
-            let mut input = InputObject::new(format!("{name}KeyInput"));
+            let mut input = InputObject::new(format!("{name}KeyInput"))
+                .description(format!("Primary key of one {name} record"));
             for id in &c.primary_key {
                 let f = c
                     .fields
                     .iter()
                     .find(|f| &f.id == id)
                     .ok_or_else(|| RuntimeGraphqlError::new("invalid_composition"))?;
-                input = input.field(InputValue::new(
-                    &f.api_name,
-                    TypeRef::named_nn(super::scalar::name(f.value_kind)),
-                ));
+                input = input.field(
+                    InputValue::new(
+                        &f.api_name,
+                        TypeRef::named_nn(super::scalar::name(f.value_kind)),
+                    )
+                    .description(f.effective_description()),
+                );
             }
             types.push(input.into());
         }
@@ -171,16 +188,17 @@ impl<B: RuntimeMutationBackend> RuntimeGraphqlComposer<B> {
         Ok(self)
     }
     pub fn mutation_field(mut self, field: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
-        if !super::module::valid_name(&field.name, false) || !self.mutation_roots.insert(field.name)
-        {
+        let (name, field, semantic) = field.into_parts(GraphqlOperationKind::Mutation)?;
+        if !super::module::valid_name(&name, false) || !self.mutation_roots.insert(name) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
         self.mutation = Some(
             self.mutation
                 .take()
                 .ok_or_else(|| RuntimeGraphqlError::new("invalid_composition"))?
-                .field(field.field),
+                .field(field),
         );
+        self.semantic.root(semantic);
         Ok(self)
     }
 }
@@ -197,7 +215,7 @@ fn fields<B: RuntimeMutationBackend>(
                 return Err(RuntimeGraphqlError::new("name_collision"));
             }
             let database = database.clone();
-            let mut field = Field::new(
+            let field = Field::new(
                 &name,
                 TypeRef::named_nn(format!("{object}MutationPayload")),
                 move |ctx| {
@@ -205,32 +223,15 @@ fn fields<B: RuntimeMutationBackend>(
                     FieldFuture::new(async move { execute(database, ctx).await.map(Some) })
                 },
             )
-            .argument(InputValue::new(
-                "expectedSchema",
-                TypeRef::named_nn("String"),
-            ));
-            if action != RuntimeMutationAction::Create {
-                field = field
-                    .argument(InputValue::new(
-                        "key",
-                        TypeRef::named_nn(format!("{object}KeyInput")),
-                    ))
-                    .argument(InputValue::new(
-                        "expected",
-                        TypeRef::named(format!("{object}WhereInput")),
-                    ));
-            }
-            if action != RuntimeMutationAction::Delete {
-                let kind = if action == RuntimeMutationAction::Create {
-                    "Create"
-                } else {
-                    "Update"
-                };
-                field = field.argument(InputValue::new(
-                    "input",
-                    TypeRef::named_nn(format!("{kind}{object}Input")),
-                ));
-            }
+            .description(super::semantic::mutation_description(action, &object));
+            let field = super::semantic::mutation_arguments(action, &object)
+                .into_iter()
+                .fold(field, |field, (name, ty)| {
+                    field.argument(
+                        InputValue::new(name, super::schema::type_ref(&ty))
+                            .description(super::semantic::argument_description(name)),
+                    )
+                });
             fields.push((name, field));
         }
     }

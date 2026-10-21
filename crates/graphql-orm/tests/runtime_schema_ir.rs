@@ -184,6 +184,9 @@ fn fid(id: &str) -> FieldId {
 
 fn field(id: &str, api: &str, column: &str, kind: RuntimeValueKind) -> RuntimeField {
     RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
         id: fid(id),
         api_name: api.to_string(),
         physical_column: column.to_string(),
@@ -207,6 +210,9 @@ fn relation(
     on_delete: Option<DeletePolicy>,
 ) -> RuntimeRelation {
     RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
         id: RelationId::new(id).expect("valid relation id"),
         api_name: api.to_string(),
         target: cid(target),
@@ -241,6 +247,8 @@ fn order(field: &str, direction: RuntimeOrderDirection) -> RuntimeOrderTerm {
 
 fn fixture_runtime_schema() -> RuntimeSchema {
     let customers = RuntimeCollection {
+        classification: None,
+        description: None,
         id: cid("col_customer"),
         api_type_name: "Customer".to_string(),
         api_plural_name: "Customers".to_string(),
@@ -360,6 +368,8 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     let contact_details = RuntimeCollection {
+        classification: None,
+        description: None,
         id: cid("col_contact_detail"),
         api_type_name: "ContactDetail".to_string(),
         api_plural_name: "ContactDetails".to_string(),
@@ -414,6 +424,8 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     let customer_notes = RuntimeCollection {
+        classification: None,
+        description: None,
         id: cid("col_customer_note"),
         api_type_name: "CustomerNote".to_string(),
         api_plural_name: "CustomerNotes".to_string(),
@@ -464,6 +476,8 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     let note_attachments = RuntimeCollection {
+        classification: None,
+        description: None,
         id: cid("col_note_attachment"),
         api_type_name: "NoteAttachment".to_string(),
         api_plural_name: "NoteAttachments".to_string(),
@@ -617,6 +631,8 @@ fn owned_schema_survives_source_value_drop_and_serde_round_trip() {
         let source_table = String::from("things");
         let mut schema = RuntimeSchema::default();
         schema.collections.push(RuntimeCollection {
+            description: None,
+            classification: None,
             id: CollectionId::new(source_table.clone()).expect("id"),
             api_type_name: "Thing".to_string(),
             api_plural_name: "Things".to_string(),

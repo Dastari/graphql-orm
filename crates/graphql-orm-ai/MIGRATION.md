@@ -19,6 +19,15 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.109.0 to 0.109.1: ORM 0.56.0 alignment
+
+Adopt `graphql-orm-ai` 0.109.1 with ORM/macros 0.56.0 from one workspace
+release. No AI API, GraphQL SDL, schema module, persistence or data migration is
+involved. Hosts composing runtime GraphQL can pass the catalogue from
+`RuntimeGraphqlComposer::finish_with_semantic_catalog` to
+`AiGraphqlQueryCapabilityCatalog::compile` and `AiCapabilityIndex::compile`
+like a static `graphql_orm_semantic_catalog()`.
+
 ## 0.108.0 to 0.109.0: frozen retained tool surfaces in task-context budgets
 
 This pre-1.0 minor relaxes one pre-transport budget admission and adds API. No
