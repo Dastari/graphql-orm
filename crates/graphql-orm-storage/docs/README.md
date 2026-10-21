@@ -28,6 +28,7 @@ Start with the package [README](../README.md).
 ## Reference
 
 - [`BlobStore` API](blob-store.md).
+- [Namespace identity and capacity-domain facts](namespace-identity.md).
 - [Migration guide](../MIGRATION.md) and [changelog](../CHANGELOG.md).
 
 ## Concepts and maintenance

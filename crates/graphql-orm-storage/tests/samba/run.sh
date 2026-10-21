@@ -197,3 +197,17 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
 SMB_TEST_FIXTURE_RUN="$RUN_ID" \
   run_test sdk_directory_drop_releases_directory_arc "$SMB_TEST_CARGO" test --locked --features smb --test smb_directory_stream \
   sdk_directory_drop_releases_directory_arc -- --ignored --exact --nocapture
+
+# Namespace marker lifecycle, restart and reserved-name aliases on the owned share.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test samba_namespace_marker_lifecycle_and_reserved_aliases "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_namespace_marker_lifecycle_and_reserved_aliases -- --ignored --exact --nocapture
+
+# Fenced create through an owned loopback fault proxy: no reconnect or replay mid-operation.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test samba_fenced_create_never_reconnects_or_replays_mid_operation "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_fenced_create_never_reconnects_or_replays_mid_operation -- --ignored --exact --nocapture

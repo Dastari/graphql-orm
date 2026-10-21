@@ -72,6 +72,11 @@ path = "tests/local_streaming_object.rs"
 required-features = ["local"]
 
 [[test]]
+name = "local_namespace"
+path = "tests/local_namespace.rs"
+required-features = ["local"]
+
+[[test]]
 name = "smb_integration"
 path = "tests/smb_integration.rs"
 required-features = ["smb"]
