@@ -833,7 +833,10 @@ async fn s3_nested_byte_budget_charges_the_marker_overflow_probe() {
         assert_eq!(observed.nested.completeness, ScanCompleteness::Complete);
         assert_eq!(observed.nested.found.len(), 1);
         assert_eq!(
-            matches!(observed.nested.found[0].state, NamespaceState::Conflict { .. }),
+            matches!(
+                observed.nested.found[0].state,
+                NamespaceState::Conflict { .. }
+            ),
             conflict
         );
         let log = server.join().expect("fixture thread");

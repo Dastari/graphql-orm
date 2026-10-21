@@ -675,7 +675,10 @@ async fn nested_byte_budget_is_charged_before_the_last_marker_read() {
         assert_eq!(observed.nested.found.len(), 1);
         // The overflow probe is charged even though parsing reports Conflict.
         assert_eq!(
-            matches!(observed.nested.found[0].state, NamespaceState::Conflict { .. }),
+            matches!(
+                observed.nested.found[0].state,
+                NamespaceState::Conflict { .. }
+            ),
             marker.is_some()
         );
     }
