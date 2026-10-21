@@ -3,7 +3,7 @@ title: "Development"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -66,8 +66,10 @@ under a generated prefix.
 ## Managed SMB fixture ownership
 
 `tests/samba/run.sh` runs the seven managed protocol, cancellation, encryption,
-constrained-write, backup-lifecycle and reconnect cases, followed by two SDK
-directory-stream regressions. It creates fresh randomly
+constrained-write, backup-lifecycle and reconnect cases. They are followed by
+two SDK directory-stream regressions and two capacity cases: the authenticated
+share allocation, and the share size limit that the constrained fixture sets
+with `max disk size = 64`. It creates fresh randomly
 named containers and a fresh labelled volume, binds dynamic ports only on
 `127.0.0.1`, and passes the exact normal container ID to the restart test. It never
 reuses or deletes a pre-existing fixed-name fixture. Cleanup selects only its
