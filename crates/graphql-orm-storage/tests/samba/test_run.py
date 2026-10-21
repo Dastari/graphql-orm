@@ -141,7 +141,7 @@ class FixtureOwnershipTests(unittest.TestCase):
     def test_success_preserves_seven_cases_adds_sdk_cases_and_deletes_only_owned_ids(self):
         result, calls, state, cargo = self.run_fixture()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(cargo), 10)
+        self.assertEqual(len(cargo), 11)
         self.assertTrue(all(item["port"].isdigit() for item in cargo))
         self.assertEqual(cargo[6]["container"], "immutable-fixture-id-1")
         self.assertTrue(all(item["container"] is None for item in cargo[7:]))
@@ -169,6 +169,7 @@ class FixtureOwnershipTests(unittest.TestCase):
             "sdk_directory_multibatch_eof_exact_names",
             "sdk_directory_drop_releases_directory_arc",
             "samba_namespace_marker_lifecycle_and_reserved_aliases",
+            "samba_fenced_create_never_reconnects_or_replays_mid_operation",
         ]
         self.assertEqual([item["args"][item["args"].index("--") - 1] for item in cargo], expected_names)
         self.assertEqual(state, {"containers": {}, "volume": None})
@@ -183,12 +184,12 @@ class FixtureOwnershipTests(unittest.TestCase):
                 self.assertEqual(len(cargo), 3)
                 self.assertEqual(state, {"containers": {}, "volume": None})
 
-    def test_absolute_cargo_runner_preserves_all_ten_invocations(self):
+    def test_absolute_cargo_runner_preserves_all_eleven_invocations(self):
         default_result, _, _, default_cargo = self.run_fixture()
         self.assertEqual(default_result.returncode, 0, default_result.stderr)
         result, _, state, cargo = self.run_fixture(absolute_cargo=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(cargo), 10)
+        self.assertEqual(len(cargo), 11)
         self.assertTrue(all(Path(item["executable"]).is_absolute() for item in cargo))
         self.assertTrue(all(item["executable"].endswith("/explicit runner/bounded cargo")
                             for item in cargo))
@@ -207,7 +208,7 @@ class FixtureOwnershipTests(unittest.TestCase):
     def test_changed_ownership_is_not_deleted(self):
         result, calls, state, cargo = self.run_fixture("ownership_mismatch")
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len(cargo), 10)
+        self.assertEqual(len(cargo), 11)
         removals = [args[-1] for args in calls if args[0] == "rm"]
         self.assertNotIn("immutable-fixture-id-1", removals)
         self.assertEqual(set(state["containers"]), {"immutable-fixture-id-1"})

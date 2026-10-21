@@ -96,6 +96,9 @@ The ordinary `put_blob_if_not_exists` path is not reused for markers.
 - **One deadline per scan.** `max_duration` starts when the scan starts. Every
   directory read, entry, listing page and marker read awaits only the remaining
   time, so a single wide directory or a slow provider still stops on time.
+- **Bytes are charged before the read.** Each candidate directory is charged
+  its recorded path plus the largest admissible marker read (1 KiB) before the
+  marker is read, so no outcome, including `Complete`, exceeds `max_bytes`.
 - Reaching any limit reports `Truncated { limit }`, naming the limit.
 - Every scan reports a `ScanCompleteness` value: `Complete`, `Truncated`,
   `Denied`, `Unsupported` or `NotRequested`. Only `Complete` with no markers is
@@ -160,8 +163,8 @@ must re-observe.
 | Provider | What the fence re-validates | Residual risk |
 | --- | --- | --- |
 | Local | Backend instance, target directory identity (device and inode on Unix) and the marker. A target replaced by a directory with a copied marker is refused. | Check-then-act: a replacement between the check and the write is not excluded. |
-| SMB | Backend instance, connection generation, target directory identity (volume object ID or `none`, volume serial and file ID) and the marker. The fenced create never reconnects: the generation is checked again before parent creation, before the create, and at the publication point, and any reconnect fails the write. | Overwriting fenced writes are `UnsupportedOperation`, because a rename cannot be bound to the session. |
-| S3 | Backend instance and the marker only (configuration-only). | Endpoint aliasing, bucket recreation and concurrent marker replacement are undetectable. |
+| SMB | Backend instance, connection generation, target directory identity (volume object ID or `none`, volume serial and file ID) and the marker. Every effect of the fenced create (each missing parent directory create and its close, the exclusive file create, writes, flush, publication and cleanup) is issued only on the checked session. The generation is re-checked before each parent create, before the file create and at the publication point. A failure is returned without reconnect, directory-cache repair or replay, and cleanup never reconnects. | Overwriting fenced writes are `UnsupportedOperation`, because a rename cannot be bound to the session. Parent directories created before a failure remain (in the original session). If the session is lost between the exclusive create and arming delete-on-close, an empty object can remain at the key. |
+| S3 | Backend instance and the marker only (configuration-only). Both fenced writes send every mutation (single `PutObject`; or multipart create, each part, completion and abort) exactly once, with SDK retries disabled; failures are `SingleAttemptFailed`. A failed multipart lifecycle is aborted once. | Endpoint aliasing, bucket recreation and concurrent marker replacement are undetectable. A lost abort can leave an incomplete multipart upload for the bucket's lifecycle rules. |
 
 `put_blob_if_not_exists_fenced` never overwrites. If it returns `Ok(None)`,
 read the existing object and compare it with your own body. If the outcome is

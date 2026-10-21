@@ -132,39 +132,56 @@ impl S3StorageBackend {
             .to_string()
     }
 
+    /// Uploads a body. `attempt` selects the SDK retry policy for every
+    /// mutation of the lifecycle (single object, multipart create, parts,
+    /// completion and abort).
     async fn put_blob_inner(
         &self,
         key: &str,
         body: StorageByteStream,
         options: BlobPutOptions,
         if_not_exists: bool,
+        attempt: Attempt,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
         let provider_key = self.provider_key(key)?;
         let mut stream = body.into_inner();
         let mut buffer = BytesMut::new();
         let mut hasher = Sha256::new();
         let mut size_bytes = 0_u64;
-        let mut multipart = None;
+        let mut multipart: Option<MultipartUploadState> = None;
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    // Before any mutation the caller's stream error is returned
+                    // as is; after a multipart start the outcome is ambiguous.
+                    let started = multipart.is_some();
+                    self.abort_after_failure(&provider_key, multipart.as_ref(), attempt)
+                        .await;
+                    return Err(if started { attempt.wrap(error) } else { error });
+                }
+            };
             size_bytes = size_bytes.saturating_add(u64::try_from(chunk.len()).unwrap_or(u64::MAX));
             hasher.update(&chunk);
             buffer.extend_from_slice(&chunk);
 
             while buffer.len() >= MULTIPART_PART_SIZE {
-                let state = match multipart.as_mut() {
-                    Some(state) => state,
-                    None => {
-                        multipart = Some(
-                            self.create_multipart_upload(&provider_key, &options)
-                                .await?,
-                        );
-                        multipart.as_mut().expect("multipart state exists")
-                    }
-                };
+                if multipart.is_none() {
+                    multipart = Some(
+                        self.create_multipart_upload(&provider_key, &options, attempt)
+                            .await
+                            .map_err(|error| attempt.wrap(error))?,
+                    );
+                }
+                let state = multipart.as_mut().expect("multipart state exists");
                 let part = buffer.split_to(MULTIPART_PART_SIZE).freeze();
-                self.upload_part(&provider_key, state, part).await?;
+                let uploaded = self.upload_part(&provider_key, state, part, attempt).await;
+                if let Err(error) = uploaded {
+                    self.abort_after_failure(&provider_key, multipart.as_ref(), attempt)
+                        .await;
+                    return Err(attempt.wrap(error));
+                }
             }
         }
 
@@ -173,34 +190,68 @@ impl S3StorageBackend {
             sha256_hex: format!("{:x}", hasher.finalize()),
         };
 
-        match multipart {
+        let result = match multipart {
             Some(mut state) => {
-                if !buffer.is_empty() {
-                    self.upload_part(&provider_key, &mut state, buffer.freeze())
-                        .await?;
+                let uploaded = if buffer.is_empty() {
+                    Ok(())
+                } else {
+                    self.upload_part(&provider_key, &mut state, buffer.freeze(), attempt)
+                        .await
+                };
+                if let Err(error) = uploaded {
+                    self.abort_after_failure(&provider_key, Some(&state), attempt)
+                        .await;
+                    return Err(attempt.wrap(error));
                 }
-
-                match self
-                    .complete_multipart_upload(&provider_key, state, if_not_exists)
+                self.complete_multipart_upload(&provider_key, state, if_not_exists, attempt)
                     .await
-                {
-                    Ok(()) => Ok(Some(outcome)),
-                    Err(err) if if_not_exists && is_precondition_error(&err) => Ok(None),
-                    Err(err) => Err(err),
-                }
             }
             None => {
                 let bytes = buffer.freeze();
-                match self
-                    .put_single_blob(&provider_key, bytes, options, if_not_exists)
+                self.put_single_blob(&provider_key, bytes, options, if_not_exists, attempt)
                     .await
-                {
-                    Ok(()) => Ok(Some(outcome)),
-                    Err(err) if if_not_exists && is_precondition_error(&err) => Ok(None),
-                    Err(err) => Err(err),
-                }
             }
+        };
+        match result {
+            Ok(()) => Ok(Some(outcome)),
+            Err(err) if if_not_exists && is_precondition_error(&err) => Ok(None),
+            Err(err) => Err(attempt.wrap(err)),
         }
+    }
+
+    /// Single-attempt lifecycles abort a started multipart upload once, without
+    /// retries. Ordinary uploads keep their existing behavior.
+    async fn abort_after_failure(
+        &self,
+        provider_key: &str,
+        state: Option<&MultipartUploadState>,
+        attempt: Attempt,
+    ) {
+        if attempt == Attempt::Single
+            && let Some(state) = state
+        {
+            self.abort_multipart_upload(provider_key, &state.upload_id, attempt)
+                .await;
+        }
+    }
+
+    async fn abort_multipart_upload(&self, provider_key: &str, upload_id: &str, attempt: Attempt) {
+        let request = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.config.bucket)
+            .key(provider_key)
+            .upload_id(upload_id);
+        let _ = match attempt {
+            Attempt::Ordinary => request.send().await,
+            Attempt::Single => {
+                request
+                    .customize()
+                    .config_override(single_attempt_config())
+                    .send()
+                    .await
+            }
+        };
     }
 
     async fn put_single_blob(
@@ -209,6 +260,7 @@ impl S3StorageBackend {
         bytes: Bytes,
         options: BlobPutOptions,
         if_not_exists: bool,
+        attempt: Attempt,
     ) -> Result<(), StorageError> {
         let mut request = self
             .client
@@ -224,14 +276,23 @@ impl S3StorageBackend {
             request = request.if_none_match("*");
         }
 
-        request.send().await.map_err(map_s3_error)?;
-        Ok(())
+        match attempt {
+            Attempt::Ordinary => request.send().await.map(|_| ()),
+            Attempt::Single => request
+                .customize()
+                .config_override(single_attempt_config())
+                .send()
+                .await
+                .map(|_| ()),
+        }
+        .map_err(map_s3_error)
     }
 
     async fn create_multipart_upload(
         &self,
         provider_key: &str,
         options: &BlobPutOptions,
+        attempt: Attempt,
     ) -> Result<MultipartUploadState, StorageError> {
         let mut request = self
             .client
@@ -243,7 +304,17 @@ impl S3StorageBackend {
             request = request.content_type(content_type);
         }
 
-        let output = request.send().await.map_err(map_s3_error)?;
+        let output = match attempt {
+            Attempt::Ordinary => request.send().await,
+            Attempt::Single => {
+                request
+                    .customize()
+                    .config_override(single_attempt_config())
+                    .send()
+                    .await
+            }
+        }
+        .map_err(map_s3_error)?;
         let upload_id = output.upload_id().ok_or_else(|| StorageError::Provider {
             backend: StorageBackend::S3.as_str().to_string(),
             message: "S3 multipart upload did not return an upload id".to_string(),
@@ -262,19 +333,28 @@ impl S3StorageBackend {
         provider_key: &str,
         state: &mut MultipartUploadState,
         bytes: Bytes,
+        attempt: Attempt,
     ) -> Result<(), StorageError> {
         let part_number = state.next_part_number;
-        let output = self
+        let request = self
             .client
             .upload_part()
             .bucket(&self.config.bucket)
             .key(provider_key)
             .upload_id(&state.upload_id)
             .part_number(part_number)
-            .body(ByteStream::from(bytes))
-            .send()
-            .await
-            .map_err(map_s3_error)?;
+            .body(ByteStream::from(bytes));
+        let output = match attempt {
+            Attempt::Ordinary => request.send().await,
+            Attempt::Single => {
+                request
+                    .customize()
+                    .config_override(single_attempt_config())
+                    .send()
+                    .await
+            }
+        }
+        .map_err(map_s3_error)?;
 
         let completed_part = CompletedPart::builder()
             .set_e_tag(output.e_tag().map(ToString::to_string))
@@ -290,6 +370,7 @@ impl S3StorageBackend {
         provider_key: &str,
         state: MultipartUploadState,
         if_not_exists: bool,
+        attempt: Attempt,
     ) -> Result<(), StorageError> {
         let upload_id = state.upload_id.clone();
         let completed = CompletedMultipartUpload::builder()
@@ -307,21 +388,46 @@ impl S3StorageBackend {
             request = request.if_none_match("*");
         }
 
-        match request.send().await.map_err(map_s3_error) {
-            Ok(_) => Ok(()),
+        let result = match attempt {
+            Attempt::Ordinary => request.send().await.map(|_| ()),
+            Attempt::Single => request
+                .customize()
+                .config_override(single_attempt_config())
+                .send()
+                .await
+                .map(|_| ()),
+        };
+        match result.map_err(map_s3_error) {
+            Ok(()) => Ok(()),
             Err(err) => {
-                let _ = self
-                    .client
-                    .abort_multipart_upload()
-                    .bucket(&self.config.bucket)
-                    .key(provider_key)
-                    .upload_id(upload_id)
-                    .send()
+                self.abort_multipart_upload(provider_key, &upload_id, attempt)
                     .await;
                 Err(err)
             }
         }
     }
+}
+
+/// Retry policy for one upload lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Attempt {
+    /// The client's configured retries (ordinary APIs).
+    Ordinary,
+    /// Exactly one request per mutation; failures are `SingleAttemptFailed`.
+    Single,
+}
+
+impl Attempt {
+    fn wrap(self, error: StorageError) -> StorageError {
+        match self {
+            Self::Ordinary => error,
+            Self::Single => StorageError::single_attempt(error),
+        }
+    }
+}
+
+fn single_attempt_config() -> S3ConfigBuilder {
+    S3ConfigBuilder::new().retry_config(RetryConfig::disabled())
 }
 
 fn s3_is_denied<E: fmt::Debug>(error: &aws_sdk_s3::error::SdkError<E>) -> bool {
@@ -751,7 +857,13 @@ impl BlobStore for S3StorageBackend {
         fence: &NamespaceFence,
     ) -> Result<BlobWriteOutcome, StorageError> {
         self.check_fence(key, fence).await?;
-        self.put_blob(key, body, options).await
+        // One request per mutation after the single fence check; never resent.
+        self.put_blob_inner(key, body, options, false, Attempt::Single)
+            .await?
+            .ok_or_else(|| StorageError::PreconditionFailed {
+                key: key.to_string(),
+                condition: "blob unexpectedly already exists".to_string(),
+            })
     }
 
     async fn put_blob_if_not_exists_fenced(
@@ -761,9 +873,11 @@ impl BlobStore for S3StorageBackend {
         options: BlobPutOptions,
         fence: &NamespaceFence,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        // If-None-Match create after a configuration-only fence check.
+        // If-None-Match create after a configuration-only fence check. Every
+        // mutation of the lifecycle is one request with SDK retries disabled.
         self.check_fence(key, fence).await?;
-        self.put_blob_if_not_exists(key, body, options).await
+        self.put_blob_inner(key, body, options, true, Attempt::Single)
+            .await
     }
 
     async fn delete_blob_once(&self, key: &str) -> Result<(), StorageError> {
@@ -773,7 +887,7 @@ impl BlobStore for S3StorageBackend {
             .bucket(&self.config.bucket)
             .key(provider_key)
             .customize()
-            .config_override(S3ConfigBuilder::new().retry_config(RetryConfig::disabled()))
+            .config_override(single_attempt_config())
             .send()
             .await
             .map_err(|error| StorageError::single_attempt(map_s3_error(error)))?;
@@ -790,7 +904,7 @@ impl BlobStore for S3StorageBackend {
         body: StorageByteStream,
         options: BlobPutOptions,
     ) -> Result<BlobWriteOutcome, StorageError> {
-        self.put_blob_inner(key, body, options, false)
+        self.put_blob_inner(key, body, options, false, Attempt::Ordinary)
             .await?
             .ok_or_else(|| StorageError::PreconditionFailed {
                 key: key.to_string(),
@@ -804,7 +918,8 @@ impl BlobStore for S3StorageBackend {
         body: StorageByteStream,
         options: BlobPutOptions,
     ) -> Result<Option<BlobWriteOutcome>, StorageError> {
-        self.put_blob_inner(key, body, options, true).await
+        self.put_blob_inner(key, body, options, true, Attempt::Ordinary)
+            .await
     }
 
     async fn get_blob(&self, key: &str) -> Result<BlobBody, StorageError> {

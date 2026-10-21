@@ -332,7 +332,11 @@ async fn scan_nested(dir: &Path, scan: NestedScan) -> ScanResult {
                 completeness = truncated("max_depth");
                 continue;
             }
-            bytes = bytes.saturating_add(relative.len());
+            // The path and the largest admissible marker read are charged
+            // before the read, so no outcome (including Complete) exceeds max_bytes.
+            bytes = bytes
+                .saturating_add(relative.len())
+                .saturating_add(MAX_NAMESPACE_MARKER_BYTES);
             if bytes > scan.max_bytes {
                 completeness = truncated("max_bytes");
                 break 'scan;
@@ -341,7 +345,6 @@ async fn scan_nested(dir: &Path, scan: NestedScan) -> ScanResult {
                 completeness = truncated("max_duration");
                 break 'scan;
             };
-            bytes = bytes.saturating_add(MAX_NAMESPACE_MARKER_BYTES);
             if let NamespaceState::Unknown { reason } = &state {
                 completeness = ScanCompleteness::Denied {
                     reason: reason.clone(),

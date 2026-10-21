@@ -665,20 +665,28 @@ impl SmbStorageBackend {
 
     async fn ensure_root_prefix(&self) -> Result<(), StorageError> {
         if let Some(prefix) = &self.inner.config.root_prefix {
-            self.ensure_directories(prefix).await?;
+            self.ensure_directories(prefix, None).await?;
         }
         Ok(())
     }
 
-    async fn ensure_parent_directories(&self, key: &str) -> Result<(), StorageError> {
+    /// Creates missing parents. With `fence` set, every directory create is
+    /// bound to that session generation: it is issued only on the checked
+    /// session, and a failure is returned without reconnect, cache repair or
+    /// replay.
+    async fn ensure_parent_directories(
+        &self,
+        key: &str,
+        fence: Option<u64>,
+    ) -> Result<(), StorageError> {
         let mapped = self.mapped_key(key)?;
         let Some((parent, _)) = mapped.rsplit_once('/') else {
             return Ok(());
         };
-        self.ensure_directories(parent).await
+        self.ensure_directories(parent, fence).await
     }
 
-    async fn ensure_directories(&self, path: &str) -> Result<(), StorageError> {
+    async fn ensure_directories(&self, path: &str, fence: Option<u64>) -> Result<(), StorageError> {
         if self.inner.directories.contains(path).await {
             self.inner
                 .diagnostics
@@ -695,9 +703,9 @@ impl SmbStorageBackend {
                     current.push('/');
                 }
                 current.push_str(segment);
-                match self.ensure_one_directory(&current).await {
+                match self.ensure_one_directory(&current, fence).await {
                     Ok(()) => {}
-                    Err(error) if pass == 0 && is_not_found(&error) => {
+                    Err(error) if pass == 0 && fence.is_none() && is_not_found(&error) => {
                         self.inner.directories.clear().await;
                         retry_from_root = true;
                         break;
@@ -717,7 +725,11 @@ impl SmbStorageBackend {
         ))
     }
 
-    async fn ensure_one_directory(&self, path: &str) -> Result<(), StorageError> {
+    async fn ensure_one_directory(
+        &self,
+        path: &str,
+        fence: Option<u64>,
+    ) -> Result<(), StorageError> {
         if self.inner.directories.contains(path).await {
             self.inner
                 .diagnostics
@@ -765,6 +777,12 @@ impl SmbStorageBackend {
         };
         for attempt in 0..2 {
             let snapshot = self.client_snapshot().await;
+            if fence.is_some_and(|expected| expected != snapshot.generation) {
+                return Err(fence_invalidated(
+                    path,
+                    "the SMB session reconnected before a parent directory create",
+                ));
+            }
             self.inner
                 .diagnostics
                 .directory_create_requests
@@ -783,6 +801,8 @@ impl SmbStorageBackend {
                             self.inner.directories.insert(path.to_string()).await;
                             return Ok(());
                         }
+                        // Fenced: the directory may exist; never repair or replay.
+                        Err(error) if fence.is_some() => return Err(error),
                         Err(error) if error.is_retryable() => {
                             self.reconnect_after(snapshot.generation).await?;
                             if attempt == 1 {
@@ -792,6 +812,7 @@ impl SmbStorageBackend {
                         Err(error) => return Err(error),
                     }
                 }
+                Err(error) if fence.is_some() => return Err(error),
                 Err(error) if error.is_retryable() => {
                     self.reconnect_after(snapshot.generation).await?;
                     if attempt == 1 {
@@ -905,7 +926,15 @@ impl SmbStorageBackend {
         } else {
             WriteCleanupTarget::TemporaryPath(key.to_string())
         };
-        let mut cleanup = WriteCleanupGuard::new(self.clone(), target, file, generation);
+        // Under a fence, cleanup closes on the original handle only and never
+        // reconnects; the server drops a delete-pending file with the session.
+        let mut cleanup = WriteCleanupGuard::new(
+            self.clone(),
+            target,
+            file,
+            generation,
+            fence_generation.is_none(),
+        );
 
         // Delete-on-close makes cancellation safe after CREATE succeeds. The flag
         // is cleared only after the complete stream has been flushed.
@@ -1031,7 +1060,8 @@ impl SmbStorageBackend {
                     "the SMB session reconnected before create",
                 ));
             }
-            self.ensure_parent_directories(key).await?;
+            self.ensure_parent_directories(key, fence_generation)
+                .await?;
             let path = self.remote_path(key)?;
             let snapshot = self.client_snapshot().await;
             if fenced_session_changed(snapshot.generation) {
@@ -1060,7 +1090,7 @@ impl SmbStorageBackend {
                         false,
                     ));
                 }
-                Err(error) if path_attempt == 0 && is_not_found(&error) => {
+                Err(error) if path_attempt == 0 && fence_generation.is_none() && is_not_found(&error) => {
                     self.inner.directories.clear().await;
                 }
                 // Under a fence the session is never repaired or replayed.
@@ -1089,7 +1119,7 @@ impl SmbStorageBackend {
     }
 
     async fn rename(&self, from: &str, to: &str, replace: bool) -> Result<(), StorageError> {
-        self.ensure_parent_directories(to).await?;
+        self.ensure_parent_directories(to, None).await?;
         let file = self
             .open_file(
                 from,
@@ -1365,6 +1395,8 @@ struct WriteCleanupGuard {
     target: WriteCleanupTarget,
     file: Option<File>,
     generation: u64,
+    /// Whether a failed close may reconnect. False under a fence.
+    repair: bool,
     armed: bool,
 }
 
@@ -1416,12 +1448,14 @@ impl WriteCleanupGuard {
         target: WriteCleanupTarget,
         file: File,
         generation: u64,
+        repair: bool,
     ) -> Self {
         Self {
             backend,
             target,
             file: Some(file),
             generation,
+            repair,
             armed: true,
         }
     }
@@ -1443,6 +1477,7 @@ impl WriteCleanupGuard {
                     let close = self.backend.with_timeout("close", file.close()).await;
                     if let Err(error) = close
                         && error.is_retryable()
+                        && self.repair
                     {
                         let _ = self.backend.reconnect_after(self.generation).await;
                     }
@@ -1472,6 +1507,7 @@ impl Drop for WriteCleanupGuard {
         let backend = self.backend.clone();
         let target = self.target.clone();
         let generation = self.generation;
+        let repair = self.repair;
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 cleanup_write_target(
@@ -1480,6 +1516,7 @@ impl Drop for WriteCleanupGuard {
                         let close = backend.with_timeout("close", file.close()).await;
                         if let Err(error) = close
                             && error.is_retryable()
+                            && repair
                         {
                             let _ = backend.reconnect_after(generation).await;
                         }

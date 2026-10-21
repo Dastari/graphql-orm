@@ -33,6 +33,10 @@ supersedes: []
 - `AncestorScan` gains `max_duration`, and `NestedScan` gains `max_bytes` and
   `max_results`. Scan limits are validated against the new `MAX_SCAN_*`
   constants, and one deadline bounds every await of a scan.
+- Fenced SMB creates bind parent-directory creation and cleanup to the
+  checked session as well, without reconnect or replay. Fenced S3 writes send
+  each mutation once with SDK retries disabled, across the multipart lifecycle.
+  Local nested scans charge the marker allowance before each read.
 - Local stores on Windows hosts use the `Windows` key equivalence. The local
   temporary-file sweep skips reserved names. SMB marker publication no longer
   uses delete-on-close.

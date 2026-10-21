@@ -488,3 +488,236 @@ async fn s3_fences_and_scan_limits_fail_before_any_request() {
     let log = server.join().expect("fixture thread");
     assert!(log.is_empty(), "{log:?}");
 }
+
+/// Owned loopback S3 fixture that counts every mutation request. The marker
+/// read is answered; a single-object PUT either loses its response (`lost`) or
+/// returns 503; multipart create succeeds, every part returns 503 and abort
+/// succeeds.
+fn mutation_fixture(
+    marker: Vec<u8>,
+    lose_put_response: bool,
+) -> (
+    String,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("owned loopback listener");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(AtomicBool::new(false));
+    let (server_log, server_done) = (Arc::clone(&log), Arc::clone(&done));
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !server_done.load(Ordering::SeqCst) && Instant::now() < deadline {
+            let (stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(2));
+                    continue;
+                }
+                Err(error) => panic!("accept: {error}"),
+            };
+            stream.set_nonblocking(false).expect("blocking stream");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).expect("header line") == 0 {
+                    break;
+                }
+                headers.push_str(&line);
+                if line == "\r\n" {
+                    break;
+                }
+                assert!(headers.len() < 32_768, "bounded headers");
+            }
+            if headers.is_empty() {
+                continue;
+            }
+            let header = |name: &str| {
+                headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.trim().to_ascii_lowercase())
+            };
+            if header("expect").as_deref() == Some("100-continue") {
+                stream
+                    .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
+                    .expect("continue");
+            }
+            if header("transfer-encoding").is_some_and(|value| value.contains("chunked")) {
+                loop {
+                    let mut size = String::new();
+                    reader.read_line(&mut size).expect("chunk size");
+                    let size = usize::from_str_radix(
+                        size.trim().split(';').next().unwrap_or("0"),
+                        16,
+                    )
+                    .expect("chunk size");
+                    let mut chunk = vec![0; size + 2];
+                    reader.read_exact(&mut chunk).expect("chunk");
+                    if size == 0 {
+                        break;
+                    }
+                }
+            } else {
+                let length = header("content-length")
+                    .map(|value| value.parse::<usize>().expect("length"))
+                    .unwrap_or(0);
+                assert!(length <= 16 * 1024 * 1024, "bounded fixture body");
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).expect("request body");
+            }
+            let line = headers.lines().next().expect("request line").to_string();
+            let mut parts = line.split_whitespace();
+            let method = parts.next().expect("method").to_string();
+            let target = parts.next().expect("target").to_string();
+            let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
+            let path = path.trim_start_matches("/fixture/").to_string();
+            let kind = if query.contains("uploads") {
+                "create-multipart"
+            } else if query.contains("partNumber") {
+                "part"
+            } else if query.contains("uploadId") && method == "DELETE" {
+                "abort"
+            } else if query.contains("uploadId") {
+                "complete"
+            } else {
+                "object"
+            };
+            server_log
+                .lock()
+                .expect("log")
+                .push(format!("{method} {path} {kind}"));
+            let unavailable = "<Error><Code>SlowDown</Code><Message>fixture</Message></Error>";
+            let unavailable = format!(
+                "HTTP/1.1 503 Slow Down\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{unavailable}",
+                unavailable.len()
+            )
+            .into_bytes();
+            let response = match (method.as_str(), kind) {
+                ("GET", "object") if path == "tenant/.graphql-orm-namespace" => {
+                    let mut response = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 0-{}/{}\r\nConnection: close\r\n\r\n",
+                        marker.len(),
+                        marker.len() - 1,
+                        marker.len()
+                    )
+                    .into_bytes();
+                    response.extend_from_slice(&marker);
+                    response
+                }
+                ("PUT", "object") if lose_put_response => {
+                    // The request was received; the response is lost.
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
+                ("PUT", "object") | ("PUT", "part") => unavailable,
+                ("POST", "create-multipart") => {
+                    let body = "<InitiateMultipartUploadResult><Bucket>fixture</Bucket><Key>k</Key><UploadId>fixture-upload</UploadId></InitiateMultipartUploadResult>";
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .into_bytes()
+                }
+                ("DELETE", "abort") => {
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_vec()
+                }
+                other => panic!("unexpected request {other:?} {path}"),
+            };
+            let _ = stream.write_all(&response);
+        }
+    });
+    (endpoint, log, done, server)
+}
+
+fn count(log: &std::sync::Mutex<Vec<String>>, entry: &str) -> usize {
+    log.lock()
+        .expect("log")
+        .iter()
+        .filter(|line| line.as_str() == entry)
+        .count()
+}
+
+#[tokio::test]
+async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries() {
+    use graphql_orm_storage::{
+        NamespaceFence, NamespaceId, NamespaceTarget, encode_marker,
+    };
+    use std::sync::atomic::Ordering;
+
+    let id = NamespaceId::new_random();
+    let fence_for = |store: &S3StorageBackend| NamespaceFence {
+        target: NamespaceTarget::Root,
+        namespace: id,
+        epoch: store.observation_epoch(),
+    };
+    let small = || StorageByteStream::from_bytes(Bytes::from_static(b"prepared once"));
+
+    for lose in [true, false] {
+        // Fenced conditional create: exactly one PUT, never resent.
+        let (endpoint, log, done, server) = mutation_fixture(encode_marker(id), lose);
+        let store = namespace_backend(endpoint);
+        let error = store
+            .put_blob_if_not_exists_fenced("data/object", small(), BlobPutOptions::default(), &fence_for(&store))
+            .await
+            .expect_err("lost or unavailable response stays ambiguous");
+        assert!(matches!(error, StorageError::SingleAttemptFailed { .. }), "{error:?}");
+        assert!(!error.is_retryable());
+        assert_eq!(count(&log, "PUT tenant/data/object object"), 1, "lose={lose}");
+
+        // Fenced overwriting put: also exactly one PUT.
+        let error = store
+            .put_blob_fenced("data/overwrite", small(), BlobPutOptions::default(), &fence_for(&store))
+            .await
+            .expect_err("fenced put fails");
+        assert!(matches!(error, StorageError::SingleAttemptFailed { .. }), "{error:?}");
+        assert_eq!(count(&log, "PUT tenant/data/overwrite object"), 1, "lose={lose}");
+        done.store(true, Ordering::SeqCst);
+        server.join().expect("fixture thread");
+    }
+
+    // The same fixture detects resends: the ordinary API keeps SDK retries.
+    let (endpoint, log, done, server) = mutation_fixture(encode_marker(id), false);
+    let store = namespace_backend(endpoint);
+    assert!(
+        store
+            .put_blob_if_not_exists("data/ordinary", small(), BlobPutOptions::default())
+            .await
+            .is_err()
+    );
+    assert!(count(&log, "PUT tenant/data/ordinary object") > 1);
+
+    // Multipart lifecycle: one create, one part attempt, one abort, no completion.
+    let large = StorageByteStream::from_bytes(Bytes::from(vec![7_u8; 9 * 1024 * 1024]));
+    let error = store
+        .put_blob_if_not_exists_fenced("data/large", large, BlobPutOptions::default(), &fence_for(&store))
+        .await
+        .expect_err("part failure");
+    assert!(matches!(error, StorageError::SingleAttemptFailed { .. }), "{error:?}");
+    assert_eq!(count(&log, "POST tenant/data/large create-multipart"), 1);
+    assert_eq!(count(&log, "PUT tenant/data/large part"), 1);
+    assert_eq!(count(&log, "DELETE tenant/data/large abort"), 1);
+    assert_eq!(count(&log, "POST tenant/data/large complete"), 0);
+    done.store(true, Ordering::SeqCst);
+    server.join().expect("fixture thread");
+}

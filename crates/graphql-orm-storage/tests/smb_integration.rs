@@ -814,3 +814,254 @@ fn restart_guard_denies_missing_failed_and_mismatched_ownership_without_mutation
     .expect("verified restart callback");
     assert_eq!(mutations.get(), 1);
 }
+
+/// Owned loopback SMB2 fault proxy. It forwards whole NetBIOS frames and, once
+/// armed, closes both sockets instead of forwarding the selected request, so a
+/// fault lands at an exact protocol step of the operation under test.
+mod fault_proxy {
+    use std::{
+        io::{Read, Write},
+        net::{Shutdown, TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    pub const CREATE: u16 = 0x0005;
+    pub const CLOSE: u16 = 0x0006;
+    pub const WRITE: u16 = 0x0009;
+    pub const SET_INFO: u16 = 0x0011;
+
+    #[derive(Default)]
+    struct Rule {
+        active: bool,
+        name: Vec<u8>,
+        command: u16,
+        skip: usize,
+        seen: bool,
+        count: usize,
+    }
+
+    pub struct FaultProxy {
+        pub port: u16,
+        rule: Arc<Mutex<Rule>>,
+        fired: Arc<AtomicBool>,
+    }
+
+    impl FaultProxy {
+        pub fn start(upstream: (String, u16)) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("owned proxy listener");
+            let port = listener.local_addr().expect("proxy address").port();
+            let rule = Arc::new(Mutex::new(Rule::default()));
+            let fired = Arc::new(AtomicBool::new(false));
+            let (accept_rule, accept_fired) = (Arc::clone(&rule), Arc::clone(&fired));
+            std::thread::spawn(move || {
+                for client in listener.incoming() {
+                    let Ok(client) = client else { return };
+                    let Ok(server) = TcpStream::connect((upstream.0.as_str(), upstream.1)) else {
+                        let _ = client.shutdown(Shutdown::Both);
+                        continue;
+                    };
+                    let _ = client.set_nodelay(true);
+                    let _ = server.set_nodelay(true);
+                    let (mut down_from, mut down_to) = (
+                        server.try_clone().expect("server clone"),
+                        client.try_clone().expect("client clone"),
+                    );
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut down_from, &mut down_to);
+                        let _ = down_to.shutdown(Shutdown::Both);
+                    });
+                    let (rule, fired) = (Arc::clone(&accept_rule), Arc::clone(&accept_fired));
+                    std::thread::spawn(move || forward_requests(client, server, &rule, &fired));
+                }
+            });
+            Self { port, rule, fired }
+        }
+
+        /// Drops the `skip`-th request with `command` issued after the first
+        /// CREATE whose path contains `name` (that CREATE itself counts).
+        pub fn arm(&self, name: &str, command: u16, skip: usize) {
+            let name = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            *self.rule.lock().expect("rule") = Rule {
+                active: true,
+                name,
+                command,
+                skip,
+                ..Rule::default()
+            };
+            self.fired.store(false, Ordering::SeqCst);
+        }
+
+        pub fn fired(&self) -> bool {
+            self.fired.load(Ordering::SeqCst)
+        }
+    }
+
+    fn forward_requests(
+        mut client: TcpStream,
+        mut server: TcpStream,
+        rule: &Mutex<Rule>,
+        fired: &AtomicBool,
+    ) {
+        loop {
+            let mut header = [0_u8; 4];
+            if client.read_exact(&mut header).is_err() {
+                break;
+            }
+            let length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+            let mut frame = vec![0_u8; length];
+            if client.read_exact(&mut frame).is_err() {
+                break;
+            }
+            if should_drop(&mut rule.lock().expect("rule"), &frame) {
+                fired.store(true, Ordering::SeqCst);
+                break;
+            }
+            if server.write_all(&header).is_err() || server.write_all(&frame).is_err() {
+                break;
+            }
+        }
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = server.shutdown(Shutdown::Both);
+    }
+
+    fn should_drop(rule: &mut Rule, frame: &[u8]) -> bool {
+        if !rule.active {
+            return false;
+        }
+        let mut offset = 0;
+        while let Some(message) = frame.get(offset..) {
+            if message.len() < 64 || &message[..4] != b"\xfeSMB" {
+                return false;
+            }
+            let command = u16::from_le_bytes([message[12], message[13]]);
+            let next = u32::from_le_bytes([message[20], message[21], message[22], message[23]])
+                as usize;
+            let body = if next == 0 {
+                message
+            } else {
+                &message[..next.min(message.len())]
+            };
+            if command == CREATE
+                && !rule.name.is_empty()
+                && body.windows(rule.name.len()).any(|window| window == rule.name)
+            {
+                rule.seen = true;
+            }
+            if rule.seen && command == rule.command {
+                if rule.count == rule.skip {
+                    rule.active = false;
+                    return true;
+                }
+                rule.count += 1;
+            }
+            if next == 0 {
+                return false;
+            }
+            offset += next;
+        }
+        false
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the documented Samba container"]
+async fn samba_fenced_create_never_reconnects_or_replays_mid_operation() {
+    use fault_proxy::{CLOSE, CREATE, FaultProxy, SET_INFO, WRITE};
+    use graphql_orm_storage::{
+        NamespaceFence, NamespaceId, NamespaceTarget, StorageError, TopologyScan,
+    };
+
+    let root = format!("graphql-orm-storage-fault/{}", Uuid::new_v4());
+    let mut direct_config = test_config(root);
+    direct_config.operation_timeout = Duration::from_secs(5);
+    SmbStorageBackend::probe(
+        direct_config.clone(),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe");
+    let direct = SmbStorageBackend::connect(direct_config.clone())
+        .await
+        .expect("direct connection");
+    let id = NamespaceId::new_random();
+    direct
+        .initialise_namespace(&NamespaceTarget::Root, id)
+        .await
+        .expect("initialise");
+    let proxy = FaultProxy::start((direct_config.server.clone(), direct_config.port));
+    let mut proxied_config = direct_config.clone();
+    proxied_config.server = "127.0.0.1".to_string();
+    proxied_config.port = proxy.port;
+
+    // (key, CREATE path fragment, dropped command, skipped matches, step)
+    let cases = [
+        ("fp-a/deep/object.bin", "fp-a", CREATE, 0, "parent directory create"),
+        ("fp-b/object.bin", "fp-b", CLOSE, 0, "parent directory close"),
+        ("fp-c/fp-c-final.bin", "fp-c-final.bin", CREATE, 0, "final exclusive create"),
+        ("fp-d/fp-d-final.bin", "fp-d-final.bin", WRITE, 0, "body write"),
+        ("fp-e/fp-e-final.bin", "fp-e-final.bin", SET_INFO, 1, "set-info before publication"),
+    ];
+    for (key, name, command, skip, step) in cases {
+        let store = SmbStorageBackend::connect(proxied_config.clone())
+            .await
+            .expect("proxied connection");
+        let observed = store
+            .observe_namespace(&NamespaceTarget::Root, &TopologyScan::default())
+            .await
+            .expect("observe");
+        let fence = NamespaceFence {
+            target: NamespaceTarget::Root,
+            namespace: id,
+            epoch: observed.epoch,
+        };
+        let reconnects = store.diagnostics().await.reconnects;
+        proxy.arm(name, command, skip);
+        let result = store
+            .put_blob_if_not_exists_fenced(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"fenced")),
+                BlobPutOptions::default(),
+                &fence,
+            )
+            .await;
+        assert!(proxy.fired(), "{step}: the fault point was not reached");
+        assert!(result.is_err(), "{step}: {result:?}");
+        // Spawned drop cleanup must not reconnect either.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            store.diagnostics().await.reconnects,
+            reconnects,
+            "{step}: the fenced path reconnected"
+        );
+        // Nothing was published: the server discards the delete-pending file
+        // with the lost session.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while direct.blob_exists(key).await.expect("inspect") {
+            assert!(std::time::Instant::now() < deadline, "{step}: object published");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Only an ordinary call repairs the session; the old fence then fails
+        // closed and still writes nothing.
+        let _ = store.blob_exists("unrelated.bin").await;
+        assert!(
+            matches!(
+                store
+                    .put_blob_if_not_exists_fenced(
+                        key,
+                        StorageByteStream::from_bytes(Bytes::from_static(b"stale")),
+                        BlobPutOptions::default(),
+                        &fence,
+                    )
+                    .await,
+                Err(StorageError::PreconditionFailed { .. })
+            ),
+            "{step}: a stale fence was accepted after reconnect"
+        );
+        assert!(!direct.blob_exists(key).await.expect("inspect"), "{step}");
+    }
+}

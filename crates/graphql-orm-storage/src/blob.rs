@@ -383,8 +383,9 @@ pub trait BlobStore: Send + Sync {
     ///
     /// Providers re-validate what they natively can and return a
     /// non-retryable `PreconditionFailed` ("namespace fence invalidated")
-    /// instead of writing under a stale fence. Never retried automatically.
-    /// The default returns `UnsupportedOperation` without I/O.
+    /// instead of writing under a stale fence. Never retried automatically:
+    /// each provider mutation is sent at most once. The default returns
+    /// `UnsupportedOperation` without I/O.
     ///
     /// # Errors
     ///
