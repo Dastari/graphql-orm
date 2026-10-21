@@ -14,6 +14,16 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.58.0 (unreleased)
+
+- Add `AuthorizedScanContext` and
+  `EntityQuery::fetch_authorized_scan_with_context` for custom resolver pages.
+  A new ORM-owned confidential `goms2` cursor binds the complete server-authored
+  context, entity/keyset identity, position and expiry. Current authorization
+  still runs on every page. Protected scans enforce finite context, cursor,
+  page, batch and work bounds, with bounded key rotation. Existing `goms1`
+  scans and generated pagination retain their behavior and wire format.
+
 ## 0.57.0 (unreleased)
 
 - Add the SQL Server-only `#[graphql_orm(mssql_money)]` field domain for exact
