@@ -1090,7 +1090,9 @@ impl SmbStorageBackend {
                         false,
                     ));
                 }
-                Err(error) if path_attempt == 0 && fence_generation.is_none() && is_not_found(&error) => {
+                Err(error)
+                    if path_attempt == 0 && fence_generation.is_none() && is_not_found(&error) =>
+                {
                     self.inner.directories.clear().await;
                 }
                 // Under a fence the session is never repaired or replayed.

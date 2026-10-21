@@ -937,8 +937,8 @@ mod fault_proxy {
                 return false;
             }
             let command = u16::from_le_bytes([message[12], message[13]]);
-            let next = u32::from_le_bytes([message[20], message[21], message[22], message[23]])
-                as usize;
+            let next =
+                u32::from_le_bytes([message[20], message[21], message[22], message[23]]) as usize;
             let body = if next == 0 {
                 message
             } else {
@@ -946,7 +946,9 @@ mod fault_proxy {
             };
             if command == CREATE
                 && !rule.name.is_empty()
-                && body.windows(rule.name.len()).any(|window| window == rule.name)
+                && body
+                    .windows(rule.name.len())
+                    .any(|window| window == rule.name)
             {
                 rule.seen = true;
             }
@@ -1000,11 +1002,41 @@ async fn samba_fenced_create_never_reconnects_or_replays_mid_operation() {
 
     // (key, CREATE path fragment, dropped command, skipped matches, step)
     let cases = [
-        ("fp-a/deep/object.bin", "fp-a", CREATE, 0, "parent directory create"),
-        ("fp-b/object.bin", "fp-b", CLOSE, 0, "parent directory close"),
-        ("fp-c/fp-c-final.bin", "fp-c-final.bin", CREATE, 0, "final exclusive create"),
-        ("fp-d/fp-d-final.bin", "fp-d-final.bin", WRITE, 0, "body write"),
-        ("fp-e/fp-e-final.bin", "fp-e-final.bin", SET_INFO, 1, "set-info before publication"),
+        (
+            "fp-a/deep/object.bin",
+            "fp-a",
+            CREATE,
+            0,
+            "parent directory create",
+        ),
+        (
+            "fp-b/object.bin",
+            "fp-b",
+            CLOSE,
+            0,
+            "parent directory close",
+        ),
+        (
+            "fp-c/fp-c-final.bin",
+            "fp-c-final.bin",
+            CREATE,
+            0,
+            "final exclusive create",
+        ),
+        (
+            "fp-d/fp-d-final.bin",
+            "fp-d-final.bin",
+            WRITE,
+            0,
+            "body write",
+        ),
+        (
+            "fp-e/fp-e-final.bin",
+            "fp-e-final.bin",
+            SET_INFO,
+            1,
+            "set-info before publication",
+        ),
     ];
     for (key, name, command, skip, step) in cases {
         let store = SmbStorageBackend::connect(proxied_config.clone())
@@ -1042,7 +1074,10 @@ async fn samba_fenced_create_never_reconnects_or_replays_mid_operation() {
         // with the lost session.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while direct.blob_exists(key).await.expect("inspect") {
-            assert!(std::time::Instant::now() < deadline, "{step}: object published");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{step}: object published"
+            );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         // Only an ordinary call repairs the session; the old fence then fails

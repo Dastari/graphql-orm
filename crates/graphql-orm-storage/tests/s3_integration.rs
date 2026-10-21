@@ -566,11 +566,9 @@ fn mutation_fixture(
                 loop {
                     let mut size = String::new();
                     reader.read_line(&mut size).expect("chunk size");
-                    let size = usize::from_str_radix(
-                        size.trim().split(';').next().unwrap_or("0"),
-                        16,
-                    )
-                    .expect("chunk size");
+                    let size =
+                        usize::from_str_radix(size.trim().split(';').next().unwrap_or("0"), 16)
+                            .expect("chunk size");
                     let mut chunk = vec![0; size + 2];
                     reader.read_exact(&mut chunk).expect("chunk");
                     if size == 0 {
@@ -660,9 +658,7 @@ fn count(log: &std::sync::Mutex<Vec<String>>, entry: &str) -> usize {
 
 #[tokio::test]
 async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries() {
-    use graphql_orm_storage::{
-        NamespaceFence, NamespaceId, NamespaceTarget, encode_marker,
-    };
+    use graphql_orm_storage::{NamespaceFence, NamespaceId, NamespaceTarget, encode_marker};
     use std::sync::atomic::Ordering;
 
     let id = NamespaceId::new_random();
@@ -678,20 +674,44 @@ async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries()
         let (endpoint, log, done, server) = mutation_fixture(encode_marker(id), lose);
         let store = namespace_backend(endpoint);
         let error = store
-            .put_blob_if_not_exists_fenced("data/object", small(), BlobPutOptions::default(), &fence_for(&store))
+            .put_blob_if_not_exists_fenced(
+                "data/object",
+                small(),
+                BlobPutOptions::default(),
+                &fence_for(&store),
+            )
             .await
             .expect_err("lost or unavailable response stays ambiguous");
-        assert!(matches!(error, StorageError::SingleAttemptFailed { .. }), "{error:?}");
+        assert!(
+            matches!(error, StorageError::SingleAttemptFailed { .. }),
+            "{error:?}"
+        );
         assert!(!error.is_retryable());
-        assert_eq!(count(&log, "PUT tenant/data/object object"), 1, "lose={lose}");
+        assert_eq!(
+            count(&log, "PUT tenant/data/object object"),
+            1,
+            "lose={lose}"
+        );
 
         // Fenced overwriting put: also exactly one PUT.
         let error = store
-            .put_blob_fenced("data/overwrite", small(), BlobPutOptions::default(), &fence_for(&store))
+            .put_blob_fenced(
+                "data/overwrite",
+                small(),
+                BlobPutOptions::default(),
+                &fence_for(&store),
+            )
             .await
             .expect_err("fenced put fails");
-        assert!(matches!(error, StorageError::SingleAttemptFailed { .. }), "{error:?}");
-        assert_eq!(count(&log, "PUT tenant/data/overwrite object"), 1, "lose={lose}");
+        assert!(
+            matches!(error, StorageError::SingleAttemptFailed { .. }),
+            "{error:?}"
+        );
+        assert_eq!(
+            count(&log, "PUT tenant/data/overwrite object"),
+            1,
+            "lose={lose}"
+        );
         done.store(true, Ordering::SeqCst);
         server.join().expect("fixture thread");
     }
@@ -710,10 +730,18 @@ async fn s3_fenced_mutations_are_single_attempt_and_ordinary_puts_keep_retries()
     // Multipart lifecycle: one create, one part attempt, one abort, no completion.
     let large = StorageByteStream::from_bytes(Bytes::from(vec![7_u8; 9 * 1024 * 1024]));
     let error = store
-        .put_blob_if_not_exists_fenced("data/large", large, BlobPutOptions::default(), &fence_for(&store))
+        .put_blob_if_not_exists_fenced(
+            "data/large",
+            large,
+            BlobPutOptions::default(),
+            &fence_for(&store),
+        )
         .await
         .expect_err("part failure");
-    assert!(matches!(error, StorageError::SingleAttemptFailed { .. }), "{error:?}");
+    assert!(
+        matches!(error, StorageError::SingleAttemptFailed { .. }),
+        "{error:?}"
+    );
     assert_eq!(count(&log, "POST tenant/data/large create-multipart"), 1);
     assert_eq!(count(&log, "PUT tenant/data/large part"), 1);
     assert_eq!(count(&log, "DELETE tenant/data/large abort"), 1);
