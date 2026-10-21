@@ -93,7 +93,8 @@ CONSTRAINED_ID=$(docker run -d --name "$CONSTRAINED" --label "$LABEL=$RUN_ID" --
   -p "127.0.0.1:$CONSTRAINED_PORT:445" "$IMAGE" \
   -p -w WORKGROUP -u "backup;$PASSWORD" \
   -s 'backups;/share;yes;no;no;backup' \
-  -g 'server signing = mandatory' -g 'smb2 max write = 65536')
+  -g 'server signing = mandatory' -g 'smb2 max write = 65536' \
+  -g 'max disk size = 64')
 port_for() {
   docker port "$1" 445/tcp | python3 -c 'import sys; print(sys.stdin.read().strip().rsplit(":", 1)[1])'
 }
@@ -197,3 +198,17 @@ SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP
 SMB_TEST_FIXTURE_RUN="$RUN_ID" \
   run_test sdk_directory_drop_releases_directory_arc "$SMB_TEST_CARGO" test --locked --features smb --test smb_directory_stream \
   sdk_directory_drop_releases_directory_arc -- --ignored --exact --nocapture
+
+# Capacity observations: authenticated caller allocation on the normal share and
+# the share-level size limit Samba applies on the constrained fixture.
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$NORMAL_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" \
+  run_test samba_capacity_observes_authenticated_share_allocation "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_capacity_observes_authenticated_share_allocation -- --ignored --exact --nocapture
+
+SMB_TEST_SERVER=127.0.0.1 SMB_TEST_PORT="$CONSTRAINED_PORT" SMB_TEST_SHARE=backups \
+SMB_TEST_USERNAME=backup SMB_TEST_PASSWORD="$PASSWORD" SMB_TEST_DOMAIN=WORKGROUP \
+SMB_TEST_FIXTURE_RUN="$RUN_ID" SMB_TEST_EXPECT_MAX_DISK_BYTES=67108864 \
+  run_test samba_capacity_reports_share_size_limit "$SMB_TEST_CARGO" test --locked --features smb --test smb_integration \
+  samba_capacity_reports_share_size_limit -- --ignored --exact --nocapture

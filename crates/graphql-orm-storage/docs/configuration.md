@@ -3,7 +3,7 @@ title: "Storage configuration and limits"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -31,6 +31,8 @@ process construction; do not serialize, log, or place secrets in source.
 | Type | Use | Defaults and limits |
 | --- | --- | --- |
 | [`S3StorageConfig`](../src/s3.rs) | `endpoint_url`, `region`, `bucket`, optional `key_prefix`, `access_key_id`, `secret_access_key`, and explicit `path_style`. | No defaults; secrets are redacted from `Debug`. Multipart part size is internal (currently 8 MiB), not a host contract. |
+| [`S3CapacityMode`](../src/s3.rs) | `S3StorageBackend::with_capacity_mode` selects `Unknown`, operator-declared `ProviderManaged`, or `AwsGeneralPurpose { expected_bucket_owner }`. | Defaults to `Unknown`. The mode and owner are part of the capacity binding. `AwsGeneralPurpose` requires the regional AWS S3 HTTPS endpoint and is re-verified on every observation. |
+| [`CapacityRequest`](../src/capacity.rs) | `max_age` of one `BlobStore::observe_capacity` observation, measured from before the first provider request. | Defaults to 30 s and is clamped to 10 minutes. See [destination capacity](blob-store.md#destination-capacity). |
 | [`SmbStorageConfig`](../src/smb.rs) | `server`, `port`, `share`, optional `root_prefix`/`domain`, `username`, secret `password`, dialect, signing/encryption, timeouts, transfer concurrency. | `new` defaults: port 445, SMB 3.0 minimum, signing on, encryption off, 10 s connect, 60 s operation, 8 transfers. Port/timeouts/concurrency must be positive; encryption requires SMB 3.0+. |
 | [`SmbProbeOptions`](../src/smb.rs) | `create_prefix` controls whether a probe creates a missing root prefix. | Defaults false. Use only a test-owned or operator-approved share. |
 | [`AzureBlobStorageConfig`](../src/azure.rs) | Future Azure declaration fields. | Not operational; all backend operations return `UnsupportedBackend`. |

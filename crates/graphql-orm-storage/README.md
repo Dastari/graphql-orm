@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -22,7 +22,7 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
-Version 0.7.5 retains the SMB 0.10.2 dependency family with a narrow,
+Version 0.7.6 retains the SMB 0.10.2 dependency family with a narrow,
 owner-local directory-stream backport. See the [native SMB reference](docs/native-smb.md#client-selection)
 and [migration guide](MIGRATION.md) before updating a consuming lockfile.
 
@@ -37,13 +37,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.5" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.6" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.5", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.6", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start
@@ -98,7 +98,10 @@ NULs, and platform prefixes are rejected. `StorageError::is_retryable()` is a
 provider signal, not permission to replay a non-idempotent stream.
 
 For backups, adapt `Arc<dyn BlobStore>` with the companion backup repository;
-use atomic `put_blob_if_not_exists` for locks and deduplication.
+use atomic `put_blob_if_not_exists` for locks and deduplication. Use
+`BlobStore::observe_capacity` for a bounded, account-bound observation of the
+destination's caller-available capacity before admission. See
+[destination capacity](docs/blob-store.md#destination-capacity).
 
 ## Further reading
 

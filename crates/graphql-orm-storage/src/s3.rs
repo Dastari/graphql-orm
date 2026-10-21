@@ -11,12 +11,15 @@ use aws_sdk_s3::{
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
+use time::OffsetDateTime;
 use tokio_util::io::ReaderStream;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    ObjectStorage, StorageBackend, StorageByteStream, StorageError, StorageObjectBody,
-    StoredObject, collect_storage_stream, validate_blob_key,
+    CapacityBinding, CapacityObservation, CapacityPlacement, CapacityRequest, CapacityState,
+    CapacityUnknownReason, ObjectStorage, ProviderManagedBasis, ProviderManagedCapacity,
+    StorageBackend, StorageByteStream, StorageError, StorageObjectBody, StoredObject,
+    UnknownCapacity, collect_storage_stream, validate_blob_key,
 };
 
 const MULTIPART_PART_SIZE: usize = 8 * 1024 * 1024;
@@ -55,10 +58,71 @@ impl fmt::Debug for S3StorageConfig {
     }
 }
 
+/// How an S3-compatible destination reports capacity.
+///
+/// The S3 API has no capacity or quota operation. Capacity is therefore never
+/// inferred from a successful request; the destination configuration selects
+/// the basis and every observation re-verifies it against the provider.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub enum S3CapacityMode {
+    /// The provider may enforce a quota that the S3 API cannot observe.
+    ///
+    /// Observations report [`CapacityState::Unknown`] with
+    /// [`CapacityUnknownReason::ProviderQuotaNotObservable`].
+    #[default]
+    Unknown,
+    /// The operator declares that the provider performs no physical-byte
+    /// capacity admission for this bucket and account.
+    ///
+    /// Observations report [`CapacityState::ProviderManaged`] with
+    /// [`ProviderManagedBasis::OperatorDeclared`] after the authenticated
+    /// account reaches the bucket. Reachability does not prove the absence of
+    /// a finite provider quota. Consumers must still enforce a finite
+    /// service-owned quota.
+    ProviderManaged,
+    /// An Amazon S3 general-purpose bucket, which AWS documents as having no
+    /// maximum bucket size.
+    ///
+    /// The endpoint must be the AWS S3 HTTPS endpoint for the configured
+    /// region (`s3.<region>.amazonaws.com` or its dual-stack form), the bucket
+    /// name must not name a directory bucket, access point alias or Outposts
+    /// alias, and `HeadBucket` must succeed with `ExpectedBucketOwner` and
+    /// report the configured region and no directory-bucket location type.
+    /// Observations then report [`CapacityState::ProviderManaged`] with
+    /// [`ProviderManagedBasis::AwsGeneralPurposeBucket`]; any mismatch is an
+    /// error. Consumers must still enforce a finite service-owned quota, and
+    /// individual writes can still fail.
+    AwsGeneralPurpose {
+        /// Twelve-digit AWS account ID that must own the bucket.
+        expected_bucket_owner: String,
+    },
+}
+
+impl S3CapacityMode {
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::ProviderManaged => "provider_managed",
+            Self::AwsGeneralPurpose { .. } => "aws_general_purpose",
+        }
+    }
+
+    fn expected_bucket_owner(&self) -> Option<&str> {
+        match self {
+            Self::AwsGeneralPurpose {
+                expected_bucket_owner,
+            } => Some(expected_bucket_owner),
+            Self::Unknown | Self::ProviderManaged => None,
+        }
+    }
+}
+
 /// S3-compatible storage backend.
 #[derive(Clone, Debug)]
 pub struct S3StorageBackend {
     config: S3StorageConfig,
+    capacity_mode: S3CapacityMode,
     client: Client,
 }
 
@@ -82,14 +146,28 @@ impl S3StorageBackend {
 
         Self {
             config,
+            capacity_mode: S3CapacityMode::default(),
             client: Client::from_conf(s3_config),
         }
+    }
+
+    /// Declares how this destination reports capacity.
+    #[must_use]
+    pub fn with_capacity_mode(mut self, mode: S3CapacityMode) -> Self {
+        self.capacity_mode = mode;
+        self
     }
 
     /// Returns the backend configuration.
     #[must_use]
     pub const fn config(&self) -> &S3StorageConfig {
         &self.config
+    }
+
+    /// Returns the declared capacity mode.
+    #[must_use]
+    pub const fn capacity_mode(&self) -> &S3CapacityMode {
+        &self.capacity_mode
     }
 
     fn provider_key(&self, key: &str) -> Result<String, StorageError> {
@@ -327,6 +405,85 @@ impl BlobStore for S3StorageBackend {
 
     fn backend(&self) -> StorageBackend {
         StorageBackend::S3
+    }
+
+    fn capacity_binding(&self) -> CapacityBinding {
+        let path_style = if self.config.path_style {
+            "true"
+        } else {
+            "false"
+        };
+        CapacityBinding::new(
+            StorageBackend::S3,
+            &[
+                ("endpoint_url", self.config.endpoint_url.as_str()),
+                ("region", self.config.region.as_str()),
+                ("bucket", self.config.bucket.as_str()),
+                (
+                    "key_prefix",
+                    self.config.key_prefix.as_deref().unwrap_or(""),
+                ),
+                ("access_key_id", self.config.access_key_id.as_str()),
+                ("path_style", path_style),
+                ("capacity_mode", self.capacity_mode.name()),
+                (
+                    "expected_bucket_owner",
+                    self.capacity_mode.expected_bucket_owner().unwrap_or(""),
+                ),
+            ],
+        )
+    }
+
+    async fn observe_capacity(
+        &self,
+        request: &CapacityRequest,
+    ) -> Result<CapacityObservation, StorageError> {
+        // Prove the configured account reaches the exact bucket before
+        // reporting any state for it.
+        let observed_at = OffsetDateTime::now_utc();
+        let mut head = self.client.head_bucket().bucket(&self.config.bucket);
+        if let Some(owner) = self.capacity_mode.expected_bucket_owner() {
+            aws_general_purpose_configuration(&self.config, owner)
+                .map_err(s3_configuration_error)?;
+            head = head.expected_bucket_owner(owner);
+        }
+        let head = head.send().await.map_err(map_s3_error)?;
+        let placement = head
+            .bucket_region()
+            .map(|region| CapacityPlacement(format!("s3:region={region}")));
+        let state = match self.capacity_mode {
+            S3CapacityMode::Unknown => CapacityState::Unknown(UnknownCapacity {
+                reason: CapacityUnknownReason::ProviderQuotaNotObservable,
+            }),
+            S3CapacityMode::ProviderManaged => {
+                CapacityState::ProviderManaged(ProviderManagedCapacity {
+                    basis: ProviderManagedBasis::OperatorDeclared,
+                })
+            }
+            S3CapacityMode::AwsGeneralPurpose { .. } => {
+                if head.bucket_region() != Some(self.config.region.as_str()) {
+                    return Err(s3_configuration_error(
+                        "bucket region does not match the configured AWS region",
+                    ));
+                }
+                if head.bucket_location_type().is_some() {
+                    return Err(s3_configuration_error(
+                        "bucket is a directory bucket, not a general-purpose bucket",
+                    ));
+                }
+                CapacityState::ProviderManaged(ProviderManagedCapacity {
+                    basis: ProviderManagedBasis::AwsGeneralPurposeBucket,
+                })
+            }
+        };
+        let binding = self.capacity_binding();
+        Ok(CapacityObservation::new(
+            binding,
+            placement,
+            state,
+            observed_at,
+            request,
+        ))
     }
 
     async fn put_blob(
@@ -633,6 +790,58 @@ fn is_precondition_error(err: &StorageError) -> bool {
         || message.contains("code: 412")
 }
 
+/// Checks the configuration-side preconditions of the AWS general-purpose
+/// capacity basis without provider I/O.
+fn aws_general_purpose_configuration(
+    config: &S3StorageConfig,
+    expected_bucket_owner: &str,
+) -> Result<(), &'static str> {
+    let digits = expected_bucket_owner.bytes().all(|b| b.is_ascii_digit());
+    if expected_bucket_owner.len() != 12 || !digits {
+        return Err("expected bucket owner must be a twelve-digit AWS account ID");
+    }
+    if !is_aws_regional_endpoint(&config.endpoint_url, &config.region) {
+        return Err("AWS general-purpose capacity requires the regional AWS S3 HTTPS endpoint");
+    }
+    if !is_general_purpose_bucket_name(&config.bucket) {
+        return Err("bucket name does not name an AWS general-purpose bucket");
+    }
+    Ok(())
+}
+
+fn is_aws_regional_endpoint(endpoint: &str, region: &str) -> bool {
+    let valid_region = !region.is_empty()
+        && region
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let Some(host) = endpoint.strip_prefix("https://") else {
+        return false;
+    };
+    let host = host.strip_suffix('/').unwrap_or(host);
+    valid_region
+        && (host == format!("s3.{region}.amazonaws.com")
+            || host == format!("s3.dualstack.{region}.amazonaws.com"))
+}
+
+fn is_general_purpose_bucket_name(bucket: &str) -> bool {
+    let reserved_suffix = ["--x-s3", "--table-s3", "--op-s3", "-s3alias"]
+        .iter()
+        .any(|suffix| bucket.ends_with(suffix));
+    (3..=63).contains(&bucket.len())
+        && bucket
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        && !reserved_suffix
+}
+
+fn s3_configuration_error(message: &str) -> StorageError {
+    StorageError::Provider {
+        backend: StorageBackend::S3.as_str().to_string(),
+        message: message.to_string(),
+        retryable: false,
+    }
+}
+
 fn map_s3_error<E>(err: aws_sdk_s3::error::SdkError<E>) -> StorageError
 where
     E: fmt::Debug,
@@ -657,4 +866,95 @@ fn is_retryable_s3_message(message: &str) -> bool {
         || lower.contains("temporarily")
         || lower.contains("status: 5")
         || lower.contains("code: 5")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(endpoint: &str, region: &str, bucket: &str) -> S3StorageConfig {
+        S3StorageConfig {
+            endpoint_url: endpoint.to_string(),
+            region: region.to_string(),
+            bucket: bucket.to_string(),
+            key_prefix: None,
+            access_key_id: "fixture".to_string(),
+            secret_access_key: "fixture-secret".to_string(),
+            path_style: false,
+        }
+    }
+
+    #[test]
+    fn aws_endpoint_must_be_the_https_endpoint_of_the_configured_region() {
+        for endpoint in [
+            "https://s3.ap-southeast-2.amazonaws.com",
+            "https://s3.ap-southeast-2.amazonaws.com/",
+            "https://s3.dualstack.ap-southeast-2.amazonaws.com",
+        ] {
+            assert!(
+                is_aws_regional_endpoint(endpoint, "ap-southeast-2"),
+                "{endpoint}"
+            );
+        }
+        for endpoint in [
+            "http://s3.ap-southeast-2.amazonaws.com",
+            "https://s3.us-east-1.amazonaws.com",
+            "https://s3.ap-southeast-2.amazonaws.com:8443",
+            "https://s3.ap-southeast-2.amazonaws.com/bucket",
+            "https://s3.ap-southeast-2.amazonaws.com.example.test",
+            "https://minio.example.test",
+            "https://s3.cn-north-1.amazonaws.com.cn",
+        ] {
+            assert!(
+                !is_aws_regional_endpoint(endpoint, "ap-southeast-2"),
+                "{endpoint}"
+            );
+        }
+        assert!(!is_aws_regional_endpoint("https://s3..amazonaws.com", ""));
+        assert!(!is_aws_regional_endpoint(
+            "https://s3.x/y.amazonaws.com",
+            "x/y"
+        ));
+    }
+
+    #[test]
+    fn only_general_purpose_bucket_names_qualify() {
+        for bucket in ["backups", "org.backups-1", "abc"] {
+            assert!(is_general_purpose_bucket_name(bucket), "{bucket}");
+        }
+        for bucket in [
+            "backups--usw2-az1--x-s3",
+            "tables--table-s3",
+            "outpost-alias--op-s3",
+            "ap-alias-abcdef-s3alias",
+            "arn:aws:s3:::backups",
+            "Backups",
+            "ab",
+        ] {
+            assert!(!is_general_purpose_bucket_name(bucket), "{bucket}");
+        }
+    }
+
+    #[test]
+    fn aws_general_purpose_configuration_requires_account_endpoint_and_bucket() {
+        let aws = config(
+            "https://s3.ap-southeast-2.amazonaws.com",
+            "ap-southeast-2",
+            "backups",
+        );
+        assert_eq!(
+            aws_general_purpose_configuration(&aws, "123456789012"),
+            Ok(())
+        );
+        assert!(aws_general_purpose_configuration(&aws, "12345678901").is_err());
+        assert!(aws_general_purpose_configuration(&aws, "12345678901x").is_err());
+        let custom = config("https://minio.example.test", "ap-southeast-2", "backups");
+        assert!(aws_general_purpose_configuration(&custom, "123456789012").is_err());
+        let directory = config(
+            "https://s3.ap-southeast-2.amazonaws.com",
+            "ap-southeast-2",
+            "backups--apse2-az1--x-s3",
+        );
+        assert!(aws_general_purpose_configuration(&directory, "123456789012").is_err());
+    }
 }

@@ -3,12 +3,27 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.7.5 to 0.7.6: destination capacity observations
+
+- No changes are required. `BlobStore::observe_capacity` and
+  `BlobStore::capacity_binding` have default implementations. These return
+  `CapacityState::Unknown(Unsupported)` without provider I/O.
+- Custom providers that can observe capacity should override both methods.
+  The binding must include the location, account and capacity-relevant
+  configuration, and no secrets.
+- Consumers must validate an observation with `validate_for` immediately before
+  admission. Treat `Unknown` and errors as unavailable, and keep their own
+  service quota and reservations. S3 destinations stay `Unknown` unless the
+  operator selects `S3CapacityMode::ProviderManaged` (operator-declared) or
+  `S3CapacityMode::AwsGeneralPurpose` (verified Amazon S3 general-purpose
+  bucket).
 
 ## 0.7.4 to 0.7.5: maintained protocol-validation package identity
 
