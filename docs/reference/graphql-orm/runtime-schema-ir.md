@@ -207,6 +207,14 @@ Defaults: `RuntimeDefault::decimal(DecimalValue)` or `RuntimeDefault::decimal_te
 must be the canonical spelling. `CurrentTimestamp` is invalid for decimals. Decimal fields
 cannot be primary keys, relation keys or generated (`UnsupportedCapability`).
 
+The SQL Server MONEY domain (`DecimalDef::mssql_money()`, precision 19, scale 4, signed
+64-bit mantissa) is static-only and is not a runtime decimal definition. `validate` reports a
+runtime field declaring it as `UnsupportedCapability`; `RuntimeSchema::from_static_entities`
+reports a static `#[graphql_orm(mssql_money)]` column as `UnsupportedCapability` instead of
+converting it; and a JSON `RuntimeValue::Decimal` carrying it is rejected. Runtime decimals
+therefore never emit `DECIMAL(19,4)`, `NUMERIC(19,4)` or `INTEGER_DECIMAL(19,4)` for a MONEY
+column.
+
 Queries support `eq`, `ne`, `in`, `not_in`, `lt`, `lte`, `gt`, `gte`, `between`, null checks,
 ordering and keyset cursors. A changed definition is refused by owned planning; see
 [runtime migrations](runtime-migrations.md#exact-decimals-0560).

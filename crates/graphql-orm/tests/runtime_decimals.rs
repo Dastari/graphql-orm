@@ -253,6 +253,16 @@ fn decimal_kind_identity_validation_and_defaults() {
         serde_json::from_str::<RuntimeValueKind>(r#"{"decimal":{"precision":2,"scale":3}}"#)
             .is_err()
     );
+    // The static-only SQL Server MONEY domain is never a runtime decimal.
+    let mut with_money = definition(false, 2);
+    with_money.collections[0].fields[1].value_kind = RuntimeValueKind::Decimal(DecimalDef::mssql_money());
+    assert!(with_money
+        .validate()
+        .unwrap_err()
+        .diagnostics()
+        .iter()
+        .any(|d| d.code == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+            && d.subject.as_deref() == Some("amount")));
     let schema = definition(false, 2).validate().unwrap();
     let canonical = String::from_utf8(schema.canonical_bytes()).unwrap();
     assert!(canonical.contains("|kind=decimal(12,2)|"));
@@ -380,6 +390,22 @@ fn static_decimal_metadata_converts_to_runtime_decimals() {
 }
 
 #[test]
+fn static_mssql_money_metadata_is_not_converted_to_a_runtime_decimal() {
+    let mut metadata = ConvertedLedger::metadata().clone();
+    let amount = metadata
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "amount")
+        .unwrap();
+    amount.decimal = Some(DecimalDef::mssql_money());
+    amount.default = None;
+    let diagnostics = RuntimeSchema::from_static_entities(&[&metadata]).unwrap_err();
+    assert!(diagnostics.diagnostics().iter().any(|d| d.code
+        == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+        && d.subject.as_deref() == Some("amount")));
+}
+
+#[test]
 fn json_records_and_values_carry_canonical_strings() {
     let value = dec(money(), "12.5");
     let json = serde_json::to_value(&value).unwrap();
@@ -406,6 +432,11 @@ fn json_records_and_values_carry_canonical_strings() {
     ] {
         assert!(parse(rejected.clone()).is_err(), "{rejected}");
     }
+    // A MONEY definition is rejected even for an in-domain value.
+    assert!(serde_json::from_value::<RuntimeValue>(serde_json::json!({
+        "decimal": {"value": "1.0000", "definition": {"precision": 19, "scale": 4, "mssql_money": true}}
+    }))
+    .is_err());
 }
 
 #[tokio::test]

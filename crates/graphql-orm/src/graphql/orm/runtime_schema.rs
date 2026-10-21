@@ -1051,6 +1051,19 @@ impl RuntimeSchema {
                         subject,
                     ));
                 }
+                // Runtime decimals are portable (precision 1..=18). The SQL
+                // Server MONEY domain is static-only: it has no runtime DDL,
+                // storage or decoder, and must not reach SQLite or PostgreSQL.
+                if let RuntimeValueKind::Decimal(definition) = field.value_kind
+                    && definition.is_mssql_money()
+                {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        "SQL Server MONEY is not a runtime decimal definition".to_string(),
+                        cid,
+                        subject,
+                    ));
+                }
             }
 
             // Primary key.
@@ -1904,6 +1917,18 @@ impl RuntimeSchema {
                         &cid,
                         Some(field.name),
                     ));
+                }
+                if field.decimal.is_some_and(DecimalDef::is_mssql_money) {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        format!(
+                            "column `{}` is SQL Server MONEY, which the runtime IR does not represent; runtime decimals are portable (precision 1..=18)",
+                            field.name
+                        ),
+                        &cid,
+                        Some(field.name),
+                    ));
+                    continue;
                 }
                 let Some(value_kind) = convert_value_kind(field) else {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(

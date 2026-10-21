@@ -27,6 +27,11 @@ with portable decimal metadata. Existing portable Decimal fields, GraphQL SDL,
 source tables and stored data are unchanged. No data or schema migration is
 needed; in particular this feature performs no DDL against external tables.
 
+Runtime decimals (0.56.0) stay portable at precision 1..=18. A static MONEY
+column is not converted by `RuntimeSchema::from_static_entities`; it is
+reported as `UnsupportedCapability`. Runtime schemas and JSON runtime values
+cannot declare the MONEY definition.
+
 ## 0.55.1 to 0.56.0: runtime descriptions and exact decimals
 
 Upgrade ORM/macros together with `graphql-orm-operation-catalog` 0.4.1 and refresh the

@@ -23,6 +23,10 @@ for historical context.
   and the signed 64-bit scaled mantissa without rounding. Portable decimal
   precision remains capped at 18; existing declarations and cursor formats are
   unchanged. SQL Server typed read projections are now supported.
+- The MONEY domain is static-only: runtime schema validation rejects a runtime
+  decimal field declaring it, `RuntimeSchema::from_static_entities` reports a
+  static MONEY column as `UnsupportedCapability` instead of converting it to a
+  runtime decimal, and a JSON `RuntimeValue::Decimal` carrying it is rejected.
 - Test-only: the owned SQL Server fixture never pulls by default
   (`GRAPHQL_ORM_TEST_MSSQL_PULL=missing` opts in), runs without swap, with a
   1024-task PID limit, one bounded 16 MiB json-file log, and an optional
