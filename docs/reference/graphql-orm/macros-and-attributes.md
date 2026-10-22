@@ -553,3 +553,13 @@ Enable at most one in each group:
 - [Strict authorization](strict-authorization.md)
 - [Federation entities, keys, and operation roots](federation.md)
 - [Macro crate README](../../../crates/graphql-orm-macros/README.md)
+
+## Host-owned timestamps
+
+`#[graphql_orm(timestamp = "host")]` accepts ordinary `i64`, `String` and optional
+forms on `GraphQLEntity` or `RepositoryEntity` fields whose Rust or physical name is
+`created_at` or `updated_at`. It preserves supplied source timestamps through
+generated writes, including an RFC3339 String mapped to physical `updated_at`.
+The opt-in changes input/automatic-write behavior, not column types or defaults.
+See the [migration contract](../../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps)
+and [repository example](repository-only-entities.md).

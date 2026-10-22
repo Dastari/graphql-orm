@@ -1356,7 +1356,7 @@ pub(crate) fn generate_graphql_operations(
     };
     crate::entity::validate_host_timestamp_fields(
         fields,
-        crate::entity::has_repository_entity_attribute(&input.attrs),
+        !entity_meta.schema_only,
     )?;
 
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();

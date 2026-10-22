@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.58.0 extends explicit host-owned timestamps to public entities and String
+values without replacing source timestamps with the mutation clock. See the
+[migration guide](../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps).
+
 Version 0.57.0 adds the SQL Server-only `#[graphql_orm(mssql_money)]` field
 annotation and identifier-safe exact read projections for native `MONEY`.
 It pairs with runtime 0.57.0; see the

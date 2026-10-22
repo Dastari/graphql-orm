@@ -2498,7 +2498,7 @@ impl FieldMetadata {
 
 fn validate_host_timestamp(
     field: &Field,
-    repository: bool,
+    writable_derive: bool,
     inferred_primary_key: bool,
 ) -> syn::Result<()> {
     let meta = parse_field_metadata(field)?;
@@ -2506,8 +2506,8 @@ fn validate_host_timestamp(
         return Ok(());
     }
     let invalid = |message| syn::Error::new_spanned(field, message);
-    if !repository {
-        return Err(invalid("timestamp = \"host\" requires RepositoryEntity"));
+    if !writable_derive {
+        return Err(invalid("timestamp = \"host\" requires GraphQLEntity or RepositoryEntity"));
     }
     let rust_name = field
         .ident
@@ -2523,13 +2523,13 @@ fn validate_host_timestamp(
         ));
     }
     let ty = option_inner_type(&field.ty).unwrap_or(&field.ty);
-    if !type_path_last_ident(ty).is_some_and(|ident| ident == "i64")
+    if !type_path_last_ident(ty).is_some_and(|ident| ident == "i64" || ident == "String")
         || meta.is_date_field
         || meta.is_boolean_field
         || meta.is_json_field
     {
         return Err(invalid(
-            "host timestamp requires an ordinary i64 or Option<i64> Integer field",
+            "host timestamp requires an ordinary i64 or String field (optionals allowed)",
         ));
     }
     if meta.is_relation
@@ -2974,7 +2974,7 @@ fn generate_entity_impl(
     let schema_only = schema_only_override || entity_meta.schema_only;
     validate_host_timestamp_fields(
         fields,
-        has_repository_entity_attribute(&input.attrs) && !schema_only,
+        !schema_only,
     )?;
     if schema_only && !entity_meta.projections.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -7165,7 +7165,7 @@ mod host_timestamp_tests {
     fn invalid_declarations_fail_before_emission() {
         let invalid: Vec<Field> = vec![
             parse_quote!(#[graphql_orm(timestamp = "host")] unrelated: i64),
-            parse_quote!(#[graphql_orm(timestamp = "host")] created_at: String),
+            parse_quote!(#[graphql_orm(timestamp = "host")] created_at: bool),
             parse_quote!(#[graphql_orm(timestamp = "host")] created_at: Option<Option<i64>>),
             parse_quote!(#[graphql_orm(timestamp = "host")] #[date_field] created_at: i64),
             parse_quote!(#[graphql_orm(timestamp = "host")] #[skip_db] created_at: i64),
@@ -7179,6 +7179,8 @@ mod host_timestamp_tests {
         }
         let valid: Field = parse_quote!(#[graphql_orm(timestamp = "host", db_column = "updated_at", default = false, auto_generated = false)] modified: Option<i64>);
         assert!(validate_host_timestamp(&valid, true, false).is_ok());
+        let text: Field = parse_quote!(#[graphql_orm(timestamp = "host", db_column = "updated_at")] observed: Option<String>);
+        assert!(validate_host_timestamp(&text, true, false).is_ok());
         assert!(validate_host_timestamp(&valid, false, false).is_err());
         let restricted: Field =
             parse_quote!(#[graphql_orm(timestamp = "host", write = false)] created_at: i64);

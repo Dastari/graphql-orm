@@ -109,11 +109,12 @@ struct ClockedRecord {
 }
 ```
 
-`timestamp = "host"` supports persisted `i64` and `Option<i64>` fields where
+`timestamp = "host"` supports persisted `i64`, `String`, and optional forms where
 either the Rust name or physical column is `created_at` or `updated_at`.
 It disables both typed-input exclusion and automatic seconds assignment for
 that field. Supplied signed integers are bound unchanged: the ORM neither
-selects a clock nor interprets/rescales their units. Mixed host-managed and
+selects a clock nor interprets/rescales their units. Strings are bound unchanged without date parsing or normalization.
+The same explicit mode is supported by public `GraphQLEntity` fields. Mixed host-managed and
 legacy fields retain their independent behavior.
 
 Non-null writable create fields are required even with a database default.
