@@ -1248,9 +1248,19 @@ pub(crate) fn generate_graphql_operations(
     let struct_name_str = struct_name.to_string();
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let operation_authorizations = parse_operation_authorizations(&input.attrs)?;
-    let query_shape_enabled = |shape: &str| entity_meta.query_shapes.as_ref()
-        .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape));
-    let query_shape_skip = |shape: &str| if query_shape_enabled(shape) { quote! {} } else { quote! { skip, } };
+    let query_shape_enabled = |shape: &str| {
+        entity_meta
+            .query_shapes
+            .as_ref()
+            .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+    };
+    let query_shape_skip = |shape: &str| {
+        if query_shape_enabled(shape) {
+            quote! {}
+        } else {
+            quote! { skip, }
+        }
+    };
     let single_query_skip = query_shape_skip("single");
     let list_query_skip = query_shape_skip("list");
     let keyset_query_skip = query_shape_skip("keyset");
@@ -6627,7 +6637,10 @@ pub(crate) fn generate_graphql_operations(
                 _ => true,
             };
             if !available {
-                return Err(syn::Error::new_spanned(struct_name, format!("query_shapes selects unavailable {shape} capability")));
+                return Err(syn::Error::new_spanned(
+                    struct_name,
+                    format!("query_shapes selects unavailable {shape} capability"),
+                ));
             }
         }
     }
@@ -6638,8 +6651,14 @@ pub(crate) fn generate_graphql_operations(
         ("scan", scan_query_name.as_str()),
         ("search", search_query_name.as_str()),
         ("aggregate", aggregate_query_name.as_str()),
-    ].into_iter().filter(|(shape, _)| !query_shape_enabled(shape)).map(|(_, name)| name).collect::<Vec<_>>();
-    let query_shape_metadata_filter = if disabled_query_fields.is_empty() { quote! {} } else {
+    ]
+    .into_iter()
+    .filter(|(shape, _)| !query_shape_enabled(shape))
+    .map(|(_, name)| name)
+    .collect::<Vec<_>>();
+    let query_shape_metadata_filter = if disabled_query_fields.is_empty() {
+        quote! {}
+    } else {
         quote! {
             operations.retain(|operation| !(operation.kind() == ::graphql_orm::graphql::orm::GraphqlOperationKind::Query
                 && [#(#disabled_query_fields),*].contains(&operation.field_name())));
@@ -9468,8 +9487,19 @@ mod query_shape_tests {
     #[test]
     fn malformed_or_unavailable_query_selections_fail_closed() {
         assert!(generate_graphql_operations(&entity("list")).is_ok());
-        for shapes in ["", "unknown", "single,single", "keyset", "scan", "search", "aggregate"] {
-            assert!(generate_graphql_operations(&entity(shapes)).is_err(), "{shapes}");
+        for shapes in [
+            "",
+            "unknown",
+            "single,single",
+            "keyset",
+            "scan",
+            "search",
+            "aggregate",
+        ] {
+            assert!(
+                generate_graphql_operations(&entity(shapes)).is_err(),
+                "{shapes}"
+            );
         }
     }
 }
