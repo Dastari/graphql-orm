@@ -20,6 +20,10 @@ Companion runtime/macros version: **0.58.0**.
 
 - Extend explicit `timestamp = "host"` to public GraphQLEntity fields and ordinary String timestamps (including optional forms). Caller-supplied source timestamps stay unchanged instead of receiving the ORM mutation clock. Existing automatic timestamp behavior remains the default. Policies, hooks and field restrictions still apply.
 
+- Revalidate configured cursor ordering and all composite key fields before SQL
+  and before release, independently of the selected payload. Reject hidden raw
+  cursor values on GraphQL keyset and scan surfaces.
+
 - Generate static keyset reads and authorized scans for entities with composite primary keys. Configured order must end with the complete primary-key tuple in declaration order, with no duplicate order fields. Every component is retained in cursor ordering; existing authorization, limits and read-only schema posture remain in force.
 
 ## 0.57.0 (2026-10-22)

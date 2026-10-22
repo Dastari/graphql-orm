@@ -4273,9 +4273,22 @@ pub(crate) fn generate_graphql_operations(
     let keyset_generated = if let Some(parts) = &keyset_parts {
         let mut order_tokens = Vec::new();
         let mut cursor_tokens = Vec::new();
+        let mut cursor_field_metadata = Vec::new();
         let mut fingerprint_parts = Vec::new();
         for (field, ty, column, ascending, nulls_first) in parts {
             let quoted_column = backend_quote_identifier_path(backend, column);
+            let source = fields.iter().find(|candidate| candidate.ident.as_ref() == Some(field))
+                .expect("keyset field was resolved during parsing");
+            let meta = parse_field_metadata(source)?;
+            let api_name = graphql_field_name(&meta, &field.to_string(), graphql_rename_fields, serde_rename_all);
+            let graphql_readable = meta.read && !meta.input_only && !meta.graphql_skip
+                && meta.transform_read.is_none() && meta.transform_write.is_none();
+            let policy = match meta.read_policy.as_deref() {
+                Some(policy) => quote! { Some(#policy) }, None => quote! { None },
+            };
+            cursor_field_metadata.push(quote! { ::graphql_orm::graphql::orm::KeysetCursorField {
+                column: #quoted_column, api_name: #api_name, read_policy: #policy, graphql_readable: #graphql_readable,
+            } });
             let direction = if *ascending {
                 quote! { ::graphql_orm::graphql::orm::KeysetOrderColumn::asc(#quoted_column) }
             } else {
@@ -4343,6 +4356,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 impl ::graphql_orm::graphql::orm::AuthorizedKeysetEntity for #struct_name {
+                    const KEYSET_CURSOR_FIELDS: &'static [::graphql_orm::graphql::orm::KeysetCursorField] = &[#(#cursor_field_metadata),*];
                     const KEYSET_ORDER: &'static [::graphql_orm::graphql::orm::KeysetOrderColumn] = &[#(#order_tokens),*];
                     const KEYSET_FINGERPRINT: &'static str = #fingerprint;
                     fn keyset_values(&self) -> Vec<::graphql_orm::graphql::pagination::KeysetValue> {

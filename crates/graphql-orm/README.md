@@ -14,6 +14,11 @@ Version 0.58.0 extends explicit host-owned timestamps to public entities and Str
 values without replacing source timestamps with the mutation clock. See the
 [migration guide](../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps).
 
+Configured keyset cursors require current read authority for every order field
+and complete primary-key suffix, even for cursor-only selections. Checks run
+before queries and again against returned rows. Private, skipped or transformed
+GraphQL order fields fail closed; repository field policy remains independent.
+
 Version 0.58.0 supports static keyset reads with a complete composite-primary-key
 tiebreaker tuple. Schema ownership and write posture are unchanged. See the
 [migration guide](../../MIGRATION.md#0570-to-0580-composite-primary-key-keysets).

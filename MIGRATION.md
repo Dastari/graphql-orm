@@ -21,6 +21,13 @@ Upgrade runtime/macros together. Public GraphQLEntity and RepositoryEntity times
 
 ## 0.57.0 to 0.58.0: composite-primary-key keysets
 
+Configured cursors carry raw ordering values, so their fields now require current
+read authority even when clients select only `cursor`. GraphQL rejects private,
+skipped and transformed cursor fields. Repository policies remain independent.
+Manual `AuthorizedKeysetEntity` implementations must supply `KEYSET_CURSOR_FIELDS`;
+missing field metadata fails closed. Generated derives populate it automatically.
+Ordering, fingerprints and cursor bytes remain unchanged for authorized reads.
+
 Upgrade runtime/macros together. Composite-key entities may now declare `keyset = "rank desc, partition_key asc, item_no asc"` when `(partition_key, item_no)` is the primary key in declaration order. Every primary-key member must appear as the final unique tiebreaker tuple; order fields may not repeat. The generated keyset and scan read surfaces use the existing bounded, authorized cursor implementation. Existing valid single-key orders/cursors are unchanged. No generated GraphQL writes or subscriptions are enabled for composite-key entities by this change. No data or schema migration is required, and an externally managed source stays externally managed.
 
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads

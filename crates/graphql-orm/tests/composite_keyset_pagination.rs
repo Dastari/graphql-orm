@@ -164,3 +164,30 @@ async fn generated_composite_keyset_is_admitted_without_graphql_writes() -> grap
     );
     Ok(())
 }
+
+
+struct CompositeCursorAuthority(&'static str);
+impl FieldPolicy for CompositeCursorAuthority {
+    fn can_read_field<'a>(&'a self, _: &'a async_graphql::Context<'_>, _: &'a Database, _: &'static str, field: &'static str, _: Option<&'static str>, _: Option<&'a (dyn std::any::Any + Send + Sync)>) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(field != self.0) })
+    }
+    fn can_write_field<'a>(&'a self, _: &'a async_graphql::Context<'_>, _: &'a Database, _: &'static str, _: &'static str, _: Option<&'static str>, _: Option<&'a (dyn std::any::Any + Send + Sync)>, _: Option<&'a (dyn std::any::Any + Send + Sync)>) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+}
+struct CompositeReadCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl ReadQueryObserver for CompositeReadCounter {
+    fn on_read(&self, _: &str, _: usize) { self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+}
+#[tokio::test]
+async fn cursor_only_composite_reads_require_rank_and_both_key_components_before_select() {
+    for denied in ["rank", "partitionKey", "itemNo"] {
+        let mut database = setup().await.unwrap();
+        database.set_field_policy(CompositeCursorAuthority(denied));
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let database = database.with_read_query_observer(CompositeReadCounter(reads.clone()));
+        let schema = schema_builder(database).data(AuthSubject::new("fixture-principal")).finish();
+        let response = schema.execute("{ compositeKeysetRecordsKeyset(page: {limit: 2}) { edges { cursor } } }").await;
+        assert!(!response.errors.is_empty(), "unselected cursor component {denied} was not checked");
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0, "denied cursor field reached SELECT");
+        assert!(response.data.into_json().unwrap()["compositeKeysetRecordsKeyset"].is_null());
+    }
+}

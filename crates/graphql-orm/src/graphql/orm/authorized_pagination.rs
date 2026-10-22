@@ -168,7 +168,20 @@ impl ReadVisibility {
 pub trait AuthorizedKeysetEntity: Entity {
     const KEYSET_ORDER: &'static [KeysetOrderColumn];
     const KEYSET_FINGERPRINT: &'static str;
+    /// Authority for every configured ordering value carried by a cursor.
+    /// Missing metadata fails closed; generated derives supply it.
+    const KEYSET_CURSOR_FIELDS: &'static [KeysetCursorField] = &[];
     fn keyset_values(&self) -> Vec<KeysetValue>;
+}
+
+/// Configured ordering metadata, independent of GraphQL payload selection.
+#[derive(Clone, Copy, Debug)]
+pub struct KeysetCursorField {
+    pub column: &'static str,
+    pub api_name: &'static str,
+    pub read_policy: Option<&'static str>,
+    /// Raw cursor values may be public only for readable, untransformed scalars.
+    pub graphql_readable: bool,
 }
 
 /// Diagnostics for actual fetched database rows, before entity decoding.
@@ -367,6 +380,30 @@ where
     B: OrmBackend,
     T: AuthorizedKeysetEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
+    async fn authorize_keyset_order_fields(
+        db: &Database<B>,
+        ctx: Option<&async_graphql::Context<'_>>,
+        order: &[KeysetOrderColumn],
+        row: Option<&T>,
+    ) -> async_graphql::Result<()> {
+        for part in order {
+            let field = T::KEYSET_CURSOR_FIELDS.iter().find(|field| field.column == part.column)
+                .ok_or_else(invalid)?;
+            let (api_name, policy, graphql_readable) = (field.api_name, field.read_policy, field.graphql_readable);
+            let record = row.map(|row| row as &(dyn std::any::Any + Send + Sync));
+            if let Some(ctx) = ctx {
+                if !graphql_readable {
+                    return Err(OrmPublicError::forbidden().into_graphql_error());
+                }
+                db.ensure_readable_field(ctx, T::entity_name(), api_name, policy, record).await?;
+            } else {
+                db.ensure_repository_readable_field(None, T::entity_name(), api_name, policy, record)
+                    .await.map_err(|error| error.into_graphql_error())?;
+            }
+        }
+        Ok(())
+    }
+
     fn keyset_bound(
         mut self,
         values: &[KeysetValue],
@@ -475,6 +512,7 @@ where
             .map_err(|e| e.into_graphql_error())?;
         let backward = page.direction == KeysetWindowDirection::Backward;
         let visibility = self.authorize_pagination(db, ctx).await?;
+        Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, None).await?;
         if visibility.requires_residual_checks() && (ctx.is_some() || page.include_total_count) {
             return Err(invalid());
         }
@@ -547,6 +585,10 @@ where
             (has_more, opposite)
         };
         Self::authorize_page_fields(db, ctx, &nodes).await?;
+        for node in &nodes {
+            Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, Some(node)).await?;
+        }
+        Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, None).await?;
         let edges = nodes
             .into_iter()
             .map(|node| Edge {
@@ -577,6 +619,7 @@ where
         page: AuthorizedScanInput,
     ) -> async_graphql::Result<AuthorizedScanPage<T>> {
         let visibility = self.authorize_pagination(db, ctx).await?;
+        Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, None).await?;
         let config = db.authorized_scan_config().ok_or_else(invalid)?;
         if config.batch_size == 0 || config.max_scanned_rows == 0 {
             return Err(invalid());
@@ -659,6 +702,10 @@ where
             }
         };
         Self::authorize_page_fields(db, ctx, &nodes).await?;
+        for node in &nodes {
+            Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, Some(node)).await?;
+        }
+        Self::authorize_keyset_order_fields(db, ctx, T::KEYSET_ORDER, None).await?;
         let continuation = if status == ScanStatus::Exhausted {
             None
         } else {
