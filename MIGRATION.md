@@ -21,7 +21,10 @@ Upgrade runtime and macros together. A generated `…Keyset` query now accepts
 `orderBy: [EntityKeysetOrderByInput!]`. Each entry selects exactly one readable,
 persisted sortable scalar (for example `[{title: ASC}, {rank: DESC}]`). Primary-key
 fields are also accepted. Computed, relation, spatial and decimal orders are absent
-from this input; ordinary list ordering retains its separate input type.
+from this input; ordinary list ordering retains its separate input type. A complete
+readable scalar primary key is required for runtime ordering. Entities with private
+or unsupported primary keys keep their existing configured keyset surface and do
+not register an empty/unsupported runtime order input.
 
 Each dynamic order appends missing primary-key columns in ascending order. NULL
 values sort last for either direction; backward windows reverse both comparison

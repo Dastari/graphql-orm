@@ -4285,6 +4285,11 @@ pub(crate) fn generate_graphql_operations(
     let scan_connection_type = quote::format_ident!("{}AuthorizedScanPage", struct_name);
     let scan_query_name = apply_graphql_case(&format!("{}Scan", plural_name), resolver_case);
     let keyset_order_input = quote::format_ident!("{}KeysetOrderByInput", struct_name);
+    let runtime_keyset_available = primary_key_fields.iter().all(|field| {
+        field.meta.read && !field.meta.is_private && !field.meta.input_only && !field.meta.graphql_skip
+            && field.meta.transform_read.is_none() && field.meta.transform_write.is_none()
+            && runtime_keyset_value(&field.field_type).is_some()
+    });
     let keyset_generated = if let Some(parts) = &keyset_parts {
         let mut runtime_fields = Vec::new();
         let mut runtime_metadata = Vec::new();
@@ -4293,7 +4298,8 @@ pub(crate) fn generate_graphql_operations(
         let mut primary_columns = Vec::new();
         for field in fields {
             let meta = parse_field_metadata(field)?;
-            if meta.is_relation || meta.skip_db || !meta.read || meta.input_only
+            if meta.is_relation || meta.skip_db || !meta.read || meta.input_only || meta.graphql_skip
+                || meta.transform_read.is_some() || meta.transform_write.is_some()
                 || !(meta.is_primary_key || (meta.sortable && meta.order)) { continue; }
             let Some(value_tokens) = runtime_keyset_value(&field.ty) else { continue; };
             let ident = field.ident.as_ref().expect("named field");
@@ -4385,14 +4391,7 @@ pub(crate) fn generate_graphql_operations(
             });
         }
         let fingerprint = format!("v1:{}", fingerprint_parts.join(","));
-        let definitions = quote! {
-                #[derive(::graphql_orm::async_graphql::SimpleObject, Clone, Debug)]
-                #[graphql(rename_fields = #field_case_rule)]
-                pub struct #scan_connection_type {
-                    pub nodes: Vec<#struct_name>,
-                    pub page_info: ::graphql_orm::graphql::orm::ScanPageInfo,
-                }
-
+        let runtime_order_definitions = if runtime_keyset_available { quote! {
                 /// Scalar-only runtime keyset order. Each list entry must select
                 /// exactly one field; NULL values sort last in either direction.
                 #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
@@ -4413,36 +4412,16 @@ pub(crate) fn generate_graphql_operations(
                     }
                 }
 
-                impl ::graphql_orm::graphql::orm::AuthorizedKeysetEntity for #struct_name {
+        } } else { quote! {} };
+        let runtime_order_trait_items = if runtime_keyset_available { quote! {
                     const KEYSET_FIELDS: &'static [::graphql_orm::graphql::orm::KeysetField] = &[#(#runtime_metadata),*];
                     const KEYSET_PRIMARY_COLUMNS: &'static [&'static str] = &[#(#primary_columns),*];
                     fn keyset_value_for_column(&self, column: &str) -> Option<::graphql_orm::graphql::pagination::KeysetValue> {
                         match column { #(#runtime_values),*, _ => None }
                     }
 
-                    const KEYSET_ORDER: &'static [::graphql_orm::graphql::orm::KeysetOrderColumn] = &[#(#order_tokens),*];
-                    const KEYSET_FINGERPRINT: &'static str = #fingerprint;
-                    fn keyset_values(&self) -> Vec<::graphql_orm::graphql::pagination::KeysetValue> {
-                        let entity = self;
-                        vec![#(#cursor_tokens),*]
-                    }
-                }
-
-        };
-        (
-            quote! {
-                /// Scan bounded batches with request-independent repository policies.
-                /// Install AuthorizedScanConfig on the database to opt in.
-                pub async fn authorized_scan(
-                    db: &::graphql_orm::db::Database<#backend_marker>,
-                    filter: #where_input,
-                    page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
-                ) -> ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::AuthorizedScanPage<Self>> {
-                    ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
-                        .filter_with_entity_matching(&filter)
-                        .fetch_authorized_scan(db, None, None, page).await
-                }
-
+        } } else { quote! {} };
+        let runtime_order_repository_methods = if runtime_keyset_available { quote! {
                 /// Fetch a bounded page with optional scalar ordering and a complete primary-key suffix.
                 pub async fn keyset_page_ordered(
                     db: &::graphql_orm::db::Database<#backend_marker>,
@@ -4468,6 +4447,44 @@ pub(crate) fn generate_graphql_operations(
                         .filter_with_entity_matching(&filter)
                         .fetch_authorized_keyset_connection_with_order(db, None, None, page, order).await
                 }
+
+        } } else { quote! {} };
+        let definitions = quote! {
+                #[derive(::graphql_orm::async_graphql::SimpleObject, Clone, Debug)]
+                #[graphql(rename_fields = #field_case_rule)]
+                pub struct #scan_connection_type {
+                    pub nodes: Vec<#struct_name>,
+                    pub page_info: ::graphql_orm::graphql::orm::ScanPageInfo,
+                }
+
+                #runtime_order_definitions
+
+                impl ::graphql_orm::graphql::orm::AuthorizedKeysetEntity for #struct_name {
+                    #runtime_order_trait_items
+                    const KEYSET_ORDER: &'static [::graphql_orm::graphql::orm::KeysetOrderColumn] = &[#(#order_tokens),*];
+                    const KEYSET_FINGERPRINT: &'static str = #fingerprint;
+                    fn keyset_values(&self) -> Vec<::graphql_orm::graphql::pagination::KeysetValue> {
+                        let entity = self;
+                        vec![#(#cursor_tokens),*]
+                    }
+                }
+
+        };
+        (
+            quote! {
+                /// Scan bounded batches with request-independent repository policies.
+                /// Install AuthorizedScanConfig on the database to opt in.
+                pub async fn authorized_scan(
+                    db: &::graphql_orm::db::Database<#backend_marker>,
+                    filter: #where_input,
+                    page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
+                ) -> ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::AuthorizedScanPage<Self>> {
+                    ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
+                        .filter_with_entity_matching(&filter)
+                        .fetch_authorized_scan(db, None, None, page).await
+                }
+
+                #runtime_order_repository_methods
 
                 /// Fetch a bounded, stable keyset page using the entity's configured order.
                 pub async fn keyset_page(
@@ -4679,6 +4696,17 @@ pub(crate) fn generate_graphql_operations(
     };
     let (keyset_repository_methods, keyset_trait_impl, authorized_keyset_definitions) =
         keyset_generated;
+    let runtime_keyset_argument = if runtime_keyset_available { quote! {
+        #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#keyset_order_input>>,
+    } } else { quote! {} };
+    let runtime_keyset_prepare = if runtime_keyset_available { quote! {
+        let order = order_by.map(#keyset_order_input::__gom_columns).transpose()?;
+    } } else { quote! {} };
+    let runtime_keyset_fetch = if runtime_keyset_available { quote! {
+        .fetch_authorized_keyset_ordered(db, Some(ctx), auth, page, order).await?
+    } } else { quote! {
+        .fetch_authorized_keyset(db, Some(ctx), auth, page).await?
+    } };
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
             #[doc = #keyset_operation_description]
@@ -4687,7 +4715,7 @@ pub(crate) fn generate_graphql_operations(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
-                #[graphql(name = #order_by_arg_name, desc = #order_by_arg_description)] order_by: Option<Vec<#keyset_order_input>>,
+                #runtime_keyset_argument
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
@@ -4699,10 +4727,10 @@ pub(crate) fn generate_graphql_operations(
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
                 let filter = where_input.unwrap_or_default();
-                let order = order_by.map(#keyset_order_input::__gom_columns).transpose()?;
+                #runtime_keyset_prepare
                 let connection = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
                     .filter_with_entity_matching(&filter)
-                    .fetch_authorized_keyset_ordered(db, Some(ctx), auth, page, order).await?;
+                    #runtime_keyset_fetch;
                 Ok(#connection_type::from_generic(connection))
             }
 
@@ -6486,18 +6514,14 @@ pub(crate) fn generate_graphql_operations(
         ));
     }
     if keyset_parts.is_some() {
+        let mut arguments = vec![argument_descriptor(&where_arg_name, quote! { Option<#where_input> })];
+        if runtime_keyset_available { arguments.push(argument_descriptor(&order_by_arg_name, quote! { Option<Vec<#keyset_order_input>> })); }
+        arguments.push(argument_descriptor(&page_arg_name, quote! { ::graphql_orm::graphql::pagination::KeysetPageInput }));
         operation_descriptors.push(descriptor(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
             &keyset_query_name,
-            vec![
-                argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
-                argument_descriptor(&order_by_arg_name, quote! { Option<Vec<#keyset_order_input>> }),
-                argument_descriptor(
-                    &page_arg_name,
-                    quote! { ::graphql_orm::graphql::pagination::KeysetPageInput },
-                ),
-            ],
+            arguments,
             quote! { #connection_type },
             &keyset_list_operation_authorization,
         ));

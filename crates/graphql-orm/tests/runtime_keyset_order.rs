@@ -119,3 +119,27 @@ async fn generated_sdl_catalogue_and_typed_order_agree() {
     let invalid = schema.execute("{ runtimeOrderRowsKeyset(orderBy: [{payload: ASC}], page: {limit: 2}) { edges { node { id } } } }").await;
     assert!(!invalid.errors.is_empty());
 }
+
+
+mod private_key_compatibility {
+    use graphql_orm::prelude::*;
+    #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+    #[graphql_entity(table = "private_fixed_order", plural = "PrivateFixedOrderRows", keyset = "digest asc")]
+    struct PrivateFixedOrderRow {
+        #[primary_key]
+        #[graphql_orm(private, auto_generated = false)]
+        digest: String,
+        payload: String,
+    }
+    schema_roots! { query_custom_ops: [], entities: [PrivateFixedOrderRow], }
+    #[tokio::test]
+    async fn fixed_keyset_with_private_primary_key_keeps_valid_schema_without_runtime_order() {
+        let schema=schema_builder(Database::connect_sqlite("sqlite::memory:").await.unwrap()).finish();
+        let sdl=schema.sdl();
+        assert!(sdl.contains("privateFixedOrderRowsKeyset"));
+        assert!(!sdl.contains("PrivateFixedOrderRowKeysetOrderByInput"));
+        let catalog=graphql_orm_operation_catalog();
+        let keyset=catalog.operations().iter().find(|operation|operation.field_name()=="privateFixedOrderRowsKeyset").unwrap();
+        assert!(!keyset.arguments().iter().any(|argument|argument.graphql_name()=="orderBy"));
+    }
+}
