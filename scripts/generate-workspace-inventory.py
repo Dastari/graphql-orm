@@ -96,6 +96,9 @@ def update_document(generated: str, check: bool) -> int:
     if existing == expected:
         return 0
     if check:
+        # Preserve the canonical Cargo-derived result for review in CI logs.
+        # Check mode still refuses the stale tracked file and never rewrites it.
+        print(generated)
         print(
             "docs/reference/workspace-packages.md is stale; run "
             "python3 scripts/generate-workspace-inventory.py",
