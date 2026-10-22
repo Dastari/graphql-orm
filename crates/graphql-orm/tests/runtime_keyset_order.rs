@@ -129,6 +129,7 @@ mod private_key_compatibility {
         #[primary_key]
         #[graphql_orm(private, auto_generated = false)]
         digest: String,
+        #[sortable]
         payload: String,
     }
     schema_roots! { query_custom_ops: [], entities: [PrivateFixedOrderRow], }
