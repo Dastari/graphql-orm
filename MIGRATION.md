@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,8 +17,10 @@ published to crates.io.
 
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
-Upgrade `graphql-orm` and `graphql-orm-macros` together. For an existing SQL
-Server `MONEY` column mapped to `rust_decimal::Decimal`, use
+Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one
+published workspace release tag and refresh the lockfile. Router advances to
+0.6.4 for the TLS patch lock refresh below. Other companion package versions
+and durable wire/schema contracts are unchanged. For an existing SQL Server `MONEY` column mapped to `rust_decimal::Decimal`, use
 `#[graphql_orm(mssql_money)]` instead of a portable `decimal(...)` declaration.
 The generated SELECT projects `CAST([column] AS DECIMAL(19,4)) AS [column]` so
 the driver receives an exact Numeric value. The annotation rejects non-SQL
@@ -31,6 +33,12 @@ Runtime decimals (0.56.0) stay portable at precision 1..=18. A static MONEY
 column is not converted by `RuntimeSchema::from_static_entities`; it is
 reported as `UnsupportedCapability`. Runtime schemas and JSON runtime values
 cannot declare the MONEY definition.
+
+The coordinated workspace also selects `rustls-webpki` 0.103.16 and
+`webpki-roots` / `webpki-root-certs` 1.0.10 for the published certificate-distrust
+fixes. Refresh downstream locks and rebuild consuming binaries. No stored-data
+migration is required. See the [router migration](crates/graphql-orm-router/MIGRATION.md#063-to-064-tls-certificate-distrust-patches)
+for the affected trust paths and source-versus-binary release boundary.
 
 ## 0.55.1 to 0.56.0: runtime descriptions and exact decimals
 

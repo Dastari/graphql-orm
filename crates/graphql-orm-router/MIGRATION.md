@@ -3,12 +3,26 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-22
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.6.3 to 0.6.4: TLS certificate distrust patches
+
+Refresh the consuming lockfile to `rustls-webpki` 0.103.16 or later in its
+0.103 series and `webpki-roots` / `webpki-root-certs` 1.0.10 or later.
+Rebuild consuming binaries with the reviewed lock. The 0.26.11 compatibility
+root packages re-export their resolved 1.x parent; retaining an older parent
+retains the affected trust anchors. Certificate paths through the distrusted
+emSign intermediates now fail verification. Do not restore those paths through
+certificate-verification bypasses or by pinning an older root bundle.
+
+No Rust API, SDL, configuration format, database or stored-data migration is
+added. Source release does not authorize a router binary distribution: renew
+its lock-bound notice and distribution evidence before attaching an artifact.
 
 ## 0.6.2 to 0.6.3: signed catalogue transport bound
 

@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-17
+last_reviewed: 2026-10-22
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -15,6 +15,11 @@ The current workspace selects published Auth `v0.22.1` at
 correction. Direct Auth consumers must select the same tag and refresh their
 locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+
+Version `0.6.4` selects the published TLS certificate-distrust patches in the
+workspace lockfile. Rebuild with that lock and refresh downstream locks to retain
+`rustls-webpki` 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.10.
+No SDL or stored-data migration is needed; see [MIGRATION.md](MIGRATION.md).
 
 Version `0.6.3` raises the finite default signed role-catalogue HTTP response
 bound to 2 MiB. This includes both the plaintext catalogue and its complete JWS;
@@ -46,7 +51,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.3" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.4" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql

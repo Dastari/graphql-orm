@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -14,7 +14,9 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
-## 0.57.0 (unreleased)
+## 0.57.0 (2026-10-22)
+
+Companion macros crate: `graphql-orm-macros` **0.57.0**.
 
 - Add the SQL Server-only `#[graphql_orm(mssql_money)]` field domain for exact
   native `MONEY` values as `rust_decimal::Decimal`. Generated entity, relation,
@@ -37,7 +39,13 @@ for historical context.
   container ID by exclusive creation, so an external controller can clean up
   only the containers its run created.
 
-## 0.56.0 (unreleased)
+- Refresh affected workspace/fixture TLS locks to `rustls-webpki` 0.103.16
+  and `webpki-roots` / `webpki-root-certs` 1.0.10 for the published emSign
+  certificate-distrust fixes. Router 0.6.4 records the changed binary behavior;
+  existing dependency findings and their conditions remain independently
+  tracked in the [security disposition](docs/reference/dependency-security-disposition.md).
+
+## 0.56.0 (2026-10-21)
 
 Companion macros crate: `graphql-orm-macros` **0.56.0** (version alignment only).
 Backend-neutral semantic owner: `graphql-orm-operation-catalog` **0.4.1**.
