@@ -3,12 +3,22 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-22
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.6.4 - 2026-10-22
+
+- Refresh the workspace and affected fixture locks to published
+  `rustls-webpki` 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.10.
+  These patches reject distrusted emSign intermediate public keys and remove
+  the affected bundled root for RUSTSEC-2026-0381, -0382 and -0383.
+- Routing, authorization, SDL, durable protocols and persisted data are
+  unchanged. Router binary redistribution still requires its separate notice,
+  dependency review and distribution approval for the new lockfile.
 
 ## 0.6.3 - 2026-10-20
 

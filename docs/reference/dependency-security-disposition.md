@@ -3,7 +3,7 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-22
 review_by: 2026-11-15
 supersedes: []
 ---
@@ -24,6 +24,27 @@ and release manifest own package identities. The
 publication gates; this reference creates no additional approval process.
 Application rollout steps belong to the
 [security upgrade guide](../how-to/upgrade-security-remediation.md).
+
+## TLS certificate distrust patches
+
+The maintained workspace and affected fixture locks select published
+`rustls-webpki` 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.10.
+These address [RUSTSEC-2026-0382](https://rustsec.org/advisories/RUSTSEC-2026-0382.html),
+[RUSTSEC-2026-0381](https://rustsec.org/advisories/RUSTSEC-2026-0381.html) and
+[RUSTSEC-2026-0383](https://rustsec.org/advisories/RUSTSEC-2026-0383.html): distrusted
+emSign intermediate public keys and the affected bundled trust anchor.
+The 0.26.11 compatibility root crates do not carry an independent safe bundle;
+their resolved 1.x parent must also be patched. Downstream applications must
+refresh their own locks and rebuild; updating this repository does not update
+an application's resolved graph or installed binaries.
+
+The October 15 frozen scan below predates these advisories and is not evidence
+for the repaired lockfiles. Qualify the exact release source, selected graphs
+and current advisory snapshot under the release process; retain raw findings
+and nonzero scan exits. The previous quick-xml, LRU, RSA and maintenance
+findings below remain conditional and are not erased by the TLS updates.
+Router binary distribution additionally requires refreshed lock-bound notices
+and its separate approval; source-only delivery does not supply that evidence.
 
 ## Owning dependency fixes
 

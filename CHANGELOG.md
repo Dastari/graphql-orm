@@ -39,6 +39,12 @@ Companion macros crate: `graphql-orm-macros` **0.57.0**.
   container ID by exclusive creation, so an external controller can clean up
   only the containers its run created.
 
+- Refresh affected workspace/fixture TLS locks to `rustls-webpki` 0.103.16
+  and `webpki-roots` / `webpki-root-certs` 1.0.10 for the published emSign
+  certificate-distrust fixes. Router 0.6.4 records the changed binary behavior;
+  existing dependency findings and their conditions remain independently
+  tracked in the [security disposition](docs/reference/dependency-security-disposition.md).
+
 ## 0.56.0 (2026-10-21)
 
 Companion macros crate: `graphql-orm-macros` **0.56.0** (version alignment only).
