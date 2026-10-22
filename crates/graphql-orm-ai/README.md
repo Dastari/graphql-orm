@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 The current workspace selects published Auth `v0.22.1` at
 `86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
 correction. Direct Auth consumers must select the same tag and refresh their

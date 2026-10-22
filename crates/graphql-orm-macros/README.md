@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.58.0 adds optional `#[graphql_orm(policy_binding = "owner.contract")]`.
+Canonical schema builders require matching entity, row and field providers and
+strict authorization before generated operations, including counts. Unbound or
+unrelated providers fail closed. See the
+[migration guide](../../MIGRATION.md#0570-to-0580-required-policy-bindings).
+
 Version 0.57.0 adds the SQL Server-only `#[graphql_orm(mssql_money)]` field
 annotation and identifier-safe exact read projections for native `MONEY`.
 It pairs with runtime 0.57.0; see the

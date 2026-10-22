@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 All notable user-visible changes are recorded here. The crate follows
 Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION.md).
 

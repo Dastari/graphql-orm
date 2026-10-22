@@ -28,7 +28,9 @@ where T: graphql_orm::graphql::orm::Entity + Send + Sync + 'static,
         let denied = || OrmPublicError::forbidden().into_graphql_error();
         let database = context.data::<Database<DefaultWriteBackend>>()?;
         if database.authorization_mode() != AuthorizationMode::ExplicitPolicyForAllExposedOperations
-            || database.entity_policy().is_none() || database.row_policy().is_none() || database.field_policy().is_none() {
+            || !database.entity_policy().is_some_and(|policy| policy.supports_policy_binding("ai.public.metadata"))
+            || !database.row_policy().is_some_and(|policy| policy.supports_policy_binding("ai.public.metadata"))
+            || !database.field_policy().is_some_and(|policy| policy.supports_policy_binding("ai.public.metadata")) {
             return Err(denied());
         }
         let surface = if context.query_env.operation.node.ty == async_graphql::parser::types::OperationType::Subscription {
@@ -240,6 +242,9 @@ struct Guard {
 }
 
 impl EntityPolicy<DefaultWriteBackend> for Guard {
+    fn supports_policy_binding(&self, binding: &str) -> bool {
+        binding == "ai.public.metadata" || self.entity.as_ref().is_some_and(|policy| policy.supports_policy_binding(binding))
+    }
     fn can_access_entity<'a>(
         &'a self,
         context: Option<&'a Context<'_>>,
@@ -278,6 +283,9 @@ impl EntityPolicy<DefaultWriteBackend> for Guard {
 }
 
 impl RowPolicy<DefaultWriteBackend> for Guard {
+    fn supports_policy_binding(&self, binding: &str) -> bool {
+        binding == "ai.public.metadata" || self.row.as_ref().is_some_and(|policy| policy.supports_policy_binding(binding))
+    }
     fn read_visibility<'a>(
         &'a self,
         context: Option<&'a Context<'_>>,
@@ -361,6 +369,9 @@ impl RowPolicy<DefaultWriteBackend> for Guard {
 }
 
 impl FieldPolicy<DefaultWriteBackend> for Guard {
+    fn supports_policy_binding(&self, binding: &str) -> bool {
+        binding == "ai.public.metadata" || self.field.as_ref().is_some_and(|policy| policy.supports_policy_binding(binding))
+    }
     fn can_read_field<'a>(
         &'a self,
         context: &'a Context<'_>,

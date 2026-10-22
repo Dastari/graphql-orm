@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.58.0 (unreleased) — Required policy bindings
+
+- Add an explicit entity policy-binding contract enforced by `schema_roots!`
+  before generated data operations, including count-only selections.
+- Require matching entity, row and field policy providers; preserve existing
+  callback decisions and reject absent or unrelated bindings.
+- Existing declarations remain unchanged unless the entity opts in. Public AI
+  projections require their AI binding by default.
+
 ## 0.57.0 (2026-10-22)
 
 Companion macros crate: `graphql-orm-macros` **0.57.0**.

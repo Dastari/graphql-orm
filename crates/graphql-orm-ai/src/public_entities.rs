@@ -20,6 +20,7 @@ use graphql_orm::uuid::Uuid;
     serde::Serialize,
     serde::Deserialize,
 )]
+#[graphql_orm(policy_binding = "ai.public.metadata")]
 #[graphql_entity(
     table = "graphql_orm_ai_sessions",
     plural = "AiPublicSessions",
@@ -122,6 +123,7 @@ pub struct AiPublicSession {
     serde::Serialize,
     serde::Deserialize,
 )]
+#[graphql_orm(policy_binding = "ai.public.metadata")]
 #[graphql_entity(
     table = "graphql_orm_ai_messages",
     plural = "AiPublicMessages",
@@ -213,6 +215,7 @@ pub struct AiPublicMessage {
     serde::Serialize,
     serde::Deserialize,
 )]
+#[graphql_orm(policy_binding = "ai.public.metadata")]
 #[graphql_entity(
     table = "graphql_orm_ai_runs",
     plural = "AiPublicRuns",
@@ -293,6 +296,7 @@ pub struct AiPublicRun {
     serde::Serialize,
     serde::Deserialize,
 )]
+#[graphql_orm(policy_binding = "ai.public.metadata")]
 #[graphql_entity(
     table = "graphql_orm_ai_attachments",
     plural = "AiPublicAttachments",
@@ -391,6 +395,7 @@ pub struct AiPublicAttachment {
 
 /// Read-only authorized toolpolicy metadata; protected payloads remain private.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_orm(policy_binding = "ai.public.metadata")]
 #[graphql_entity(
     table = "graphql_orm_ai_tool_policies",
     plural = "AiPublicToolPolicies",

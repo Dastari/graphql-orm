@@ -248,3 +248,41 @@ async fn scalar_projection_composition_retains_host_field_denial() {
     assert!(!response.errors.is_empty());
     assert!(!format!("{:?}", response.data).contains("Owner session"));
 }
+
+#[derive(Clone)]
+struct UnboundAllow;
+impl EntityPolicy for UnboundAllow {
+    fn can_access_entity<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database, _: &'static str, _: Option<&'static str>, _: EntityAccessKind, _: EntityAccessSurface) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+}
+impl RowPolicy for UnboundAllow {
+    fn can_read_row<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database, _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync)) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+    fn can_write_row<'a>(&'a self, _: Option<&'a async_graphql::Context<'_>>, _: &'a Database, _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync)) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+}
+impl FieldPolicy for UnboundAllow {
+    fn can_read_field<'a>(&'a self, _: &'a async_graphql::Context<'_>, _: &'a Database, _: &'static str, _: &'static str, _: Option<&'static str>, _: Option<&'a (dyn std::any::Any + Send + Sync)>) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+    fn can_write_field<'a>(&'a self, _: &'a async_graphql::Context<'_>, _: &'a Database, _: &'static str, _: &'static str, _: Option<&'static str>, _: Option<&'a (dyn std::any::Any + Send + Sync)>, _: Option<&'a (dyn std::any::Any + Send + Sync)>) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
+}
+struct BindingReadObserver(Arc<std::sync::atomic::AtomicUsize>);
+impl ReadQueryObserver for BindingReadObserver {
+    fn on_read(&self, _: &str, _: usize) { self.0.fetch_add(1, Ordering::SeqCst); }
+}
+#[tokio::test]
+async fn count_only_reads_require_named_bindings_before_database_access() {
+    let (database, owner, _, policy) = fixture().await;
+    let count_request = || Request::new("{ aiPublicSessions(page: {limit: 1}) { pageInfo { totalCount } } }").data(owner.clone()).data(AuthSubject::new(owner.subject()));
+    let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    for arbitrary_providers in [false, true] {
+        let mut unbound = database.clone().with_read_query_observer(BindingReadObserver(reads.clone()));
+        if arbitrary_providers { unbound.set_entity_policy(UnboundAllow); unbound.set_row_policy(UnboundAllow); unbound.set_field_policy(UnboundAllow); }
+        let schema = schema_builder(unbound).finish();
+        assert!(schema.sdl().contains("aiPublicSessions("));
+        let response = schema.execute(count_request()).await;
+        assert!(!response.errors.is_empty(), "missing or unrelated providers must not release counts");
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+    }
+    let current = Arc::new(Current { principal: owner.clone(), revoked: AtomicBool::new(false) });
+    let access = AiPublicEntityAccess::new(database, policy, current);
+    let response = schema_builder(access.database()).finish().execute(count_request()).await;
+    assert!(response.errors.is_empty(), "valid count query with bindings: {:?}", response.errors);
+    assert_eq!(response.data.into_json().unwrap()["aiPublicSessions"]["pageInfo"]["totalCount"], 1);
+}

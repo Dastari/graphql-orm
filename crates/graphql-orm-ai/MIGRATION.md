@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 `graphql-orm-ai` is Git-distributed and is not published to crates.io. This guide
 is mandatory so Git consumers and disposable test deployments can track schema
 and API changes without guessing.
