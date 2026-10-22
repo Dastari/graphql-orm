@@ -11,6 +11,7 @@ use graphql_orm::prelude::*;
 )]
 struct ShapeRecord {
     #[primary_key]
+    #[sortable]
     #[graphql_orm(auto_generated = false)]
     id: String,
     title: String,
