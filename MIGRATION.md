@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-22
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,7 +17,9 @@ published to crates.io.
 
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
-Upgrade `graphql-orm` and `graphql-orm-macros` together. For an existing SQL
+Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one
+published workspace release tag and refresh the lockfile. Other companion package
+versions and durable wire/schema contracts are unchanged. For an existing SQL
 Server `MONEY` column mapped to `rust_decimal::Decimal`, use
 `#[graphql_orm(mssql_money)]` instead of a portable `decimal(...)` declaration.
 The generated SELECT projects `CAST([column] AS DECIMAL(19,4)) AS [column]` so
