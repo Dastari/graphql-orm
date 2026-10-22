@@ -1,20 +1,20 @@
 error: timestamp = "host" requires GraphQLEntity or RepositoryEntity
+ --> tests/ui/host_timestamp_unsupported.rs:7:5
+  |
+7 | /     #[graphql_orm(timestamp = "host")]
+8 | |     created_at: i64,
+  | |___________________^
+
+error: timestamp = "host" requires GraphQLEntity or RepositoryEntity
   --> tests/ui/host_timestamp_unsupported.rs:15:5
    |
 15 | /     #[graphql_orm(timestamp = "host")]
-16 | |     created_at: i64,
-   | |___________________^
-
-error: timestamp = "host" requires GraphQLEntity or RepositoryEntity
-  --> tests/ui/host_timestamp_unsupported.rs:31:5
-   |
-31 | /     #[graphql_orm(timestamp = "host")]
-32 | |     updated_at: i64,
+16 | |     updated_at: i64,
    | |___________________^
 
 error: host timestamp cannot be a relation, skipped database field, primary key, version, or generated field
-  --> tests/ui/host_timestamp_unsupported.rs:37:5
+  --> tests/ui/host_timestamp_unsupported.rs:21:5
    |
-37 | /     #[graphql_orm(timestamp = "host", db_column = "updated_at", auto_generated = false)]
-38 | |     id: i64,
+21 | /     #[graphql_orm(timestamp = "host", db_column = "updated_at", auto_generated = false)]
+22 | |     id: i64,
    | |___________^

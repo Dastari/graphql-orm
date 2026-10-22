@@ -1,12 +1,4 @@
 use graphql_orm::prelude::*;
-
-
-
-
-
-
-
-
 #[derive(GraphQLSchemaEntity)]
 #[graphql_entity(table = "schema_clock", plural = "SchemaClocks")]
 struct SchemaClock {
@@ -15,14 +7,6 @@ struct SchemaClock {
     #[graphql_orm(timestamp = "host")]
     created_at: i64,
 }
-
-
-
-
-
-
-
-
 #[derive(GraphQLOperations)]
 #[graphql_entity(table = "operations_clock", schema_only)]
 struct OperationsClock {
