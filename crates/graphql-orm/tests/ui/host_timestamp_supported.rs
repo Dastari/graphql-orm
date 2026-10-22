@@ -3,6 +3,7 @@ use graphql_orm::prelude::*;
 #[graphql_entity(table = "public_clock", plural = "PublicClocks")]
 struct PublicClock {
     #[primary_key]
+    #[sortable]
     id: String,
     #[graphql_orm(timestamp = "host")]
     created_at: i64,

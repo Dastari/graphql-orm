@@ -6,6 +6,7 @@ use graphql_orm::prelude::*;
 #[graphql_entity(table = "source_stamped_records", plural = "SourceStampedRecords")]
 struct SourceStampedRecord {
     #[primary_key]
+    #[sortable]
     #[graphql_orm(auto_generated = false)]
     id: String,
     #[graphql_orm(timestamp = "host", db_column = "updated_at")]
