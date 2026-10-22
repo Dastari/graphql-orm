@@ -196,6 +196,18 @@ turn's `with_capability_delivery` binding. Broker operations remain read-only;
 reviewed static bootstrap mutations retain current policy, one-shot approval
 where required, and ordinary resolver authorization.
 
+## Draft generated metadata reads
+
+`public_entities::*` provides read-only session/message/run/attachment/tool-policy
+metadata for `schema_roots!`. Bind `AiPublicEntityAccess` with the original database,
+AI policy and current-principal resolver before building the public schema. Raw
+persistence, protected content and custody remain private; every metadata field is
+non-exportable. Keep `AiSchemaModule` for owned schema/backup custody.
+
+This is the read slice of upstream #184. Generated read-only notifications and
+child propagation are incomplete; it is not a completed alignment or release gate.
+See the [migration contract](MIGRATION.md#01091-to-01100-generated-metadata-read-projections-draft).
+
 ## Install
 
 This active pre-release is Git-only. Pin one reviewed full monorepo revision
