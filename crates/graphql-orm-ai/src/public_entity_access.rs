@@ -15,6 +15,35 @@ use graphql_orm::graphql::{
 use graphql_orm::{db::Database, futures::future::BoxFuture};
 use std::{any::Any, sync::Arc};
 
+/// Preserve current ORM decisions for SimpleObject scalar fields composed
+/// with generated ComplexObject relations.
+pub(crate) struct PublicMetadataFieldGuard<'a, T> { record: &'a T }
+impl<'a, T> PublicMetadataFieldGuard<'a, T> {
+    pub(crate) fn new(record: &'a T) -> Self { Self { record } }
+}
+impl<T> async_graphql::Guard for PublicMetadataFieldGuard<'_, T>
+where T: graphql_orm::graphql::orm::Entity + Send + Sync + 'static,
+{
+    async fn check(&self, context: &Context<'_>) -> async_graphql::Result<()> {
+        let denied = || OrmPublicError::forbidden().into_graphql_error();
+        let database = context.data::<Database<DefaultWriteBackend>>()?;
+        if database.authorization_mode() != AuthorizationMode::ExplicitPolicyForAllExposedOperations
+            || database.entity_policy().is_none() || database.row_policy().is_none() || database.field_policy().is_none() {
+            return Err(denied());
+        }
+        let surface = if context.query_env.operation.node.ty == async_graphql::parser::types::OperationType::Subscription {
+            EntityAccessSurface::GraphqlSubscription
+        } else { EntityAccessSurface::GraphqlQuery };
+        database.ensure_entity_access(Some(context), T::entity_name(), T::metadata().read_policy, EntityAccessKind::Read, surface).await?;
+        if !database.can_read_row(Some(context), T::entity_name(), T::metadata().read_policy, surface, self.record).await? {
+            return Err(denied());
+        }
+        let field = T::repository_field_policies().iter()
+            .find(|field| field.api_name == context.item.node.name.node.as_str()).ok_or_else(denied)?;
+        database.ensure_readable_field(context, T::entity_name(), field.api_name, field.read_policy, Some(self.record)).await
+    }
+}
+
 /// Mandatory authorization binding for generated, read-only AI metadata entities.
 ///
 /// This permits no content opening, writes, schema ownership or provider disclosure.

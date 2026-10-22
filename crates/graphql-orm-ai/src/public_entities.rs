@@ -12,6 +12,7 @@ use graphql_orm::uuid::Uuid;
 /// Read-only authorized session metadata; protected payloads remain private.
 #[derive(
     GraphQLEntity,
+    graphql_orm::async_graphql::SimpleObject,
     GraphQLOperations,
     GraphQLRelations,
     Clone,
@@ -28,50 +29,51 @@ use graphql_orm::uuid::Uuid;
     write_policy = "ai.public.never_write",
     backup = false
 )]
-#[graphql(complex)]
+#[graphql(complex, guard = "crate::public_entity_access::PublicMetadataFieldGuard::new(self)")]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiPublicSession {
     /// Authorized id metadata.
     #[primary_key]
     #[sortable]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub id: Uuid,
     /// Authorized scope kind metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub scope_kind: String,
     /// Authorized scope id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub scope_id: String,
     /// Authorized tenant id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub tenant_id: Option<String>,
     /// Authorized title metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub title: String,
     /// Authorized state metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub state: String,
     /// Authorized stream head metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub stream_head: i64,
     /// Authorized last activity at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub last_activity_at: i64,
     /// Authorized archived at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub archived_at: Option<i64>,
     /// Authorized related messages; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicMessage",
         from = "id",
@@ -84,7 +86,7 @@ pub struct AiPublicSession {
     /// Authorized related runs; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicRun",
         from = "id",
@@ -97,7 +99,7 @@ pub struct AiPublicSession {
     /// Authorized related attachments; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicAttachment",
         from = "id",
@@ -112,6 +114,7 @@ pub struct AiPublicSession {
 /// Read-only authorized message metadata; protected payloads remain private.
 #[derive(
     GraphQLEntity,
+    graphql_orm::async_graphql::SimpleObject,
     GraphQLOperations,
     GraphQLRelations,
     Clone,
@@ -128,54 +131,55 @@ pub struct AiPublicSession {
     write_policy = "ai.public.never_write",
     backup = false
 )]
-#[graphql(complex)]
+#[graphql(complex, guard = "crate::public_entity_access::PublicMetadataFieldGuard::new(self)")]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiPublicMessage {
     /// Authorized id metadata.
     #[primary_key]
     #[sortable]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub id: Uuid,
     /// Authorized session id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub session_id: Uuid,
     /// Authorized sequence metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub sequence: i64,
     /// Authorized message role metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub message_role: String,
     /// Authorized run id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub run_id: Option<Uuid>,
     /// Authorized block count metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub block_count: i64,
     /// Authorized completion state metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub completion_state: String,
     /// Authorized created at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub created_at: i64,
     /// Authorized finalized at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub finalized_at: Option<i64>,
     /// Authorized content purged at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub content_purged_at: Option<i64>,
     /// Authorized related session; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicSession",
         from = "session_id",
@@ -187,7 +191,7 @@ pub struct AiPublicMessage {
     /// Authorized related run; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicRun",
         from = "run_id",
@@ -201,6 +205,7 @@ pub struct AiPublicMessage {
 /// Read-only authorized run metadata; protected payloads remain private.
 #[derive(
     GraphQLEntity,
+    graphql_orm::async_graphql::SimpleObject,
     GraphQLOperations,
     GraphQLRelations,
     Clone,
@@ -217,42 +222,43 @@ pub struct AiPublicMessage {
     write_policy = "ai.public.never_write",
     backup = false
 )]
-#[graphql(complex)]
+#[graphql(complex, guard = "crate::public_entity_access::PublicMetadataFieldGuard::new(self)")]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiPublicRun {
     /// Authorized id metadata.
     #[primary_key]
     #[sortable]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub id: Uuid,
     /// Authorized session id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub session_id: Uuid,
     /// Authorized input message id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub input_message_id: Uuid,
     /// Authorized state metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub state: String,
     /// Authorized error code metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub error_code: Option<String>,
     /// Authorized created at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub created_at: i64,
     /// Authorized row version metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub row_version: i64,
     /// Authorized related session; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicSession",
         from = "session_id",
@@ -264,7 +270,7 @@ pub struct AiPublicRun {
     /// Authorized related messages; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicMessage",
         from = "id",
@@ -279,6 +285,7 @@ pub struct AiPublicRun {
 /// Read-only authorized attachment metadata; protected payloads remain private.
 #[derive(
     GraphQLEntity,
+    graphql_orm::async_graphql::SimpleObject,
     GraphQLOperations,
     GraphQLRelations,
     Clone,
@@ -295,70 +302,71 @@ pub struct AiPublicRun {
     write_policy = "ai.public.never_write",
     backup = false
 )]
-#[graphql(complex)]
+#[graphql(complex, guard = "crate::public_entity_access::PublicMetadataFieldGuard::new(self)")]
+#[cfg_attr(feature = "graphql-case-pascal", graphql(rename_fields = "PascalCase"))]
 pub struct AiPublicAttachment {
     /// Authorized id metadata.
     #[primary_key]
     #[sortable]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub id: Uuid,
     /// Authorized session id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub session_id: Uuid,
     /// Authorized message id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub message_id: Option<Uuid>,
     /// Authorized safe filename metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub safe_filename: String,
     /// Authorized declared mime metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub declared_mime: Option<String>,
     /// Authorized detected mime metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub detected_mime: Option<String>,
     /// Authorized byte count metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub byte_count: Option<i64>,
     /// Authorized quarantine state metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub quarantine_state: String,
     /// Authorized scan state metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub scan_state: String,
     /// Authorized processing state metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub processing_state: String,
     /// Authorized rejection code metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub rejection_code: Option<String>,
     /// Authorized created at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub created_at: i64,
     /// Authorized finalized at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub finalized_at: Option<i64>,
     /// Authorized deleted at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub deleted_at: Option<i64>,
     /// Authorized related session; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicSession",
         from = "session_id",
@@ -370,7 +378,7 @@ pub struct AiPublicAttachment {
     /// Authorized related message; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[relation(
         target = "AiPublicMessage",
         from = "message_id",
@@ -396,51 +404,51 @@ pub struct AiPublicToolPolicy {
     /// Authorized id metadata.
     #[primary_key]
     #[sortable]
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "uuid")]
     pub id: Uuid,
     /// Authorized scope kind metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub scope_kind: String,
     /// Authorized scope id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub scope_id: String,
     /// Authorized tenant id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub tenant_id: Option<String>,
     /// Authorized tool id metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub tool_id: String,
     /// Authorized tool fingerprint metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub tool_fingerprint: String,
     /// Authorized enabled metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "boolean")]
     pub enabled: bool,
     /// Authorized maximum maturity metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub maximum_maturity: String,
     /// Authorized approval rule metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "string")]
     pub approval_rule: String,
     /// Authorized maximum calls metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub maximum_calls: i64,
     /// Authorized maximum output bytes metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub maximum_output_bytes: i64,
     /// Authorized updated at metadata.
-    #[graphql_orm(non_exportable)]
+    #[graphql_orm(non_exportable, read_policy = "ai.public.field")]
     #[filterable(type = "number")]
     pub updated_at: i64,
 }

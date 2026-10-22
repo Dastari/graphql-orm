@@ -228,3 +228,23 @@ async fn missing_binding_fails_closed_and_schema_never_exposes_custody_columns_o
         assert!(!entity.backup_enabled);
     }
 }
+
+struct DenyPublicTitle;
+impl FieldPolicy for DenyPublicTitle {
+    fn can_read_field<'a>(&'a self, _: &'a async_graphql::Context<'_>, _: &'a Database, _: &'static str, field: &'static str, _: Option<&'static str>, _: Option<&'a (dyn std::any::Any + Send + Sync)>) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(field != "title") })
+    }
+    fn can_write_field<'a>(&'a self, _: &'a async_graphql::Context<'_>, _: &'a Database, _: &'static str, _: &'static str, _: Option<&'static str>, _: Option<&'a (dyn std::any::Any + Send + Sync)>, _: Option<&'a (dyn std::any::Any + Send + Sync)>) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+#[tokio::test]
+async fn scalar_projection_composition_retains_host_field_denial() {
+    let (mut database, owner, id, policy) = fixture().await;
+    database.set_field_policy(DenyPublicTitle);
+    let current = Arc::new(Current { principal: owner.clone(), revoked: AtomicBool::new(false) });
+    let access = AiPublicEntityAccess::new(database, policy, current);
+    let response = schema_builder(access.database()).finish().execute(request(&owner, id)).await;
+    assert!(!response.errors.is_empty());
+    assert!(!format!("{:?}", response.data).contains("Owner session"));
+}
