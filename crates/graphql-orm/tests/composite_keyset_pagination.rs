@@ -41,14 +41,21 @@ async fn setup() -> graphql_orm::Result<Database<SqliteBackend>> {
         ("a", 3, None),
         ("b", 3, None),
     ] {
-        sqlx::query("INSERT INTO composite_keyset_records (\"partition\", item_no, rank) VALUES (?, ?, ?)")
-            .bind(partition).bind(item).bind(rank).execute(database.pool()).await?;
+        sqlx::query(
+            "INSERT INTO composite_keyset_records (\"partition\", item_no, rank) VALUES (?, ?, ?)",
+        )
+        .bind(partition)
+        .bind(item)
+        .bind(rank)
+        .execute(database.pool())
+        .await?;
     }
     Ok(database)
 }
 
 #[tokio::test]
-async fn forward_pages_keep_complete_composite_identity_and_nullable_order() -> graphql_orm::Result<()> {
+async fn forward_pages_keep_complete_composite_identity_and_nullable_order()
+-> graphql_orm::Result<()> {
     let database = setup().await?;
     let mut after = None;
     let mut keys = Vec::new();
@@ -56,17 +63,39 @@ async fn forward_pages_keep_complete_composite_identity_and_nullable_order() -> 
         let page = CompositeRecord::keyset_page(
             &database,
             CompositeRecordWhereInput::default(),
-            KeysetPageInput { after, limit: Some(2), include_total_count: false },
-        ).await.expect("composite keyset page");
-        keys.extend(page.edges.into_iter().map(|edge| (edge.node.partition_key, edge.node.item_no)));
+            KeysetPageInput {
+                after,
+                limit: Some(2),
+                include_total_count: false,
+            },
+        )
+        .await
+        .expect("composite keyset page");
+        keys.extend(
+            page.edges
+                .into_iter()
+                .map(|edge| (edge.node.partition_key, edge.node.item_no)),
+        );
         if page_index == 0 {
             sqlx::query("INSERT INTO composite_keyset_records (\"partition\", item_no, rank) VALUES ('new-before-cursor', 1, 99)")
                 .execute(database.pool()).await?;
         }
-        if !page.page_info.has_next_page { break; }
+        if !page.page_info.has_next_page {
+            break;
+        }
         after = page.page_info.end_cursor;
     }
-    assert_eq!(keys, vec![("a".into(), 1), ("a".into(), 2), ("b".into(), 1), ("b".into(), 2), ("a".into(), 3), ("b".into(), 3)]);
+    assert_eq!(
+        keys,
+        vec![
+            ("a".into(), 1),
+            ("a".into(), 2),
+            ("b".into(), 1),
+            ("b".into(), 2),
+            ("a".into(), 3),
+            ("b".into(), 3)
+        ]
+    );
     assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), 6);
     Ok(())
 }
@@ -75,27 +104,62 @@ async fn forward_pages_keep_complete_composite_identity_and_nullable_order() -> 
 async fn backward_pages_keep_the_complete_key_tiebreaker() -> graphql_orm::Result<()> {
     let database = setup().await?;
     let tail = CompositeRecord::keyset_connection_page(
-        &database, CompositeRecordWhereInput::default(),
-        graphql_orm::graphql::pagination::KeysetConnectionInput { last: Some(2), ..Default::default() },
-    ).await.expect("composite tail");
-    assert_eq!(tail.edges.iter().map(|edge| (edge.node.partition_key.as_str(), edge.node.item_no)).collect::<Vec<_>>(), [("a", 3), ("b", 3)]);
+        &database,
+        CompositeRecordWhereInput::default(),
+        graphql_orm::graphql::pagination::KeysetConnectionInput {
+            last: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("composite tail");
+    assert_eq!(
+        tail.edges
+            .iter()
+            .map(|edge| (edge.node.partition_key.as_str(), edge.node.item_no))
+            .collect::<Vec<_>>(),
+        [("a", 3), ("b", 3)]
+    );
     let older = CompositeRecord::keyset_connection_page(
-        &database, CompositeRecordWhereInput::default(),
-        graphql_orm::graphql::pagination::KeysetConnectionInput { last: Some(2), before: tail.page_info.start_cursor, ..Default::default() },
-    ).await.expect("composite older window");
-    assert_eq!(older.edges.iter().map(|edge| (edge.node.partition_key.as_str(), edge.node.item_no)).collect::<Vec<_>>(), [("b", 1), ("b", 2)]);
+        &database,
+        CompositeRecordWhereInput::default(),
+        graphql_orm::graphql::pagination::KeysetConnectionInput {
+            last: Some(2),
+            before: tail.page_info.start_cursor,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("composite older window");
+    assert_eq!(
+        older
+            .edges
+            .iter()
+            .map(|edge| (edge.node.partition_key.as_str(), edge.node.item_no))
+            .collect::<Vec<_>>(),
+        [("b", 1), ("b", 2)]
+    );
     Ok(())
 }
 
 #[tokio::test]
-async fn generated_composite_keyset_is_admitted_without_graphql_writes() -> graphql_orm::Result<()> {
-    let schema = schema_builder(setup().await?).data("test-user".to_string()).finish();
+async fn generated_composite_keyset_is_admitted_without_graphql_writes() -> graphql_orm::Result<()>
+{
+    let schema = schema_builder(setup().await?)
+        .data("test-user".to_string())
+        .finish();
     let sdl = schema.sdl();
     assert!(sdl.contains("compositeKeysetRecordsKeyset("));
     assert!(sdl.contains("compositeKeysetRecordsScan("));
     assert!(!sdl.contains("createCompositeRecord("));
     let response = schema.execute("{ compositeKeysetRecordsKeyset(page: {limit: 2}) { edges { node { partitionKey itemNo } } } }").await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
-    assert_eq!(response.data.into_json().unwrap()["compositeKeysetRecordsKeyset"]["edges"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        response.data.into_json().unwrap()["compositeKeysetRecordsKeyset"]["edges"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     Ok(())
 }

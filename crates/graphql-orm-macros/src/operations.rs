@@ -9354,16 +9354,32 @@ mod composite_keyset_tests {
 
     #[test]
     fn complete_tuple_is_required_as_the_unique_order_suffix() {
-        assert!(generate_graphql_operations(&entity("rank desc, partition_key asc, item_no asc")).is_ok());
-        for order in ["rank desc, partition_key asc", "rank desc, item_no asc", "rank desc, item_no asc, partition_key asc"] {
+        assert!(
+            generate_graphql_operations(&entity("rank desc, partition_key asc, item_no asc"))
+                .is_ok()
+        );
+        for order in [
+            "rank desc, partition_key asc",
+            "rank desc, item_no asc",
+            "rank desc, item_no asc, partition_key asc",
+        ] {
             let error = generate_graphql_operations(&entity(order)).unwrap_err();
-            assert!(error.to_string().contains("every primary-key field"), "{error}");
+            assert!(
+                error.to_string().contains("every primary-key field"),
+                "{error}"
+            );
         }
     }
 
     #[test]
     fn duplicate_composite_order_fields_are_rejected() {
-        let error = generate_graphql_operations(&entity("partition_key asc, rank desc, partition_key asc, item_no asc")).unwrap_err();
-        assert!(error.to_string().contains("must not repeat a field"), "{error}");
+        let error = generate_graphql_operations(&entity(
+            "partition_key asc, rank desc, partition_key asc, item_no asc",
+        ))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("must not repeat a field"),
+            "{error}"
+        );
     }
 }
