@@ -44,6 +44,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
     pub(crate) compose_complex_object: bool,
+    pub(crate) policy_binding: Option<String>,
     /// Declared Apollo Federation v2 entity keys, in declaration order.
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
 }
@@ -476,6 +477,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("compose_complex_object") {
                     metadata.compose_complex_object = true;
+                } else if meta.path.is_ident("policy_binding") {
+                    let value: syn::LitStr = meta.value()?.parse()?;
+                    if value.value().trim().is_empty() { return Err(syn::Error::new_spanned(value, "policy_binding must not be empty")); }
+                    metadata.policy_binding = Some(value.value());
                 } else if meta.path.is_ident("search") {
                     let mut search = SearchEntityMetadata::default();
                     meta.parse_nested_meta(|search_meta| {
@@ -3071,6 +3076,8 @@ fn generate_entity_impl(
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None });
+    let policy_binding = entity_meta.policy_binding.as_deref().map(|binding| quote! { Some(#binding) })
+        .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
@@ -4874,6 +4881,7 @@ fn generate_entity_impl(
             }
 
             impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+                const REQUIRED_POLICY_BINDING: Option<&'static str> = #policy_binding;
                 fn entity_name() -> &'static str {
                     #struct_name_str
                 }
@@ -5379,6 +5387,7 @@ fn generate_entity_impl(
         }
 
         impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+            const REQUIRED_POLICY_BINDING: Option<&'static str> = #policy_binding;
             fn entity_name() -> &'static str {
                 #struct_name_str
             }

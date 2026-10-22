@@ -15,6 +15,19 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.57.0 to 0.58.0: required policy bindings
+
+Runtime/macros advance together. An entity can declare
+`#[graphql_orm(policy_binding = "owner.contract")]`. Its canonical `schema_roots!`
+builder requires entity, row and field providers whose `supports_policy_binding`
+methods acknowledge that contract; missing or unrelated providers reject all
+operations before reads, including metadata/count-only selections. Provider
+acknowledgement is a binding capability, never an authorization grant: each
+normal current-principal, scope, entity, row and field decision still runs.
+Configure all providers before building the schema. Entities without a binding
+retain their existing authorization mode. No data or physical schema migration
+is required.
+
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one

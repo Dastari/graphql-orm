@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 `graphql-orm-ai` is Git-distributed and is not published to crates.io. This guide
 is mandatory so Git consumers and disposable test deployments can track schema
 and API changes without guessing.
@@ -18,6 +24,14 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.109.1 to 0.110.0: generated metadata read projections (draft)
+
+Import `public_entities::*` for `schema_roots!` composition and build the public schema with `AiPublicEntityAccess::new(original_database, ai_access_policy, current_principal_resolver).database()`. Keep the original database and `AiSchemaModule` as the private persistence/schema/backup authority. Public projections declare `external_read_only`, never own those tables, and cannot perform generated writes. Missing policies/principal bindings fail closed under the default ORM authorization mode; deliberately permissive databases are outside this integration contract.
+
+Metadata reads require both scope and session Read+List authority, exact current principal owner identity and exact tenant equality; tool-policy metadata requires scope Read+List. Existing host callbacks are additional restrictions, so hosts that match entity names must admit these projection types explicitly. Relations reauthorize the target and selected fields. Every exposed metadata field is non-exportable. The surface never opens protected messages, exposes credential/storage/upload references or runs custody actions.
+
+This draft is a read slice only. Generated read-only notifications and message-to-session/run propagation are still required by issue #184; existing notification and protected-content roots remain recorded upstream/custody exceptions. No data, physical schema or AI_SCHEMA_MODULE_VERSION migration is needed because no persistent entity/semantic changes occur. Do not claim completed entity-first alignment or publish a complete #184 resolution from this slice.
 
 ## 0.109.0 to 0.109.1: ORM 0.56.0 alignment
 

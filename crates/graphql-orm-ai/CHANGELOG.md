@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 All notable user-visible changes are recorded here. The crate follows
 Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION.md).
 
@@ -17,6 +23,11 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## Unreleased - 0.110.0
+
+- Add a draft generated-read integration for safe session/message/run/attachment/tool-policy metadata. Public projection types map read-only to AI-owned tables; raw persistence and protected content remain private. `AiPublicEntityAccess` requires current-principal resolution, exact tenant/owner and host scope/session Read+List decisions, and preserves additional host entity/row/field restrictions. Metadata fields are non-exportable; projection writes, migrations and backup ownership are unavailable.
+- This does not complete issue #184: read-only generated notifications and child propagation remain unimplemented. Do not adopt this slice as entity-first alignment or replace protected-content/custody roots. No data or AI schema-module migration is required for the read projections.
 
 ## Unreleased - 0.109.1
 

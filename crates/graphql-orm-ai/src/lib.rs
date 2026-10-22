@@ -22,6 +22,12 @@ compile_error!(
 
 mod access;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub mod public_entities;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod public_entity_access;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use public_entity_access::AiPublicEntityAccess;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod agent_loop;
 mod approvals;
 mod attachments;

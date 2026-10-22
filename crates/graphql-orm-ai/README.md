@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-ai
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 The current workspace selects published Auth `v0.22.1` at
 `86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
 correction. Direct Auth consumers must select the same tag and refresh their
@@ -195,6 +201,18 @@ Classified native turns can retain the crate-owned capability broker through
 turn's `with_capability_delivery` binding. Broker operations remain read-only;
 reviewed static bootstrap mutations retain current policy, one-shot approval
 where required, and ordinary resolver authorization.
+
+## Draft generated metadata reads
+
+`public_entities::*` provides read-only session/message/run/attachment/tool-policy
+metadata for `schema_roots!`. Bind `AiPublicEntityAccess` with the original database,
+AI policy and current-principal resolver before building the public schema. Raw
+persistence, protected content and custody remain private; every metadata field is
+non-exportable. Keep `AiSchemaModule` for owned schema/backup custody.
+
+This is the read slice of upstream #184. Generated read-only notifications and
+child propagation are incomplete; it is not a completed alignment or release gate.
+See the [migration contract](MIGRATION.md#01091-to-01100-generated-metadata-read-projections-draft).
 
 ## Install
 
