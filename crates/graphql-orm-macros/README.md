@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.58.1 generates configured keyset cursor field authority and checks
+ordering fields before reads and before cursor/scan release. GraphQL-hidden raw
+values remain unavailable even for cursor-only selections; authorized cursor
+encoding and independent repository policies are preserved. See the
+[migration guide](../../MIGRATION.md#0580-to-0581-keyset-cursor-field-authority).
+
 Version 0.58.0 adds optional runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix and cursor binding are described
 in the [migration guide](../../MIGRATION.md#0570-to-0580-runtime-keyset-ordering).

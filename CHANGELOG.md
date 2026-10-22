@@ -14,6 +14,15 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.58.1 (unreleased) — Keyset cursor field authority
+
+- Authorize every configured and runtime keyset ordering field before reads and
+  against returned rows before releasing cursors or scan page metadata.
+- Keep GraphQL-private, skipped or transformed raw values out of configured
+  GraphQL keysets and scans independently of the selected payload fields.
+- Generate explicit configured-order field metadata; preserve authorized cursor
+  encoding and independent repository field authority.
+
 ## 0.58.0 (unreleased) — Runtime keyset ordering
 
 - Add generated scalar-only keyset order inputs, repository forward/backward

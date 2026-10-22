@@ -15,6 +15,24 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.58.0 to 0.58.1: keyset cursor field authority
+
+Upgrade runtime and macros together. Every field used by a configured or runtime
+keyset order, including the complete primary-key suffix, must be readable for the
+current surface. GraphQL-private, skipped or transformed raw fields cannot be
+carried in GraphQL cursor orders. Selecting only `cursor` or scan page metadata
+still requires that authority. Permission is checked before reading and against
+returned rows before release. A configured scan also checks its ordering fields
+although its continuation remains encrypted.
+
+Generated entities provide `AuthorizedKeysetEntity::KEYSET_CURSOR_FIELDS`.
+Handwritten implementations must provide the configured column, public policy
+name, read-policy key and `graphql_readable` decision for every ordering field;
+missing metadata reports authorization misconfiguration. Repository paths retain
+their independent field policy, so a GraphQL-private field can still be used by
+an authorized internal repository read. Authorized cursor bytes, source data and
+physical schema are unchanged. No database migration is required.
+
 ## 0.57.0 to 0.58.0: runtime keyset ordering
 
 Upgrade runtime and macros together. A generated `…Keyset` query now accepts
