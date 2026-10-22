@@ -1534,12 +1534,6 @@ pub(crate) fn generate_graphql_operations(
         }
     }
     let keyset_parts = if let Some(config) = entity_meta.keyset.as_deref() {
-        if has_composite_primary_key {
-            return Err(syn::Error::new_spanned(
-                struct_name,
-                "keyset pagination currently requires a single-column primary key",
-            ));
-        }
         let mut parts = Vec::new();
         for raw in config.split(',') {
             let tokens = raw.split_whitespace().collect::<Vec<_>>();
@@ -1597,15 +1591,31 @@ pub(crate) fn generate_graphql_operations(
                 nulls_first,
             ));
         }
-        if parts.is_empty()
-            || parts
-                .last()
-                .is_none_or(|(field, _, _, _, _)| field != &pk_field)
-        {
+        let complete_key_suffix = parts.len() >= primary_key_fields.len()
+            && parts[parts.len().saturating_sub(primary_key_fields.len())..]
+                .iter()
+                .zip(&primary_key_fields)
+                .all(|((field, _, _, _, _), key)| field == &key.field_name);
+        if !complete_key_suffix {
             return Err(syn::Error::new_spanned(
                 struct_name,
-                "keyset order must end with the primary key as a unique tiebreaker",
+                if has_composite_primary_key {
+                    "keyset order must end with every primary-key field in declaration order as a unique tiebreaker"
+                } else {
+                    "keyset order must end with the primary key as a unique tiebreaker"
+                },
             ));
+        }
+        if has_composite_primary_key {
+            let mut ordered_fields = std::collections::BTreeSet::new();
+            for (field, _, _, _, _) in &parts {
+                if !ordered_fields.insert(field.to_string()) {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "composite keyset order must not repeat a field",
+                    ));
+                }
+            }
         }
         Some(parts)
     } else {
@@ -9320,4 +9330,40 @@ pub(crate) fn generate_graphql_operations(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod composite_keyset_tests {
+    use super::generate_graphql_operations;
+
+    fn entity(order: &str) -> syn::DeriveInput {
+        let order = syn::LitStr::new(order, proc_macro2::Span::call_site());
+        syn::parse_quote! {
+            #[graphql_entity(table = "composite_keyset_fixture", keyset = #order)]
+            struct CompositeKeysetFixture {
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                partition_key: String,
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                item_no: i64,
+                rank: i64,
+            }
+        }
+    }
+
+    #[test]
+    fn complete_tuple_is_required_as_the_unique_order_suffix() {
+        assert!(generate_graphql_operations(&entity("rank desc, partition_key asc, item_no asc")).is_ok());
+        for order in ["rank desc, partition_key asc", "rank desc, item_no asc", "rank desc, item_no asc, partition_key asc"] {
+            let error = generate_graphql_operations(&entity(order)).unwrap_err();
+            assert!(error.to_string().contains("every primary-key field"), "{error}");
+        }
+    }
+
+    #[test]
+    fn duplicate_composite_order_fields_are_rejected() {
+        let error = generate_graphql_operations(&entity("partition_key asc, rank desc, partition_key asc, item_no asc")).unwrap_err();
+        assert!(error.to_string().contains("must not repeat a field"), "{error}");
+    }
 }

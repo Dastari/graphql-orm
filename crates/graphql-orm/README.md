@@ -14,6 +14,10 @@ Version 0.58.0 extends explicit host-owned timestamps to public entities and Str
 values without replacing source timestamps with the mutation clock. See the
 [migration guide](../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps).
 
+Version 0.58.0 supports static keyset reads with a complete composite-primary-key
+tiebreaker tuple. Schema ownership and write posture are unchanged. See the
+[migration guide](../../MIGRATION.md#0570-to-0580-composite-primary-key-keysets).
+
 Version 0.57.0 adds exact SQL Server `MONEY` typed reads through
 `#[graphql_orm(mssql_money)]`. The generated read projection casts the native
 column to `DECIMAL(19,4)` under its original alias before decoding; ordinary

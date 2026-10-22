@@ -19,6 +19,10 @@ published to crates.io.
 
 Upgrade runtime/macros together. Public GraphQLEntity and RepositoryEntity timestamp fields may explicitly use `#[graphql_orm(timestamp = "host")]` on ordinary `i64`, `String`, or optional forms whose Rust or physical name is `created_at` or `updated_at`. For an external source timestamp mapped to physical `updated_at`, opt in on the mapped field to prevent automatic epoch assignment. Values are bound unchanged; String content is caller-owned and is not parsed or normalized as a date. Existing automatic behavior remains unchanged without the annotation. The annotation does not change stored type/default metadata; conventional Rust names still need `default = false` to suppress their implicit default when appropriate. Schema-only, generated/version/key/relation fields and date/JSON/boolean adapters remain rejected. No data or schema migration is required merely to opt in; preserve field/row authorization and distinguish source observation time from collection and mutation clocks.
 
+## 0.57.0 to 0.58.0: composite-primary-key keysets
+
+Upgrade runtime/macros together. Composite-key entities may now declare `keyset = "rank desc, partition_key asc, item_no asc"` when `(partition_key, item_no)` is the primary key in declaration order. Every primary-key member must appear as the final unique tiebreaker tuple; order fields may not repeat. The generated keyset and scan read surfaces use the existing bounded, authorized cursor implementation. Existing valid single-key orders/cursors are unchanged. No generated GraphQL writes or subscriptions are enabled for composite-key entities by this change. No data or schema migration is required, and an externally managed source stays externally managed.
+
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one
