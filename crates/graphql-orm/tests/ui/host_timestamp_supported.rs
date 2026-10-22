@@ -1,5 +1,5 @@
 use graphql_orm::prelude::*;
-#[derive(GraphQLEntity, GraphQLOperations, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(table = "public_clock", plural = "PublicClocks")]
 struct PublicClock {
     #[primary_key]
@@ -7,7 +7,7 @@ struct PublicClock {
     #[graphql_orm(timestamp = "host")]
     created_at: i64,
 }
-#[derive(RepositoryEntity, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(RepositoryEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[repository_entity(table = "text_clock", plural = "TextClocks")]
 struct TextClock {
     #[primary_key]
