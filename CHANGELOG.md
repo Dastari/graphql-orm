@@ -14,6 +14,14 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## 0.58.0 (unreleased) — Runtime keyset ordering
+
+- Add generated scalar-only keyset order inputs, repository forward/backward
+  methods and matching SDL/operation catalogue arguments.
+- Bind dynamic cursors to the complete order, append the primary-key suffix,
+  reject duplicates/unsupported orders, and authorize every order field before reads.
+- Preserve configured ordering and cursor bytes when `orderBy` is omitted.
+
 ## 0.57.0 (2026-10-22)
 
 Companion macros crate: `graphql-orm-macros` **0.57.0**.

@@ -15,6 +15,30 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.57.0 to 0.58.0: runtime keyset ordering
+
+Upgrade runtime and macros together. A generated `…Keyset` query now accepts
+`orderBy: [EntityKeysetOrderByInput!]`. Each entry selects exactly one readable,
+persisted sortable scalar (for example `[{title: ASC}, {rank: DESC}]`). Primary-key
+fields are also accepted. Computed, relation, spatial and decimal orders are absent
+from this input; ordinary list ordering retains its separate input type.
+
+Each dynamic order appends missing primary-key columns in ascending order. NULL
+values sort last for either direction; backward windows reverse both comparison
+and null placement internally, then return canonical order. Duplicate fields,
+empty entries and empty lists fail before SELECT. Order fields, including implicit
+primary-key components, must pass current field policy even when not selected.
+
+Dynamic cursors bind the entity, exact ordered columns, directions and null placement.
+A cursor from another order or the configured default is rejected. Omit `orderBy`
+to retain the configured order and its existing cursor bytes. Repository callers can
+use `keyset_page_ordered` or `keyset_connection_page_ordered`; the existing methods
+are unchanged. No schema/data migration is required. Composite-PK availability
+continues to depend on the separate composite-keyset capability.
+
+The proposed unreleased 0.58.0 also appears in other pending upstream drafts;
+merge/release owners must reconcile versions before publishing any tag.
+
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one

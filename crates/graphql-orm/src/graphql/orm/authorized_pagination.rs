@@ -169,6 +169,61 @@ pub trait AuthorizedKeysetEntity: Entity {
     const KEYSET_ORDER: &'static [KeysetOrderColumn];
     const KEYSET_FINGERPRINT: &'static str;
     fn keyset_values(&self) -> Vec<KeysetValue>;
+
+    /// Persisted scalar fields accepted by generated runtime keyset ordering.
+    /// Handwritten implementations retain the configured order only.
+    const KEYSET_FIELDS: &'static [KeysetField] = &[];
+
+    /// All primary-key components, in declaration order, for a unique suffix.
+    const KEYSET_PRIMARY_COLUMNS: &'static [&'static str] = &[];
+
+    fn keyset_value_for_column(&self, column: &str) -> Option<KeysetValue> {
+        Self::KEYSET_ORDER.iter().position(|part| part.column == column)
+            .and_then(|index| self.keyset_values().get(index).cloned())
+    }
+}
+
+/// A generated, identifier-quoted scalar column and its policy identity.
+#[derive(Clone, Copy, Debug)]
+pub struct KeysetField {
+    pub column: &'static str,
+    pub api_name: &'static str,
+    pub read_policy: Option<&'static str>,
+}
+
+fn runtime_keyset_order<T: AuthorizedKeysetEntity>(
+    mut order: Vec<KeysetOrderColumn>,
+) -> async_graphql::Result<(Vec<KeysetOrderColumn>, String)> {
+    if order.is_empty() || order.len() > T::KEYSET_FIELDS.len() {
+        return Err(input_error());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for part in &order {
+        if !T::KEYSET_FIELDS.iter().any(|field| field.column == part.column)
+            || !seen.insert(part.column)
+        {
+            return Err(input_error());
+        }
+    }
+    if T::KEYSET_PRIMARY_COLUMNS.is_empty() {
+        return Err(input_error());
+    }
+    for column in T::KEYSET_PRIMARY_COLUMNS {
+        if !T::KEYSET_FIELDS.iter().any(|field| field.column == *column) {
+            return Err(input_error());
+        }
+        if seen.insert(column) {
+            order.push(KeysetOrderColumn::asc(column));
+        }
+    }
+    // Generated identifiers cannot contain separators unescaped: serialize the
+    // complete structural order rather than concatenating ambiguous names.
+    let fingerprint = serde_json::to_string(&order.iter().map(|part| (
+        part.column,
+        matches!(part.direction, KeysetDirection::Asc),
+        matches!(part.nulls, KeysetNulls::First),
+    )).collect::<Vec<_>>()).map_err(|_| input_error())?;
+    Ok((order, format!("runtime-keyset-v1:{}:{fingerprint}", T::entity_name())))
 }
 
 /// Diagnostics for actual fetched database rows, before entity decoding.
@@ -368,20 +423,30 @@ where
     T: AuthorizedKeysetEntity + FromSqlRow<B> + Clone + Send + Sync + 'static,
 {
     fn keyset_bound(
+        self,
+        values: &[KeysetValue],
+        before: bool,
+        inclusive: bool,
+    ) -> async_graphql::Result<Self> {
+        self.keyset_bound_with_order(T::KEYSET_ORDER, values, before, inclusive)
+    }
+
+    fn keyset_bound_with_order(
         mut self,
+        order: &[KeysetOrderColumn],
         values: &[KeysetValue],
         before: bool,
         inclusive: bool,
     ) -> async_graphql::Result<Self> {
         let (mut clause, mut binds) = if before {
-            render_keyset_before(B::DIALECT, T::KEYSET_ORDER, values, self.values.len() + 1)
+            render_keyset_before(B::DIALECT, order, values, self.values.len() + 1)
         } else {
-            render_keyset_after(B::DIALECT, T::KEYSET_ORDER, values, self.values.len() + 1)
+            render_keyset_after(B::DIALECT, order, values, self.values.len() + 1)
         }
         .map_err(|e| e.into_graphql_error())?;
         if inclusive {
             let mut equal = Vec::new();
-            for (column, value) in T::KEYSET_ORDER.iter().zip(values) {
+            for (column, value) in order.iter().zip(values) {
                 if matches!(value, KeysetValue::Null) {
                     equal.push(format!("{} IS NULL", column.column));
                 } else {
@@ -470,6 +535,57 @@ where
         auth: Option<&DbAuthContext>,
         page: KeysetConnectionInput,
     ) -> async_graphql::Result<Connection<T>> {
+        self.fetch_authorized_keyset_connection_with_order(db, ctx, auth, page, None).await
+    }
+
+    /// Fetch a forward page using a generated scalar order. The complete primary
+    /// key is appended and every order field is authorized before database I/O.
+    pub async fn fetch_authorized_keyset_ordered(
+        self,
+        db: &Database<B>,
+        ctx: Option<&async_graphql::Context<'_>>,
+        auth: Option<&DbAuthContext>,
+        page: KeysetPageInput,
+        order: Option<Vec<KeysetOrderColumn>>,
+    ) -> async_graphql::Result<Connection<T>> {
+        self.fetch_authorized_keyset_connection_with_order(db, ctx, auth, KeysetConnectionInput {
+            after: page.after,
+            first: page.limit,
+            include_total_count: page.include_total_count,
+            ..Default::default()
+        }, order).await
+    }
+
+    /// Bidirectional counterpart with an exact order-bound cursor. Omission
+    /// preserves the configured order and its existing cursor encoding.
+    pub async fn fetch_authorized_keyset_connection_with_order(
+        self,
+        db: &Database<B>,
+        ctx: Option<&async_graphql::Context<'_>>,
+        auth: Option<&DbAuthContext>,
+        page: KeysetConnectionInput,
+        order: Option<Vec<KeysetOrderColumn>>,
+    ) -> async_graphql::Result<Connection<T>> {
+        let runtime = order.map(runtime_keyset_order::<T>).transpose()?;
+        let (order, fingerprint) = runtime.as_ref()
+            .map(|(order, fingerprint)| (order.as_slice(), fingerprint.as_str()))
+            .unwrap_or((T::KEYSET_ORDER, T::KEYSET_FINGERPRINT));
+        if runtime.is_some() {
+            for part in order {
+                let field = T::KEYSET_FIELDS.iter().find(|field| field.column == part.column)
+                    .ok_or_else(input_error)?;
+                if let Some(ctx) = ctx {
+                    db.ensure_readable_field(ctx, T::entity_name(), field.api_name, field.read_policy, None).await?;
+                } else {
+                    db.ensure_repository_readable_field(None, T::entity_name(), field.api_name, field.read_policy, None)
+                        .await.map_err(|error| error.into_graphql_error())?;
+                }
+            }
+        }
+        let values_for = |node: &T| -> async_graphql::Result<Vec<KeysetValue>> {
+            if runtime.is_none() { return Ok(node.keyset_values()); }
+            order.iter().map(|part| node.keyset_value_for_column(part.column).ok_or_else(input_error)).collect()
+        };
         let page = page
             .validate(PaginationConfig::DEFAULT_LIMIT, i64::MAX)
             .map_err(|e| e.into_graphql_error())?;
@@ -483,7 +599,7 @@ where
         }
         let mut base = self.with_read_visibility(&visibility)?;
         base.page = None;
-        base.order_clauses = T::KEYSET_ORDER.iter().map(|c| c.order_sql()).collect();
+        base.order_clauses = order.iter().map(|c| c.order_sql()).collect();
         base.order_values.clear();
         let limit = db
             .pagination_config()
@@ -501,7 +617,7 @@ where
             .cursor
             .as_deref()
             .map(|cursor| {
-                decode_keyset_cursor(cursor, T::KEYSET_FINGERPRINT, T::KEYSET_ORDER.len())
+                decode_keyset_cursor(cursor, fingerprint, order.len())
                     .map_err(|e| e.into_graphql_error())
             })
             .transpose()?;
@@ -511,12 +627,12 @@ where
             None
         };
         let mut query = if let Some(values) = &after {
-            base.clone().keyset_bound(values, backward, false)?
+            base.clone().keyset_bound_with_order(order, values, backward, false)?
         } else {
             base.clone()
         };
         if backward {
-            query.order_clauses = T::KEYSET_ORDER
+            query.order_clauses = order
                 .iter()
                 .map(|c| c.reversed().order_sql())
                 .collect();
@@ -527,10 +643,10 @@ where
         Self::check_repository_candidates(db, &visibility, &nodes).await?;
         let has_more = nodes.len() > limit as usize;
         nodes.truncate(limit as usize);
-        let opposite = if let Some(values) = nodes.first().map(T::keyset_values).or(after) {
+        let opposite = if let Some(values) = nodes.first().map(&values_for).transpose()?.or(after) {
             let probe = base
                 .clone()
-                .keyset_bound(&values, !backward, nodes.is_empty())?
+                .keyset_bound_with_order(order, &values, !backward, nodes.is_empty())?
                 .bounded_rows(db, auth, 1)
                 .await?;
             Self::check_repository_candidates(db, &visibility, &probe).await?;
@@ -549,11 +665,11 @@ where
         Self::authorize_page_fields(db, ctx, &nodes).await?;
         let edges = nodes
             .into_iter()
-            .map(|node| Edge {
-                cursor: encode_keyset_cursor(T::KEYSET_FINGERPRINT, node.keyset_values()),
+            .map(|node| Ok(Edge {
+                cursor: encode_keyset_cursor(fingerprint, values_for(&node)?),
                 node,
-            })
-            .collect::<Vec<_>>();
+            }))
+            .collect::<async_graphql::Result<Vec<_>>>()?;
         Ok(Connection {
             page_info: PageInfo {
                 has_next_page,

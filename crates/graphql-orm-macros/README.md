@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.58.0 adds optional runtime `orderBy` to generated keyset queries.
+The scalar-only input, complete primary-key suffix and cursor binding are described
+in the [migration guide](../../MIGRATION.md#0570-to-0580-runtime-keyset-ordering).
+
 Version 0.57.0 adds the SQL Server-only `#[graphql_orm(mssql_money)]` field
 annotation and identifier-safe exact read projections for native `MONEY`.
 It pairs with runtime 0.57.0; see the
