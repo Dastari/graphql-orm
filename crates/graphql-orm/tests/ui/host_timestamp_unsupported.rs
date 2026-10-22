@@ -1,12 +1,12 @@
 use graphql_orm::prelude::*;
-#[derive(GraphQLEntity)]
-#[graphql_entity(table = "public_clock", plural = "PublicClocks")]
-struct PublicClock {
-    #[primary_key]
-    id: String,
-    #[graphql_orm(timestamp = "host")]
-    created_at: i64,
-}
+
+
+
+
+
+
+
+
 #[derive(GraphQLSchemaEntity)]
 #[graphql_entity(table = "schema_clock", plural = "SchemaClocks")]
 struct SchemaClock {
@@ -15,16 +15,16 @@ struct SchemaClock {
     #[graphql_orm(timestamp = "host")]
     created_at: i64,
 }
-#[derive(RepositoryEntity)]
-#[repository_entity(table = "text_clock", plural = "TextClocks")]
-struct TextClock {
-    #[primary_key]
-    id: String,
-    #[graphql_orm(timestamp = "host")]
-    updated_at: String,
-}
+
+
+
+
+
+
+
+
 #[derive(GraphQLOperations)]
-#[graphql_entity(table = "operations_clock", plural = "OperationsClocks")]
+#[graphql_entity(table = "operations_clock", schema_only)]
 struct OperationsClock {
     #[primary_key]
     id: String,
