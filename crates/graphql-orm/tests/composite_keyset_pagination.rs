@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 )]
 struct CompositeRecord {
     #[primary_key]
+    #[sortable]
     #[graphql_orm(auto_generated = false, db_column = "partition")]
     #[filterable(type = "string")]
     partition_key: String,
