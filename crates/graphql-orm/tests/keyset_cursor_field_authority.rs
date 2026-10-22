@@ -139,7 +139,7 @@ mod skipped_order {
     #[tokio::test]
     async fn configured_hidden_field_cannot_escape_via_cursor_or_scan() {
         let db = Database::connect_sqlite("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE skipped_cursor_records skipped_cursor_records (id TEXT PRIMARY KEY, hidden_rank INTEGER NOT NULL)").execute(db.pool()).await.unwrap();
+        sqlx::query("CREATE TABLE skipped_cursor_records (id TEXT PRIMARY KEY, hidden_rank INTEGER NOT NULL)").execute(db.pool()).await.unwrap();
         sqlx::query("INSERT INTO skipped_cursor_records VALUES ('one',17),('two',29)").execute(db.pool()).await.unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let db = db.with_read_query_observer(Observe { reads: reads.clone(), revoke: None })
@@ -172,7 +172,7 @@ mod private_order {
     #[tokio::test]
     async fn configured_hidden_field_cannot_escape_via_cursor_or_scan() {
         let db = Database::connect_sqlite("sqlite::memory:").await.unwrap();
-        sqlx::query("CREATE private_cursor_records private_cursor_records (id TEXT PRIMARY KEY, hidden_rank INTEGER NOT NULL)").execute(db.pool()).await.unwrap();
+        sqlx::query("CREATE TABLE private_cursor_records (id TEXT PRIMARY KEY, hidden_rank INTEGER NOT NULL)").execute(db.pool()).await.unwrap();
         sqlx::query("INSERT INTO private_cursor_records VALUES ('one',17),('two',29)").execute(db.pool()).await.unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let db = db.with_read_query_observer(Observe { reads: reads.clone(), revoke: None })
