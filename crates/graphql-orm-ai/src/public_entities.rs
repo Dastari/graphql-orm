@@ -32,6 +32,7 @@ use graphql_orm::uuid::Uuid;
 pub struct AiPublicSession {
     /// Authorized id metadata.
     #[primary_key]
+    #[sortable]
     #[graphql_orm(non_exportable)]
     #[filterable(type = "uuid")]
     pub id: Uuid,
@@ -131,6 +132,7 @@ pub struct AiPublicSession {
 pub struct AiPublicMessage {
     /// Authorized id metadata.
     #[primary_key]
+    #[sortable]
     #[graphql_orm(non_exportable)]
     #[filterable(type = "uuid")]
     pub id: Uuid,
@@ -219,6 +221,7 @@ pub struct AiPublicMessage {
 pub struct AiPublicRun {
     /// Authorized id metadata.
     #[primary_key]
+    #[sortable]
     #[graphql_orm(non_exportable)]
     #[filterable(type = "uuid")]
     pub id: Uuid,
@@ -296,6 +299,7 @@ pub struct AiPublicRun {
 pub struct AiPublicAttachment {
     /// Authorized id metadata.
     #[primary_key]
+    #[sortable]
     #[graphql_orm(non_exportable)]
     #[filterable(type = "uuid")]
     pub id: Uuid,
@@ -391,6 +395,7 @@ pub struct AiPublicAttachment {
 pub struct AiPublicToolPolicy {
     /// Authorized id metadata.
     #[primary_key]
+    #[sortable]
     #[graphql_orm(non_exportable)]
     #[filterable(type = "uuid")]
     pub id: Uuid,
