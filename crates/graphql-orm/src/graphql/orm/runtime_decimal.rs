@@ -3,7 +3,10 @@
 //! A runtime decimal field carries the existing portable [`DecimalDef`]
 //! (precision 1..=18, scale ≤ precision). Values are [`DecimalValue`]s and are
 //! never rounded: input that needs more scale or precision than the definition
-//! retains is rejected.
+//! retains is rejected. The static-only SQL Server MONEY domain
+//! ([`DecimalDef::mssql_money`]) is not a runtime decimal definition: runtime
+//! schemas reject it, static conversion reports it as unsupported, and runtime
+//! JSON values carrying it are rejected.
 //!
 //! Every text form outside the database uses the same rules:
 //!
@@ -181,6 +184,11 @@ pub(crate) mod value_serde {
         deserializer: D,
     ) -> Result<DecimalValue, D::Error> {
         let wire = ReadWire::deserialize(deserializer)?;
+        if wire.definition.is_mssql_money() {
+            return Err(serde::de::Error::custom(
+                "SQL Server MONEY is not a runtime decimal definition",
+            ));
+        }
         match wire.value {
             Input::Text(text) => parse_runtime_decimal(wire.definition, &text),
             Input::Signed(value) => runtime_decimal_from_integer(wire.definition, value.into()),

@@ -6,6 +6,7 @@ mod owned_mssql;
 
 use async_graphql::SimpleObject;
 use graphql_orm::prelude::*;
+use graphql_orm::rust_decimal::Decimal;
 use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio::net::TcpStream;
 
@@ -15,6 +16,11 @@ use tokio::net::TcpStream;
     plural = "MssqlCustomers",
     default_sort = "[CustomerName] ASC"
 )]
+#[graphql_orm(projection(
+    name = "MssqlCustomerMoneyProjection",
+    fields = [id, credit_limit],
+    private = true
+))]
 pub struct MssqlCustomer {
     #[primary_key]
     #[graphql_orm(db_column = "CustomerId", write = false)]
@@ -26,6 +32,9 @@ pub struct MssqlCustomer {
     #[filterable(type = "string")]
     #[sortable]
     pub customer_name: String,
+
+    #[graphql_orm(db_column = "CreditLimit", mssql_money, write = false)]
+    pub credit_limit: Decimal,
 }
 
 impl graphql_orm::graphql::loaders::BatchLoadEntity for MssqlCustomer {
@@ -62,6 +71,9 @@ pub struct MssqlJob {
     #[filterable(type = "string")]
     #[sortable]
     pub job_name: String,
+
+    #[graphql_orm(db_column = "Amount", mssql_money, write = false)]
+    pub amount: Option<Decimal>,
 
     #[graphql_orm(db_column = "IsClosed", write = false)]
     #[filterable(type = "boolean")]
@@ -111,27 +123,32 @@ async fn setup_database(connection_string: &str) -> Result<(), Box<dyn std::erro
 
         CREATE TABLE dbo.GraphqlOrmMssqlCustomers (
             CustomerId BIGINT NOT NULL PRIMARY KEY,
-            CustomerName NVARCHAR(100) NOT NULL
+            CustomerName NVARCHAR(100) NOT NULL,
+            CreditLimit MONEY NOT NULL
         );
 
         CREATE TABLE dbo.GraphqlOrmMssqlJobs (
             JobId BIGINT NOT NULL PRIMARY KEY,
             CustomerId BIGINT NOT NULL,
             JobName NVARCHAR(100) NOT NULL,
+            Amount MONEY NULL,
             IsClosed BIT NOT NULL,
             StartedAt DATE NULL,
             CompletedAt DATETIME2 NULL
         );
 
-        INSERT INTO dbo.GraphqlOrmMssqlCustomers (CustomerId, CustomerName)
-        VALUES (10, N'Acme'), (20, N'Globex');
+        INSERT INTO dbo.GraphqlOrmMssqlCustomers (CustomerId, CustomerName, CreditLimit)
+        VALUES (10, N'Acme', 922337203685477.5807),
+               (20, N'Globex', -922337203685477.5808),
+               (30, N'Zeta', 900719925474.0993),
+               (40, N'Zero', 0.0000);
 
         INSERT INTO dbo.GraphqlOrmMssqlJobs
-            (JobId, CustomerId, JobName, IsClosed, StartedAt, CompletedAt)
+            (JobId, CustomerId, JobName, Amount, IsClosed, StartedAt, CompletedAt)
         VALUES
-            (1, 10, N'Pump repair', 0, '2026-01-03', NULL),
-            (2, 10, N'Pump audit', 0, '2026-01-04', NULL),
-            (3, 20, N'Valve replacement', 1, '2025-12-01', '2025-12-02T08:15:00');
+            (1, 10, N'Pump repair', 0.0001, 0, '2026-01-03', NULL),
+            (2, 10, N'Pump audit', -0.0001, 0, '2026-01-04', NULL),
+            (3, 20, N'Valve replacement', NULL, 1, '2025-12-01', '2025-12-02T08:15:00');
         "#,
     )
     .await
@@ -147,6 +164,19 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
 
     let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(&connection_string).await?;
     let database = graphql_orm::db::Database::new(pool);
+    let projected = MssqlCustomerMoneyProjection::query(&database)
+        .limit(4)
+        .fetch_all()
+        .await?;
+    assert_eq!(projected.len(), 4);
+    let projected = projected
+        .into_iter()
+        .map(|customer| (customer.id, customer.credit_limit.to_string()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(projected[&10], "922337203685477.5807");
+    assert_eq!(projected[&20], "-922337203685477.5808");
+    assert_eq!(projected[&30], "900719925474.0993");
+    assert_eq!(projected[&40], "0.0000");
     let schema = schema_builder(database)
         .data("test-user".to_string())
         .finish();
@@ -169,10 +199,12 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
                         node {
                             id
                             jobName
+                            amount
                             closed
                             startedAt
                             customer {
                                 customerName
+                                creditLimit
                             }
                         }
                     }
@@ -203,6 +235,14 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
         list_json["mssqlJobs"]["edges"][0]["node"]["customer"]["customerName"],
         "Acme"
     );
+    assert_eq!(
+        list_json["mssqlJobs"]["edges"][0]["node"]["amount"],
+        "-0.0001"
+    );
+    assert_eq!(
+        list_json["mssqlJobs"]["edges"][0]["node"]["customer"]["creditLimit"],
+        "922337203685477.5807"
+    );
 
     let single_response = schema
         .execute(
@@ -210,10 +250,12 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
             query {
                 mssqlJob(id: 3) {
                     jobName
+                    amount
                     closed
                     completedAt
                     customer {
                         customerName
+                        creditLimit
                     }
                 }
             }
@@ -228,10 +270,19 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
     let single_json = single_response.data.into_json()?;
     assert_eq!(single_json["mssqlJob"]["jobName"], "Valve replacement");
     assert_eq!(single_json["mssqlJob"]["closed"], true);
+    assert!(single_json["mssqlJob"]["amount"].is_null());
+    assert_eq!(
+        single_json["mssqlJob"]["customer"]["creditLimit"],
+        "-922337203685477.5808"
+    );
     assert_eq!(
         single_json["mssqlJob"]["customer"]["customerName"],
         "Globex"
     );
+
+    let positive = schema.execute("{ mssqlJob(id: 1) { amount } }").await;
+    assert!(positive.errors.is_empty(), "{:?}", positive.errors);
+    assert_eq!(positive.data.into_json()?["mssqlJob"]["amount"], "0.0001");
 
     Ok(())
 }

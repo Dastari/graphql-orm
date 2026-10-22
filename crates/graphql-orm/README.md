@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.57.0 adds exact SQL Server `MONEY` typed reads through
+`#[graphql_orm(mssql_money)]`. The generated read projection casts the native
+column to `DECIMAL(19,4)` under its original alias before decoding; ordinary
+portable decimals retain their precision-18 limit. See the
+[SQL Server reference](../../docs/reference/graphql-orm/mssql.md) and
+[migration guide](../../MIGRATION.md#0560-to-0570-exact-sql-server-money-reads).
+
 Version 0.56.0 adds runtime descriptions, classification and export with a runtime
 semantic catalogue, and an exact runtime decimal kind; see the
 [workspace migration](../../MIGRATION.md#0551-to-0560-runtime-descriptions-and-exact-decimals).

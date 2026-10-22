@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.57.0 adds the SQL Server-only `#[graphql_orm(mssql_money)]` field
+annotation and identifier-safe exact read projections for native `MONEY`.
+It pairs with runtime 0.57.0; see the
+[migration guide](../../MIGRATION.md#0560-to-0570-exact-sql-server-money-reads).
+
 Version 0.56.0 adds runtime descriptions, classification and export with a runtime
 semantic catalogue, and an exact runtime decimal kind; see the
 [workspace migration](../../MIGRATION.md#0551-to-0560-runtime-descriptions-and-exact-decimals).
