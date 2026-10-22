@@ -10,8 +10,24 @@ use graphql_orm::prelude::*;
 use graphql_orm::uuid::Uuid;
 
 /// Read-only authorized session metadata; protected payloads remain private.
-#[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "graphql_orm_ai_sessions", plural = "AiPublicSessions", schema_policy = "external_read_only", auth = "required", read_policy = "ai.public.read", write_policy = "ai.public.never_write", backup = false)]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_sessions",
+    plural = "AiPublicSessions",
+    schema_policy = "external_read_only",
+    auth = "required",
+    read_policy = "ai.public.read",
+    write_policy = "ai.public.never_write",
+    backup = false
+)]
 #[graphql(complex)]
 pub struct AiPublicSession {
     /// Authorized id metadata.
@@ -55,25 +71,62 @@ pub struct AiPublicSession {
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicMessage", from = "id", to = "session_id", multiple, emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicMessage",
+        from = "id",
+        to = "session_id",
+        multiple,
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub messages: Vec<AiPublicMessage>,
     /// Authorized related runs; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicRun", from = "id", to = "session_id", multiple, emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicRun",
+        from = "id",
+        to = "session_id",
+        multiple,
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub runs: Vec<AiPublicRun>,
     /// Authorized related attachments; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicAttachment", from = "id", to = "session_id", multiple, emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicAttachment",
+        from = "id",
+        to = "session_id",
+        multiple,
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub attachments: Vec<AiPublicAttachment>,
 }
 
 /// Read-only authorized message metadata; protected payloads remain private.
-#[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "graphql_orm_ai_messages", plural = "AiPublicMessages", schema_policy = "external_read_only", auth = "required", read_policy = "ai.public.read", write_policy = "ai.public.never_write", backup = false)]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_messages",
+    plural = "AiPublicMessages",
+    schema_policy = "external_read_only",
+    auth = "required",
+    read_policy = "ai.public.read",
+    write_policy = "ai.public.never_write",
+    backup = false
+)]
 #[graphql(complex)]
 pub struct AiPublicMessage {
     /// Authorized id metadata.
@@ -121,19 +174,47 @@ pub struct AiPublicMessage {
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicSession", from = "session_id", to = "id", emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicSession",
+        from = "session_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub session: Option<AiPublicSession>,
     /// Authorized related run; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicRun", from = "run_id", to = "id", emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicRun",
+        from = "run_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub run: Option<AiPublicRun>,
 }
 
 /// Read-only authorized run metadata; protected payloads remain private.
-#[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "graphql_orm_ai_runs", plural = "AiPublicRuns", schema_policy = "external_read_only", auth = "required", read_policy = "ai.public.read", write_policy = "ai.public.never_write", backup = false)]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_runs",
+    plural = "AiPublicRuns",
+    schema_policy = "external_read_only",
+    auth = "required",
+    read_policy = "ai.public.read",
+    write_policy = "ai.public.never_write",
+    backup = false
+)]
 #[graphql(complex)]
 pub struct AiPublicRun {
     /// Authorized id metadata.
@@ -169,19 +250,48 @@ pub struct AiPublicRun {
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicSession", from = "session_id", to = "id", emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicSession",
+        from = "session_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub session: Option<AiPublicSession>,
     /// Authorized related messages; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicMessage", from = "id", to = "run_id", multiple, emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicMessage",
+        from = "id",
+        to = "run_id",
+        multiple,
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub messages: Vec<AiPublicMessage>,
 }
 
 /// Read-only authorized attachment metadata; protected payloads remain private.
-#[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "graphql_orm_ai_attachments", plural = "AiPublicAttachments", schema_policy = "external_read_only", auth = "required", read_policy = "ai.public.read", write_policy = "ai.public.never_write", backup = false)]
+#[derive(
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    Clone,
+    Debug,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_attachments",
+    plural = "AiPublicAttachments",
+    schema_policy = "external_read_only",
+    auth = "required",
+    read_policy = "ai.public.read",
+    write_policy = "ai.public.never_write",
+    backup = false
+)]
 #[graphql(complex)]
 pub struct AiPublicAttachment {
     /// Authorized id metadata.
@@ -245,19 +355,39 @@ pub struct AiPublicAttachment {
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicSession", from = "session_id", to = "id", emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicSession",
+        from = "session_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub session: Option<AiPublicSession>,
     /// Authorized related message; propagation awaits read-only notification support.
     #[graphql(skip)]
     #[serde(skip)]
     #[graphql_orm(non_exportable)]
-    #[relation(target = "AiPublicMessage", from = "message_id", to = "id", emit_fk = false, propagate_change = "none")]
+    #[relation(
+        target = "AiPublicMessage",
+        from = "message_id",
+        to = "id",
+        emit_fk = false,
+        propagate_change = "none"
+    )]
     pub message: Option<AiPublicMessage>,
 }
 
 /// Read-only authorized toolpolicy metadata; protected payloads remain private.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "graphql_orm_ai_tool_policies", plural = "AiPublicToolPolicies", schema_policy = "external_read_only", auth = "required", read_policy = "ai.public.read", write_policy = "ai.public.never_write", backup = false)]
+#[graphql_entity(
+    table = "graphql_orm_ai_tool_policies",
+    plural = "AiPublicToolPolicies",
+    schema_policy = "external_read_only",
+    auth = "required",
+    read_policy = "ai.public.read",
+    write_policy = "ai.public.never_write",
+    backup = false
+)]
 pub struct AiPublicToolPolicy {
     /// Authorized id metadata.
     #[primary_key]
@@ -309,4 +439,3 @@ pub struct AiPublicToolPolicy {
     #[filterable(type = "number")]
     pub updated_at: i64,
 }
-
