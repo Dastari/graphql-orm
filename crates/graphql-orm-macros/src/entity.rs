@@ -2507,7 +2507,9 @@ fn validate_host_timestamp(
     }
     let invalid = |message| syn::Error::new_spanned(field, message);
     if !writable_derive {
-        return Err(invalid("timestamp = \"host\" requires GraphQLEntity or RepositoryEntity"));
+        return Err(invalid(
+            "timestamp = \"host\" requires GraphQLEntity or RepositoryEntity",
+        ));
     }
     let rust_name = field
         .ident
@@ -2972,10 +2974,7 @@ fn generate_entity_impl(
         }
     }
     let schema_only = schema_only_override || entity_meta.schema_only;
-    validate_host_timestamp_fields(
-        fields,
-        !schema_only,
-    )?;
+    validate_host_timestamp_fields(fields, !schema_only)?;
     if schema_only && !entity_meta.projections.is_empty() {
         return Err(syn::Error::new_spanned(
             input,
