@@ -554,6 +554,16 @@ Enable at most one in each group:
 - [Federation entities, keys, and operation roots](federation.md)
 - [Macro crate README](../../../crates/graphql-orm-macros/README.md)
 
+## Generated query shapes
+
+`#[graphql_entity(query_shapes = "list,keyset,scan")]` selects generated query
+shapes for the entity. The available selectors are `single`, `list`, `keyset`,
+`scan`, `search`, and `aggregate`; optional capabilities must be configured.
+Omission preserves all current generated queries. Disabled shapes are absent
+from both SDL and operation metadata. This selection does not alter repository
+APIs, relations, mutations, subscriptions or authorization. See the
+[migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
+
 ## Host-owned timestamps
 
 `#[graphql_orm(timestamp = "host")]` accepts ordinary `i64`, `String` and optional

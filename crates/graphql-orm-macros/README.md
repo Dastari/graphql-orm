@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.60.0 adds explicit generated query-shape selection for controlled
+coexistence with recorded legacy roots. Defaults are unchanged; see the
+[migration guide](../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
+
 Version 0.58.0 extends explicit host-owned timestamps to public entities and String
 values without replacing source timestamps with the mutation clock. See the
 [migration guide](../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps).
