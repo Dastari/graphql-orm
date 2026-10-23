@@ -1354,10 +1354,7 @@ pub(crate) fn generate_graphql_operations(
             ));
         }
     };
-    crate::entity::validate_host_timestamp_fields(
-        fields,
-        crate::entity::has_repository_entity_attribute(&input.attrs),
-    )?;
+    crate::entity::validate_host_timestamp_fields(fields, !entity_meta.schema_only)?;
 
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();

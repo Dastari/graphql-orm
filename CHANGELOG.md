@@ -14,6 +14,12 @@ This file is the authoritative user-facing release chronology. The former
 [release-notes ledger](docs/archive/2026/graphql-orm-release-notes.md) is retained
 for historical context.
 
+## Unreleased
+
+Companion runtime/macros version: **0.58.0**.
+
+- Extend explicit `timestamp = "host"` to public GraphQLEntity fields and ordinary String timestamps (including optional forms). Caller-supplied source timestamps stay unchanged instead of receiving the ORM mutation clock. Existing automatic timestamp behavior remains the default. Policies, hooks and field restrictions still apply.
+
 ## 0.57.0 (2026-10-22)
 
 Companion macros crate: `graphql-orm-macros` **0.57.0**.
