@@ -288,9 +288,9 @@ mod skipped_order {
         sqlx::query(
             "INSERT INTO skipped_cursor_records VALUES ('one','First',17),('two','Second',29)",
         )
-            .execute(db.pool())
-            .await
-            .unwrap();
+        .execute(db.pool())
+        .await
+        .unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let db = db
             .with_read_query_observer(Observe {
@@ -350,9 +350,9 @@ mod private_order {
         sqlx::query(
             "INSERT INTO private_cursor_records VALUES ('one','First',17),('two','Second',29)",
         )
-            .execute(db.pool())
-            .await
-            .unwrap();
+        .execute(db.pool())
+        .await
+        .unwrap();
         let reads = Arc::new(AtomicUsize::new(0));
         let db = db
             .with_read_query_observer(Observe {
