@@ -52,8 +52,22 @@ async fn selected_generated_list_coexists_with_a_differently_shaped_legacy_singl
         .data("test-user".to_string())
         .finish();
     let sdl = schema.sdl();
-    assert!(sdl.contains("shapeRecord(legacyValue: String!): String!"));
-    assert!(!sdl.contains("shapeRecord(id:"));
+    let document = graphql_orm::async_graphql::parser::parse_schema(&sdl).unwrap();
+    let query_name = <QueryRoot as graphql_orm::async_graphql::OutputType>::type_name();
+    let query_fields = document.definitions.iter().find_map(|definition| {
+        use graphql_orm::async_graphql::parser::types::{TypeKind, TypeSystemDefinition};
+        let TypeSystemDefinition::Type(definition) = definition else { return None; };
+        if definition.node.name.node.as_str() != query_name.as_ref() { return None; }
+        let TypeKind::Object(object) = &definition.node.kind else { return None; };
+        Some(&object.fields)
+    }).expect("composed query root");
+    let singleton = query_fields.iter().find(|field| field.node.name.node.as_str() == "shapeRecord")
+        .expect("legacy singleton remains composed");
+    assert_eq!(singleton.node.ty.node.to_string(), "String!");
+    assert_eq!(singleton.node.arguments.len(), 1);
+    let argument = &singleton.node.arguments[0].node;
+    assert_eq!(argument.name.node.as_str(), "legacyValue");
+    assert_eq!(argument.ty.node.to_string(), "String!");
     assert!(sdl.contains("shapeRecords("));
     assert!(sdl.contains("shapeRecordChanged("));
     let response = schema
@@ -86,9 +100,10 @@ fn generated_catalogue_contains_only_selected_query_shapes() {
             .iter()
             .any(|operation| operation.kind() == GraphqlOperationKind::Mutation)
     );
-    assert!(
-        graphql_orm_operation_catalog()
-            .exposed_operations()
-            .any(|operation| operation.field_name() == "shapeRecord")
-    );
+    let legacy = graphql_orm_semantic_catalog().operations.iter()
+        .find(|operation| operation.field_name == "shapeRecord")
+        .expect("described legacy operation is present in the semantic catalogue");
+    assert_eq!(legacy.source, graphql_orm::graphql::orm::GraphqlSemanticOperationSource::Custom);
+    assert_eq!(legacy.arguments.len(), 1);
+    assert_eq!(legacy.arguments[0].graphql_name, "legacyValue");
 }
