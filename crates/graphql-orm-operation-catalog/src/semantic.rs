@@ -1,6 +1,6 @@
 //! Canonical public GraphQL semantic metadata.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -680,6 +680,41 @@ impl GraphqlSemanticCatalog {
         entities: Vec<GraphqlEntitySemanticMetadata>,
         mut operations: Vec<GraphqlSemanticOperationDescriptor>,
     ) -> Result<Self, GraphqlSemanticError> {
+        let exportable_results = exportable_entity_results(&entities);
+        for operation in &mut operations {
+            // Inheritance must never repair a stale or malformed caller descriptor.
+            validate_operation(operation)?;
+            if operation.source != GraphqlSemanticOperationSource::Generated {
+                continue;
+            }
+            let entity = entities
+                .iter()
+                .find(|entity| {
+                    Some(&entity.entity_name) == operation.generated_entity_name.as_ref()
+                })
+                .ok_or_else(|| {
+                    GraphqlSemanticError::new("generated semantic operation entity is absent")
+                })?;
+            let inherited_export = if exportable_results.contains(&entity.entity_name) {
+                GraphqlSemanticExport::Exportable
+            } else {
+                GraphqlSemanticExport::NeverExport
+            };
+            let mut disclosure =
+                operation
+                    .result_disclosure
+                    .unwrap_or(GraphqlSemanticResultDisclosure::new(
+                        entity.default_classification,
+                        inherited_export,
+                    ));
+            disclosure.classification =
+                disclosure.classification.max(entity.default_classification);
+            if inherited_export == GraphqlSemanticExport::NeverExport {
+                disclosure.export = GraphqlSemanticExport::NeverExport;
+            }
+            operation.result_disclosure = Some(disclosure);
+            operation.fingerprint = operation.compute_fingerprint();
+        }
         operations.sort_by(|left, right| {
             (left.kind, left.field_name.as_str()).cmp(&(right.kind, right.field_name.as_str()))
         });
@@ -1154,6 +1189,45 @@ fn validate_entity(entity: &GraphqlEntitySemanticMetadata) -> Result<(), Graphql
         }
     }
     Ok(())
+}
+
+// Root wrappers inherit the entity result boundary. Reverse reachability
+// visits each relationship once; cycles without an exportable field never
+// become exportable merely because their relationship fields are public.
+fn exportable_entity_results(entities: &[GraphqlEntitySemanticMetadata]) -> BTreeSet<String> {
+    let mut exportable = BTreeSet::new();
+    let mut parents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entity in entities {
+        if entity.default_classification == GraphqlSemanticClassification::Secret {
+            continue;
+        }
+        for field in entity.fields.iter().filter(|field| {
+            field.selectable
+                && field.export == GraphqlSemanticExport::Exportable
+                && field.classification != GraphqlSemanticClassification::Secret
+        }) {
+            if let Some(relation) = &field.relationship {
+                parents
+                    .entry(relation.target.clone())
+                    .or_default()
+                    .push(entity.entity_name.clone());
+            } else {
+                // Disclosure is independent of compiler type support. An
+                // unsupported public terminal must still fail readiness,
+                // rather than being silently classified as nonexportable.
+                exportable.insert(entity.entity_name.clone());
+            }
+        }
+    }
+    let mut pending = exportable.iter().cloned().collect::<VecDeque<_>>();
+    while let Some(target) = pending.pop_front() {
+        for parent in parents.get(&target).into_iter().flatten() {
+            if exportable.insert(parent.clone()) {
+                pending.push_back(parent.clone());
+            }
+        }
+    }
+    exportable
 }
 
 fn normalize_composed_entities(

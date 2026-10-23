@@ -454,3 +454,301 @@ mod tests {
         ));
     }
 }
+
+#[cfg(all(test, feature = "sqlite"))]
+mod secret_generated_results {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeSet;
+
+    /// Operator-only provider settings retain their generated GraphQL roots.
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql(rename_fields = "PascalCase")]
+    #[graphql_entity(
+        table = "SecretSettings",
+        plural = "SecretSettingsRows",
+        keyset = "id asc",
+        classification = "secret"
+    )]
+    struct SecretSettings {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[filterable(type = "string")]
+        #[sortable]
+        id: String,
+        secret_value: String,
+    }
+
+    /// Public classification does not override an absolute field export ban.
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql(rename_fields = "PascalCase")]
+    #[graphql_entity(
+        table = "HiddenSettings",
+        plural = "HiddenSettingsRows",
+        keyset = "id asc",
+        classification = "public"
+    )]
+    struct HiddenSettings {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[filterable(type = "string")]
+        #[sortable]
+        #[graphql_orm(non_exportable)]
+        id: String,
+        #[graphql_orm(non_exportable)]
+        hidden_value: String,
+    }
+
+    /// Exportable inventory remains available beside operator-only settings.
+    #[derive(
+        GraphQLEntity,
+        GraphQLRelations,
+        GraphQLOperations,
+        SimpleObject,
+        Clone,
+        Debug,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[graphql(complex, rename_fields = "PascalCase")]
+    #[graphql_entity(
+        table = "PublicInventory",
+        plural = "PublicInventoryRows",
+        keyset = "id asc",
+        classification = "public"
+    )]
+    struct PublicInventory {
+        #[primary_key]
+        #[graphql_orm(auto_generated = false)]
+        #[filterable(type = "string")]
+        #[sortable]
+        id: String,
+        label: String,
+        settings_id: Option<String>,
+        hidden_settings_id: Option<String>,
+        #[graphql_orm(sensitive)]
+        provider_token: String,
+        #[graphql(skip)]
+        #[relation(
+            target = "SecretSettings",
+            from = "settings_id",
+            to = "Id",
+            propagate_change = "none",
+            emit_fk = false
+        )]
+        settings: Option<SecretSettings>,
+        #[graphql(skip)]
+        #[relation(
+            target = "HiddenSettings",
+            from = "hidden_settings_id",
+            to = "Id",
+            propagate_change = "none",
+            emit_fk = false
+        )]
+        hidden_settings: Option<HiddenSettings>,
+    }
+    impl_fixture_batch_loader!(SecretSettings);
+    impl_fixture_batch_loader!(HiddenSettings);
+    schema_roots! {
+        query_custom_ops: [],
+        entities: [PublicInventory, SecretSettings, HiddenSettings],
+        generated_mutations: "none",
+    }
+
+    #[test]
+    fn mixed_generated_roots_preserve_operator_sdl_without_private_provider_capabilities() {
+        let schema = Schema::build(
+            QueryRoot::default(),
+            MutationRoot::default(),
+            SubscriptionRoot::default(),
+        )
+        .finish();
+        let sdl = schema.sdl();
+        let semantic = graphql_orm_semantic_catalog();
+        let composed = GraphqlSemanticCatalog::compose(
+            semantic.entities.clone(),
+            &graphql_orm_operation_catalog(),
+        )
+        .expect("ordinary generated composition");
+        assert_eq!(
+            composed.fingerprint, semantic.fingerprint,
+            "compose and compose_with_custom must share disclosure semantics"
+        );
+        semantic
+            .validate()
+            .expect("complete generated semantics remain valid");
+        for name in ["SecretSettings", "HiddenSettings"] {
+            let operations = semantic
+                .operations
+                .iter()
+                .filter(|operation| operation.generated_entity_name.as_deref() == Some(name))
+                .collect::<Vec<_>>();
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.generated_category
+                        == Some(GeneratedGraphqlOperationCategory::List))
+            );
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.generated_category
+                        == Some(GeneratedGraphqlOperationCategory::KeysetList))
+            );
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.field_name.ends_with("Scan"))
+            );
+            assert!(
+                operations
+                    .iter()
+                    .any(|operation| operation.kind == GraphqlOperationKind::Subscription)
+            );
+            for operation in operations {
+                assert!(
+                    sdl.contains(&operation.field_name),
+                    "operator root disappeared: {}",
+                    operation.field_name
+                );
+                let result = operation
+                    .result_disclosure
+                    .expect("generated result disclosure");
+                assert_eq!(result.export, GraphqlSemanticExport::NeverExport);
+                if name == "SecretSettings" {
+                    assert_eq!(result.classification, GraphqlSemanticClassification::Secret);
+                }
+            }
+        }
+        let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+            "mixed-generated",
+            GraphqlExecutionTargetId::parse("mixed.generated").unwrap(),
+            &sdl,
+            semantic,
+            AiGraphqlQueryCapabilityLimits::default(),
+        )
+        .expect("secret generated roots must not abort public catalogue compilation");
+        let expected = semantic
+            .operations
+            .iter()
+            .filter(|operation| {
+                operation.kind == GraphqlOperationKind::Query
+                    && operation.generated_entity_name.as_deref() == Some("PublicInventory")
+            })
+            .map(|operation| operation.field_name.clone())
+            .collect::<BTreeSet<_>>();
+        let actual = capabilities
+            .capabilities()
+            .map(|capability| capability.field_name().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert_eq!(
+            actual, expected,
+            "all public roots and only public roots must remain"
+        );
+        for capability in capabilities.capabilities() {
+            let arguments = capability.argument_schema();
+            assert!(
+                arguments
+                    .pointer("/properties/relationships/properties/Settings")
+                    .is_none()
+            );
+            assert!(
+                arguments
+                    .pointer("/properties/relationships/properties/HiddenSettings")
+                    .is_none()
+            );
+            assert!(
+                arguments
+                    .pointer("/properties/fields/properties/ProviderToken")
+                    .is_none()
+            );
+            let compact = capability.compact_argument_schema().to_string();
+            for private in [
+                "\"Settings\"",
+                "\"HiddenSettings\"",
+                "SecretValue",
+                "HiddenValue",
+                "ProviderToken",
+            ] {
+                assert!(
+                    !compact.contains(private),
+                    "private projection entered provider schema"
+                );
+            }
+        }
+        let inventory = capabilities
+            .capabilities()
+            .find(|capability| capability.field_name() == "PublicInventory")
+            .unwrap();
+        let public = inventory
+            .compile(
+                json!({"arguments":{"Id":"inventory-one"},"fields":{"Id":true,"Label":true},"relationships":{}}),
+            )
+            .expect("public inventory plan");
+        assert!(!public.descriptor().document.contains("Settings"));
+        assert!(inventory.compile(json!({"arguments":{"Id":"inventory-one"},"fields":{"Id":true},"relationships":{"Settings":{"arguments":{},"fields":{"Id":true},"relationships":{}}}})).is_err(), "provider cannot manually request a hidden relation");
+        assert!(inventory.compile_compact(json!({"arguments":{"Id":"inventory-one"},"selections":["Settings.Id"],"relationshipArguments":{},"relationshipMaximumItems":{}})).is_err(), "compact plans cannot forge a private relation path");
+    }
+    #[test]
+    fn generated_descriptor_composition_tightens_disclosure_without_repairing_stale_input() {
+        let semantic = graphql_orm_semantic_catalog();
+        let source = semantic
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.kind == GraphqlOperationKind::Query
+                    && operation.generated_entity_name.as_deref() == Some("SecretSettings")
+            })
+            .unwrap();
+        let generated = GraphqlSemanticOperationDescriptor::generated(
+            source.kind,
+            source.generated_category.unwrap(),
+            "SecretSettings",
+            source.field_name.clone(),
+            source.description.clone(),
+            source.arguments.clone(),
+            source.result_type.clone(),
+            source.has_authorization_policy,
+        )
+        .unwrap();
+        assert!(generated.result_disclosure.is_none());
+        let composed =
+            GraphqlSemanticCatalog::compose_descriptors(semantic.entities.clone(), [generated])
+                .unwrap();
+        assert_eq!(
+            composed.operations[0].result_disclosure.unwrap().export,
+            GraphqlSemanticExport::NeverExport
+        );
+        let public = semantic
+            .operations
+            .iter()
+            .find(|operation| {
+                operation.kind == GraphqlOperationKind::Query
+                    && operation.generated_entity_name.as_deref() == Some("PublicInventory")
+            })
+            .unwrap()
+            .clone();
+        let tightened = public
+            .clone()
+            .with_result_disclosure(GraphqlSemanticResultDisclosure::fail_safe())
+            .unwrap();
+        let composed =
+            GraphqlSemanticCatalog::compose_descriptors(semantic.entities.clone(), [tightened])
+                .unwrap();
+        assert_eq!(
+            composed.operations[0].result_disclosure.unwrap(),
+            GraphqlSemanticResultDisclosure::fail_safe()
+        );
+        let mut stale = public;
+        stale.field_name = "TamperedRoot".to_owned();
+        assert!(
+            GraphqlSemanticCatalog::compose_descriptors(semantic.entities.clone(), [stale])
+                .is_err()
+        );
+    }
+}

@@ -3181,7 +3181,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -3228,7 +3228,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

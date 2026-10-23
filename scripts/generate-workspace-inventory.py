@@ -101,6 +101,8 @@ def update_document(generated: str, check: bool) -> int:
             "python3 scripts/generate-workspace-inventory.py",
             file=sys.stderr,
         )
+        print("Actual Cargo-derived generated block follows:", file=sys.stderr)
+        print(generated, file=sys.stderr)
         return 1
     OUTPUT.write_text(expected, encoding="utf-8")
     return 0

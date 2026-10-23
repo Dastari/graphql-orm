@@ -31,6 +31,17 @@ Companion runtime/macros version: **0.60.0**.
 - Omit unselected query resolver methods entirely, including their GraphQL-only
   argument attributes, so list-only generated roots compile beside legacy roots.
 
+## Operation catalog 0.4.2 / AI tool profiles 0.16.2 (unreleased)
+
+- Carry entity classification and structural export disposition into generated
+  result metadata, including paged, keyset, scan and Changed wrappers.
+- Keep the complete operator SDL and semantic catalogue while excluding secret
+  or entirely nonexportable results from provider capabilities.
+- Omit provider relationship selections that cannot reach an exportable scalar
+  within their depth and cycle bounds; retain all public capabilities.
+- Add a real generated-schema regression for mixed public inventory and secret
+  settings, absolute field export bans and private relation rejection.
+
 ## 0.57.0 (2026-10-22)
 
 - Reject private configured cursor fields despite explicit read/order surface

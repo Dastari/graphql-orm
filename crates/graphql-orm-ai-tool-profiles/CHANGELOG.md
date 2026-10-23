@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## 0.16.2 (unreleased)
+
+- Compile mixed public/secret generated schemas without exposing private root
+  capabilities or aborting unrelated public capability construction.
+- Omit provider relations that cannot reach an exportable scalar within depth
+  and cycle bounds; preserve operator SDL and all public roots.
+
 ## [0.16.1] - 2026-10-20
 
 ### Added
