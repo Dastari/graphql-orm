@@ -1780,27 +1780,53 @@ fn generate_graphql_operations_unfiltered(
         let rust_name = field_name.to_string();
         let graphql_name =
             graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
-        let source_names = meta.relation_from_fields.clone().unwrap_or_else(|| vec![
-            meta.relation_from.clone().unwrap_or_else(|| pk_field.to_string())
-        ]);
-        let target_fields = meta.relation_to_fields.clone().unwrap_or_else(|| vec![
-            meta.relation_to.clone().unwrap_or_else(|| "id".to_string())
-        ]);
+        let source_names = meta.relation_from_fields.clone().unwrap_or_else(|| {
+            vec![
+                meta.relation_from
+                    .clone()
+                    .unwrap_or_else(|| pk_field.to_string()),
+            ]
+        });
+        let target_fields = meta
+            .relation_to_fields
+            .clone()
+            .unwrap_or_else(|| vec![meta.relation_to.clone().unwrap_or_else(|| "id".to_string())]);
         if source_names.is_empty() || source_names.len() != target_fields.len() {
-            return Err(syn::Error::new_spanned(field, "propagate_change requires equal nonempty from/to tuples"));
+            return Err(syn::Error::new_spanned(
+                field,
+                "propagate_change requires equal nonempty from/to tuples",
+            ));
         }
         let mut source_fields = Vec::new();
         for source in source_names {
             let candidate = fields.iter().find(|candidate| candidate.ident.as_ref().is_some_and(|ident| ident == source.as_str()))
                 .ok_or_else(|| syn::Error::new_spanned(field, format!("Relation '{rust_name}' references unknown propagation source field '{source}'")))?;
             let metadata = parse_field_metadata(candidate)?;
-            if metadata.is_relation || metadata.skip_db || classify_propagation_value_type(&candidate.ty).is_none() {
-                return Err(syn::Error::new_spanned(candidate, "propagate_change source fields must be persisted scalar fields"));
+            if metadata.is_relation
+                || metadata.skip_db
+                || classify_propagation_value_type(&candidate.ty).is_none()
+            {
+                return Err(syn::Error::new_spanned(
+                    candidate,
+                    "propagate_change source fields must be persisted scalar fields",
+                ));
             }
-            source_fields.push((candidate.ident.clone().expect("named field"), candidate.ty.clone(), metadata));
+            source_fields.push((
+                candidate.ident.clone().expect("named field"),
+                candidate.ty.clone(),
+                metadata,
+            ));
         }
-        let target_type = syn::Ident::new(meta.relation_target.as_deref().unwrap_or("Unknown"), field.span());
-        propagated_relations.push(PropagatedRelation { graphql_name, source_fields, target_fields, target_type });
+        let target_type = syn::Ident::new(
+            meta.relation_target.as_deref().unwrap_or("Unknown"),
+            field.span(),
+        );
+        propagated_relations.push(PropagatedRelation {
+            graphql_name,
+            source_fields,
+            target_fields,
+            target_type,
+        });
     }
 
     // Generate type names
