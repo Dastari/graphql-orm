@@ -644,7 +644,7 @@ mod tests {
                 .relations
                 .iter()
                 .any(|relation| {
-                    relation.field_name == "public_metadata"
+                    relation.field_name == "publicMetadata"
                         && relation.target_type == "AiPublicSession"
                         && relation.propagate_change == RelationChangePropagation::Up
                 })
