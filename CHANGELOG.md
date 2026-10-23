@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.62.0**.
+
+- Add typed runtime `orderBy` to generated keyset queries and repository forward/backward reads. Whitelist persisted scalar order fields, append the complete primary-key suffix, bind dynamic cursors to the exact order, authorize all raw cursor fields, and retain existing configured cursor bytes when `orderBy` is absent.
+
+## 0.61.0 (2026-10-23)
+
 Companion runtime/macros version: **0.61.0**.
 
 - Generated single-primary-key `…Changed` subscriptions accept an optional typed `key` argument. Omission retains all authorized changes; a key composes with the action filter. Registration and every delivered event retain current authorization and provenance checks. The generated operation catalogue includes the same argument.

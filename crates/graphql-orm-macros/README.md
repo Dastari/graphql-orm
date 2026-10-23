@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
+The scalar-only input, complete primary-key suffix, order-bound cursor and current
+field authorization are described in the
+[migration guide](../../MIGRATION.md#0610-to-0620-runtime-keyset-ordering).
+
 Version 0.61.0 adds an optional typed `key` argument to generated single-primary-key
 change subscriptions, preserving current authorization and action filtering. See the
 [migration guide](../../MIGRATION.md#0600-to-0610-subscription-primary-key-selection).

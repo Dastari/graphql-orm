@@ -362,6 +362,7 @@ pub(crate) fn strip_operations_graphql_surface(
     ]);
     let create_name = format!("Create{entity_name}Input");
     let update_name = format!("Update{entity_name}Input");
+    let keyset_order_name = format!("{entity_name}KeysetOrderByInput");
     let key_name = format!("{entity_name}Key");
     let changed_event_name = format!("{entity_name}ChangedEvent");
     let sensitive = sensitive_fields(input)?;
@@ -389,6 +390,10 @@ pub(crate) fn strip_operations_graphql_surface(
         Item::Struct(item_struct) if removed.contains(&item_struct.ident.to_string()) => false,
         Item::Struct(item_struct) if item_struct.ident == changed_event_name => {
             sanitize_plain_struct(item_struct, false, false);
+            true
+        }
+        Item::Struct(item_struct) if item_struct.ident == keyset_order_name => {
+            sanitize_plain_struct(item_struct, true, false);
             true
         }
         Item::Struct(item_struct)
@@ -737,6 +742,40 @@ mod aggregate_tests {
             assert!(rendered.contains("GroupedAggregateQuery"));
             assert!(!contains_generated_graphql_impl(&tokens));
         }
+    }
+
+    #[test]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    fn repository_runtime_keyset_order_keeps_plain_input_and_repository_methods() {
+        let mut input = entity(false);
+        input
+            .attrs
+            .push(parse_quote!(#[repository_entity(keyset = "amount asc, id asc")]));
+        let generated = crate::operations::generate_graphql_operations(&input)
+            .expect("generate runtime order operations");
+        let plain = strip_operations_graphql_surface(&input, generated)
+            .expect("strip runtime order GraphQL surface");
+        let rendered = plain.to_string();
+        assert!(rendered.contains("PlainAggregateKeysetOrderByInput"));
+        assert!(rendered.contains("keyset_page_ordered"));
+        assert!(!contains_generated_graphql_impl(&plain));
+        let file = syn::parse2::<syn::File>(plain).expect("plain generated Rust");
+        let input = file
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Struct(item) if item.ident == "PlainAggregateKeysetOrderByInput" => {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .expect("repository input remains");
+        assert!(
+            input
+                .attrs
+                .iter()
+                .all(|attribute| !attribute.path().is_ident("graphql"))
+        );
     }
 
     #[test]
