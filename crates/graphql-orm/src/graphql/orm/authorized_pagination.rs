@@ -387,18 +387,29 @@ where
         row: Option<&T>,
     ) -> async_graphql::Result<()> {
         for part in order {
-            let field = T::KEYSET_CURSOR_FIELDS.iter().find(|field| field.column == part.column)
+            let field = T::KEYSET_CURSOR_FIELDS
+                .iter()
+                .find(|field| field.column == part.column)
                 .ok_or_else(invalid)?;
-            let (api_name, policy, graphql_readable) = (field.api_name, field.read_policy, field.graphql_readable);
+            let (api_name, policy, graphql_readable) =
+                (field.api_name, field.read_policy, field.graphql_readable);
             let record = row.map(|row| row as &(dyn std::any::Any + Send + Sync));
             if let Some(ctx) = ctx {
                 if !graphql_readable {
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
-                db.ensure_readable_field(ctx, T::entity_name(), api_name, policy, record).await?;
+                db.ensure_readable_field(ctx, T::entity_name(), api_name, policy, record)
+                    .await?;
             } else {
-                db.ensure_repository_readable_field(None, T::entity_name(), api_name, policy, record)
-                    .await.map_err(|error| error.into_graphql_error())?;
+                db.ensure_repository_readable_field(
+                    None,
+                    T::entity_name(),
+                    api_name,
+                    policy,
+                    record,
+                )
+                .await
+                .map_err(|error| error.into_graphql_error())?;
             }
         }
         Ok(())
