@@ -23,6 +23,27 @@ Each dynamic order appends missing primary-key columns in ascending order. NULL 
 
 Dynamic cursors bind the entity, exact ordered columns, directions and null placement. A cursor for a different order or the configured default is rejected. Omit `orderBy` to retain the configured order and existing cursor bytes. Repository callers may use `keyset_page_ordered` or `keyset_connection_page_ordered`; existing methods stay unchanged. Every composite primary-key component participates in configured and runtime validation. No schema or data migration is required.
 
+## 0.61.0 to 0.62.0: propagation relation tuples
+
+Upgrade runtime/macros together. `propagate_change = "up"` now resolves the
+complete declared `from`/`to` arrays, including scalar-primary-key entities
+related by a multi-column natural key. It no longer substitutes the child primary
+key or assumes the target relation column is its primary key. Scalar relations
+use the same mapped path. Every target must fit the remaining bounded fanout;
+a larger fanout fails the mutation so it cannot silently notify a partial set.
+
+A generated witness retains only typed source keys, target identity and the
+complete relation mapping. At each subscriber release, current source authority,
+source key and relation-field authority, every tuple component and the target
+are revalidated. A relation changed since commit suppresses stale delivery.
+Post-commit, rollback, provenance-hop and event budgets remain enforced. The
+legacy hidden scalar witness constructor remains compatible with existing hosts.
+
+This is a focused part of issue #191. Composite-primary-key Changed generation
+and read-only trusted projection subscriptions remain separate unfinished work;
+this change does not complete #191, #184 or draft #189. No data/schema migration
+or downstream pin change is included.
+
 ## 0.60.0 to 0.61.0: subscription primary-key selection
 
 Upgrade runtime/macros together. Generated single-key subscriptions gain an optional `key` argument, using the entity primary key scalar and configured argument casing. Existing operations remain valid. For example, `recordChanged(key: "…", filter: {actions: [UPDATED]})` watches one row. Key selection narrows notifications only: it never grants row, field, scope, assurance, deleted-preimage or propagated-source authority. Refresh schema/catalogue snapshots. Composite-key subscriptions remain unsupported by this change. No data or schema migration is required.

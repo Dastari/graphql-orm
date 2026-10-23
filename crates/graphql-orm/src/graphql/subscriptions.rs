@@ -24,6 +24,11 @@ type SourceCheck<B> = for<'a, 'ctx> fn(
     &'static str,
 ) -> BoxFuture<'a, async_graphql::Result<()>>;
 
+type RelationSourceCheck<B> = for<'a, 'ctx> fn(
+    &'a Database<B>, &'a Context<'ctx>, &'a [SqlValue], &'a [SqlValue],
+    &'static str, &'a [(&'static str, &'static str)],
+) -> BoxFuture<'a, async_graphql::Result<()>>;
+
 /// Server-only source identity. It retains typed keys, never source snapshots.
 #[doc(hidden)]
 #[derive(Clone)]
@@ -33,6 +38,8 @@ pub struct SubscriptionEventSource<B: OrmBackend = DefaultBackend> {
     keys: Vec<SqlValue>,
     relation: &'static str,
     source_field: &'static str,
+    relation_fields: Vec<(&'static str, &'static str)>,
+    relation_check: Option<RelationSourceCheck<B>>,
     check: SourceCheck<B>,
 }
 impl<B: OrmBackend> std::fmt::Debug for SubscriptionEventSource<B> {
@@ -57,8 +64,23 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
             keys,
             relation,
             source_field,
+            relation_fields: Vec::new(),
+            relation_check: None,
             check: check_source::<T, B>,
         }
+    }
+
+    /// Bind an upward relation to its complete source/target column mapping.
+    /// Both types and field names come from generated server code, never clients.
+    pub fn new_relation<S, T>(keys: Vec<SqlValue>, relation: &'static str, fields: Vec<(&'static str, &'static str)>) -> Self
+    where
+        S: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+        T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    {
+        let mut source = Self::new::<S>(keys, relation, "");
+        source.relation_fields = fields;
+        source.relation_check = Some(check_relation_source::<S, T, B>);
+        source
     }
 }
 
@@ -133,6 +155,9 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
                 .sources
                 .get(index + 1)
                 .map_or(self.keys.as_slice(), |next| next.keys.as_slice());
+            if let Some(check) = source.relation_check {
+                check(db, ctx, &source.keys, target_keys, source.relation, &source.relation_fields).await?;
+            } else {
             (source.check)(
                 db,
                 ctx,
@@ -142,6 +167,7 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
                 source.source_field,
             )
             .await?;
+            }
         }
         Ok(())
     }
@@ -170,7 +196,7 @@ async fn authorize_subscription_row_matching<T, B>(
     ctx: &Context<'_>,
     keys: &[SqlValue],
     deleted_preimage: Option<&T>,
-    link: Option<(&str, &SqlValue)>,
+    link: Option<(String, Vec<SqlValue>)>,
 ) -> async_graphql::Result<Option<T>>
 where
     B: OrmBackend,
@@ -195,11 +221,8 @@ where
         // PRIMARY_KEYS are trusted backend-rendered column identities.
         query = query.where_clause(&format!("{column} = ?"), value.clone());
     }
-    if let Some((column, value)) = link {
-        query = query.where_clause(
-            &format!("{} = ?", B::DIALECT.quote_identifier_path(column)),
-            value.clone(),
-        );
+    if let Some((clause, values)) = link {
+        query = query.where_values(&clause, values);
     }
     query = query
         .with_read_visibility(&visibility)?
@@ -325,7 +348,7 @@ where
             ctx,
             keys,
             None,
-            Some((column.name, &target_keys[0])),
+            Some((format!("{} = ?", B::DIALECT.quote_identifier_path(column.name)), vec![target_keys[0].clone()])) ,
         )
         .await?
         .ok_or_else(|| OrmPublicError::forbidden().into_graphql_error())?;
@@ -333,6 +356,74 @@ where
         check_field::<T, B>(db, ctx, &row, column.api_name).await?;
         check_field::<T, B>(db, ctx, &row, relation).await
     })
+}
+
+fn check_relation_source<'a, 'ctx, S, T, B>(
+    db: &'a Database<B>, ctx: &'a Context<'ctx>, keys: &'a [SqlValue],
+    target_keys: &'a [SqlValue], relation: &'static str,
+    fields: &'a [(&'static str, &'static str)],
+) -> BoxFuture<'a, async_graphql::Result<()>>
+where
+    B: OrmBackend,
+    S: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+{
+    Box::pin(async move {
+        let denied = || OrmPublicError::forbidden().into_graphql_error();
+        if fields.is_empty() || fields.len() > S::columns().len()
+            || target_keys.len() != T::PRIMARY_KEYS.len() || target_keys.is_empty() { return Err(denied()); }
+        let mut predicates = T::PRIMARY_KEYS.iter().map(|column| format!("__gom_propagation_target.{column} = ?")).collect::<Vec<_>>();
+        let mut source_fields = Vec::new();
+        let mut target_fields = Vec::new();
+        for (source, target) in fields {
+            let source = S::columns().iter().find(|column| column.rust_name == *source).ok_or_else(denied)?;
+            let target = T::columns().iter().find(|column| column.rust_name == *target).ok_or_else(denied)?;
+            predicates.push(format!("__gom_propagation_target.{} = {}.{}",
+                B::DIALECT.quote_identifier_path(target.name),
+                B::DIALECT.quote_identifier_path(S::TABLE_NAME),
+                B::DIALECT.quote_identifier_path(source.name)));
+            source_fields.push(source.api_name);
+            target_fields.push(target.api_name);
+        }
+        let clause = format!("EXISTS (SELECT 1 FROM {} AS __gom_propagation_target WHERE {})",
+            B::DIALECT.quote_identifier_path(T::TABLE_NAME), predicates.join(" AND "));
+        let row = authorize_subscription_row_matching::<S, B>(db, ctx, keys, None, Some((clause, target_keys.to_vec()))).await?.ok_or_else(denied)?;
+        authorize_subscription_keys::<S, B>(db, ctx, &row).await?;
+        for field in source_fields { check_field::<S, B>(db, ctx, &row, field).await?; }
+        check_field::<S, B>(db, ctx, &row, relation).await?;
+        let target = authorize_subscription_row::<T, B>(db, ctx, target_keys, None).await?.ok_or_else(denied)?;
+        authorize_subscription_keys::<T, B>(db, ctx, &target).await?;
+        for field in target_fields { check_field::<T, B>(db, ctx, &target, field).await?; }
+        Ok(())
+    })
+}
+
+/// Read bounded propagation targets on the same pinned mutation transaction.
+/// This grants no release authority: every hop is revalidated for each subscriber.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub async fn propagation_targets<T, B>(
+    context: &mut crate::graphql::orm::MutationContext<'_, B>,
+    fields: &[&str], values: &[SqlValue], remaining: usize,
+) -> crate::Result<Vec<T>>
+where
+    B: crate::graphql::orm::WriteBackend,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+{
+    if fields.is_empty() || fields.len() != values.len() || remaining == 0 || remaining > MAX_SUBSCRIPTION_PROPAGATION_EVENTS {
+        return Err(sqlx::Error::Protocol("invalid generated propagation tuple/budget".into()));
+    }
+    let mut query = EntityQuery::<T, B>::new();
+    for (field, value) in fields.iter().zip(values) {
+        let column = T::columns().iter().find(|column| column.rust_name == *field)
+            .ok_or_else(|| sqlx::Error::Protocol("unknown generated propagation target column".into()))?;
+        query = query.where_clause(&format!("{} = ?", B::DIALECT.quote_identifier_path(column.name)), value.clone());
+    }
+    // One lookahead detects a fanout that cannot be represented completely.
+    let rows = query.paginate(&crate::graphql::orm::PageInput { limit: Some(remaining.min(MAX_SUBSCRIPTION_PROPAGATION_EVENTS) as i64 + 1), offset: Some(0) })
+        .fetch_all_in_transaction(context).await?;
+    if rows.len() > remaining { return Err(sqlx::Error::Protocol("generated propagation target budget exceeded".into())); }
+    Ok(rows)
 }
 
 fn unsupported_subscription_selection() -> async_graphql::Error {
