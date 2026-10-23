@@ -10,11 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
-The current workspace selects published Auth `v0.22.1` at
-`86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
-correction. Direct Auth consumers must select the same tag and refresh their
-locks to one source; see the
-[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+The current workspace selects merged Auth 0.23.0 at reviewed revision
+`158c79e27117adc5a95d01d58c39c39fd44e6a1a` (no release tag yet). Direct Auth
+consumers must select the same revision and refresh their locks to one source;
+see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
 Version `0.110.1` aligns with ORM/macros 0.69.0 (`RuntimeRelation::join`).
 There is no AI API or schema change.
