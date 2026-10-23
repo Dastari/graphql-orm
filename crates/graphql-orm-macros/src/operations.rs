@@ -3554,6 +3554,7 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     } else {
         quote! {
+            /// Finds one authorized entity by its primary key through a database handle.
             #[allow(clippy::ptr_arg)]
             pub async fn find_by_id(
                 db: &::graphql_orm::db::Database<#backend_marker>,
@@ -3567,6 +3568,7 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     } else {
         quote! {
+            /// Gets one entity by its primary key through a backing pool.
             pub async fn get(pool: &#pool_type, id: &#pk_type_ty) -> ::graphql_orm::Result<Option<Self>> {
                 Self::get_by_key(pool, id).await
             }
@@ -3575,6 +3577,7 @@ fn generate_graphql_operations_unfiltered(
     let read_repository_key_methods = quote! {
         #find_by_id_method
 
+        /// Finds one authorized entity by its complete primary key.
         pub async fn find_by_key(
             db: &::graphql_orm::db::Database<#backend_marker>,
             key: &#key_type,
@@ -3618,6 +3621,7 @@ fn generate_graphql_operations_unfiltered(
 
         #get_by_id_method
 
+        /// Gets one entity by its complete primary key through a backing pool.
         pub async fn get_by_key(pool: &#pool_type, key: &#key_type) -> ::graphql_orm::Result<Option<Self>> {
             ::graphql_orm::graphql::orm::EntityQuery::<Self, #backend_marker>::new()
                 .where_values(&Self::__gom_key_where_clause(), Self::__gom_key_values(key))
@@ -3630,6 +3634,7 @@ fn generate_graphql_operations_unfiltered(
         && backend != BackendKind::Mssql
     {
         quote! {
+            /// Empty mutation root for read-only or composite-key entities.
             #[derive(Default)]
             pub struct #mutations_struct;
 
