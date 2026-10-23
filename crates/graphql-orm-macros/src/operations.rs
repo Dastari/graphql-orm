@@ -1534,12 +1534,6 @@ pub(crate) fn generate_graphql_operations(
         }
     }
     let keyset_parts = if let Some(config) = entity_meta.keyset.as_deref() {
-        if has_composite_primary_key {
-            return Err(syn::Error::new_spanned(
-                struct_name,
-                "keyset pagination currently requires a single-column primary key",
-            ));
-        }
         let mut parts = Vec::new();
         for raw in config.split(',') {
             let tokens = raw.split_whitespace().collect::<Vec<_>>();
@@ -1597,15 +1591,31 @@ pub(crate) fn generate_graphql_operations(
                 nulls_first,
             ));
         }
-        if parts.is_empty()
-            || parts
-                .last()
-                .is_none_or(|(field, _, _, _, _)| field != &pk_field)
-        {
+        let complete_key_suffix = parts.len() >= primary_key_fields.len()
+            && parts[parts.len().saturating_sub(primary_key_fields.len())..]
+                .iter()
+                .zip(&primary_key_fields)
+                .all(|((field, _, _, _, _), key)| field == &key.field_name);
+        if !complete_key_suffix {
             return Err(syn::Error::new_spanned(
                 struct_name,
-                "keyset order must end with the primary key as a unique tiebreaker",
+                if has_composite_primary_key {
+                    "keyset order must end with every primary-key field in declaration order as a unique tiebreaker"
+                } else {
+                    "keyset order must end with the primary key as a unique tiebreaker"
+                },
             ));
+        }
+        if has_composite_primary_key {
+            let mut ordered_fields = std::collections::BTreeSet::new();
+            for (field, _, _, _, _) in &parts {
+                if !ordered_fields.insert(field.to_string()) {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        "composite keyset order must not repeat a field",
+                    ));
+                }
+            }
         }
         Some(parts)
     } else {
@@ -4263,9 +4273,34 @@ pub(crate) fn generate_graphql_operations(
     let keyset_generated = if let Some(parts) = &keyset_parts {
         let mut order_tokens = Vec::new();
         let mut cursor_tokens = Vec::new();
+        let mut cursor_field_metadata = Vec::new();
         let mut fingerprint_parts = Vec::new();
         for (field, ty, column, ascending, nulls_first) in parts {
             let quoted_column = backend_quote_identifier_path(backend, column);
+            let source = fields
+                .iter()
+                .find(|candidate| candidate.ident.as_ref() == Some(field))
+                .expect("keyset field was resolved during parsing");
+            let meta = parse_field_metadata(source)?;
+            let api_name = graphql_field_name(
+                &meta,
+                &field.to_string(),
+                graphql_rename_fields,
+                serde_rename_all,
+            );
+            let graphql_readable = meta.read
+                && !meta.is_private
+                && !meta.input_only
+                && !meta.graphql_skip
+                && meta.transform_read.is_none()
+                && meta.transform_write.is_none();
+            let policy = match meta.read_policy.as_deref() {
+                Some(policy) => quote! { Some(#policy) },
+                None => quote! { None },
+            };
+            cursor_field_metadata.push(quote! { ::graphql_orm::graphql::orm::KeysetCursorField {
+                column: #quoted_column, api_name: #api_name, read_policy: #policy, graphql_readable: #graphql_readable,
+            } });
             let direction = if *ascending {
                 quote! { ::graphql_orm::graphql::orm::KeysetOrderColumn::asc(#quoted_column) }
             } else {
@@ -4333,6 +4368,7 @@ pub(crate) fn generate_graphql_operations(
                 }
 
                 impl ::graphql_orm::graphql::orm::AuthorizedKeysetEntity for #struct_name {
+                    const KEYSET_CURSOR_FIELDS: &'static [::graphql_orm::graphql::orm::KeysetCursorField] = &[#(#cursor_field_metadata),*];
                     const KEYSET_ORDER: &'static [::graphql_orm::graphql::orm::KeysetOrderColumn] = &[#(#order_tokens),*];
                     const KEYSET_FINGERPRINT: &'static str = #fingerprint;
                     fn keyset_values(&self) -> Vec<::graphql_orm::graphql::pagination::KeysetValue> {
@@ -9320,4 +9356,56 @@ pub(crate) fn generate_graphql_operations(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod composite_keyset_tests {
+    use super::generate_graphql_operations;
+
+    fn entity(order: &str) -> syn::DeriveInput {
+        let order = syn::LitStr::new(order, proc_macro2::Span::call_site());
+        syn::parse_quote! {
+            #[graphql_entity(table = "composite_keyset_fixture", keyset = #order)]
+            struct CompositeKeysetFixture {
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                partition_key: String,
+                #[primary_key]
+                #[graphql_orm(auto_generated = false)]
+                item_no: i64,
+                rank: i64,
+            }
+        }
+    }
+
+    #[test]
+    fn complete_tuple_is_required_as_the_unique_order_suffix() {
+        assert!(
+            generate_graphql_operations(&entity("rank desc, partition_key asc, item_no asc"))
+                .is_ok()
+        );
+        for order in [
+            "rank desc, partition_key asc",
+            "rank desc, item_no asc",
+            "rank desc, item_no asc, partition_key asc",
+        ] {
+            let error = generate_graphql_operations(&entity(order)).unwrap_err();
+            assert!(
+                error.to_string().contains("every primary-key field"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_composite_order_fields_are_rejected() {
+        let error = generate_graphql_operations(&entity(
+            "partition_key asc, rank desc, partition_key asc, item_no asc",
+        ))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("must not repeat a field"),
+            "{error}"
+        );
+    }
 }

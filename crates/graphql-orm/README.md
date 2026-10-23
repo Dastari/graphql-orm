@@ -14,6 +14,19 @@ Version 0.58.0 extends explicit host-owned timestamps to public entities and Str
 values without replacing source timestamps with the mutation clock. See the
 [migration guide](../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps).
 
+GraphQL-private configured ordering fields remain unavailable even when
+`read = true` or `order = true` is explicitly set. Repository field policy and
+permitted repository pagination retain their independent behavior.
+
+Configured keyset cursors require current read authority for every order field
+and complete primary-key suffix, even for cursor-only selections. Checks run
+before queries and again against returned rows. Private, skipped or transformed
+GraphQL order fields fail closed; repository field policy remains independent.
+
+Version 0.59.0 supports static keyset reads with a complete composite-primary-key
+tiebreaker tuple. Schema ownership and write posture are unchanged. See the
+[migration guide](../../MIGRATION.md#0580-to-0590-composite-primary-key-keysets).
+
 Version 0.57.0 adds exact SQL Server `MONEY` typed reads through
 `#[graphql_orm(mssql_money)]`. The generated read projection casts the native
 column to `DECIMAL(19,4)` under its original alias before decoding; ordinary

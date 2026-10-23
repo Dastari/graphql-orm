@@ -19,6 +19,21 @@ published to crates.io.
 
 Upgrade runtime/macros together. Public GraphQLEntity and RepositoryEntity timestamp fields may explicitly use `#[graphql_orm(timestamp = "host")]` on ordinary `i64`, `String`, or optional forms whose Rust or physical name is `created_at` or `updated_at`. For an external source timestamp mapped to physical `updated_at`, opt in on the mapped field to prevent automatic epoch assignment. Values are bound unchanged; String content is caller-owned and is not parsed or normalized as a date. Existing automatic behavior remains unchanged without the annotation. The annotation does not change stored type/default metadata; conventional Rust names still need `default = false` to suppress their implicit default when appropriate. Schema-only, generated/version/key/relation fields and date/JSON/boolean adapters remain rejected. No data or schema migration is required merely to opt in; preserve field/row authorization and distinguish source observation time from collection and mutation clocks.
 
+## 0.58.0 to 0.59.0: composite-primary-key keysets
+
+Explicit `read = true` or `order = true` never overrides a private configured
+GraphQL cursor field. Keyset and scan queries reject it before the first read;
+trusted repository pagination retains its independent field policy.
+
+Configured cursors carry raw ordering values, so their fields now require current
+read authority even when clients select only `cursor`. GraphQL rejects private,
+skipped and transformed cursor fields. Repository policies remain independent.
+Manual `AuthorizedKeysetEntity` implementations must supply `KEYSET_CURSOR_FIELDS`;
+missing field metadata fails closed. Generated derives populate it automatically.
+Ordering, fingerprints and cursor bytes remain unchanged for authorized reads.
+
+Upgrade runtime/macros together. Composite-key entities may now declare `keyset = "rank desc, partition_key asc, item_no asc"` when `(partition_key, item_no)` is the primary key in declaration order. Every primary-key member must appear as the final unique tiebreaker tuple; order fields may not repeat. The generated keyset and scan read surfaces use the existing bounded, authorized cursor implementation. Existing valid single-key orders/cursors are unchanged. No generated GraphQL writes or subscriptions are enabled for composite-key entities by this change. No data or schema migration is required, and an externally managed source stays externally managed.
+
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one
