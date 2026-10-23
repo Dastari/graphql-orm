@@ -15,9 +15,9 @@ The scalar-only input, complete primary-key suffix, order-bound cursor and curre
 field authorization are described in the
 [migration guide](../../MIGRATION.md#0610-to-0620-runtime-keyset-ordering).
 
-Version 0.62.0 resolves generated upward propagation using complete relation
+Version 0.63.0 resolves generated upward propagation using complete relation
 from/to tuples and revalidates the current mapping at release. See the
-[migration guide](../../MIGRATION.md#0610-to-0620-propagation-relation-tuples).
+[migration guide](../../MIGRATION.md#0620-to-0630-propagation-relation-tuples).
 
 Version 0.61.0 adds an optional typed `key` argument to generated single-primary-key
 change subscriptions, preserving current authorization and action filtering. See the

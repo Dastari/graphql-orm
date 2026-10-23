@@ -23,7 +23,7 @@ Each dynamic order appends missing primary-key columns in ascending order. NULL 
 
 Dynamic cursors bind the entity, exact ordered columns, directions and null placement. A cursor for a different order or the configured default is rejected. Omit `orderBy` to retain the configured order and existing cursor bytes. Repository callers may use `keyset_page_ordered` or `keyset_connection_page_ordered`; existing methods stay unchanged. Every composite primary-key component participates in configured and runtime validation. No schema or data migration is required.
 
-## 0.61.0 to 0.62.0: propagation relation tuples
+## 0.62.0 to 0.63.0: propagation relation tuples
 
 Upgrade runtime/macros together. `propagate_change = "up"` now resolves the
 complete declared `from`/`to` arrays, including scalar-primary-key entities

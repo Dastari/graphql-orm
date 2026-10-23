@@ -16,12 +16,17 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.62.0**.
+Companion runtime/macros version: **0.63.0**.
 
-- Add typed runtime `orderBy` to generated keyset queries and repository forward/backward reads. Whitelist persisted scalar order fields, append the complete primary-key suffix, bind dynamic cursors to the exact order, authorize all raw cursor fields, and retain existing configured cursor bytes when `orderBy` is absent.
 - Seed propagated-event cycle detection with the complete typed target identity and origin so cycles cannot re-emit the direct source.
 - Resolve generated upward propagation using all declared relation from/to components, independent of either entity's primary key.
 - Revalidate source/target tuple witnesses and current relation-field authority before subscriber delivery; reject fanout that exceeds the remaining budget.
+
+## 0.62.0 (unreleased)
+
+Companion runtime/macros version: **0.62.0**.
+
+- Add typed runtime `orderBy` to generated keyset queries and repository forward/backward reads. Whitelist persisted scalar order fields, append the complete primary-key suffix, bind dynamic cursors to the exact order, authorize all raw cursor fields, and retain existing configured cursor bytes when `orderBy` is absent.
 
 ## 0.61.0 (2026-10-23)
 
