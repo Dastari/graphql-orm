@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.61.0**.
+
+- Generated single-primary-key `…Changed` subscriptions accept an optional typed `key` argument. Omission retains all authorized changes; a key composes with the action filter. Registration and every delivered event retain current authorization and provenance checks. The generated operation catalogue includes the same argument.
+
+## 0.60.0 (unreleased)
+
 Companion runtime/macros version: **0.60.0**.
 
 - Add explicit `query_shapes = "list,keyset,scan"` selection on generated entities. Omitted query shapes disappear from both the GraphQL root and operation catalogue, allowing a host to retain a differently shaped legacy singleton during migration. Default generation remains unchanged; repository APIs, relations, mutations and subscriptions are unaffected.

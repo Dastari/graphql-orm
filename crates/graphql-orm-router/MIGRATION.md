@@ -10,6 +10,12 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.6.4 to 0.6.5: test startup diagnostics
+
+No application, protocol or data migration is required. The package identity
+records a test-only diagnostic correction. No executable is distributed by this
+source change; binary publication retains its separate approval boundary.
+
 ## 0.6.3 to 0.6.4: TLS certificate distrust patches
 
 Refresh the consuming lockfile to `rustls-webpki` 0.103.16 or later in its

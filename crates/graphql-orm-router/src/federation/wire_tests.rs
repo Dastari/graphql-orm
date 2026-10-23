@@ -2360,7 +2360,7 @@ impl TestRouter {
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("router child should start");
         Self {
@@ -2424,7 +2424,7 @@ impl TestRouter {
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("static router child should start");
         Self {
@@ -2523,7 +2523,7 @@ impl TestRouter {
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("administrative router child should start");
         (
@@ -2561,7 +2561,7 @@ impl TestRouter {
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::inherit())
             .spawn()
             .expect("authenticated router child should start");
         Self {

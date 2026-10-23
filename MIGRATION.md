@@ -15,6 +15,10 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.60.0 to 0.61.0: subscription primary-key selection
+
+Upgrade runtime/macros together. Generated single-key subscriptions gain an optional `key` argument, using the entity primary key scalar and configured argument casing. Existing operations remain valid. For example, `recordChanged(key: "…", filter: {actions: [UPDATED]})` watches one row. Key selection narrows notifications only: it never grants row, field, scope, assurance, deleted-preimage or propagated-source authority. Refresh schema/catalogue snapshots. Composite-key subscriptions remain unsupported by this change. No data or schema migration is required.
+
 ## 0.59.0 to 0.60.0: generated query-shape selection
 
 Upgrade runtime/macros together. `#[graphql_entity(query_shapes = "list,keyset,scan")]` exposes only those generated query shapes. Supported selectors are `single`, `list`, `keyset`, `scan`, `search` and `aggregate`. The list must be nonempty and contain no duplicates; selected optional capabilities must already be configured. An omitted selector retains all existing generated queries. Disabled shapes are absent from both SDL and operation/semantic metadata; repository methods and entity relations remain available. Mutation and subscription exposure stay independent. This permits a recorded legacy root to coexist while its generated same-name query is deliberately omitted; it grants no authorization and does not make the legacy root an accepted permanent exception. No data or schema migration is required.
@@ -52,7 +56,7 @@ Regenerate derived capability manifests and semantic/router descriptors from
 the actual finished SDL and semantic catalogue because fingerprints change.
 Existing resolver, field, row and provider-egress authorization remains
 independent. GraphQL SDL, stored data and schema ownership are unchanged; no
-DDL or data migration is needed. Runtime/macros package versions stay 0.60.0.
+DDL or data migration is needed. This companion patch does not itself change runtime/macros; use their paired versions from the selected workspace tag.
 
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 

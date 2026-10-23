@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## 0.6.5 (unreleased)
+
+- Forward spawned federation wire-test router stderr to hosted CI, so an early
+  child exit exposes its cause. This changes test diagnostics only; production
+  routing, authorization, SDL and persisted data are unchanged.
+
 ## 0.6.4 - 2026-10-22
 
 - Refresh the workspace and affected fixture locks to published
