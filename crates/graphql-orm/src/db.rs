@@ -18,6 +18,55 @@ struct EventSenders {
     senders: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
 }
 
+struct RequiredPolicyBindings<B: OrmBackend> {
+    required: Vec<&'static str>,
+    delegate: Option<Arc<dyn crate::graphql::orm::EntityPolicy<B>>>,
+}
+impl<B: OrmBackend> crate::graphql::orm::EntityPolicy<B> for RequiredPolicyBindings<B> {
+    fn supports_policy_binding(&self, binding: &str) -> bool {
+        self.delegate
+            .as_ref()
+            .is_some_and(|policy| policy.supports_policy_binding(binding))
+    }
+    fn can_access_entity<'a>(
+        &'a self,
+        context: Option<&'a async_graphql::Context<'_>>,
+        database: &'a Database<B>,
+        entity: &'static str,
+        policy_key: Option<&'static str>,
+        kind: crate::graphql::orm::EntityAccessKind,
+        surface: crate::graphql::orm::EntityAccessSurface,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            let Some(delegate) = &self.delegate else {
+                return Err(
+                    OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .into_graphql_error(),
+                );
+            };
+            for binding in &self.required {
+                if !delegate.supports_policy_binding(binding)
+                    || !database
+                        .row_policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.supports_policy_binding(binding))
+                    || !database
+                        .field_policy
+                        .as_ref()
+                        .is_some_and(|policy| policy.supports_policy_binding(binding))
+                {
+                    return Err(OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
+                        .with_internal("required entity, row and field policy bindings must be installed before schema composition")
+                        .into_graphql_error());
+                }
+            }
+            delegate
+                .can_access_entity(context, database, entity, policy_key, kind, surface)
+                .await
+        })
+    }
+}
+
 const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
@@ -347,6 +396,34 @@ impl<B: OrmBackend> Database<B> {
     /// Update the authorization policy enforcement mode in place.
     pub fn set_authorization_mode(&mut self, authorization_mode: AuthorizationMode) {
         self.authorization_mode = authorization_mode;
+    }
+
+    /// Require named entity, row and field providers for a composed schema.
+    /// Missing/mismatched bindings deny operations, including count-only reads.
+    /// Configure complete providers before building; existing callbacks are retained.
+    pub fn require_policy_bindings(&mut self, bindings: &[Option<&'static str>]) {
+        let required = bindings.iter().flatten().copied().collect::<Vec<_>>();
+        if required.is_empty() {
+            return;
+        }
+        self.authorization_mode = AuthorizationMode::ExplicitPolicyForAllExposedOperations;
+        let complete = required.iter().all(|binding| {
+            self.entity_policy
+                .as_ref()
+                .is_some_and(|policy| policy.supports_policy_binding(binding))
+                && self
+                    .row_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.supports_policy_binding(binding))
+                && self
+                    .field_policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.supports_policy_binding(binding))
+        });
+        if !complete {
+            let delegate = self.entity_policy.take();
+            self.entity_policy = Some(Arc::new(RequiredPolicyBindings { required, delegate }));
+        }
     }
 
     /// Return a copy of this handle with a different authorization mode.

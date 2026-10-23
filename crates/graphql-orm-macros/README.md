@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.65.0 adds optional `#[graphql_orm(policy_binding = "owner.contract")]`.
+Canonical schema builders require matching entity, row and field providers and
+strict authorization before generated operations, including counts. Unbound or
+unrelated providers fail closed. See the
+[migration guide](../../MIGRATION.md#0640-to-0650-canonical-policy-bindings).
+
+ORM derives preserve object-level async-graphql guards and consume their foreign
+attribute values alongside ORM field-naming metadata.
+
 Version 0.62.0 adds optional typed runtime `orderBy` to generated keyset queries.
 The scalar-only input, complete primary-key suffix, order-bound cursor and current
 field authorization are described in the

@@ -2149,6 +2149,7 @@ mod bootstrap_snapshot_tests {
 
     fn record() -> AiSessionRecord {
         AiSessionRecord {
+            public_metadata: None,
             execution_selection: None,
             id: uuid::Uuid::from_u128(1),
             owner_principal_kind: "user".to_owned(),

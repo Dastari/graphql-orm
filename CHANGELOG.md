@@ -16,6 +16,20 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.65.0**.
+
+- Preserve async-graphql object guard expressions while parsing ORM entity
+  naming metadata, including guards on read-only AI scalar projections.
+
+- Add an explicit entity policy-binding contract enforced by `schema_roots!`
+  before generated data operations, including count-only selections.
+- Require matching entity, row and field policy providers; preserve existing
+  callback decisions and reject absent or unrelated bindings.
+- Existing declarations remain unchanged unless the entity opts in. Public AI
+  projections require their AI binding by default.
+
+## 0.64.0 (unreleased)
+
 Companion runtime/macros version: **0.64.0**.
 
 - Revalidate the complete current release contract after successful selected
