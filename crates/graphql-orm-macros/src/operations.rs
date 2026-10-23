@@ -1254,13 +1254,24 @@ pub(crate) fn generate_graphql_operations(
     let queries_name = format!("{}Queries", input.ident);
     let mut generated: syn::File = syn::parse2(output)?;
     for item in &mut generated.items {
-        let syn::Item::Impl(implementation) = item else { continue; };
-        let syn::Type::Path(target) = implementation.self_ty.as_ref() else { continue; };
-        if !target.path.segments.last().is_some_and(|segment| segment.ident == queries_name) {
+        let syn::Item::Impl(implementation) = item else {
+            continue;
+        };
+        let syn::Type::Path(target) = implementation.self_ty.as_ref() else {
+            continue;
+        };
+        if !target
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == queries_name)
+        {
             continue;
         }
         implementation.items.retain(|item| {
-            let syn::ImplItem::Fn(method) = item else { return true; };
+            let syn::ImplItem::Fn(method) = item else {
+                return true;
+            };
             let shape = match method.sig.ident.to_string().as_str() {
                 "get_by_id" => "single",
                 "list" => "list",
