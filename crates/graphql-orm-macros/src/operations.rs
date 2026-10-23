@@ -722,8 +722,8 @@ fn classify_propagation_value_type(ty: &syn::Type) -> Option<(PropagationValueKi
 
 struct PropagatedRelation {
     graphql_name: String,
-    source_field: syn::Ident,
-    source_ty: syn::Type,
+    source_fields: Vec<(syn::Ident, syn::Type, FieldMetadata)>,
+    target_fields: Vec<String>,
     target_type: syn::Ident,
 }
 
@@ -1780,41 +1780,51 @@ fn generate_graphql_operations_unfiltered(
         let rust_name = field_name.to_string();
         let graphql_name =
             graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
-        let source_column = meta
-            .relation_from
-            .clone()
-            .unwrap_or_else(|| pk_field.to_string());
-        let source_field = fields
-            .iter()
-            .find(|candidate| {
-                candidate
-                    .ident
-                    .as_ref()
-                    .is_some_and(|ident| ident == source_column.as_str())
-            })
-            .and_then(|candidate| {
-                candidate
-                    .ident
+        let source_names = meta.relation_from_fields.clone().unwrap_or_else(|| {
+            vec![
+                meta.relation_from
                     .clone()
-                    .map(|ident| (ident, candidate.ty.clone()))
-            })
-            .ok_or_else(|| {
-                syn::Error::new_spanned(
-                    field,
-                    format!(
-                        "Relation '{}' references unknown propagation source field '{}'",
-                        rust_name, source_column
-                    ),
-                )
-            })?;
+                    .unwrap_or_else(|| pk_field.to_string()),
+            ]
+        });
+        let target_fields = meta
+            .relation_to_fields
+            .clone()
+            .unwrap_or_else(|| vec![meta.relation_to.clone().unwrap_or_else(|| "id".to_string())]);
+        if source_names.is_empty() || source_names.len() != target_fields.len() {
+            return Err(syn::Error::new_spanned(
+                field,
+                "propagate_change requires equal nonempty from/to tuples",
+            ));
+        }
+        let mut source_fields = Vec::new();
+        for source in source_names {
+            let candidate = fields.iter().find(|candidate| candidate.ident.as_ref().is_some_and(|ident| ident == source.as_str()))
+                .ok_or_else(|| syn::Error::new_spanned(field, format!("Relation '{rust_name}' references unknown propagation source field '{source}'")))?;
+            let metadata = parse_field_metadata(candidate)?;
+            if metadata.is_relation
+                || metadata.skip_db
+                || classify_propagation_value_type(&candidate.ty).is_none()
+            {
+                return Err(syn::Error::new_spanned(
+                    candidate,
+                    "propagate_change source fields must be persisted scalar fields",
+                ));
+            }
+            source_fields.push((
+                candidate.ident.clone().expect("named field"),
+                candidate.ty.clone(),
+                metadata,
+            ));
+        }
         let target_type = syn::Ident::new(
             meta.relation_target.as_deref().unwrap_or("Unknown"),
             field.span(),
         );
         propagated_relations.push(PropagatedRelation {
             graphql_name,
-            source_field: source_field.0,
-            source_ty: source_field.1,
+            source_fields,
+            target_fields,
             target_type,
         });
     }
@@ -2163,6 +2173,11 @@ fn generate_graphql_operations_unfiltered(
     };
     let propagated_subscription_emitter = quote! {
         #[doc(hidden)]
+        pub(crate) fn __gom_propagation_key(entity: &Self) -> #pk_type_ty {
+            entity.#pk_field.clone()
+        }
+
+        #[doc(hidden)]
         #[allow(clippy::too_many_arguments, unused_variables)]
         pub(crate) fn __gom_queue_propagated_changed_event(
             hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
@@ -2187,87 +2202,66 @@ fn generate_graphql_operations_unfiltered(
             #propagated_witness_emission
         }
     };
-    let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations
-        .iter()
+    // Direct and propagated events must share exactly the same typed target
+    // identity and origin encoding, so a cycle cannot re-emit its source.
+    let propagation_visited_seed = quote! {
+        let origin_target_id = ::graphql_orm::graphql::orm::composite_key_id(
+            &Self::__gom_subscription_key_values(entity),
+        );
+        let origin_dedupe_key = ::graphql_orm::serde_json::to_string(&(
+            #entity_name_lit, origin_target_id, #entity_name_lit, &source_id,
+        )).map_err(|error| ::graphql_orm::sqlx::Error::Protocol(error.to_string()))?;
+        let mut visited = ::std::collections::HashSet::from([origin_dedupe_key]);
+    };
+    let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations.iter()
         .map(|relation| -> syn::Result<proc_macro2::TokenStream> {
             let relation_name = &relation.graphql_name;
-            let source_field = &relation.source_field;
-            let source_field_name = source_field.to_string();
             let target_type = &relation.target_type;
-            let (kind, is_option) = classify_propagation_value_type(&relation.source_ty).ok_or_else(
-                || {
-                    syn::Error::new_spanned(
-                        &relation.source_ty,
-                        format!(
-                            "Unsupported propagate_change source field type for relation '{}': expected String/uuid/int/float/bool (optionals allowed)",
-                            relation_name
-                        ),
-                    )
-                },
-            )?;
-
-            let source_binding = if is_option {
-                quote! {
-                    let Some(parent_id) = entity.#source_field.as_ref() else {
-                        return Ok(());
-                    };
-                }
-            } else {
-                quote! {
-                    let parent_id = &entity.#source_field;
-                }
-            };
-
-            let parent_key_string = match kind {
-                PropagationValueKind::String => quote! { parent_id.clone() },
-                _ => quote! { parent_id.to_string() },
-            };
-
-            let fetch_parent = quote! {
-                let parent_entity = <#target_type>::__gom_fetch_by_id_on(hook_ctx, parent_id).await?;
-            };
-
+            let target_fields = &relation.target_fields;
+            let mut value_tokens = Vec::new();
+            let mut optional_checks = Vec::new();
+            let mut source_names = Vec::new();
+            for (field, ty, metadata) in &relation.source_fields {
+                source_names.push(field.to_string());
+                if is_option_type(ty) { optional_checks.push(quote! { entity.#field.is_some() }); }
+                let mut metadata = metadata.clone();
+                metadata.transform_write = None;
+                value_tokens.push(push_create_input_sql_value_tokens(backend, struct_name,
+                    quote! { entity.#field.clone() }, ty, &metadata, quote! { ::graphql_orm::sqlx::Error }));
+            }
             Ok(quote! {
-                {
+                if true #(&& #optional_checks)* {
                     if visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return Ok(()); }
-                    #source_binding
-                    let parent_id_string = #parent_key_string;
-                    let mut next_path = path.clone();
-                    next_path.push(#relation_name.to_string());
-                    let mut next_provenance = provenance.to_vec();
-                    next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new::<Self>(
-                        Self::__gom_subscription_key_values(entity), #relation_name, #source_field_name,
-                    ));
-                    let dedupe_key = format!(
-                        "{}:{}:{}:{}",
-                        <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
-                        parent_id_string,
-                        source_entity,
-                        source_id
-                    );
-                    if visited.insert(dedupe_key) {
-                        #fetch_parent
-                        <#target_type>::__gom_queue_propagated_changed_event(
-                            hook_ctx, action, parent_id.clone(), parent_entity.as_ref(), source_entity,
-                            source_id, next_path.clone(), next_provenance.clone(),
-                        );
-                        if let Some(parent_entity) = parent_entity.as_ref() {
-                            <#target_type>::__gom_propagate_changed_event(
-                                hook_ctx,
-                                action,
-                                parent_entity,
-                                source_entity,
-                                source_id,
-                                next_path,
-                                visited,
-                                &next_provenance,
-                            ).await?;
+                    let mut bind_values = Vec::new();
+                    #(#value_tokens)*
+                    let parent_entities = ::graphql_orm::graphql::subscriptions::propagation_targets::<#target_type, #backend_marker>(
+                        hook_ctx, &[#(#target_fields),*], &bind_values,
+                        ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS - visited.len(),
+                    ).await?;
+                    for parent_entity in parent_entities {
+                        let parent_id = <#target_type>::__gom_propagation_key(&parent_entity);
+                        let parent_keys = <#target_type>::__gom_subscription_key_values(&parent_entity);
+                        let parent_id_string = ::graphql_orm::graphql::orm::composite_key_id(&parent_keys);
+                        let mut next_path = path.clone();
+                        next_path.push(#relation_name.to_string());
+                        let mut next_provenance = provenance.to_vec();
+                        next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
+                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*],
+                        ));
+                        let dedupe_key = ::graphql_orm::serde_json::to_string(&(
+                            <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                            parent_id_string, source_entity, source_id,
+                        )).map_err(|error| ::graphql_orm::sqlx::Error::Protocol(error.to_string()))?;
+                        if visited.insert(dedupe_key) {
+                            <#target_type>::__gom_queue_propagated_changed_event(hook_ctx, action, parent_id,
+                                Some(&parent_entity), source_entity, source_id, next_path.clone(), next_provenance.clone());
+                            <#target_type>::__gom_propagate_changed_event(hook_ctx, action, &parent_entity,
+                                source_entity, source_id, next_path, visited, &next_provenance).await?;
                         }
                     }
                 }
             })
-        })
-        .collect::<syn::Result<Vec<_>>>()?;
+        }).collect::<syn::Result<Vec<_>>>()?;
 
     // Generate input fields (excluding primary key for create, all optional for update)
     let mut create_input_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -5390,9 +5384,7 @@ fn generate_graphql_operations_unfiltered(
                     };
                     hook_ctx.queue_event(event.clone());
                     #queue_subscription_witness
-                    let mut visited = ::std::collections::HashSet::from([format!(
-                        "{}:{}:{}:{}", #entity_name_lit, source_id, #entity_name_lit, source_id
-                    )]);
+                    #propagation_visited_seed
                     Self::__gom_propagate_changed_event(
                         hook_ctx, action, entity, #entity_name_lit, &source_id, Vec::new(), &mut visited, &[],
                     ).await
@@ -8212,13 +8204,7 @@ fn generate_graphql_operations_unfiltered(
                     };
                     hook_ctx.queue_event(event.clone());
                     #queue_subscription_witness
-                    let mut visited = ::std::collections::HashSet::from([format!(
-                        "{}:{}:{}:{}",
-                        #entity_name_lit,
-                        source_id,
-                        #entity_name_lit,
-                        source_id
-                    )]);
+                    #propagation_visited_seed
                     Self::__gom_propagate_changed_event(
                         hook_ctx,
                         action,

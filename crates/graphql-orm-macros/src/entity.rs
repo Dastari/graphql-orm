@@ -4765,6 +4765,7 @@ fn generate_entity_impl(
             PartialEq,
         )]
         #aggregate_graphql_attribute
+        #[allow(clippy::enum_variant_names)]
         pub enum #aggregate_field_name {
             #(#aggregate_field_variants),*
         }
