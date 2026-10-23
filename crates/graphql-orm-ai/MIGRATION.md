@@ -29,6 +29,9 @@ use [implementation status](docs/implementation-status.md) and the central
 
 Import `public_entities::*` into `schema_roots!` and compose with
 `AiPublicEntityAccess::new(original_database, ai_access_policy, current_principal_resolver).database()`.
+Install a bounded `AuthorizedScanConfig` on `original_database` before this step
+when callback-only row policy serves list, count, or relation reads; missing
+scan bounds fail those operations closed with `AUTHORIZATION_MISCONFIGURED`.
 Keep the original database and `AiSchemaModule` as private persistence/schema/backup
 custody. Public projections remain `external_read_only` and non-exportable, with
 no generated writes or protected-content/custody resolvers.

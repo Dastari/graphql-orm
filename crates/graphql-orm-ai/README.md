@@ -15,6 +15,9 @@ three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
 schema builders reject absent or unrelated providers before reads, including
 count-only selections. Existing host binding capabilities remain delegated;
 acknowledging a binding never grants row or field access.
+Callback-only row authorization also needs a host-supplied bounded
+`AuthorizedScanConfig` on the original database before composing list, count,
+or relation reads. Keep its cursor key stable across instances that share cursors.
 
 The current workspace selects published Auth `v0.22.1` at
 `86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
