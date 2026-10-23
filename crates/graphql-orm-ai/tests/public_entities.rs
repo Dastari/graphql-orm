@@ -119,9 +119,8 @@ async fn fixture() -> (Database<SqliteBackend>, AuthPrincipal, Uuid, Arc<Access>
         .unwrap();
     // Callback-only row authorization needs a bounded scan for counts and
     // relation pages. This deterministic key belongs only to this fixture.
-    let database = database.with_authorized_scan_config(AuthorizedScanConfig::new(
-        [7; 32], 32, 2048,
-    ));
+    let database =
+        database.with_authorized_scan_config(AuthorizedScanConfig::new([7; 32], 32, 2048));
     let owner = principal("owner", "tenant-1");
     let policy = Arc::new(Access(AtomicBool::new(true)));
     let service = OrmAiSessionService::new(
