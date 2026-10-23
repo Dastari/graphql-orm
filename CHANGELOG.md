@@ -28,6 +28,9 @@ Companion runtime/macros version: **0.58.0**.
 
 ## 0.57.0 (2026-10-22)
 
+- Reject private configured cursor fields despite explicit read/order surface
+  overrides, before GraphQL keyset or scan reads; preserve repository policy.
+
 Companion macros crate: `graphql-orm-macros` **0.57.0**.
 
 - Add the SQL Server-only `#[graphql_orm(mssql_money)]` field domain for exact

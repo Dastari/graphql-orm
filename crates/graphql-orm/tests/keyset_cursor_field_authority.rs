@@ -162,7 +162,9 @@ mod private_order {
         #[graphql_orm(auto_generated = false)]
         #[sortable]
         id: String,
-        #[graphql_orm(private)]
+        // Explicit repository surface overrides cannot publish a private cursor value.
+        #[graphql_orm(private, read = true, order = true)]
+        #[sortable]
         hidden_rank: i64,
     }
     schema_roots! { query_custom_ops: [], generated_mutations: "none", entities: [HiddenOrderRecord], }

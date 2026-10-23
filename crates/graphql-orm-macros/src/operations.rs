@@ -4281,7 +4281,7 @@ pub(crate) fn generate_graphql_operations(
                 .expect("keyset field was resolved during parsing");
             let meta = parse_field_metadata(source)?;
             let api_name = graphql_field_name(&meta, &field.to_string(), graphql_rename_fields, serde_rename_all);
-            let graphql_readable = meta.read && !meta.input_only && !meta.graphql_skip
+            let graphql_readable = meta.read && !meta.is_private && !meta.input_only && !meta.graphql_skip
                 && meta.transform_read.is_none() && meta.transform_write.is_none();
             let policy = match meta.read_policy.as_deref() {
                 Some(policy) => quote! { Some(#policy) }, None => quote! { None },

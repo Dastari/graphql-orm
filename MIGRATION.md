@@ -21,6 +21,10 @@ Upgrade runtime/macros together. Public GraphQLEntity and RepositoryEntity times
 
 ## 0.57.0 to 0.58.0: composite-primary-key keysets
 
+Explicit `read = true` or `order = true` never overrides a private configured
+GraphQL cursor field. Keyset and scan queries reject it before the first read;
+trusted repository pagination retains its independent field policy.
+
 Configured cursors carry raw ordering values, so their fields now require current
 read authority even when clients select only `cursor`. GraphQL rejects private,
 skipped and transformed cursor fields. Repository policies remain independent.
