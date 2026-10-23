@@ -504,6 +504,106 @@ async fn additional_host_source_and_projection_entity_revocation_are_preserved()
     }
 }
 
+#[derive(Clone)]
+struct DenySubscriptionSource {
+    enabled: Arc<AtomicBool>,
+}
+impl RowPolicy for DenySubscriptionSource {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        surface: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity != "AiSessionRecord"
+                || surface != EntityAccessSurface::GraphqlSubscription
+                || !self.enabled.load(Ordering::SeqCst))
+        })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+impl FieldPolicy for DenySubscriptionSource {
+    fn can_read_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        entity: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(entity != "AiSessionRecord" || !self.enabled.load(Ordering::SeqCst))
+        })
+    }
+    fn can_write_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+        _: Option<&'a (dyn std::any::Any + Send + Sync)>,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[tokio::test]
+async fn additional_host_source_row_and_field_revocation_suppress_queued_projection() {
+    for denied_surface in ["row", "field"] {
+        let (mut database, owner, id, policy) = fixture().await;
+        let denied = Arc::new(AtomicBool::new(false));
+        let host = DenySubscriptionSource {
+            enabled: denied.clone(),
+        };
+        if denied_surface == "row" {
+            database.set_row_policy(host);
+        } else {
+            database.set_field_policy(host);
+        }
+        let current = Arc::new(Current {
+            principal: owner.clone(),
+            revoked: AtomicBool::new(false),
+        });
+        let schema = schema_builder(
+            AiPublicEntityAccess::new(database.clone(), policy.clone(), current).database(),
+        )
+        .finish();
+        let mut stream = Box::pin(schema.execute_stream(subscription(&owner, id)));
+        registered(&mut stream).await;
+        rename(
+            &sessions(database, policy),
+            &owner,
+            id,
+            "Queued host-gated title",
+        )
+        .await;
+        denied.store(true, Ordering::SeqCst);
+        assert!(
+            timeout(Duration::from_millis(150), stream.next())
+                .await
+                .is_err(),
+            "host {denied_surface} revocation released metadata"
+        );
+    }
+}
+
 struct DenyPublicTitle;
 impl FieldPolicy for DenyPublicTitle {
     fn can_read_field<'a>(

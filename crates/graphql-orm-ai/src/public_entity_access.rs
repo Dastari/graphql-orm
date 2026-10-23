@@ -860,6 +860,44 @@ mod notification_tests {
         );
     }
     #[tokio::test]
+    async fn run_update_propagates_to_its_existing_public_session() {
+        let (db, session, _, run) = fixture().await;
+        let schema = schema_builder(db.clone())
+            .data(AuthSubject::new("tester"))
+            .finish();
+        let mut sessions = Box::pin(schema.execute_stream(format!(
+            "subscription {{ aiPublicSessionChanged(key: \"{session}\") {{ sourceId path }} }}"
+        )));
+        registered(&mut sessions).await;
+        AiRunRecord::update_by_id(
+            &db,
+            &run,
+            UpdateAiRunRecordInput {
+                state: Some("running".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let response = timeout(Duration::from_secs(2), sessions.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let value = response.data.into_json().unwrap();
+        assert_eq!(
+            value["aiPublicSessionChanged"]["sourceId"],
+            run.to_string()
+        );
+        assert!(
+            value["aiPublicSessionChanged"]["path"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|part| part == "session")
+        );
+    }
+    #[tokio::test]
     async fn rolled_back_private_source_update_emits_no_public_metadata() {
         let (db, session, message, _) = fixture().await;
         let schema = schema_builder(db.clone())
