@@ -7254,6 +7254,7 @@ fn generate_graphql_operations_unfiltered(
                     }
                 }
 
+                /// Returns an empty authorized page.
                 pub fn empty() -> Self {
                     Self {
                         edges: Vec::new(),
@@ -7270,6 +7271,7 @@ fn generate_graphql_operations_unfiltered(
             // Query Struct
             // ============================================================================
 
+            /// Generated query root for this entity.
             #[derive(Default)]
             pub struct #queries_struct;
 
@@ -7439,6 +7441,7 @@ fn generate_graphql_operations_unfiltered(
             impl #struct_name {
                 #key_condition_method
 
+                /// Begins a typed query against this entity's backing pool.
                 pub fn query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::FindQuery<'a, Self, #where_input, #order_by_input, #backend_marker> {
                     ::graphql_orm::graphql::orm::FindQuery::new(pool)
                 }
@@ -7449,6 +7452,7 @@ fn generate_graphql_operations_unfiltered(
 
                 #read_repository_key_methods
 
+                /// Begins a typed count query against this entity's backing pool.
                 pub fn count_query<'a>(pool: &'a #pool_type) -> ::graphql_orm::graphql::orm::EntityCountQuery<'a, Self, #where_input, #backend_marker> {
                     ::graphql_orm::graphql::orm::EntityCountQuery::new(pool)
                 }

@@ -5021,6 +5021,7 @@ fn generate_entity_impl(
         #aggregate_field_definition
 
         /// Typed predicates for filtering this entity.
+        #[allow(missing_docs)]
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
         #[graphql(name = #where_input_name_str, rename_fields = #field_case_rule)]
         pub struct #where_input_name {
@@ -5037,6 +5038,7 @@ fn generate_entity_impl(
         }
 
         /// Typed ordering fields for this entity.
+        #[allow(missing_docs)]
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
         #[graphql(name = #order_by_name_str, rename_fields = #field_case_rule)]
         pub struct #order_by_name {

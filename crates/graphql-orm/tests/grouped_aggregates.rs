@@ -306,7 +306,7 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
         .into_iter()
         .find_map(|definition| match definition {
             TypeSystemDefinition::Type(definition)
-                if definition.node.name.node.to_string() == "AggregateWorkRecordAggregateField" =>
+                if definition.node.name.node.as_str() == "AggregateWorkRecordAggregateField" =>
             {
                 match definition.node.kind {
                     TypeKind::Enum(enum_type) => Some(
