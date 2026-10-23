@@ -28,6 +28,9 @@ Companion runtime/macros version: **0.60.0**.
 
 - Generate static keyset reads and authorized scans for entities with composite primary keys. Configured order must end with the complete primary-key tuple in declaration order, with no duplicate order fields. Every component is retained in cursor ordering; existing authorization, limits and read-only schema posture remain in force.
 
+- Omit unselected query resolver methods entirely, including their GraphQL-only
+  argument attributes, so list-only generated roots compile beside legacy roots.
+
 ## 0.57.0 (2026-10-22)
 
 - Reject private configured cursor fields despite explicit read/order surface
