@@ -8,7 +8,7 @@ struct SchemaClock {
     created_at: i64,
 }
 #[derive(GraphQLOperations)]
-#[graphql_entity(table = "operations_clock", schema_only)]
+#[graphql_entity(table = "operations_clock")]
 struct OperationsClock {
     #[primary_key]
     id: String,
