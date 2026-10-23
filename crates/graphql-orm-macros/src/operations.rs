@@ -1851,6 +1851,9 @@ fn generate_graphql_operations_unfiltered(
     let id_arg_name = apply_graphql_case("id", argument_case);
     let input_arg_name = apply_graphql_case("input", argument_case);
     let filter_arg_name = apply_graphql_case("filter", argument_case);
+    let key_arg_name = apply_graphql_case("key", argument_case);
+    let key_arg_description =
+        "Receive changes only for this exact primary key. Omit to watch every authorized row.";
     let where_arg_description = semantic_argument_description(&where_arg_name);
     let search_arg_description = semantic_argument_description(&search_arg_name);
     let order_by_arg_description = semantic_argument_description(&order_by_arg_name);
@@ -5061,6 +5064,7 @@ fn generate_graphql_operations_unfiltered(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
                     #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                    #[graphql(name = #key_arg_name, desc = #key_arg_description)] key: Option<#pk_type_ty>,
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                     use ::graphql_orm::futures::StreamExt;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
@@ -5091,9 +5095,11 @@ fn generate_graphql_operations_unfiltered(
                     Ok(::graphql_orm::tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
+                        let key = key.clone();
                         async move {
                             let witness = result.ok()?;
                             let event = witness.event.as_ref();
+                            if key.as_ref().is_some_and(|key| key != &event.id) { return None; }
                             if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
                                 != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
                             if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
@@ -5110,6 +5116,9 @@ fn generate_graphql_operations_unfiltered(
                                 let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
                                 let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
                                     .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
+                                if key.is_some() {
+                                    ::graphql_orm::graphql::subscriptions::authorize_subscription_keys::<#struct_name, #backend_marker>(&db, ctx, &row).await?;
+                                }
                                 ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
                                 // Query and field-policy awaits must not outlive current authority.
                                 db.ensure_entity_access(Some(ctx), #entity_name_lit,
@@ -6265,7 +6274,11 @@ fn generate_graphql_operations_unfiltered(
     };
 
     let argument_descriptor = |graphql_name: &str, rust_type: proc_macro2::TokenStream| {
-        let description = semantic_argument_description(graphql_name);
+        let description = if graphql_name == key_arg_name {
+            key_arg_description.to_owned()
+        } else {
+            semantic_argument_description(graphql_name)
+        };
         quote! {
             ::graphql_orm::graphql::orm::GraphqlOperationArgumentDescriptor::generated_with_description(
                 #graphql_name,
@@ -6548,10 +6561,13 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Subscription },
             &subscription_name,
-            vec![argument_descriptor(
-                &filter_arg_name,
-                quote! { Option<::graphql_orm::graphql::orm::SubscriptionFilterInput> },
-            )],
+            vec![
+                argument_descriptor(
+                    &filter_arg_name,
+                    quote! { Option<::graphql_orm::graphql::orm::SubscriptionFilterInput> },
+                ),
+                argument_descriptor(&key_arg_name, quote! { Option<#pk_type_ty> }),
+            ],
             quote! { #changed_event },
             &subscription_operation_authorization,
         )
@@ -7826,6 +7842,7 @@ fn generate_graphql_operations_unfiltered(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
+                #[graphql(name = #key_arg_name, desc = #key_arg_description)] key: Option<#pk_type_ty>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = #changed_event>> {
                 use ::graphql_orm::futures::StreamExt;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
@@ -7857,9 +7874,11 @@ fn generate_graphql_operations_unfiltered(
                     Ok(::graphql_orm::tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
+                        let key = key.clone();
                         async move {
                             let witness = result.ok()?;
                             let event = witness.event.as_ref();
+                            if key.as_ref().is_some_and(|key| key != &event.id) { return None; }
                             if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
                                 != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
                             if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
@@ -7876,6 +7895,9 @@ fn generate_graphql_operations_unfiltered(
                                 let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
                                 let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
                                     .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
+                                if key.is_some() {
+                                    ::graphql_orm::graphql::subscriptions::authorize_subscription_keys::<#struct_name, #backend_marker>(&db, ctx, &row).await?;
+                                }
                                 ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
                                 // Query and field-policy awaits must not outlive current authority.
                                 db.ensure_entity_access(Some(ctx), #entity_name_lit,

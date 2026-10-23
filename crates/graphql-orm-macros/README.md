@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.61.0 adds an optional typed `key` argument to generated single-primary-key
+change subscriptions, preserving current authorization and action filtering. See the
+[migration guide](../../MIGRATION.md#0600-to-0610-subscription-primary-key-selection).
+
 Version 0.60.0 adds explicit generated query-shape selection for controlled
 coexistence with recorded legacy roots. Defaults are unchanged; see the
 [migration guide](../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).

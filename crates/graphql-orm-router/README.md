@@ -16,6 +16,10 @@ correction. Direct Auth consumers must select the same tag and refresh their
 locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
+Version `0.6.5` retains test-child startup errors in hosted CI diagnostics.
+Production routing and authorization are unchanged; this source update does
+not distribute or authorize a new router executable.
+
 Version `0.6.4` selects the published TLS certificate-distrust patches in the
 workspace lockfile. Rebuild with that lock and refresh downstream locks to retain
 `rustls-webpki` 0.103.16 and `webpki-roots` / `webpki-root-certs` 1.0.10.
@@ -51,7 +55,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.4" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.5" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
@@ -82,6 +86,9 @@ command alone does not enforce those restrictions.
 
 Hive's separate `graphiql` feature selects static GraphiQL instead, skipping
 Laboratory generation and ignoring Laboratory seed configuration.
+
+The in-tree federation wire tests forward spawned router-child stderr to the
+test runner, preserving startup diagnostics when a child exits early.
 
 ## Minimal programmatic start
 

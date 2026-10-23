@@ -614,3 +614,120 @@ async fn deleted_preimage_requires_explicit_opt_in_even_when_ordinary_reads_allo
         assert_eq!(data["secureRecordChanged"]["action"], "CREATED");
     }
 }
+
+#[tokio::test]
+async fn exact_key_and_action_filters_narrow_normal_and_append_only_events() {
+    for (entity, field) in [
+        ("SecureRecord", "secureRecordChanged"),
+        ("SecureAudit", "secureAuditChanged"),
+    ] {
+        let (schema, _) = setup().await;
+        let mut stream = Box::pin(schema.execute_stream(
+            Request::new(format!(
+                "subscription {{ {field}(key: \"wanted\", filter: {{actions: [CREATED]}}) {{ id action }} }}"
+            ))
+            .data(AuthSubject::new("alice")),
+        ));
+        registered(&mut stream).await;
+        publish(&schema, entity, "other", "alice").await;
+        publish(&schema, entity, "wanted", "alice").await;
+        let response = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let value = response.data.into_json().unwrap();
+        assert_eq!(value[field]["id"], "wanted");
+        assert_eq!(value[field]["action"], "CREATED");
+        assert!(
+            timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn exact_key_never_grants_owner_or_revoked_entity_authority() {
+    for (entity, field) in [
+        ("SecureRecord", "secureRecordChanged"),
+        ("SecureAudit", "secureAuditChanged"),
+    ] {
+        for revoke in [false, true] {
+            let (schema, authority) = setup().await;
+            let mut stream = Box::pin(
+                schema.execute_stream(
+                    Request::new(format!(
+                        "subscription {{ {field}(key: \"wanted\") {{ id }} }}"
+                    ))
+                    .data(AuthSubject::new("alice")),
+                ),
+            );
+            registered(&mut stream).await;
+            if revoke {
+                authority.entity_allowed.store(false, Ordering::SeqCst);
+            }
+            publish(
+                &schema,
+                entity,
+                "wanted",
+                if revoke { "alice" } else { "bob" },
+            )
+            .await;
+            assert!(
+                timeout(Duration::from_millis(100), stream.next())
+                    .await
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn exact_key_requires_current_key_field_authority_for_action_only_payloads() {
+    for (entity, field) in [
+        ("SecureRecord", "secureRecordChanged"),
+        ("SecureAudit", "secureAuditChanged"),
+    ] {
+        let (schema, authority) = setup().await;
+        let mut stream = Box::pin(
+            schema.execute_stream(
+                Request::new(format!(
+                    "subscription {{ {field}(key: \"wanted\") {{ action }} }}"
+                ))
+                .data(AuthSubject::new("alice")),
+            ),
+        );
+        registered(&mut stream).await;
+        authority.key_allowed.store(false, Ordering::SeqCst);
+        publish(&schema, entity, "wanted", "alice").await;
+        assert!(
+            timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err(),
+            "key argument must not reveal a matching row through an action-only payload"
+        );
+    }
+}
+
+#[tokio::test]
+async fn subscription_key_argument_is_in_both_sdl_and_operation_catalogue() {
+    let (schema, _) = setup().await;
+    assert!(schema.sdl().contains("key: String"));
+    use graphql_orm::graphql::orm::GraphqlOperationKind;
+    let catalog = graphql_orm_operation_catalog();
+    let subscriptions = catalog
+        .operations()
+        .iter()
+        .filter(|operation| operation.kind() == GraphqlOperationKind::Subscription)
+        .collect::<Vec<_>>();
+    assert_eq!(subscriptions.len(), 2);
+    for operation in subscriptions {
+        assert!(
+            operation
+                .arguments()
+                .iter()
+                .any(|argument| argument.graphql_name() == "key")
+        );
+    }
+}

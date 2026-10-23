@@ -172,7 +172,7 @@ async fn generated_schema_respects_crate_wide_case_features() {
         );
         assert_has(
             &sdl,
-            "caseCollectionChanged(filter: SubscriptionFilterInput): CaseCollectionChangedEvent!",
+            "caseCollectionChanged(filter: SubscriptionFilterInput, key: String): CaseCollectionChangedEvent!",
         );
         assert_has(&sdl, "\tcoverStoredFileId: UUID");
         assert_has(&sdl, "\tSerdeExact: String!");
@@ -204,7 +204,7 @@ async fn generated_schema_respects_crate_wide_case_features() {
         );
         assert_has(
             &sdl,
-            "CaseCollectionChanged(Filter: SubscriptionFilterInput): CaseCollectionChangedEvent!",
+            "CaseCollectionChanged(Filter: SubscriptionFilterInput, Key: String): CaseCollectionChangedEvent!",
         );
         assert_has(&sdl, "\tCoverStoredFileId: UUID");
         assert_has(&sdl, "\tSerdeNamedField: String!");
@@ -233,7 +233,7 @@ async fn generated_schema_respects_crate_wide_case_features() {
         );
         assert_has(
             &sdl,
-            "CaseCollectionChanged(Filter: SubscriptionFilterInput): CaseCollectionChangedEvent!",
+            "CaseCollectionChanged(Filter: SubscriptionFilterInput, Key: String): CaseCollectionChangedEvent!",
         );
         assert_has(&sdl, "\tcover_stored_file_id: UUID");
         assert_has(&sdl, "\tserde_named_field: String!");
