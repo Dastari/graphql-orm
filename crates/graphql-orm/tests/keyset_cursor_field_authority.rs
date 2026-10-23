@@ -163,25 +163,20 @@ async fn setup() -> (Database, RankAuthority, Arc<AtomicUsize>) {
     (db, authority, reads)
 }
 #[tokio::test]
-async fn configured_orders_deny_before_select_even_for_cursor_only_payload() {
-    for denied in ["rank", "key"] {
-        let (db, authority, reads) = setup().await;
-        if denied == "rank" {
-            authority.allowed.store(false, Ordering::SeqCst);
-        } else {
-            authority.deny_keys.store(true, Ordering::SeqCst);
+async fn configured_and_runtime_orders_deny_before_select_even_for_cursor_only_payload() {
+    for order in ["", "orderBy: [{protectedRank: ASC}],"] {
+        for denied in ["rank", "key"] {
+            let (db, authority, reads) = setup().await;
+            if denied == "rank" {
+                authority.allowed.store(false, Ordering::SeqCst);
+            } else {
+                authority.deny_keys.store(true, Ordering::SeqCst);
+            }
+            let schema = schema_builder(db).finish();
+            let response = schema.execute(Request::new(format!("{{ cursorPolicyRecordsKeyset({order} page: {{limit: 1}}) {{ edges {{ cursor }} }} }}")).data(AuthSubject::new("fixture-principal"))).await;
+            assert!(!response.errors.is_empty());
+            assert_eq!(reads.load(Ordering::SeqCst), 0);
         }
-        let schema = schema_builder(db).finish();
-        let response = schema
-            .execute(
-                Request::new(
-                    "{ cursorPolicyRecordsKeyset(page: {limit: 1}) { edges { cursor } } }",
-                )
-                .data(AuthSubject::new("fixture-principal")),
-            )
-            .await;
-        assert!(!response.errors.is_empty());
-        assert_eq!(reads.load(Ordering::SeqCst), 0);
     }
 }
 #[tokio::test]
@@ -221,8 +216,17 @@ async fn repository_backward_and_scan_paths_retain_current_field_checks() {
         configured
             .page_info
             .start_cursor
+            .as_deref()
             .unwrap()
             .starts_with("gomk1.")
+    );
+    let omitted =
+        CursorPolicyRecord::keyset_page_ordered(&db, Default::default(), None, Default::default())
+            .await
+            .unwrap();
+    assert_eq!(
+        configured.page_info.start_cursor,
+        omitted.page_info.start_cursor
     );
     authority.allowed.store(false, Ordering::SeqCst);
     reads.store(0, Ordering::SeqCst);
@@ -337,7 +341,7 @@ mod private_order {
         id: String,
         // Keep the generated update input valid while testing hidden cursor fields.
         label: String,
-        // Explicit repository surface overrides cannot publish a private cursor value.
+        // Repository surface overrides must never make a private GraphQL sort public.
         #[graphql_orm(private, read = true, order = true)]
         #[sortable]
         hidden_rank: i64,
@@ -361,9 +365,20 @@ mod private_order {
             })
             .with_authorized_scan_config(AuthorizedScanConfig::new([7; 32], 2, 4));
         let schema = schema_builder(db.clone()).finish();
+        let sdl = schema.sdl();
+        let input = sdl
+            .split("input HiddenOrderRecordKeysetOrderByInput {")
+            .nth(1)
+            .and_then(|body| body.split("\n}").next())
+            .expect("runtime order input");
+        assert!(
+            !input.contains("hiddenRank"),
+            "private repository surface flags cannot publish an ordering input"
+        );
         for operation in [
             "{ privateCursorRecordsKeyset(page: {limit: 1}) { edges { cursor } } }",
             "{ privateCursorRecordsScan(page: {limit: 1}) { pageInfo { continuation status } } }",
+            "{ privateCursorRecordsKeyset(orderBy: [{hiddenRank: ASC}], page: {limit: 1}) { edges { cursor } } }",
         ] {
             let response = schema
                 .execute(Request::new(operation).data(AuthSubject::new("fixture-principal")))

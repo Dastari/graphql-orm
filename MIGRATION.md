@@ -15,6 +15,14 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.61.0 to 0.62.0: runtime keyset ordering
+
+Upgrade runtime and macros together. A generated `…Keyset` query now accepts `orderBy: [EntityKeysetOrderByInput!]`. Each entry selects exactly one readable, persisted sortable scalar, for example `[{title: ASC}, {rank: DESC}]`. Primary-key fields are accepted. Computed, relation, spatial and decimal orders are absent from this input; ordinary list ordering retains its separate input type. A complete readable scalar primary key is required. Entities with private or unsupported primary keys retain their configured keyset surface without registering an unusable runtime order input.
+
+Each dynamic order appends missing primary-key columns in ascending order. NULL values sort last in either direction; backward windows reverse comparison and null placement internally, then return canonical order. Duplicate fields, empty entries and empty lists fail before SELECT. Every order field, including an implicit key component, requires current field policy even when omitted from the payload.
+
+Dynamic cursors bind the entity, exact ordered columns, directions and null placement. A cursor for a different order or the configured default is rejected. Omit `orderBy` to retain the configured order and existing cursor bytes. Repository callers may use `keyset_page_ordered` or `keyset_connection_page_ordered`; existing methods stay unchanged. Every composite primary-key component participates in configured and runtime validation. No schema or data migration is required.
+
 ## 0.60.0 to 0.61.0: subscription primary-key selection
 
 Upgrade runtime/macros together. Generated single-key subscriptions gain an optional `key` argument, using the entity primary key scalar and configured argument casing. Existing operations remain valid. For example, `recordChanged(key: "…", filter: {actions: [UPDATED]})` watches one row. Key selection narrows notifications only: it never grants row, field, scope, assurance, deleted-preimage or propagated-source authority. Refresh schema/catalogue snapshots. Composite-key subscriptions remain unsupported by this change. No data or schema migration is required.

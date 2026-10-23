@@ -20,6 +20,7 @@ struct CompositeRecord {
     #[filterable(type = "number")]
     item_no: i64,
     #[filterable(type = "number")]
+    #[sortable]
     rank: Option<i64>,
 }
 
@@ -162,7 +163,150 @@ async fn generated_composite_keyset_is_admitted_without_graphql_writes() -> grap
             .len(),
         2
     );
+    let ordered = schema.execute("{ compositeKeysetRecordsKeyset(orderBy: [{rank: ASC}], page: {limit: 2}) { edges { node { partitionKey itemNo } } } }").await;
+    assert!(ordered.errors.is_empty(), "{:?}", ordered.errors);
+    let first =
+        &ordered.data.into_json().unwrap()["compositeKeysetRecordsKeyset"]["edges"][0]["node"];
+    assert_eq!(first["partitionKey"], "b");
+    assert_eq!(first["itemNo"], 2);
     Ok(())
+}
+
+fn runtime_rank_order(direction: OrderDirection) -> Option<Vec<CompositeRecordKeysetOrderByInput>> {
+    Some(vec![CompositeRecordKeysetOrderByInput {
+        rank: Some(direction),
+        ..Default::default()
+    }])
+}
+
+#[tokio::test]
+async fn runtime_composite_order_traverses_collisions_nulls_and_reverse_windows() {
+    let database = setup().await.unwrap();
+    let mut after = None;
+    let mut keys = Vec::new();
+    let mut second_start = None;
+    for page_index in 0..4 {
+        let page = CompositeRecord::keyset_page_ordered(
+            &database,
+            Default::default(),
+            runtime_rank_order(OrderDirection::Desc),
+            KeysetPageInput {
+                after,
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        if page_index == 1 {
+            second_start = page.page_info.start_cursor.clone();
+        }
+        keys.extend(
+            page.edges
+                .iter()
+                .map(|edge| (edge.node.partition_key.clone(), edge.node.item_no)),
+        );
+        if !page.page_info.has_next_page {
+            break;
+        }
+        after = page.page_info.end_cursor;
+    }
+    assert_eq!(
+        keys,
+        vec![
+            ("a".into(), 1),
+            ("a".into(), 2),
+            ("b".into(), 1),
+            ("b".into(), 2),
+            ("a".into(), 3),
+            ("b".into(), 3),
+        ]
+    );
+    assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), 6);
+    let previous = CompositeRecord::keyset_connection_page_ordered(
+        &database,
+        Default::default(),
+        runtime_rank_order(OrderDirection::Desc),
+        KeysetConnectionInput {
+            before: second_start,
+            last: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        previous
+            .edges
+            .iter()
+            .map(|edge| (edge.node.partition_key.as_str(), edge.node.item_no))
+            .collect::<Vec<_>>(),
+        [("a", 1), ("a", 2)]
+    );
+}
+
+#[tokio::test]
+async fn runtime_composite_cursor_rejects_changed_order_before_select() {
+    let database = setup().await.unwrap();
+    let first = CompositeRecord::keyset_page_ordered(
+        &database,
+        Default::default(),
+        runtime_rank_order(OrderDirection::Desc),
+        KeysetPageInput {
+            limit: Some(2),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let database = database.with_read_query_observer(CompositeReadCounter(reads.clone()));
+    assert!(
+        CompositeRecord::keyset_page_ordered(
+            &database,
+            Default::default(),
+            runtime_rank_order(OrderDirection::Asc),
+            KeysetPageInput {
+                after: first.page_info.end_cursor.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        CompositeRecord::keyset_page(
+            &database,
+            Default::default(),
+            KeysetPageInput {
+                after: first.page_info.end_cursor,
+                ..Default::default()
+            },
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn runtime_composite_cursor_requires_both_implicit_key_fields_before_select() {
+    for denied in ["rank", "partitionKey", "itemNo"] {
+        let mut database = setup().await.unwrap();
+        database.set_field_policy(CompositeCursorAuthority(denied));
+        let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let database = database.with_read_query_observer(CompositeReadCounter(reads.clone()));
+        let schema = schema_builder(database)
+            .data(AuthSubject::new("fixture-principal"))
+            .finish();
+        let response = schema.execute("{ compositeKeysetRecordsKeyset(orderBy: [{rank: DESC}], page: {limit: 2}) { edges { cursor } } }").await;
+        assert!(
+            !response.errors.is_empty(),
+            "unselected runtime cursor component {denied} was not checked"
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(response.data.into_json().unwrap()["compositeKeysetRecordsKeyset"].is_null());
+    }
 }
 
 struct CompositeCursorAuthority(&'static str);
