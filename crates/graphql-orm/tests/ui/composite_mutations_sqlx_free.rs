@@ -1,6 +1,6 @@
 use graphql_orm::prelude::*;
 
-#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, Clone, Debug)]
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[graphql_entity(
     backend = "sqlite",
     table = "private_grants",

@@ -15,13 +15,46 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
-## 0.61.0 to 0.62.0: runtime keyset ordering
+## 0.63.0 to 0.64.0: composite and read-only Changed
 
-Upgrade runtime and macros together. A generated `…Keyset` query now accepts `orderBy: [EntityKeysetOrderByInput!]`. Each entry selects exactly one readable, persisted sortable scalar, for example `[{title: ASC}, {rank: DESC}]`. Primary-key fields are accepted. Computed, relation, spatial and decimal orders are absent from this input; ordinary list ordering retains its separate input type. A complete readable scalar primary key is required. Entities with private or unsupported primary keys retain their configured keyset surface without registering an unusable runtime order input.
+A successful selected snapshot is released only after a second current source,
+target, key and field authorization check. Hosts whose serialization hooks await
+or revoke authority do not release the prepared value under stale permissions.
 
-Each dynamic order appends missing primary-key columns in ascending order. NULL values sort last in either direction; backward windows reverse comparison and null placement internally, then return canonical order. Duplicate fields, empty entries and empty lists fail before SELECT. Every order field, including an implicit key component, requires current field policy even when omitted from the payload.
+Changed snapshot and scalar nullability are preserved. Generated delivery
+prepares the selected snapshot before yielding a stream item. A late scalar
+refusal or policy error discards the whole event and its private diagnostics,
+including nullable failures, without emitting an error frame. Subsequent allowed
+events remain clean. Internal observer DTOs are unchanged.
 
-Dynamic cursors bind the entity, exact ordered columns, directions and null placement. A cursor for a different order or the configured default is rejected. Omit `orderBy` to retain the configured order and existing cursor bytes. Repository callers may use `keyset_page_ordered` or `keyset_connection_page_ordered`; existing methods stay unchanged. Every composite primary-key component participates in configured and runtime validation. No schema or data migration is required.
+Upgrade runtime and macros together. Composite-primary-key entities now expose
+real generated `…Changed` subscriptions with an optional complete `EntityKeyInput`.
+Their event includes a stable opaque `id` and typed `key`. All primary-key fields
+must be authorized before either identity is released. Composite repository
+mutations queue typed trusted witnesses and propagation only after commit;
+rollback never delivers these notifications. Existing raw composite observers
+receive added change-kind and provenance fields and must update exhaustive
+struct patterns for this pre-1.0 capability change.
+
+Read-only public entities accept the same generated trusted propagation channel.
+Entities whose `GraphQLOperations` derive now generates Changed events need
+`serde::Serialize` and `serde::Deserialize` for the observer payload. This includes
+read-only projections and composite entities with repository mutations, matching
+the existing writable scalar-key Changed contract. Add both derives to affected
+fixtures and consumers when upgrading.
+No insert/update/delete capability or schema management is added. Under a read-only
+`schema_roots!` policy the mutation root stays empty while generated subscriptions
+and their operation-catalogue entries remain present. Arbitrary extra subscriptions
+retain their read-only-schema rejection. Raw or deserialized observer events do not
+enter generated delivery.
+
+The full target key, current source/target rows, selected scalar fields, key fields,
+relation tuples and per-hop provenance are checked for each release. Omitted keys
+retain entity-wide authorized delivery. This implements the public composite/read-only
+slice of issue #191. Private repository source fields remain non-subscribable;
+private-source projection authorization and the complete dependent AI notification
+graph remain unfinished, so draft #189 and issue #184 are not completed by this change.
+No data/schema migration is required.
 
 ## 0.62.0 to 0.63.0: propagation relation tuples
 
@@ -43,6 +76,14 @@ This is a focused part of issue #191. Composite-primary-key Changed generation
 and read-only trusted projection subscriptions remain separate unfinished work;
 this change does not complete #191, #184 or draft #189. No data/schema migration
 or downstream pin change is included.
+
+## 0.61.0 to 0.62.0: runtime keyset ordering
+
+Upgrade runtime and macros together. A generated `…Keyset` query now accepts `orderBy: [EntityKeysetOrderByInput!]`. Each entry selects exactly one readable, persisted sortable scalar, for example `[{title: ASC}, {rank: DESC}]`. Primary-key fields are accepted. Computed, relation, spatial and decimal orders are absent from this input; ordinary list ordering retains its separate input type. A complete readable scalar primary key is required. Entities with private or unsupported primary keys retain their configured keyset surface without registering an unusable runtime order input.
+
+Each dynamic order appends missing primary-key columns in ascending order. NULL values sort last in either direction; backward windows reverse comparison and null placement internally, then return canonical order. Duplicate fields, empty entries and empty lists fail before SELECT. Every order field, including an implicit key component, requires current field policy even when omitted from the payload.
+
+Dynamic cursors bind the entity, exact ordered columns, directions and null placement. A cursor for a different order or the configured default is rejected. Omit `orderBy` to retain the configured order and existing cursor bytes. Repository callers may use `keyset_page_ordered` or `keyset_connection_page_ordered`; existing methods stay unchanged. Every composite primary-key component participates in configured and runtime validation. No schema or data migration is required.
 
 ## 0.60.0 to 0.61.0: subscription primary-key selection
 

@@ -27,15 +27,15 @@ schema_roots! {
 }
 
 #[test]
-fn mssql_metadata_contains_only_read_resolvers() {
+fn mssql_metadata_contains_queries_and_trusted_subscriptions_without_mutations() {
     let generated = ResolverMetadataRecord::generated_graphql_operations();
-    assert_eq!(generated.len(), 2);
+    assert_eq!(generated.len(), 3);
     assert!(generated.iter().all(|operation| {
-        operation.backend() == "mssql" && operation.kind() == GraphqlOperationKind::Query
+        operation.backend() == "mssql" && operation.kind() != GraphqlOperationKind::Mutation
     }));
 
     let catalog = graphql_orm_operation_catalog();
-    assert_eq!(catalog.exposed_operations().count(), 2);
+    assert_eq!(catalog.exposed_operations().count(), 3);
     assert!(
         catalog
             .operations()

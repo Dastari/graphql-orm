@@ -134,7 +134,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         .iter()
         .map(|entity| {
             let mutations_exposed = generated_mutation_is_exposed(entity);
-            let subscriptions_exposed = backend_writable && !schema_policy_read_only;
+            let subscriptions_exposed = true;
             quote! {
                 (
                     <#entity as ::graphql_orm::graphql::orm::GraphqlOperationMetadata>
@@ -333,12 +333,25 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             })
             .collect();
 
+        let (readonly_subscription_root, readonly_subscription_value) = if subscription_types
+            .is_empty()
+        {
+            (
+                quote! { pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription; },
+                quote! { ::graphql_orm::async_graphql::EmptySubscription },
+            )
+        } else {
+            (
+                emit_chunked_merged_subscription("Subscription", None, &subscription_types),
+                quote! { SubscriptionRoot::default() },
+            )
+        };
         return quote! {
             #query_root
             #operation_catalog_helper
 
             pub type MutationRoot = ::graphql_orm::async_graphql::EmptyMutation;
-            pub type SubscriptionRoot = ::graphql_orm::async_graphql::EmptySubscription;
+            #readonly_subscription_root
             pub type AppSchema = ::graphql_orm::async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
             pub const GRAPHQL_ORM_SCHEMA_POLICY: Option<::graphql_orm::graphql::orm::SchemaPolicy> = #schema_policy_const;
@@ -359,7 +372,7 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
                     ::graphql_orm::async_graphql::EmptyMutation,
-                    ::graphql_orm::async_graphql::EmptySubscription,
+                    #readonly_subscription_value,
                 )
                 .data(database.clone());
                 let builder = limits.apply(builder);

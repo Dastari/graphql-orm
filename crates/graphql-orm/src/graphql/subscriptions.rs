@@ -10,6 +10,71 @@ use async_graphql::Context;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
+/// A selected Changed payload prepared before the stream releases an item.
+///
+/// A nullable scalar guard can fail after authorization preflight. Resolve the
+/// selected snapshot inside the generated filter, discard every failed payload
+/// and its private diagnostics, and yield only a completed value. The GraphQL
+/// event identity and internal observer DTO remain unchanged.
+#[doc(hidden)]
+pub struct ChangedPayload<T> {
+    value: async_graphql::Value,
+    type_name: std::borrow::Cow<'static, str>,
+    marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: async_graphql::OutputType> ChangedPayload<T> {
+    /// Prepare one selected event; failures never become subscription frames.
+    pub async fn prepare(event: T, ctx: &Context<'_>) -> Option<Self> {
+        let errors_before = ctx.query_env.errors.lock().unwrap().len();
+        let type_name = event.introspection_type_name();
+        let selection = ctx.with_selection_set(&ctx.item.node.selection_set);
+        let resolved = event.resolve(&selection, ctx.item).await;
+        let field_failed = {
+            let mut errors = ctx.query_env.errors.lock().unwrap();
+            let failed = errors.len() > errors_before;
+            if failed {
+                errors.truncate(errors_before);
+            }
+            failed
+        };
+        if field_failed {
+            return None;
+        }
+        resolved.ok().map(|value| Self {
+            value,
+            type_name,
+            marker: std::marker::PhantomData,
+        })
+    }
+}
+
+impl<T: async_graphql::OutputType> async_graphql::OutputType for ChangedPayload<T> {
+    fn type_name() -> std::borrow::Cow<'static, str> {
+        T::type_name()
+    }
+
+    fn qualified_type_name() -> String {
+        T::qualified_type_name()
+    }
+
+    fn introspection_type_name(&self) -> std::borrow::Cow<'static, str> {
+        self.type_name.clone()
+    }
+
+    fn create_type_info(registry: &mut async_graphql::registry::Registry) -> String {
+        T::create_type_info(registry)
+    }
+
+    async fn resolve(
+        &self,
+        _ctx: &async_graphql::ContextSelectionSet<'_>,
+        _field: &async_graphql::Positioned<async_graphql::parser::types::Field>,
+    ) -> async_graphql::ServerResult<async_graphql::Value> {
+        Ok(self.value.clone())
+    }
+}
+
 /// Maximum number of relationship hops retained and checked for an event.
 pub const MAX_SUBSCRIPTION_PROVENANCE_HOPS: usize = 16;
 /// Maximum propagated targets examined for one originating change.
@@ -57,11 +122,15 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
     where
         T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
-        let id = crate::graphql::loaders::RelationKey::from_sql_values(&keys)
-            .parts()
-            .first()
-            .cloned()
-            .unwrap_or_default();
+        let id = if keys.len() > 1 {
+            crate::graphql::orm::composite_key_id(&keys)
+        } else {
+            crate::graphql::loaders::RelationKey::from_sql_values(&keys)
+                .parts()
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        };
         Self {
             entity: T::entity_name(),
             id,
@@ -519,7 +588,9 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
     for selected in
         crate::graphql::loaders::relation_selected_fields(ctx, &ctx.item.node.selection_set.node)
     {
-        if selected.node.name.node.as_str().eq_ignore_ascii_case("id") {
+        if selected.node.name.node.as_str().eq_ignore_ascii_case("id")
+            || selected.node.name.node.as_str().eq_ignore_ascii_case("key")
+        {
             for key in T::PRIMARY_KEYS {
                 let available = T::columns()
                     .iter()
@@ -571,7 +642,9 @@ where
         crate::graphql::loaders::relation_selected_fields(ctx, &ctx.item.node.selection_set.node)
     {
         let field_ctx = ctx.with_field(selected);
-        if selected.node.name.node.as_str().eq_ignore_ascii_case("id") {
+        if selected.node.name.node.as_str().eq_ignore_ascii_case("id")
+            || selected.node.name.node.as_str().eq_ignore_ascii_case("key")
+        {
             authorize_subscription_keys::<T, B>(db, &field_ctx, row).await?;
         } else if selected.node.name.node.as_str() == entity_field {
             for scalar in crate::graphql::loaders::relation_selected_fields(

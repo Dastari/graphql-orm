@@ -590,17 +590,17 @@ fn read_only_composite_and_append_only_profiles_report_only_actual_resolvers() {
     use root_read_only_surface::RootReadOnlyMetadataRecord;
 
     let read_only = ReadOnlyMetadataRecord::generated_graphql_operations();
-    assert_eq!(read_only.len(), 2);
+    assert_eq!(read_only.len(), 3);
     assert!(
         read_only
             .iter()
-            .all(|operation| operation.kind() == GraphqlOperationKind::Query)
+            .all(|operation| operation.kind() != GraphqlOperationKind::Mutation)
     );
     assert_eq!(
         read_only_surface::graphql_orm_operation_catalog()
             .exposed_operations()
             .count(),
-        2
+        3
     );
 
     let root_read_only = RootReadOnlyMetadataRecord::generated_graphql_operations();
@@ -610,13 +610,13 @@ fn read_only_composite_and_append_only_profiles_report_only_actual_resolvers() {
             .any(|operation| { operation.kind() == GraphqlOperationKind::Subscription })
     );
     let root_read_only_catalog = root_read_only_surface::graphql_orm_operation_catalog();
-    assert_eq!(root_read_only_catalog.exposed_operations().count(), 2);
+    assert_eq!(root_read_only_catalog.exposed_operations().count(), 3);
     assert!(root_read_only_catalog.operations().iter().all(|operation| {
-        operation.kind() == GraphqlOperationKind::Query || !operation.is_exposed()
+        operation.kind() != GraphqlOperationKind::Mutation || !operation.is_exposed()
     }));
 
     let composite = CompositeMetadataRecord::generated_graphql_operations();
-    assert_eq!(composite.len(), 2);
+    assert_eq!(composite.len(), 3);
     let single = operation(composite, GeneratedGraphqlOperationCategory::SingleRead);
     assert_eq!(
         single
