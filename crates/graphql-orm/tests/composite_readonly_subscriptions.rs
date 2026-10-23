@@ -631,7 +631,6 @@ async fn successful_serialization_cannot_outlive_source_target_key_or_field_auth
             },
             UpdateCompositeEventRowInput {
                 label: Some("after".into()),
-                ..Default::default()
             },
         )
         .await
