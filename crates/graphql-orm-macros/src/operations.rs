@@ -1231,6 +1231,9 @@ fn generated_resolver_schema_signature(
         entity_meta.search.is_some(),
         selected_field_case_rule(),
     );
+    if let Some(shapes) = &entity_meta.query_shapes {
+        signature.push_str(&format!("query_shapes={shapes:?}\n"));
+    }
     for field in field_signatures {
         signature.push_str(&field);
         signature.push('\n');
@@ -1241,10 +1244,75 @@ fn generated_resolver_schema_signature(
 pub(crate) fn generate_graphql_operations(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let output = generate_graphql_operations_unfiltered(input)?;
+    let metadata = parse_entity_metadata(&input.attrs)?;
+    let Some(shapes) = metadata.query_shapes else {
+        return Ok(output);
+    };
+    // Object's skipped methods retain ordinary Rust signatures. Removing a
+    // disabled method also removes its GraphQL-only parameter attributes.
+    let queries_name = format!("{}Queries", input.ident);
+    let mut generated: syn::File = syn::parse2(output)?;
+    for item in &mut generated.items {
+        let syn::Item::Impl(implementation) = item else {
+            continue;
+        };
+        let syn::Type::Path(target) = implementation.self_ty.as_ref() else {
+            continue;
+        };
+        if !target
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == queries_name)
+        {
+            continue;
+        }
+        implementation.items.retain(|item| {
+            let syn::ImplItem::Fn(method) = item else {
+                return true;
+            };
+            let shape = match method.sig.ident.to_string().as_str() {
+                "get_by_id" => "single",
+                "list" => "list",
+                "keyset" => "keyset",
+                "authorized_scan" => "scan",
+                "search" => "search",
+                "aggregate" => "aggregate",
+                _ => return true,
+            };
+            shapes.iter().any(|selected| selected == shape)
+        });
+    }
+    Ok(quote! { #generated })
+}
+
+fn generate_graphql_operations_unfiltered(
+    input: &DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
     let struct_name_str = struct_name.to_string();
     let entity_meta = parse_entity_metadata(&input.attrs)?;
     let operation_authorizations = parse_operation_authorizations(&input.attrs)?;
+    let query_shape_enabled = |shape: &str| {
+        entity_meta
+            .query_shapes
+            .as_ref()
+            .is_none_or(|shapes| shapes.iter().any(|selected| selected == shape))
+    };
+    let query_shape_skip = |shape: &str| {
+        if query_shape_enabled(shape) {
+            quote! {}
+        } else {
+            quote! { skip, }
+        }
+    };
+    let single_query_skip = query_shape_skip("single");
+    let list_query_skip = query_shape_skip("list");
+    let keyset_query_skip = query_shape_skip("keyset");
+    let scan_query_skip = query_shape_skip("scan");
+    let search_query_skip = query_shape_skip("search");
+    let aggregate_query_skip = query_shape_skip("aggregate");
     let resolver_auth_mode =
         resolver_auth_mode_tokens(entity_meta.auth.as_deref(), struct_name.span())?;
     let authenticated_directive = match entity_meta.auth.as_deref() {
@@ -4605,7 +4673,7 @@ pub(crate) fn generate_graphql_operations(
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
             #[doc = #keyset_operation_description]
-            #[graphql(name = #keyset_query_name, #keyset_list_requires_scopes #authenticated_directive)]
+            #[graphql(#keyset_query_skip name = #keyset_query_name, #keyset_list_requires_scopes #authenticated_directive)]
             async fn keyset(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -4628,7 +4696,7 @@ pub(crate) fn generate_graphql_operations(
             }
 
             /// Bounded forward authorization scan; continuation does not promise another visible row.
-            #[graphql(name = #scan_query_name, #keyset_list_requires_scopes #authenticated_directive)]
+            #[graphql(#scan_query_skip name = #scan_query_name, #keyset_list_requires_scopes #authenticated_directive)]
             async fn authorized_scan(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -4690,7 +4758,7 @@ pub(crate) fn generate_graphql_operations(
     let search_query_method = if has_search {
         quote! {
             #[doc = #search_operation_description]
-            #[graphql(name = #search_query_name, #search_requires_scopes #authenticated_directive)]
+            #[graphql(#search_query_skip name = #search_query_name, #search_requires_scopes #authenticated_directive)]
             async fn search(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6226,7 +6294,7 @@ pub(crate) fn generate_graphql_operations(
     let aggregate_query_method = if entity_meta.aggregate {
         quote! {
             #[doc = #aggregate_operation_description]
-            #[graphql(name = #aggregate_query_name, #aggregate_requires_scopes #authenticated_directive)]
+            #[graphql(#aggregate_query_skip name = #aggregate_query_name, #aggregate_requires_scopes #authenticated_directive)]
             async fn aggregate(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6606,6 +6674,42 @@ pub(crate) fn generate_graphql_operations(
         &federation_keys,
         &federation_scope_enforcements,
     );
+    if let Some(shapes) = &entity_meta.query_shapes {
+        for shape in shapes {
+            let available = match shape.as_str() {
+                "keyset" | "scan" => keyset_parts.is_some(),
+                "search" => has_search,
+                "aggregate" => entity_meta.aggregate,
+                _ => true,
+            };
+            if !available {
+                return Err(syn::Error::new_spanned(
+                    struct_name,
+                    format!("query_shapes selects unavailable {shape} capability"),
+                ));
+            }
+        }
+    }
+    let disabled_query_fields = [
+        ("single", single_query_name.as_str()),
+        ("list", list_query_name.as_str()),
+        ("keyset", keyset_query_name.as_str()),
+        ("scan", scan_query_name.as_str()),
+        ("search", search_query_name.as_str()),
+        ("aggregate", aggregate_query_name.as_str()),
+    ]
+    .into_iter()
+    .filter(|(shape, _)| !query_shape_enabled(shape))
+    .map(|(_, name)| name)
+    .collect::<Vec<_>>();
+    let query_shape_metadata_filter = if disabled_query_fields.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            operations.retain(|operation| !(operation.kind() == ::graphql_orm::graphql::orm::GraphqlOperationKind::Query
+                && [#(#disabled_query_fields),*].contains(&operation.field_name())));
+        }
+    };
     let operation_metadata_impl = quote! {
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
             fn generated_graphql_operations(
@@ -6617,6 +6721,7 @@ pub(crate) fn generate_graphql_operations(
                     let mut operations = vec![
                         #(#operation_descriptors),*
                     ];
+                    #query_shape_metadata_filter
                     operations.sort_by(|left, right| {
                         (
                             left.kind(),
@@ -6698,7 +6803,7 @@ pub(crate) fn generate_graphql_operations(
                 #aggregate_query_method
 
                 #[doc = #list_operation_description]
-                #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
+                #[graphql(#list_query_skip name = #list_query_name, #list_requires_scopes #authenticated_directive)]
                 async fn list(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -6802,7 +6907,7 @@ pub(crate) fn generate_graphql_operations(
                 #keyset_graphql_method
 
                 #[doc = #single_operation_description]
-                #[graphql(name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
+                #[graphql(#single_query_skip name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
                 async fn get_by_id(
                     &self,
                     ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -7073,7 +7178,7 @@ pub(crate) fn generate_graphql_operations(
 
             /// Get a list of #plural_name with optional filtering, sorting, and pagination
             #[doc = #list_operation_description]
-            #[graphql(name = #list_query_name, #list_requires_scopes #authenticated_directive)]
+            #[graphql(#list_query_skip name = #list_query_name, #list_requires_scopes #authenticated_directive)]
             async fn list(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -7177,7 +7282,7 @@ pub(crate) fn generate_graphql_operations(
 
             /// Get a single #struct_name_str by ID
             #[doc = #single_operation_description]
-            #[graphql(name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
+            #[graphql(#single_query_skip name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
             async fn get_by_id(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
@@ -9407,5 +9512,40 @@ mod composite_keyset_tests {
             error.to_string().contains("must not repeat a field"),
             "{error}"
         );
+    }
+}
+
+#[cfg(test)]
+mod query_shape_tests {
+    use super::generate_graphql_operations;
+
+    fn entity(shapes: &str) -> syn::DeriveInput {
+        let shapes = syn::LitStr::new(shapes, proc_macro2::Span::call_site());
+        syn::parse_quote! {
+            #[graphql_entity(table = "query_shape_fixture", query_shapes = #shapes)]
+            struct QueryShapeFixture {
+                #[primary_key]
+                id: String,
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_or_unavailable_query_selections_fail_closed() {
+        assert!(generate_graphql_operations(&entity("list")).is_ok());
+        for shapes in [
+            "",
+            "unknown",
+            "single,single",
+            "keyset",
+            "scan",
+            "search",
+            "aggregate",
+        ] {
+            assert!(
+                generate_graphql_operations(&entity(shapes)).is_err(),
+                "{shapes}"
+            );
+        }
     }
 }

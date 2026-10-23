@@ -16,7 +16,9 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.59.0**.
+Companion runtime/macros version: **0.60.0**.
+
+- Add explicit `query_shapes = "list,keyset,scan"` selection on generated entities. Omitted query shapes disappear from both the GraphQL root and operation catalogue, allowing a host to retain a differently shaped legacy singleton during migration. Default generation remains unchanged; repository APIs, relations, mutations and subscriptions are unaffected.
 
 - Extend explicit `timestamp = "host"` to public GraphQLEntity fields and ordinary String timestamps (including optional forms). Caller-supplied source timestamps stay unchanged instead of receiving the ORM mutation clock. Existing automatic timestamp behavior remains the default. Policies, hooks and field restrictions still apply.
 
@@ -25,6 +27,9 @@ Companion runtime/macros version: **0.59.0**.
   cursor values on GraphQL keyset and scan surfaces.
 
 - Generate static keyset reads and authorized scans for entities with composite primary keys. Configured order must end with the complete primary-key tuple in declaration order, with no duplicate order fields. Every component is retained in cursor ordering; existing authorization, limits and read-only schema posture remain in force.
+
+- Omit unselected query resolver methods entirely, including their GraphQL-only
+  argument attributes, so list-only generated roots compile beside legacy roots.
 
 ## 0.57.0 (2026-10-22)
 

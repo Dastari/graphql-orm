@@ -27,6 +27,7 @@ pub(crate) struct EntityMetadata {
     /// Explicit AI execution policy by generated mutation category.
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
+    pub(crate) query_shapes: Option<Vec<String>>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
     pub(crate) backup_restore_order: Option<i32>,
@@ -269,6 +270,26 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         }
                         Ok(())
                     })?;
+                } else if meta.path.is_ident("query_shapes") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("query_shapes requires a GraphQL entity"));
+                    }
+                    if metadata.query_shapes.is_some() {
+                        return Err(meta.error("query_shapes may only be declared once"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    let mut shapes = Vec::new();
+                    for shape in lit.value().split(',').map(str::trim) {
+                        if !matches!(shape, "single" | "list" | "keyset" | "scan" | "search" | "aggregate") {
+                            return Err(syn::Error::new(lit.span(), "query_shapes accepts single, list, keyset, scan, search, aggregate"));
+                        }
+                        if shapes.iter().any(|existing| existing == shape) {
+                            return Err(syn::Error::new(lit.span(), "query_shapes must not repeat a shape"));
+                        }
+                        shapes.push(shape.to_owned());
+                    }
+                    shapes.sort();
+                    metadata.query_shapes = Some(shapes);
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
