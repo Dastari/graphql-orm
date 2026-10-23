@@ -8,7 +8,7 @@
 use graphql_orm::async_graphql::{EmptyMutation, EmptySubscription, SDLExportOptions, Schema};
 use graphql_orm::prelude::*;
 
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
     backend = "mssql",
     table = "dbo.FederationZones",

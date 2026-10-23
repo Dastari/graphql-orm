@@ -15,6 +15,18 @@ The scalar-only input, complete primary-key suffix, order-bound cursor and curre
 field authorization are described in the
 [migration guide](../../MIGRATION.md#0610-to-0620-runtime-keyset-ordering).
 
+Generated Changed delivery prepares the selected snapshot before yielding a
+stream item. Late scalar refusals and policy errors, including nullable fields,
+discard the entire event and private diagnostics without an error frame. A
+later authorized event starts with clean response errors. After successful
+serialization, delivery rechecks current source, target, key and selected-field
+authority before yielding the prepared value.
+
+Version 0.64.0 generates complete composite-key and read-only projection change
+subscriptions independently of mutation exposure. Read-only and composite
+`GraphQLOperations` entities derive both serde traits for their observer events. See the
+[migration guide](../../MIGRATION.md#0630-to-0640-composite-and-read-only-changed).
+
 Version 0.63.0 resolves generated upward propagation using complete relation
 from/to tuples and revalidates the current mapping at release. See the
 [migration guide](../../MIGRATION.md#0620-to-0630-propagation-relation-tuples).

@@ -16,6 +16,32 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.64.0**.
+
+- Revalidate the complete current release contract after successful selected
+  snapshot serialization; source, target, key or field revocation suppresses
+  the prepared event without a frame or private diagnostics.
+
+- Prepare selected Changed snapshots before stream release. Discard late scalar
+  refusals and private policy diagnostics without emitting even an error frame,
+  and preserve clean delivery of subsequent authorized events.
+
+- Seed cycle detection with the same complete typed target identity and origin
+  encoding used by propagated events, including composite and append-only sources.
+
+- Generate real composite-key and read-only projection subscriptions with typed
+  complete-key filters and current row/field/provenance authorization.
+- Emit complete typed composite direct witnesses only after committed generated
+  repository mutations; preserve trusted rollback and propagation fences.
+- Expose generated subscriptions under read-only schema policy while retaining
+  empty mutation roots and rejecting arbitrary extra subscriptions.
+- Read-only and composite `GraphQLOperations` entities require both serde derives
+  for generated Changed observer events, matching writable scalar-key entities.
+- Keep private repository sources closed to GraphQL notification release pending
+  a separate explicit projection-authorization contract.
+
+## 0.63.0 (unreleased)
+
 Companion runtime/macros version: **0.63.0**.
 
 - Seed propagated-event cycle detection with the complete typed target identity and origin so cycles cannot re-emit the direct source.

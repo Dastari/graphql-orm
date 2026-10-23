@@ -497,7 +497,7 @@ pub mod types;
 /// ```
 /// use graphql_orm::prelude::*;
 ///
-/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// #[graphql_entity(
 ///     backend = "sqlite",
 ///     table = "composite_write_records",
@@ -523,7 +523,7 @@ pub mod types;
 /// ```compile_fail
 /// use graphql_orm::prelude::*;
 ///
-/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+/// #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 /// #[graphql_entity(
 ///     backend = "sqlite",
 ///     table = "composite_write_records",

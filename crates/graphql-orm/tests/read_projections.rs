@@ -61,7 +61,9 @@ schema_roots! {
     entities: [ProjectionCertificate],
 }
 
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq)]
+#[derive(
+    GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+)]
 #[graphql_entity(
     table = "projection_probe",
     plural = "ProjectionProbes",
