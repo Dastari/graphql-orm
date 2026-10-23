@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 All notable user-visible changes are recorded here. The crate follows
 Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION.md).
 
@@ -17,6 +23,24 @@ Historical development entries below retain their original dependency and
 checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## Unreleased - 0.110.0
+
+- Select public projection backends from the companion feature and provide the
+  standard batch-loader adapter with typed UUID identity for generated relations.
+- Add generated read-only session/message/run/attachment/tool-policy metadata and
+  trusted after-commit notifications over private AI-owned persistence.
+- Generate private-source-to-public-projection and message-to-session/run change
+  propagation. Exact source types receive subscription-only authorization through
+  current principals, owner/tenant and scope/session Read+List decisions; additional
+  host restrictions remain authoritative. No raw persistence type or protected,
+  credential, storage, upload, lease or checkpoint field enters public SDL.
+- Keep projections non-exportable and read-only, with no schema/backup custody.
+  Advance the owned schema-module version to 0.73.0 for relation metadata; there are
+  no new physical columns, tables or foreign keys. Existing data/custody is preserved.
+- This is unqualified source work depending on the composite/read-only notification
+  core. Native/backend/privacy acceptance remains pending; do not present draft
+  #189 or issues #184/#191 as completed or released.
 
 ## Unreleased - 0.109.1
 

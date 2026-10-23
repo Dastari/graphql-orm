@@ -15,6 +15,19 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.64.1 to 0.65.0: canonical policy bindings
+
+Runtime/macros advance together. An entity can declare
+`#[graphql_orm(policy_binding = "owner.contract")]`. Its canonical `schema_roots!`
+builder requires entity, row and field providers whose `supports_policy_binding`
+methods acknowledge that contract; missing or unrelated providers reject all
+operations before reads, including metadata/count-only selections. Provider
+acknowledgement is a binding capability, never an authorization grant: each
+normal current-principal, scope, entity, row and field decision still runs.
+Configure all providers before building the schema. Entities without a binding
+retain their existing authorization mode. No data or physical schema migration
+is required.
+
 ## 0.64.0 to 0.64.1: SQLite RESTRICT refusal classification
 Upgrade runtime/macros together. On SQLite, a delete or key update refused by an `ON DELETE/UPDATE RESTRICT` foreign key now returns `CONSTRAINT_VIOLATION` (and runtime mutation code `constraint_violation`) instead of `INTERNAL_ERROR` (`database_failed`), the same category PostgreSQL already returned. Behaviour change: a host that matched the SQLite internal/database-failed category for this case, or carried its own mapping for it, should rely on the constraint category on both backends and may remove that mapping. Classification requires extended code `SQLITE_CONSTRAINT_TRIGGER` (1811) together with SQLite's exact `FOREIGN KEY constraint failed` message, so other trigger `RAISE(ABORT, ...)` failures remain internal errors; an application trigger that raises that identical message is indistinguishable and is classified as a constraint violation. No API, SDL, schema or data migration is required.
 

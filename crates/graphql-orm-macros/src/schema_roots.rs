@@ -130,6 +130,14 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             quote! { #name }
         })
         .collect();
+    let policy_binding_items = entities
+        .iter()
+        .map(|entity| {
+            quote! {
+                <#entity as ::graphql_orm::graphql::orm::Entity>::REQUIRED_POLICY_BINDING
+            }
+        })
+        .collect::<Vec<_>>();
     let operation_metadata_groups = entities
         .iter()
         .map(|entity| {
@@ -366,9 +374,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
             }
 
             pub fn schema_builder_with_limits(
-                database: ::graphql_orm::db::Database<#backend_marker>,
+                mut database: ::graphql_orm::db::Database<#backend_marker>,
                 limits: ::graphql_orm::graphql::orm::SchemaLimits,
             ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+                database.require_policy_bindings(&[#(#policy_binding_items),*]);
                 let builder = ::graphql_orm::async_graphql::Schema::build(
                     QueryRoot::default(),
                     ::graphql_orm::async_graphql::EmptyMutation,
@@ -524,9 +533,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
         }
 
         pub fn schema_builder_with_limits(
-            database: ::graphql_orm::db::Database<#backend_marker>,
+            mut database: ::graphql_orm::db::Database<#backend_marker>,
             limits: ::graphql_orm::graphql::orm::SchemaLimits,
         ) -> ::graphql_orm::async_graphql::SchemaBuilder<QueryRoot, MutationRoot, SubscriptionRoot> {
+            database.require_policy_bindings(&[#(#policy_binding_items),*]);
             let builder = ::graphql_orm::async_graphql::Schema::build(
                 QueryRoot::default(),
                 #mutation_root_value,

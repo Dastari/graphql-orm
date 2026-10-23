@@ -1,5 +1,9 @@
 #![cfg(feature = "sqlite")]
 
+use graphql_orm::async_graphql::parser::{
+    parse_schema,
+    types::{TypeKind, TypeSystemDefinition},
+};
 use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
 
@@ -296,19 +300,43 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
     .await?;
     let schema = schema_builder(database).finish();
     let sdl = schema.sdl();
-    let expected_enum = format!(
-        "enum AggregateWorkRecordAggregateField {{\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n}}",
-        field_name("id", "Id"),
-        field_name("team", "Team"),
-        field_name("category", "Category"),
-        field_name("units", "Units"),
-        field_name("hours", "Hours"),
-        field_name("amount", "Amount"),
-        field_name("adjustment", "Adjustment"),
-    );
-    assert!(
-        sdl.contains(&expected_enum),
-        "ordinary aggregate enum SDL changed: {sdl}"
+    let actual_enum_values = parse_schema(&sdl)
+        .expect("generated aggregate SDL parses")
+        .definitions
+        .into_iter()
+        .find_map(|definition| match definition {
+            TypeSystemDefinition::Type(definition)
+                if definition.node.name.node.to_string() == "AggregateWorkRecordAggregateField" =>
+            {
+                match definition.node.kind {
+                    TypeKind::Enum(enum_type) => Some(
+                        enum_type
+                            .values
+                            .into_iter()
+                            .map(|value| value.node.value.node.to_string())
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("ordinary aggregate field enum exists");
+    assert_eq!(
+        actual_enum_values,
+        [
+            field_name("id", "Id"),
+            field_name("team", "Team"),
+            field_name("category", "Category"),
+            field_name("units", "Units"),
+            field_name("hours", "Hours"),
+            field_name("amount", "Amount"),
+            field_name("adjustment", "Adjustment"),
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>(),
+        "ordinary aggregate enum values changed"
     );
     let descriptor = AggregateWorkRecord::generated_graphql_operations()
         .iter()

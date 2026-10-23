@@ -10,6 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.65.0 adds optional `#[graphql_orm(policy_binding = "owner.contract")]`.
+Canonical schema builders require matching entity, row and field providers and
+strict authorization before generated operations, including counts. Unbound or
+unrelated providers fail closed. See the
+[migration guide](../../MIGRATION.md#0641-to-0650-canonical-policy-bindings).
+
+ORM derives preserve object-level async-graphql guards and consume their foreign
+attribute values alongside ORM field-naming metadata.
+
 Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).

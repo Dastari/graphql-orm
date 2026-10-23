@@ -1946,18 +1946,20 @@ fn generate_graphql_operations_unfiltered(
                 let field_name = &field.field_name;
                 let field_type = &field.field_type;
                 let graphql_name = &field.graphql_name;
-                quote! { #[graphql(name = #graphql_name)] pub #field_name: #field_type, }
+                quote! { #[doc = concat!("Primary-key component `", #graphql_name, "`.")] #[graphql(name = #graphql_name)] pub #field_name: #field_type, }
             })
             .collect::<Vec<_>>();
         quote! {
             #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize, ::graphql_orm::async_graphql::SimpleObject, ::graphql_orm::async_graphql::InputObject)]
             #[graphql(input_name = #key_input_name)]
+            /// Complete typed primary-key tuple for this entity.
             pub struct #key_type {
                 #(#fields)*
             }
         }
     } else {
         quote! {
+            /// Exact primary-key value accepted by generated reads and notifications.
             pub type #key_type = #pk_type_ty;
         }
     };
@@ -2162,7 +2164,10 @@ fn generate_graphql_operations_unfiltered(
         quote! { #pk_type }
     };
     let subscription_extra_key_field = if has_composite_primary_key {
-        quote! { pub key: #key_type, }
+        quote! {
+            /// Complete typed primary-key tuple.
+            pub key: #key_type,
+        }
     } else {
         quote! {}
     };
@@ -3676,8 +3681,10 @@ fn generate_graphql_operations_unfiltered(
             pub struct #upsert_result_type {
                 pub success: bool,
                 pub error: Option<String>,
+                /// Committed mutation action.
                 pub action: Option<::graphql_orm::graphql::orm::ChangeAction>,
                 #[graphql(name = #entity_result_field_name)]
+                /// Authorized scalar snapshot, when selected and available.
                 pub entity: Option<#struct_name>,
             }
 
@@ -4640,6 +4647,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(rename_fields = #field_case_rule)]
                 pub struct #scan_connection_type {
                     pub nodes: Vec<#struct_name>,
+                    /// Continuation state for this page.
                     pub page_info: ::graphql_orm::graphql::orm::ScanPageInfo,
                 }
 
@@ -4963,7 +4971,9 @@ fn generate_graphql_operations_unfiltered(
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
             #[graphql(name = #search_edge_type_str, rename_fields = #field_case_rule)]
             pub struct #search_edge_type {
+                /// Entity value at this edge.
                 pub node: #struct_name,
+                /// Opaque continuation cursor for this edge.
                 pub cursor: String,
                 pub score: f64,
             }
@@ -4971,8 +4981,10 @@ fn generate_graphql_operations_unfiltered(
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
             #[graphql(name = #search_connection_type_str, rename_fields = #field_case_rule)]
             pub struct #search_connection_type {
+                /// Authorized edges in this page.
                 pub edges: Vec<#search_edge_type>,
                 #[graphql(name = #page_info_field_name)]
+                /// Continuation state for this page.
                 pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
             }
 
@@ -5231,22 +5243,31 @@ fn generate_graphql_operations_unfiltered(
                 pub success: bool,
                 pub error: Option<String>,
                 #[graphql(name = #entity_result_field_name)]
+                /// Authorized scalar snapshot, when selected and available.
                 pub entity: Option<#struct_name>,
             }
 
             #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
             #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+            /// Authorized after-commit change notification for this entity.
             pub struct #changed_event {
+                /// Committed mutation action.
                 pub action: ::graphql_orm::graphql::orm::ChangeAction,
                 #[graphql(name = #change_kind_field_name)]
+                /// Direct or propagated change category.
                 pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+                /// Stable entity identity.
                 pub id: #pk_type,
                 #[graphql(name = #source_entity_field_name)]
+                /// Originating entity for a propagated change.
                 pub source_entity: Option<String>,
                 #[graphql(name = #source_id_field_name)]
+                /// Originating entity identity for a propagated change.
                 pub source_id: Option<String>,
+                /// Bounded relation path from the originating change.
                 pub path: Vec<String>,
                 #[graphql(name = #entity_result_field_name)]
+                /// Authorized scalar snapshot, when selected and available.
                 pub entity: Option<#struct_name>,
             }
 
@@ -7153,18 +7174,26 @@ fn generate_graphql_operations_unfiltered(
         quote! {
             #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
             #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
+            /// Authorized after-commit change notification for this entity.
             pub struct #changed_event {
+                /// Committed mutation action.
                 pub action: ::graphql_orm::graphql::orm::ChangeAction,
                 #[graphql(name = #change_kind_field_name)]
+                /// Direct or propagated change category.
                 pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+                /// Stable entity identity.
                 pub id: #subscription_identity_type,
                 #subscription_extra_key_field
                 #[graphql(name = #source_entity_field_name)]
+                /// Originating entity for a propagated change.
                 pub source_entity: Option<String>,
                 #[graphql(name = #source_id_field_name)]
+                /// Originating entity identity for a propagated change.
                 pub source_id: Option<String>,
+                /// Bounded relation path from the originating change.
                 pub path: Vec<String>,
                 #[graphql(name = #entity_result_field_name)]
+                /// Authorized scalar snapshot, when selected and available.
                 pub entity: Option<#struct_name>,
             }
             #generated_subscription_surface
@@ -7194,20 +7223,27 @@ fn generate_graphql_operations_unfiltered(
 
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
             #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
+            /// One entity and its opaque page cursor.
             pub struct #edge_type {
+                /// Entity value at this edge.
                 pub node: #struct_name,
+                /// Opaque continuation cursor for this edge.
                 pub cursor: String,
             }
 
             #[derive(::graphql_orm::async_graphql::SimpleObject, Debug, Clone)]
             #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
+            /// Authorized page of entity edges and continuation metadata.
             pub struct #connection_type {
+                /// Authorized edges in this page.
                 pub edges: Vec<#edge_type>,
                 #[graphql(name = #page_info_field_name)]
+                /// Continuation state for this page.
                 pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
             }
 
             impl #connection_type {
+                /// Converts an authorized generic connection to its generated GraphQL type.
                 pub fn from_generic(conn: ::graphql_orm::graphql::pagination::Connection<#struct_name>) -> Self {
                     Self {
                         edges: conn.edges.into_iter().map(|e| #edge_type {
@@ -7440,8 +7476,10 @@ fn generate_graphql_operations_unfiltered(
         #[graphql(name = #edge_type_str, rename_fields = #field_case_rule)]
         pub struct #edge_type {
             /// The item at the end of the edge
+            /// Entity value at this edge.
             pub node: #struct_name,
             /// A cursor for pagination
+            /// Opaque continuation cursor for this edge.
             pub cursor: String,
         }
 
@@ -7450,9 +7488,11 @@ fn generate_graphql_operations_unfiltered(
         #[graphql(name = #connection_type_str, rename_fields = #field_case_rule)]
         pub struct #connection_type {
             /// The edges in this connection
+            /// Authorized edges in this page.
             pub edges: Vec<#edge_type>,
             /// Pagination information
             #[graphql(name = #page_info_field_name)]
+            /// Continuation state for this page.
             pub page_info: ::graphql_orm::graphql::pagination::PageInfo,
         }
 
@@ -7530,6 +7570,7 @@ fn generate_graphql_operations_unfiltered(
             pub success: bool,
             pub error: Option<String>,
             #[graphql(name = #entity_result_field_name)]
+            /// Authorized scalar snapshot, when selected and available.
             pub entity: Option<#struct_name>,
         }
 
@@ -7550,16 +7591,23 @@ fn generate_graphql_operations_unfiltered(
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
         #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
         pub struct #changed_event {
+            /// Committed mutation action.
             pub action: ::graphql_orm::graphql::orm::ChangeAction,
             #[graphql(name = #change_kind_field_name)]
+            /// Direct or propagated change category.
             pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
+            /// Stable entity identity.
             pub id: #pk_type,
             #[graphql(name = #source_entity_field_name)]
+            /// Originating entity for a propagated change.
             pub source_entity: Option<String>,
             #[graphql(name = #source_id_field_name)]
+            /// Originating entity identity for a propagated change.
             pub source_id: Option<String>,
+            /// Bounded relation path from the originating change.
             pub path: Vec<String>,
             #[graphql(name = #entity_result_field_name)]
+            /// Authorized scalar snapshot, when selected and available.
             pub entity: Option<#struct_name>,
         }
 

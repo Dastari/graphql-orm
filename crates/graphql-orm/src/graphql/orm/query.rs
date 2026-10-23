@@ -67,6 +67,8 @@ pub struct RepositoryFieldPolicyDef {
 }
 
 pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema {
+    /// Optional named binding required by canonical generated schema builders.
+    const REQUIRED_POLICY_BINDING: Option<&'static str> = None;
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
 
