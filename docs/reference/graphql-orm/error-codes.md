@@ -3,7 +3,7 @@ title: "Public ORM Error-Code Contract"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -40,6 +40,20 @@ Default extensions:
   "correlationId": "optional-host-supplied-id"
 }
 ```
+
+## Database constraint classification
+
+`OrmPublicError::from_sqlx` maps unique, foreign-key and check violations reported
+by the driver to `CONSTRAINT_VIOLATION`. SQLite reports a refusal by an
+`ON DELETE/UPDATE RESTRICT` foreign key through its internal trigger program,
+with extended code `SQLITE_CONSTRAINT_TRIGGER` (1811) rather than
+`SQLITE_CONSTRAINT_FOREIGNKEY` (787). The ORM also classifies that case as
+`CONSTRAINT_VIOLATION` when the error comes from the SQLite driver, carries
+extended code 1811 and has SQLite's exact `FOREIGN KEY constraint failed`
+message. Other trigger failures, such as an application `RAISE(ABORT, ...)`,
+remain `INTERNAL_ERROR`. Runtime mutations map the same cases to
+`constraint_violation`, so a referenced-row refusal has one category on SQLite
+and PostgreSQL (SQLSTATE 23503).
 
 Internal diagnostic strings are never placed in extensions. Set
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS=1` to emit internal detail to stderr for local

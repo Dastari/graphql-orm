@@ -1008,6 +1008,42 @@ async fn complete_composite_keys_and_required_create_members() {
     assert_eq!(f.count().await, 0);
     f.finish().await;
 }
+fn self_referencing(action: DeletePolicy) -> RuntimeSchema {
+    let mut schema = definition();
+    schema.collections[0].fields.push(RuntimeField {
+        description: None,
+        classification: None,
+        export: None,
+        id: FieldId::new("parent").unwrap(),
+        api_name: "parent".into(),
+        physical_column: "parent".into(),
+        value_kind: RuntimeValueKind::Integer,
+        nullable: true,
+        unique: false,
+        filterable: false,
+        sortable: false,
+        generated: false,
+        default: None,
+        format: None,
+    });
+    schema.collections[0].relations.push(RuntimeRelation {
+        description: None,
+        classification: None,
+        export: None,
+        id: RelationId::new("parent_link").unwrap(),
+        api_name: "parentLink".into(),
+        target: CollectionId::new("records").unwrap(),
+        key_pairs: vec![RelationKeyPair {
+            source: FieldId::new("parent").unwrap(),
+            target: FieldId::new("id").unwrap(),
+        }],
+        cardinality: RelationCardinality::One,
+        enforce_foreign_key: true,
+        on_delete: Some(action),
+    });
+    schema
+}
+
 #[tokio::test]
 async fn incoming_modifying_dependencies_fail_closed_while_restrict_remains_usable() {
     for action in [
@@ -1015,39 +1051,7 @@ async fn incoming_modifying_dependencies_fail_closed_while_restrict_remains_usab
         DeletePolicy::SetNull,
         DeletePolicy::Restrict,
     ] {
-        let mut schema = definition();
-        schema.collections[0].fields.push(RuntimeField {
-            description: None,
-            classification: None,
-            export: None,
-            id: FieldId::new("parent").unwrap(),
-            api_name: "parent".into(),
-            physical_column: "parent".into(),
-            value_kind: RuntimeValueKind::Integer,
-            nullable: true,
-            unique: false,
-            filterable: false,
-            sortable: false,
-            generated: false,
-            default: None,
-            format: None,
-        });
-        schema.collections[0].relations.push(RuntimeRelation {
-            description: None,
-            classification: None,
-            export: None,
-            id: RelationId::new("parent_link").unwrap(),
-            api_name: "parentLink".into(),
-            target: CollectionId::new("records").unwrap(),
-            key_pairs: vec![RelationKeyPair {
-                source: FieldId::new("parent").unwrap(),
-                target: FieldId::new("id").unwrap(),
-            }],
-            cardinality: RelationCardinality::One,
-            enforce_foreign_key: true,
-            on_delete: Some(action.clone()),
-        });
-        let f = Fixture::with_definition(schema).await;
+        let f = Fixture::with_definition(self_referencing(action.clone())).await;
         f.run(f.create(1), f.authority()).await.unwrap();
         let request = f
             .schema()
@@ -1065,6 +1069,43 @@ async fn incoming_modifying_dependencies_fail_closed_while_restrict_remains_usab
         }
         f.finish().await;
     }
+}
+
+#[tokio::test]
+async fn referenced_restrict_delete_is_a_rolled_back_constraint_violation() {
+    let f = Fixture::with_definition(self_referencing(DeletePolicy::Restrict)).await;
+    f.run(f.create(1), f.authority()).await.unwrap();
+    let child = f
+        .schema()
+        .runtime_create_request(
+            &f.collection(),
+            &[
+                (f.field("id"), RuntimeValue::Integer(2)),
+                (f.field("tenant"), RuntimeValue::String("north".into())),
+                (f.field("label"), RuntimeValue::String("child".into())),
+                (f.field("parent"), RuntimeValue::Integer(1)),
+            ],
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    f.run(child, f.authority()).await.unwrap();
+    let request = f
+        .schema()
+        .runtime_delete_request(f.key(1), None, Some(f.projection()), Default::default())
+        .unwrap();
+    let error = f.run(request, f.authority()).await.unwrap_err();
+    assert_eq!(
+        error.public_error().runtime_mutation_code(),
+        Some("constraint_violation")
+    );
+    assert_eq!(
+        error.public_error().code,
+        graphql_orm::graphql::errors::OrmErrorCode::ConstraintViolation
+    );
+    assert_eq!(error.commit_outcome(), TransactionCommitOutcome::RolledBack);
+    assert_eq!(f.count().await, 2);
+    f.finish().await;
 }
 
 struct PendingIntent;

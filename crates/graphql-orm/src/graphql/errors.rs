@@ -227,7 +227,8 @@ impl OrmPublicError {
             sqlx::Error::Database(db)
                 if db.is_unique_violation()
                     || db.is_foreign_key_violation()
-                    || db.is_check_violation() =>
+                    || db.is_check_violation()
+                    || is_sqlite_restrict_foreign_key_refusal(db.as_ref()) =>
             {
                 Self::new(OrmErrorCode::ConstraintViolation).with_internal(error.to_string())
             }
@@ -253,6 +254,36 @@ impl OrmPublicError {
         }
         error
     }
+}
+
+/// Recognize a delete or key update refused by an SQLite `ON DELETE/UPDATE RESTRICT` action.
+///
+/// SQLite implements `RESTRICT` as an internal trigger program that raises
+/// `RAISE(ABORT, 'FOREIGN KEY constraint failed')`, so the failure carries the
+/// extended code `SQLITE_CONSTRAINT_TRIGGER` (1811) rather than
+/// `SQLITE_CONSTRAINT_FOREIGNKEY` (787), and sqlx reports it as
+/// `ErrorKind::Other`. The rule requires both structured signals available:
+/// the SQLite driver error type with extended code 1811, and SQLite's exact
+/// foreign-key message. Any other trigger failure, including an application
+/// `RAISE(ABORT, ...)` with a different message, remains unclassified. An
+/// application trigger that raises the identical foreign-key message is, by
+/// construction, indistinguishable and is treated as a foreign-key refusal.
+#[cfg(feature = "sqlite")]
+fn is_sqlite_restrict_foreign_key_refusal(error: &dyn sqlx::error::DatabaseError) -> bool {
+    /// SQLite extended result code `SQLITE_CONSTRAINT_TRIGGER`.
+    const SQLITE_CONSTRAINT_TRIGGER: &str = "1811";
+    /// The fixed message SQLite's foreign-key engine raises for a `RESTRICT` action.
+    const SQLITE_FOREIGN_KEY_MESSAGE: &str = "FOREIGN KEY constraint failed";
+    error
+        .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+        .is_some()
+        && error.code().as_deref() == Some(SQLITE_CONSTRAINT_TRIGGER)
+        && error.message() == SQLITE_FOREIGN_KEY_MESSAGE
+}
+
+#[cfg(not(feature = "sqlite"))]
+fn is_sqlite_restrict_foreign_key_refusal(_: &dyn sqlx::error::DatabaseError) -> bool {
+    false
 }
 
 /// Preserve a safe public category through legacy generated SQLx-result paths.
@@ -379,6 +410,69 @@ mod tests {
         let graphql = OrmPublicError::forbidden().into_graphql_error();
         let public = OrmPublicError::from(sqlx_error_from_graphql(graphql));
         assert_eq!(public.code, OrmErrorCode::Forbidden);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_restrict_refusal_is_a_constraint_violation_but_other_triggers_are_not() {
+        use sqlx::Connection;
+        let mut conn = sqlx::SqliteConnection::connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for statement in [
+            "PRAGMA foreign_keys = ON",
+            "CREATE TABLE parent (id TEXT PRIMARY KEY)",
+            "CREATE TABLE restricted (id TEXT PRIMARY KEY, parent TEXT REFERENCES parent(id) ON DELETE RESTRICT)",
+            "CREATE TABLE no_action (id TEXT PRIMARY KEY, parent TEXT REFERENCES parent(id))",
+            "CREATE TABLE guarded (id TEXT PRIMARY KEY)",
+            "CREATE TRIGGER guarded_abort BEFORE DELETE ON guarded BEGIN SELECT RAISE(ABORT, 'guarded rows are immutable'); END",
+            "INSERT INTO parent (id) VALUES ('r'), ('n')",
+            "INSERT INTO restricted (id, parent) VALUES ('c', 'r')",
+            "INSERT INTO no_action (id, parent) VALUES ('c', 'n')",
+            "INSERT INTO guarded (id) VALUES ('g')",
+        ] {
+            sqlx::query(statement).execute(&mut conn).await.unwrap();
+        }
+        let classify = |error: sqlx::Error| {
+            let code = error
+                .as_database_error()
+                .and_then(|db| db.code().map(|code| code.into_owned()));
+            (code, OrmPublicError::from_sqlx(&error).code)
+        };
+
+        let restrict = sqlx::query("DELETE FROM parent WHERE id = 'r' RETURNING id")
+            .fetch_all(&mut conn)
+            .await
+            .err()
+            .expect("RESTRICT refusal");
+        assert_eq!(
+            classify(restrict),
+            (Some("1811".into()), OrmErrorCode::ConstraintViolation)
+        );
+
+        let no_action = sqlx::query("DELETE FROM parent WHERE id = 'n'")
+            .execute(&mut conn)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify(no_action),
+            (Some("787".into()), OrmErrorCode::ConstraintViolation)
+        );
+
+        let trigger = sqlx::query("DELETE FROM guarded WHERE id = 'g'")
+            .execute(&mut conn)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify(trigger),
+            (Some("1811".into()), OrmErrorCode::InternalError)
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM parent")
+            .fetch_one(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]
