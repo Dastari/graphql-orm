@@ -23,9 +23,9 @@ and complete primary-key suffix, even for cursor-only selections. Checks run
 before queries and again against returned rows. Private, skipped or transformed
 GraphQL order fields fail closed; repository field policy remains independent.
 
-Version 0.58.0 supports static keyset reads with a complete composite-primary-key
+Version 0.59.0 supports static keyset reads with a complete composite-primary-key
 tiebreaker tuple. Schema ownership and write posture are unchanged. See the
-[migration guide](../../MIGRATION.md#0570-to-0580-composite-primary-key-keysets).
+[migration guide](../../MIGRATION.md#0580-to-0590-composite-primary-key-keysets).
 
 Version 0.57.0 adds exact SQL Server `MONEY` typed reads through
 `#[graphql_orm(mssql_money)]`. The generated read projection casts the native

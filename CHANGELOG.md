@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.58.0**.
+Companion runtime/macros version: **0.59.0**.
 
 - Extend explicit `timestamp = "host"` to public GraphQLEntity fields and ordinary String timestamps (including optional forms). Caller-supplied source timestamps stay unchanged instead of receiving the ORM mutation clock. Existing automatic timestamp behavior remains the default. Policies, hooks and field restrictions still apply.
 
