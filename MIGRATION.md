@@ -38,6 +38,22 @@ Upgrade runtime/macros together. Composite-key entities may now declare `keyset 
 
 Upgrade runtime/macros together. Public GraphQLEntity and RepositoryEntity timestamp fields may explicitly use `#[graphql_orm(timestamp = "host")]` on ordinary `i64`, `String`, or optional forms whose Rust or physical name is `created_at` or `updated_at`. For an external source timestamp mapped to physical `updated_at`, opt in on the mapped field to prevent automatic epoch assignment. Values are bound unchanged; String content is caller-owned and is not parsed or normalized as a date. Existing automatic behavior remains unchanged without the annotation. The annotation does not change stored type/default metadata; conventional Rust names still need `default = false` to suppress their implicit default when appropriate. Schema-only, generated/version/key/relation fields and date/JSON/boolean adapters remain rejected. No data or schema migration is required merely to opt in; preserve field/row authorization and distinguish source observation time from collection and mutation clocks.
 
+## Generated result disclosure patch: operation catalog 0.4.2 / profiles 0.16.2
+
+Select one qualified published workspace tag containing both patches. Keep
+secret classifications, field export bans, generated operator roots and the
+full canonical semantic catalogue. Do not filter generated metadata locally.
+Generated root results now inherit their entity's classification and structural
+export boundary; secret and entirely nonexportable results do not become AI
+capabilities. Public results omit provider relationship selections that cannot
+reach exportable fields within the configured depth and cycle limits.
+
+Regenerate derived capability manifests and semantic/router descriptors from
+the actual finished SDL and semantic catalogue because fingerprints change.
+Existing resolver, field, row and provider-egress authorization remains
+independent. GraphQL SDL, stored data and schema ownership are unchanged; no
+DDL or data migration is needed. Runtime/macros package versions stay 0.60.0.
+
 ## 0.56.0 to 0.57.0: exact SQL Server MONEY reads
 
 Upgrade `graphql-orm` and `graphql-orm-macros` together to 0.57.0 using one

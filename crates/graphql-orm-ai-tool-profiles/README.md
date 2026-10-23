@@ -20,11 +20,19 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version 0.16.2 keeps mixed public and secret generated schemas ready: the
+complete finished SDL and canonical semantic catalogue are validated, while
+secret or structurally nonexportable results do not become provider
+capabilities. A public result does not offer a relationship selection that
+cannot reach an exportable scalar within its depth and cycle bounds. The
+GraphQL relationship and operator roots remain exposed under their existing
+authorization policies. No downstream catalogue filtering is needed.
+
 ## Install
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.1" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.2" }
 serde_json = "1"
 ```
 

@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.1 to 0.16.2: generated result disclosure
+
+Adopt operation catalog 0.4.2 and profiles 0.16.2 from the same qualified
+workspace release. Keep complete generated SDL and semantic metadata; no local
+filtering or relaxed export policy is needed. Regenerate capability manifests
+and revalidate their exact schema and semantic fingerprints. Secret or entirely
+nonexportable results and closed provider relation projections are excluded
+structurally. Resolver and provider-egress policies still decide authority.
+No data or schema migration is required.
+
 ## 0.16.0 to 0.16.1
 
 This compatible patch adds `AiError::classification`, a distinct payload-free

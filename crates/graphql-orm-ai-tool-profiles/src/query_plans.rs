@@ -3057,6 +3057,15 @@ fn collect_compact_selection_paths(
         if ancestry.contains(&relationship.target) {
             continue;
         }
+        if !entity_has_provider_selections(
+            catalog,
+            &relationship.target,
+            limits,
+            depth + 1,
+            ancestry,
+        )? {
+            continue;
+        }
         let actual = schema.object_field(entity_name, &field.field_name)?;
         let collection = collection_execution(relationship)?;
         validate_collection_sdl(schema, &actual.arguments, collection)?;
@@ -3353,6 +3362,45 @@ fn validate_subscription_condition(
     Ok(())
 }
 
+// Provider selections may omit a structurally closed relationship without
+// changing its GraphQL resolver or semantic catalogue. Malformed metadata is
+// still validated before any capability is admitted.
+fn entity_has_provider_selections(
+    catalog: &GraphqlSemanticCatalog,
+    entity_name: &str,
+    limits: AiGraphqlQueryCapabilityLimits,
+    depth: u8,
+    ancestry: &[String],
+) -> Result<bool, AiError> {
+    let mut visited = ancestry.iter().cloned().collect::<BTreeSet<_>>();
+    let mut pending = VecDeque::from([(entity_name.to_owned(), depth)]);
+    while let Some((name, depth)) = pending.pop_front() {
+        if !visited.insert(name.clone()) {
+            continue;
+        }
+        let entity = semantic_entity(catalog, &name)?;
+        if entity.default_classification == GraphqlSemanticClassification::Secret {
+            continue;
+        }
+        if entity.fields.iter().any(selectable_exportable_scalar) {
+            return Ok(true);
+        }
+        if depth + 1 >= limits.maximum_depth {
+            continue;
+        }
+        for field in entity.fields.iter().filter(|field| {
+            field.selectable
+                && field.export == GraphqlSemanticExport::Exportable
+                && field.classification != GraphqlSemanticClassification::Secret
+        }) {
+            if let Some(relation) = &field.relationship {
+                pending.push_back((relation.target.clone(), depth + 1));
+            }
+        }
+    }
+    Ok(false)
+}
+
 fn selection_schema(
     schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
@@ -3393,6 +3441,15 @@ fn selection_schema(
             ));
         };
         if ancestry.iter().any(|name| name == &relationship.target) {
+            continue;
+        }
+        if !entity_has_provider_selections(
+            catalog,
+            &relationship.target,
+            limits,
+            depth + 1,
+            ancestry,
+        )? {
             continue;
         }
         let actual = schema.object_field(entity_name, &field.field_name)?;

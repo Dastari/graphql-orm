@@ -21,11 +21,18 @@ schema contains custom roots, authorize a resolver, or bind a GraphQL document.
 structural export facts, but those facts do not authorize disclosure or replace
 row, field, resolver, provider-egress, or database policy.
 
+Version 0.4.2 gives generated root results the entity's inherited
+classification and structural export boundary. Pages, keysets, scans, counts
+and Changed envelopes retain that boundary. Entities with no reachable
+exportable field result, including entirely nonexportable fields and closed
+relationship cycles, remain in the canonical GraphQL catalogue with
+`NeverExport` result metadata. This does not remove or authorize a resolver.
+
 ## Install
 
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.1" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.2" }
 serde_json = "1"
 ```
 
