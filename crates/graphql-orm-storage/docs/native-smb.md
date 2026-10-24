@@ -3,7 +3,7 @@ title: "Native SMB2/SMB3 Blob Storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-20
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -163,6 +163,14 @@ With the `smb` feature, structured `tracing` events also report connection,
 reconnect, upload start/progress/completion, and failure events. These surfaces
 do not include passwords, usernames, endpoints, or configuration debug output.
 
+`BlobStore::observe_capacity` queries `FileFsFullSizeInformation` and
+`FileFsVolumeInformation` on the configured prefix through the authenticated
+session. It reports caller-available units (which include any quota the server
+enforces for the session user) separately from actual-available and total
+units, and binds the result to the volume serial. It never creates a missing
+prefix and never falls back to a host mount or local filesystem statistic. See
+[destination capacity](blob-store.md#destination-capacity).
+
 Use `StorageProviderErrorKind`, which distinguishes connectivity,
 authentication, security negotiation, missing share, permission, missing path,
 capacity, collision, timeout, connection loss, and protocol failures. Never put
@@ -172,7 +180,7 @@ runtime configuration or credentials in support bundles.
 
 Run `crates/graphql-orm-storage/tests/samba/run.sh` from the workspace root for
 the owned Samba protocol and complete backup lifecycle suite. It uses `cargo`
-by default. Set `SMB_TEST_CARGO` to an executable path to run all nine unchanged
+by default. Set `SMB_TEST_CARGO` to an executable path to run all eleven
 Cargo/test invocations through a host's resource-controlled Cargo runner:
 
 ```sh

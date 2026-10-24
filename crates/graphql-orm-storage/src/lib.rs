@@ -17,6 +17,10 @@
 //! as large recordings. Use [`BlobStore`] for lower-level key-addressed blob
 //! operations, such as backup repository adapters.
 //!
+//! [`BlobStore::observe_capacity`] reports a bounded [`CapacityObservation`]
+//! of the capacity the authenticated caller may still allocate at the exact
+//! configured destination.
+//!
 //! # Example
 //!
 //! ```
@@ -34,11 +38,14 @@
 mod azure;
 mod backend;
 mod blob;
+mod capacity;
 mod checksum;
 mod error;
 mod key;
 #[cfg(feature = "local")]
 mod local;
+#[cfg(feature = "local")]
+mod local_capacity;
 mod object;
 #[cfg(feature = "s3")]
 mod s3;
@@ -54,6 +61,12 @@ pub use blob::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
     BoxedStorageStream, StorageByteStream, collect_storage_stream, validate_blob_key,
 };
+pub use capacity::{
+    CAPACITY_MAX_AGE_LIMIT, CapacityBinding, CapacityObservation, CapacityPlacement, CapacityQuota,
+    CapacityRequest, CapacityState, CapacityUnknownReason, CapacityValidationError,
+    DEFAULT_CAPACITY_MAX_AGE, KnownCapacity, ProviderManagedBasis, ProviderManagedCapacity,
+    QuotaLimit, QuotaScope, UnknownCapacity,
+};
 pub use checksum::sha256_hex;
 pub use error::{StorageError, StorageProviderErrorKind};
 pub use key::{build_storage_key, file_extension};
@@ -64,7 +77,7 @@ pub use object::{
     StoredObject,
 };
 #[cfg(feature = "s3")]
-pub use s3::{S3StorageBackend, S3StorageConfig};
+pub use s3::{S3CapacityMode, S3StorageBackend, S3StorageConfig};
 pub use service::{ObjectStorage, StorageService};
 #[cfg(feature = "smb")]
 pub use smb::{
