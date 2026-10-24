@@ -7,7 +7,10 @@
 //! explicitly and list it in [`RuntimeMutationEffect::links`] for hooks.
 //!
 //! Link mutations only see links to targets the host's
-//! [`RuntimeWriteAuthority::link_target_visibility`] admits. The host receives
+//! [`RuntimeWriteAuthority::link_target_visibility`] admits. Every requested
+//! target must be an existing visible row: the ORM refuses any other with a
+//! uniform `denied` before the host is asked or anything is written, so a
+//! hidden target and a missing one are indistinguishable. The host then receives
 //! every requested target, whatever its current link state, so a refusal never
 //! depends on whether a hidden link exists.
 use super::*;
@@ -125,8 +128,12 @@ impl ValidatedRuntimeSchema {
     /// write authority sees its intent and locked preimage as usual, then
     /// [`RuntimeWriteAuthority::link_target_visibility`] scopes the request to
     /// visible targets and [`RuntimeWriteAuthority::authorize_links`] receives the
-    /// requested targets and the exact delta. Links to hidden targets are never
-    /// read, counted, replaced or removed. The returned record is the unchanged
+    /// requested targets and the exact delta. Every requested target (`set`,
+    /// `add` or `remove`) must be an existing row the visibility predicate admits;
+    /// otherwise the mutation fails with `denied` before `authorize_links` and
+    /// before any write, whether the target is hidden, missing or already linked.
+    /// Links to hidden targets are never read, counted, replaced or removed.
+    /// The returned record is the unchanged
     /// source row. At most `max_link_keys` target keys may be supplied and at most
     /// `max_link_keys` visible links may exist after the change.
     ///
@@ -312,6 +319,80 @@ fn decode_keys<B: RuntimeMutationBackend>(
 }
 
 impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
+    /// Require every requested target to be an existing row of the relation's
+    /// target collection that satisfies `visible`, in bind-bounded batches.
+    /// PostgreSQL locks the rows `FOR KEY SHARE` so they cannot be deleted before
+    /// commit; SQLite's immediate write transaction already excludes writers.
+    /// Any failure is a uniform `Denied`, so a hidden target and a missing one
+    /// are indistinguishable.
+    async fn admit_link_targets(
+        &mut self,
+        relation: &RuntimeRelationHandle,
+        targets: &[&RuntimeKey],
+        visible: Option<&RuntimePredicate>,
+        limits: RuntimeMutationLimits,
+    ) -> Result<(), RuntimeMutationError> {
+        let d = B::DIALECT;
+        let join = relation
+            .join()
+            .ok_or_else(|| err(RuntimeMutationErrorCode::SchemaMismatch))?;
+        let fields = join.target();
+        let tuple = fields
+            .iter()
+            .map(|(field, _)| d.quote_identifier(field.physical_column()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reserved = visible.map_or(0, |p| {
+            let mut probe = Vec::new();
+            p.render(d, &mut probe);
+            probe.len()
+        });
+        let chunk =
+            (limits.query.max_bind_parameters.saturating_sub(reserved) / fields.len()).max(1);
+        for batch in targets.chunks(chunk) {
+            let mut values = Vec::new();
+            let list = batch
+                .iter()
+                .map(|target| {
+                    let binds = fields
+                        .iter()
+                        .zip(&target.fields)
+                        .map(|((field, _), (_, value))| bind_value(d, field, value, &mut values))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({binds})")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let mut condition = format!("({tuple}) IN ({list})");
+            if let Some(visible) = visible {
+                condition = format!("{condition} AND ({})", visible.render(d, &mut values));
+            }
+            if values.len() > limits.query.max_bind_parameters {
+                return Err(err(RuntimeMutationErrorCode::LimitExceeded));
+            }
+            let sql = format!(
+                "SELECT 1 AS {} FROM {} WHERE {condition}{}",
+                d.quote_identifier("graphql_orm_admitted"),
+                d.quote_identifier(relation.target().physical_table()),
+                if d == DatabaseBackend::Postgres {
+                    " FOR KEY SHARE"
+                } else {
+                    ""
+                }
+            );
+            let rows = self
+                .fetch_rows(&sql, &values)
+                .await
+                .map_err(database_error::<B>)?;
+            // Requested targets are distinct, so each admitted key matches one row.
+            if rows.len() != batch.len() {
+                return Err(err(RuntimeMutationErrorCode::Denied));
+            }
+        }
+        Ok(())
+    }
+
     /// Lock and read the other-side keys linked to `key` through `side`, only
     /// those whose target row satisfies `visible` when given.
     async fn linked_keys(
@@ -716,6 +797,18 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         if let Some(p) = &visible {
             p.check_mutation_limits(request.limits)?;
         }
+        let (requested_add, requested_remove): (&[RuntimeKey], &[RuntimeKey]) = match &spec.change {
+            RuntimeLinkChange::Replace(keys) => (keys, &[]),
+            RuntimeLinkChange::Delta { add, remove } => (add, remove),
+        };
+        let requested = requested_add
+            .iter()
+            .chain(requested_remove)
+            .collect::<Vec<_>>();
+        if !requested.is_empty() {
+            self.admit_link_targets(&spec.relation, &requested, visible.as_ref(), request.limits)
+                .await?;
+        }
         let side = LinkSide {
             relation: spec.relation.clone(),
             own: join.source().to_vec(),
@@ -730,10 +823,6 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         for target in &current {
             linked.insert(key_identity(target)?);
         }
-        let (requested_add, requested_remove): (&[RuntimeKey], &[RuntimeKey]) = match &spec.change {
-            RuntimeLinkChange::Replace(keys) => (keys, &[]),
-            RuntimeLinkChange::Delta { add, remove } => (add, remove),
-        };
         let mut add = Vec::new();
         for k in requested_add {
             if !linked.contains(&key_identity(k)?) {

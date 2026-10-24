@@ -141,6 +141,15 @@ means every target is visible). It locks and reads the row's links to *visible* 
 most `max_link_keys` of them, else `limit_exceeded`. Links to hidden targets are never read,
 counted, replaced or removed by a link mutation.
 
+Before reading links, the ORM requires every requested target (`set`, `add` and `remove`) to be an
+existing row of the target collection that satisfies the visibility predicate. It checks them in
+bind-bounded batches; PostgreSQL locks them `FOR KEY SHARE` until commit, and SQLite's immediate
+write transaction excludes concurrent writers. Any other target fails the mutation with `denied`
+before `authorize_links`, hooks or any write. A hidden target, a missing one and a hidden one that
+is already linked therefore give the same answer, and the committed effect never mentions a hidden
+target. This holds without a predicate too: naming a missing row is `denied`, not
+`constraint_violation`, and removing a missing row is refused rather than ignored.
+
 The ORM computes the exact delta and calls `RuntimeWriteAuthority::authorize_links` before any
 write. `RuntimeLinkCheck` carries every requested target (`requested_add` for `set`/`add`,
 `requested_remove`) independent of current link state, and the effective delta (`added`,
@@ -149,8 +158,7 @@ hidden link exists, so the endpoint is not an existence oracle. Both hook method
 default, so hosts must opt in before links can change.
 
 The delta is written in bind-bounded batches: one `DELETE … IN` and one multi-row `INSERT … ON
-CONFLICT DO NOTHING` per batch. A missing target fails its foreign key with
-`constraint_violation`. A pair already present, for example one added concurrently from the
+CONFLICT DO NOTHING` per batch. A pair already present, for example one added concurrently from the
 inverse relation, is left unchanged and is not reported as added. On PostgreSQL a pair committed
 after the transaction's snapshot makes the insert fail as a serialization failure
 (`retryable_transaction`). The result check sees the unchanged source row.

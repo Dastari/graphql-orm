@@ -16,6 +16,14 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.70.0**.
+
+- Refuse hidden and missing link targets uniformly. A link mutation now requires every requested target (`set`, `add`, `remove`) to be an existing row admitted by `RuntimeWriteAuthority::link_target_visibility`. PostgreSQL locks it `FOR KEY SHARE`. Any other target fails with `denied` before `authorize_links`, hooks or any write. A host that allows such a target can no longer leak a hidden link's existence through `RuntimeLinkEffect::added`, or a row's existence through `constraint_violation` versus success.
+- **Breaking (behaviour):** a link mutation naming a missing target returns `denied` instead of `constraint_violation`, even when the host returns no visibility predicate. Removing a missing or hidden target is refused instead of being a no-op. Adding or removing an already-linked hidden target is refused instead of leaving the link unchanged.
+- Add SQLite and PostgreSQL link tests for UUID and text primary keys (exact matching of existing links, duplicate refusal, inverse side and deletes).
+
+## 0.69.0 (unreleased)
+
 Companion runtime/macros version: **0.69.0**.
 
 - Select agql-auth 0.23.0 at reviewed merged revision `158c79e27117adc5a95d01d58c39c39fd44e6a1a` (OAuth 2.0 userinfo providers, `form_post` and signed client credentials). No ORM, AI or router source change; `auth-agql` users see the 0.23.0 Auth types. See [MIGRATION](MIGRATION.md#agql-auth-0230-selection).

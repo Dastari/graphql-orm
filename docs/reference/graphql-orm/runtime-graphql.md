@@ -327,7 +327,7 @@ Each many-to-many relation adds
 enabled. It returns the source's `…MutationPayload` and requires the host write authority's
 `authorize_links` and `link_target_visibility`. `RuntimeGraphqlMutationOptions::max_link_keys`
 bounds the supplied keys and the visible links read; `max_delete_links` bounds the links a
-generated delete may remove. A denied link write returns the code `denied`. Join relations read as `…Connection` fields like other
+generated delete may remove. A denied link write returns the code `denied`, as does naming a hidden or missing target. Join relations read as `…Connection` fields like other
 to-many relations. They do not accept relation filters, and payloads cannot select them.
 
 Attach a certified environment, pinned write authority and optional journal hook

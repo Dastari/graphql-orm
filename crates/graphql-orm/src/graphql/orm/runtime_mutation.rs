@@ -346,15 +346,13 @@ pub trait RuntimeWriteAuthority<B: RuntimeMutationBackend>: Send + Sync {
         check: RuntimeResultCheck<'a>,
         tx: &'a mut MutationContext<'_, B>,
     ) -> BoxFuture<'a, Result<RuntimeReturnGrant, RuntimeMutationError>>;
-    /// Approve the exact links a many-to-many write adds or removes, after the
-    /// intent and preimage checks and before any write: a link mutation's delta,
-    /// or every link of a row being deleted. Denies by default, so a host must
-    /// opt in before links can change.
     /// Approve a many-to-many write before any write. A link mutation presents
     /// every requested target (`requested_add`, `requested_remove`) as well as the
     /// effective delta over visible links (`added`, `removed`). Decide on the
     /// requested targets so the outcome never depends on whether a hidden link
-    /// exists. A delete presents every link of the deleted row as `removed`,
+    /// exists. The ORM has already refused, with `denied`, any requested target
+    /// that is missing or fails [`Self::link_target_visibility`], so every
+    /// requested target is an existing visible row. A delete presents every link of the deleted row as `removed`,
     /// visible or not, described from the join relation's declaring (source) side
     /// even when the deleted row is the target. Denies by default, so a host must
     /// opt in before links can change.
@@ -368,8 +366,9 @@ pub trait RuntimeWriteAuthority<B: RuntimeMutationBackend>: Send + Sync {
     }
     /// Row predicate on the join relation's target collection naming the targets
     /// a link mutation may see. Links to other targets are never read, counted,
-    /// replaced or removed by the mutation; `None` makes every target visible.
-    /// Denies by default.
+    /// replaced or removed by the mutation, and naming one fails with `denied`
+    /// exactly as naming a missing row does; `None` makes every existing target
+    /// visible. Denies by default.
     fn link_target_visibility<'a>(
         &'a self,
         check: RuntimeLinkVisibilityCheck<'a>,
