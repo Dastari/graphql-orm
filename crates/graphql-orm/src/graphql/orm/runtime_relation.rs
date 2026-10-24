@@ -456,6 +456,68 @@ fn supported_key_kind(kind: RuntimeValueKind) -> bool {
     )
 }
 
+/// Correlated key kinds are portable; a join relation's two keys are independent.
+fn supported_relation_keys(relation: &super::RuntimeRelationHandle) -> bool {
+    match relation.join() {
+        Some(join) => join
+            .source()
+            .iter()
+            .chain(join.target())
+            .all(|(field, _)| supported_key_kind(field.value_kind())),
+        None => relation.key_pairs().iter().all(|(source, target)| {
+            source.value_kind() == target.value_kind() && supported_key_kind(source.value_kind())
+        }),
+    }
+}
+
+/// Rows of the relation's target linked to one parent key: direct key equality,
+/// or a semi-join through a many-to-many link table.
+fn bind_relation_key(
+    backend: DatabaseBackend,
+    relation: &super::RuntimeRelationHandle,
+    key: &[RuntimeValue],
+    values: &mut Vec<SqlValue>,
+) -> Result<String, RuntimeRelationError> {
+    let Some(join) = relation.join() else {
+        let target_fields = relation
+            .key_pairs()
+            .iter()
+            .map(|(_, target)| target.clone())
+            .collect::<Vec<_>>();
+        return bind_key(backend, &target_fields, key, values);
+    };
+    let alias = backend.quote_identifier("graphql_orm_link");
+    let table = backend.quote_identifier(relation.target().physical_table());
+    let mut clauses = join
+        .target()
+        .iter()
+        .map(|(field, column)| {
+            format!(
+                "{alias}.{} = {table}.{}",
+                backend.quote_identifier(column),
+                backend.quote_identifier(field.physical_column())
+            )
+        })
+        .collect::<Vec<_>>();
+    for ((field, column), value) in join.source().iter().zip(key) {
+        let bind = placeholder(backend, values.len() + 1, field.value_kind());
+        values.push(
+            value_bind(value).ok_or_else(|| {
+                RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidParent)
+            })?,
+        );
+        clauses.push(format!(
+            "{alias}.{} = {bind}",
+            backend.quote_identifier(column)
+        ));
+    }
+    Ok(format!(
+        "EXISTS (SELECT 1 FROM {} AS {alias} WHERE {})",
+        backend.quote_identifier(join.physical_table()),
+        clauses.join(" AND ")
+    ))
+}
+
 fn record_values(
     record: &RuntimeRecord,
     fields: &[RuntimeFieldHandle],
@@ -493,12 +555,7 @@ fn record_anchors(
                     .for_relation(&spec.relation),
             );
         }
-        let source_fields = spec
-            .relation
-            .key_pairs()
-            .iter()
-            .map(|(source, _)| source.clone())
-            .collect::<Vec<_>>();
+        let source_fields = spec.relation.source_key_fields();
         let (relation_values, any_null) = record_values(record, &source_fields)?;
         anchors.push(RuntimeParentAnchor {
             schema: spec.relation.schema_fingerprint().clone(),
@@ -610,9 +667,9 @@ impl ValidatedRuntimeSchema {
                         .for_relation(relation),
                 );
             }
-            for (source, _) in relation.key_pairs() {
+            for source in relation.source_key_fields() {
                 if seen.insert(source.id().clone()) {
-                    union.push(source.clone());
+                    union.push(source);
                 }
             }
             for field in &parent_identity_fields {
@@ -698,8 +755,8 @@ impl ValidatedRuntimeSchema {
             );
         }
         if anchors.len() > limits.max_parents
-            || relation.key_pairs().is_empty()
-            || relation.key_pairs().len() > limits.max_key_arity
+            || relation.source_key_fields().is_empty()
+            || relation.source_key_fields().len() > limits.max_key_arity
         {
             return Err(
                 RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
@@ -718,9 +775,7 @@ impl ValidatedRuntimeSchema {
                     .for_relation(relation),
             );
         }
-        if relation.key_pairs().iter().any(|(source, target)| {
-            source.value_kind() != target.value_kind() || !supported_key_kind(source.value_kind())
-        }) {
+        if !supported_relation_keys(relation) {
             return Err(
                 RuntimeRelationError::new(RuntimeRelationErrorCode::UnsupportedKey)
                     .for_relation(relation),
@@ -833,18 +888,15 @@ impl ValidatedRuntimeSchema {
                         .for_relation(next_relation),
                 );
             }
-            if next_relation.key_pairs().is_empty()
-                || next_relation.key_pairs().len() > limits.max_key_arity
+            if next_relation.source_key_fields().is_empty()
+                || next_relation.source_key_fields().len() > limits.max_key_arity
             {
                 return Err(
                     RuntimeRelationError::new(RuntimeRelationErrorCode::ResourceLimit)
                         .for_relation(next_relation),
                 );
             }
-            if next_relation.key_pairs().iter().any(|(source, target)| {
-                source.value_kind() != target.value_kind()
-                    || !supported_key_kind(source.value_kind())
-            }) {
+            if !supported_relation_keys(next_relation) {
                 return Err(
                     RuntimeRelationError::new(RuntimeRelationErrorCode::UnsupportedKey)
                         .for_relation(next_relation),
@@ -852,7 +904,7 @@ impl ValidatedRuntimeSchema {
             }
             for field in parent_identity_fields
                 .iter()
-                .chain(next_relation.key_pairs().iter().map(|(source, _)| source))
+                .chain(&next_relation.source_key_fields())
             {
                 if seen.insert(field.id().clone()) {
                     union.push(field.clone());
@@ -905,12 +957,7 @@ where
                             .for_relation(&spec.relation),
                     );
                 }
-                let source_fields = spec
-                    .relation
-                    .key_pairs()
-                    .iter()
-                    .map(|(source, _)| source.clone())
-                    .collect::<Vec<_>>();
+                let source_fields = spec.relation.source_key_fields();
                 let (relation_values, any_null) = record_values(&edge.node, &source_fields)?;
                 anchors.push(RuntimeParentAnchor {
                     schema: spec.relation.schema_fingerprint().clone(),
@@ -1170,12 +1217,6 @@ fn render_relation_rows(
     backend: DatabaseBackend,
     groups: &[QueryGroup],
 ) -> Result<(String, Vec<SqlValue>), RuntimeRelationError> {
-    let target_fields = request
-        .relation
-        .key_pairs()
-        .iter()
-        .map(|(_, target)| target.clone())
-        .collect::<Vec<_>>();
     let columns = request
         .decode_projection
         .fields()
@@ -1189,7 +1230,12 @@ fn render_relation_rows(
     let mut values = Vec::new();
     let mut branches = Vec::new();
     for group in groups {
-        let mut predicates = vec![bind_key(backend, &target_fields, &group.key, &mut values)?];
+        let mut predicates = vec![bind_relation_key(
+            backend,
+            &request.relation,
+            &group.key,
+            &mut values,
+        )?];
         if let Some(predicate) = &request.predicate {
             predicates.push(predicate.render(backend, &mut values));
         }
@@ -1237,12 +1283,6 @@ fn render_relation_counts(
     backend: DatabaseBackend,
     groups: &[QueryGroup],
 ) -> Result<(String, Vec<SqlValue>, BTreeMap<usize, usize>), RuntimeRelationError> {
-    let target_fields = request
-        .relation
-        .key_pairs()
-        .iter()
-        .map(|(_, target)| target.clone())
-        .collect::<Vec<_>>();
     let table = backend.quote_identifier(request.relation.target().physical_table());
     let group_alias = backend.quote_identifier(GROUP_ALIAS);
     let count_alias = backend.quote_identifier(COUNT_ALIAS);
@@ -1262,7 +1302,12 @@ fn render_relation_counts(
     }
     let mut branches = Vec::new();
     for (id, key) in unique.into_values() {
-        let mut predicates = vec![bind_key(backend, &target_fields, &key, &mut values)?];
+        let mut predicates = vec![bind_relation_key(
+            backend,
+            &request.relation,
+            &key,
+            &mut values,
+        )?];
         if let Some(predicate) = &request.predicate {
             predicates.push(predicate.render(backend, &mut values));
         }

@@ -424,6 +424,14 @@ impl RuntimeGraphqlModule {
                 return Err(RuntimeGraphqlError::new("name_collision").into());
             }
         }
+        let mut mutation_roots = BTreeSet::new();
+        for c in &module.schema.schema().collections {
+            for root in super::mutation::roots(&module, c) {
+                if !mutation_roots.insert(root.name) {
+                    return Err(RuntimeGraphqlError::new("name_collision").into());
+                }
+            }
+        }
         for c in &module.schema.schema().collections {
             for name in super::mutation::type_names(&module, c) {
                 if !valid_name(&name, true)
@@ -472,7 +480,7 @@ impl RuntimeGraphqlModule {
             .collections
             .iter()
             .flat_map(|c| &c.relations)
-            .find(|r| &r.id == relation)
+            .find(|r| &r.id == relation && r.join.is_none())
             .map(|r| r.cardinality);
         match cardinality {
             Some(_) if !self.options.relation_filters.admits(relation) => &[],

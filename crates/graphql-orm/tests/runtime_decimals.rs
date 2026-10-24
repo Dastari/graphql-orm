@@ -352,6 +352,7 @@ fn decimal_kind_identity_validation_and_defaults() {
             description: None,
             classification: None,
             export: None,
+            join: None,
         })
     }));
 }

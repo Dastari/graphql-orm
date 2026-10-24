@@ -18,6 +18,10 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.110.1
+
+- Align with ORM/macros 0.69.0. The private session-activity query schema sets the new `RuntimeRelation::join` member to `None`. No provider, AI runtime, public API or schema change; AI schema module unchanged.
+
 ## Unreleased - 0.110.0
 
 - Adopt operation catalog 0.5.0 and AI tool profiles 0.17.0. The crate re-exports

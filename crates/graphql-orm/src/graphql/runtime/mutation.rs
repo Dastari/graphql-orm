@@ -17,6 +17,10 @@ pub struct RuntimeGraphqlMutationOptions {
     /// [`RuntimeMutationRequest::with_dependent_changes`]. `None` keeps refusing
     /// such deletes with `unsupported_cascade`.
     pub dependent_changes: Option<RuntimeDependentLimits>,
+    /// Bound on target keys per link mutation, and on the visible links it may read.
+    pub max_link_keys: usize,
+    /// Bound on links one delete may remove per join relation side.
+    pub max_delete_links: usize,
 }
 impl Default for RuntimeGraphqlMutationOptions {
     fn default() -> Self {
@@ -27,6 +31,8 @@ impl Default for RuntimeGraphqlMutationOptions {
             limits: Default::default(),
             output_authorization_timeout: std::time::Duration::from_secs(5),
             dependent_changes: None,
+            max_link_keys: RUNTIME_DEFAULT_MAX_LINK_KEYS,
+            max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
         }
     }
 }
@@ -42,6 +48,41 @@ pub(super) fn actions(module: &RuntimeGraphqlModule) -> Vec<(&'static str, Runti
     .into_iter()
     .filter_map(|(enabled, prefix, action)| enabled.then_some((prefix, action)))
     .collect()
+}
+/// One generated mutation root of a collection.
+pub(super) struct Root<'a> {
+    pub name: String,
+    pub action: RuntimeMutationAction,
+    /// The join relation of a link mutation.
+    pub link: Option<&'a RuntimeRelation>,
+}
+/// Generated mutation roots of one collection: enabled row actions, then one
+/// `update<Object><Relation>Links` per many-to-many relation when updates are enabled.
+pub(super) fn roots<'a>(module: &RuntimeGraphqlModule, c: &'a RuntimeCollection) -> Vec<Root<'a>> {
+    let object = module.object_name(c);
+    let mut roots = actions(module)
+        .into_iter()
+        .map(|(prefix, action)| Root {
+            name: format!("{prefix}{object}"),
+            action,
+            link: None,
+        })
+        .collect::<Vec<_>>();
+    if module.options.mutations.as_ref().is_some_and(|o| o.update) {
+        for relation in c.relations.iter().filter(|r| r.join.is_some()) {
+            let mut chars = relation.api_name.chars();
+            let pascal = chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                .unwrap_or_default();
+            roots.push(Root {
+                name: format!("update{object}{pascal}Links"),
+                action: RuntimeMutationAction::Update,
+                link: Some(relation),
+            });
+        }
+    }
+    roots
 }
 pub(super) fn type_names(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -> Vec<String> {
     let name = module.object_name(c);
@@ -214,8 +255,7 @@ fn fields<B: RuntimeMutationBackend>(
     let mut fields = vec![];
     for c in &module.schema.schema().collections {
         let object = module.object_name(c);
-        for (prefix, action) in actions(&module) {
-            let name = format!("{prefix}{object}");
+        for Root { name, action, link } in roots(&module, c) {
             if !super::module::valid_name(&name, false) {
                 return Err(RuntimeGraphqlError::new("name_collision"));
             }
@@ -228,15 +268,31 @@ fn fields<B: RuntimeMutationBackend>(
                     FieldFuture::new(async move { execute(database, ctx).await.map(Some) })
                 },
             )
-            .description(super::semantic::mutation_description(action, &object));
-            let field = super::semantic::mutation_arguments(action, &object)
-                .into_iter()
-                .fold(field, |field, (name, ty)| {
-                    field.argument(
-                        InputValue::new(name, super::schema::type_ref(&ty))
-                            .description(super::semantic::argument_description(name)),
-                    )
-                });
+            .description(match link {
+                Some(relation) => super::semantic::link_description(&object, &relation.api_name),
+                None => super::semantic::mutation_description(action, &object),
+            });
+            let arguments = match link {
+                Some(relation) => super::semantic::link_arguments(
+                    &object,
+                    &module.object_name(
+                        module
+                            .schema
+                            .schema()
+                            .collections
+                            .iter()
+                            .find(|t| t.id == relation.target)
+                            .ok_or_else(|| RuntimeGraphqlError::new("invalid_composition"))?,
+                    ),
+                ),
+                None => super::semantic::mutation_arguments(action, &object),
+            };
+            let field = arguments.into_iter().fold(field, |field, (name, ty)| {
+                field.argument(
+                    InputValue::new(name, super::schema::type_ref(&ty))
+                        .description(super::semantic::argument_description(name)),
+                )
+            });
             fields.push((name, field));
         }
     }
@@ -385,9 +441,9 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
     for field in planner.selections(selections, root, 0)? {
         for module in modules {
             for c in &module.schema.schema().collections {
-                for (prefix, action) in actions(module) {
+                for Root { name, action, link } in roots(module, c) {
                     let object = module.object_name(c);
-                    if field.name.node.as_str() != format!("{prefix}{object}") {
+                    if field.name.node.as_str() != name {
                         continue;
                     }
                     let context =
@@ -595,7 +651,80 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         .map(|v| input_fields(module, c, &collection, v, planner.limits))
                         .transpose()?
                         .unwrap_or_default();
-                    let request = if action == RuntimeMutationAction::Create {
+                    let max_link_keys = options.max_link_keys;
+                    let max_delete_links = options.max_delete_links;
+                    let request = if let Some(relation) = link {
+                        let relation = module
+                            .schema
+                            .resolve_relation(&collection, &relation.id)
+                            .map_err(record_error)?;
+                        let target = module
+                            .schema
+                            .schema()
+                            .collections
+                            .iter()
+                            .find(|t| &t.id == relation.target().id())
+                            .ok_or_else(invalid)?;
+                        let keys =
+                            |name: &str| -> Result<Option<Vec<RuntimeKey>>, RuntimeGraphqlError> {
+                                let Some(value) = args.get(name).filter(|v| **v != Value::Null)
+                                else {
+                                    return Ok(None);
+                                };
+                                let Value::List(items) = value else {
+                                    return Err(invalid());
+                                };
+                                if items.len() > max_link_keys {
+                                    return Err(RuntimeGraphqlError::new("cost_exceeded"));
+                                }
+                                items
+                                    .iter()
+                                    .map(|item| {
+                                        let fields = input_fields(
+                                            module,
+                                            target,
+                                            relation.target(),
+                                            item,
+                                            planner.limits,
+                                        )?;
+                                        module
+                                            .schema
+                                            .runtime_key(relation.target(), &fields)
+                                            .map_err(mutation_error)
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()
+                                    .map(Some)
+                            };
+                        let change = match (keys("set")?, keys("add")?, keys("remove")?) {
+                            (Some(set), None, None) => RuntimeLinkChange::Replace(set),
+                            (None, add, remove) if add.is_some() || remove.is_some() => {
+                                RuntimeLinkChange::Delta {
+                                    add: add.unwrap_or_default(),
+                                    remove: remove.unwrap_or_default(),
+                                }
+                            }
+                            _ => return Err(invalid()),
+                        };
+                        let source_keys = input_fields(
+                            module,
+                            c,
+                            &collection,
+                            args.get("key").ok_or_else(invalid)?,
+                            planner.limits,
+                        )?;
+                        let key = module
+                            .schema
+                            .runtime_key(&collection, &source_keys)
+                            .map_err(mutation_error)?;
+                        module.schema.runtime_link_request(
+                            &relation,
+                            key,
+                            change,
+                            returning.clone(),
+                            max_link_keys,
+                            limits,
+                        )
+                    } else if action == RuntimeMutationAction::Create {
                         module.schema.runtime_create_request(
                             &collection,
                             &input,
@@ -630,6 +759,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     Some(dependents) => request.with_dependent_changes(dependents),
                                     None => Ok(request),
                                 })
+                                .map(|request| request.with_max_delete_links(max_delete_links))
                         }
                     }
                     .map_err(mutation_error)?;
@@ -711,6 +841,21 @@ impl<B: RuntimeMutationBackend> RuntimeWriteAuthority<B> for AuthorityAdapter<B>
         tx: &'a mut MutationContext<'_, B>,
     ) -> futures::future::BoxFuture<'a, Result<RuntimeReturnGrant, RuntimeMutationError>> {
         self.host.authorize_result(check, tx)
+    }
+    fn authorize_links<'a>(
+        &'a self,
+        check: RuntimeLinkCheck<'a>,
+        tx: &'a mut MutationContext<'_, B>,
+    ) -> futures::future::BoxFuture<'a, Result<(), RuntimeMutationError>> {
+        self.host.authorize_links(check, tx)
+    }
+    fn link_target_visibility<'a>(
+        &'a self,
+        check: RuntimeLinkVisibilityCheck<'a>,
+        tx: &'a mut MutationContext<'_, B>,
+    ) -> futures::future::BoxFuture<'a, Result<Option<RuntimePredicate>, RuntimeMutationError>>
+    {
+        self.host.link_target_visibility(check, tx)
     }
 }
 fn wire_error(code: &'static str) -> async_graphql::Error {

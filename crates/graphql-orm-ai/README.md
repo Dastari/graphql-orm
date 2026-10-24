@@ -16,6 +16,9 @@ correction. Direct Auth consumers must select the same tag and refresh their
 locks to one source; see the
 [workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
 
+Version `0.110.1` aligns with ORM/macros 0.69.0 (`RuntimeRelation::join`).
+There is no AI API or schema change.
+
 Version `0.110.0` adopts operation catalog 0.5.0 and AI tool profiles 0.17.0.
 Re-exported catalogue types gain `label_fields`; there is no AI behaviour or
 schema change.

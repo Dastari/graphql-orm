@@ -98,6 +98,7 @@ fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
         cardinality: RelationCardinality::Many,
         enforce_foreign_key: false,
         on_delete: None,
+        join: None,
     });
     safe(schema.validate())
 }

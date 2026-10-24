@@ -195,7 +195,9 @@ pub(super) fn relation_filter_names(module: &RuntimeGraphqlModule) -> BTreeSet<S
     let collections = &module.schema.schema().collections;
     for c in collections {
         for relation in &c.relations {
-            if !module.options.relation_filters.admits(&relation.id) {
+            // Join relations correlate through their link table, which relation
+            // predicates do not render.
+            if !module.options.relation_filters.admits(&relation.id) || relation.join.is_some() {
                 continue;
             }
             if let Some(target) = collections.iter().find(|t| t.id == relation.target) {
@@ -321,7 +323,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
                         &target,
                     ),
                 };
-                if module.options.relation_filters.admits(&relation.id) {
+                if module.options.relation_filters.admits(&relation.id) && relation.join.is_none() {
                     filter = filter.field(
                         InputValue::new(
                             &relation.api_name,

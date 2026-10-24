@@ -124,6 +124,49 @@ depth 32. Bounds also apply to internal policy records; oversized decoding fails
 and poisons the transaction. Driver row decoding still allocates returned values;
 these limits are not a driver-level streaming memory cap.
 
+## Many-to-many links
+
+`runtime_link_request(relation, key, change, returning, max_link_keys, limits)` changes the links
+of one source row through a join relation. `RuntimeLinkChange::Replace(keys)` makes the set of
+*visible* links exactly `keys`. `RuntimeLinkChange::Delta { add, remove }` removes and then adds;
+adding an existing link or removing an absent one changes nothing. Target keys must belong to the
+target collection and be distinct across the request. At most `max_link_keys` keys may be
+supplied (default `RUNTIME_DEFAULT_MAX_LINK_KEYS` = 1000).
+
+The request is an `Update` of the source row that writes no fields, so the usual intent and
+locked-preimage checks apply; a hidden source row is `not_found`. `RuntimeWriteIntent::links()`
+exposes the relation and change. The ORM then asks
+`RuntimeWriteAuthority::link_target_visibility` for a row predicate on the target collection (`None`
+means every target is visible). It locks and reads the row's links to *visible* targets only, at
+most `max_link_keys` of them, else `limit_exceeded`. Links to hidden targets are never read,
+counted, replaced or removed by a link mutation.
+
+The ORM computes the exact delta and calls `RuntimeWriteAuthority::authorize_links` before any
+write. `RuntimeLinkCheck` carries every requested target (`requested_add` for `set`/`add`,
+`requested_remove`) independent of current link state, and the effective delta (`added`,
+`removed`). Authorizing on the requested targets keeps the outcome identical whether or not a
+hidden link exists, so the endpoint is not an existence oracle. Both hook methods deny by
+default, so hosts must opt in before links can change.
+
+The delta is written in bind-bounded batches: one `DELETE … IN` and one multi-row `INSERT … ON
+CONFLICT DO NOTHING` per batch. A missing target fails its foreign key with
+`constraint_violation`. A pair already present, for example one added concurrently from the
+inverse relation, is left unchanged and is not reported as added. On PostgreSQL a pair committed
+after the transaction's snapshot makes the insert fail as a serialization failure
+(`retryable_transaction`). The result check sees the unchanged source row.
+
+Deleting a row of a collection that a link table references removes all of its links, visible or
+not, atomically. The ORM locks them (at most `RuntimeMutationRequest::with_max_delete_links` per
+side, default `RUNTIME_DEFAULT_MAX_DELETE_LINKS` = 10 000, separate from the link-key bound so a
+heavily linked row stays deletable), presents them to `authorize_links` as `removed`, and deletes
+them with one statement per side before the row. They are always described from the join
+relation's declaring (source) side, even when the deleted row is the target, and a
+self-relation lists each link once. Link tables of the schema are therefore not
+`unsupported_cascade` dependencies. `RuntimeMutationEffect::links()` lists every pending
+`RuntimeLinkEffect` (relation, added, removed) for `before_commit` hooks. A hook failure rolls
+back the links with the row. A link inserted concurrently with a delete cannot slip through: the
+insert waits on the deleted row's lock, then fails its foreign key once the delete commits.
+
 ## Cancellation, rollback and commit
 
 An operation guard starts on the first poll before any await. Only complete

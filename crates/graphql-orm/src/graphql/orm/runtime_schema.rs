@@ -325,6 +325,40 @@ pub struct RuntimeRelation {
     /// Optional export disposition; `exportable` unless secret when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<GraphqlSemanticExport>,
+    /// Many-to-many link table owned by this relation. A join relation has
+    /// `Many` cardinality, no key pairs, no foreign key or delete behavior of its
+    /// own; links are rows of the join table. Omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<RuntimeJoinTable>,
+}
+
+/// ORM-owned link table of a many-to-many relation.
+///
+/// The table holds one row per link: the source collection's primary key in
+/// `source` columns and the target collection's primary key in `target`
+/// columns. Its primary key is the complete pair, so a link exists at most once.
+/// Both sides reference their collection with `ON DELETE CASCADE`, so deleting
+/// either record removes its links. Two relations may share one join table only
+/// as exact inverses (source and target swapped).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeJoinTable {
+    /// Physical link table identifier.
+    pub physical_table: String,
+    /// The source collection's primary-key fields, in key order, with their link columns.
+    pub source: Vec<RuntimeJoinColumn>,
+    /// The target collection's primary-key fields, in key order, with their link columns.
+    pub target: Vec<RuntimeJoinColumn>,
+}
+
+/// One key member of a link table.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeJoinColumn {
+    /// Primary-key field of the referenced collection.
+    pub field: FieldId,
+    /// Physical link-table column.
+    pub column: String,
 }
 
 /// Owned runtime definition of one secondary index.
@@ -456,6 +490,9 @@ pub enum RuntimeSchemaDiagnosticCode {
     /// A label field is repeated, too numerous, or not an exportable, non-secret
     /// scalar (JSON and bytes are ineligible).
     InvalidLabelField,
+    /// A many-to-many join table is malformed, collides with another physical
+    /// name, or is shared by relations that are not exact inverses.
+    InvalidJoinTable,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -490,6 +527,7 @@ impl RuntimeSchemaDiagnosticCode {
             Self::InvalidDescription => "invalid_description",
             Self::InvalidClassification => "invalid_classification",
             Self::InvalidLabelField => "invalid_label_field",
+            Self::InvalidJoinTable => "invalid_join_table",
         }
     }
 }
@@ -1259,6 +1297,10 @@ impl RuntimeSchema {
                         subject,
                     ));
                 }
+                // Join relations are validated schema-wide after every collection.
+                if relation.join.is_some() {
+                    continue;
+                }
                 if relation.key_pairs.is_empty() {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::EmptyRelationKeys,
@@ -1477,10 +1519,141 @@ impl RuntimeSchema {
             }
         }
 
+        validate_join_tables(&self, &physical_tables, &mut diagnostics);
+
         if diagnostics.is_empty() {
             Ok(ValidatedRuntimeSchema { schema: self })
         } else {
             Err(RuntimeSchemaDiagnostics(diagnostics))
+        }
+    }
+}
+
+/// Relations with a join table: shape, key coverage, names and sharing.
+fn validate_join_tables(
+    schema: &RuntimeSchema,
+    collection_tables: &BTreeSet<String>,
+    diagnostics: &mut Vec<RuntimeSchemaDiagnostic>,
+) {
+    let by_id = schema
+        .collections
+        .iter()
+        .map(|c| (&c.id, c))
+        .collect::<BTreeMap<_, _>>();
+    let index_names = schema
+        .collections
+        .iter()
+        .flat_map(|c| c.indexes.iter().map(|i| i.name.to_ascii_lowercase()))
+        .collect::<BTreeSet<_>>();
+    // table -> (source collection, relation) declarations sharing it.
+    let mut tables = BTreeMap::<String, Vec<(&RuntimeCollection, &RuntimeRelation)>>::new();
+    for collection in &schema.collections {
+        for relation in &collection.relations {
+            let Some(join) = &relation.join else {
+                continue;
+            };
+            let mut problem = |message: &str| {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::InvalidJoinTable,
+                    message.to_string(),
+                    &collection.id,
+                    Some(relation.id.as_str()),
+                ));
+            };
+            if relation.cardinality != RelationCardinality::Many
+                || !relation.key_pairs.is_empty()
+                || relation.enforce_foreign_key
+                || relation.on_delete.is_some()
+            {
+                problem(
+                    "a join relation has many cardinality, no key pairs and no foreign key or delete behavior of its own",
+                );
+            }
+            let Some(target) = by_id.get(&relation.target) else {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::UnknownRelationTarget,
+                    format!("relation targets unknown collection `{}`", relation.target),
+                    &collection.id,
+                    Some(relation.id.as_str()),
+                ));
+                continue;
+            };
+            let covers = |side: &[RuntimeJoinColumn], owner: &RuntimeCollection| {
+                side.len() == owner.primary_key.len()
+                    && side
+                        .iter()
+                        .zip(&owner.primary_key)
+                        .all(|(column, key)| &column.field == key)
+            };
+            if !covers(&join.source, collection) || !covers(&join.target, target) {
+                problem("join columns must list the source and target primary keys in key order");
+            }
+            let mut columns = BTreeSet::new();
+            if !valid_physical_name(&join.physical_table)
+                || join.physical_table.starts_with("__graphql_orm_")
+                || join.source.iter().chain(&join.target).any(|c| {
+                    !valid_physical_name(&c.column)
+                        || !columns.insert(c.column.to_ascii_lowercase())
+                })
+            {
+                problem("join table and column names must be distinct portable identifiers");
+            }
+            // The planner also names the link table's target index and PostgreSQL
+            // names its primary key `<table>_pkey`; neither may collide.
+            let target_columns = join
+                .target
+                .iter()
+                .map(|c| c.column.as_str())
+                .collect::<Vec<_>>();
+            let generated = [
+                super::core::generated_index_name(&join.physical_table, &target_columns),
+                format!("{}_pkey", join.physical_table),
+            ];
+            if collection_tables
+                .iter()
+                .any(|table| table.eq_ignore_ascii_case(&join.physical_table))
+                || index_names.contains(&join.physical_table.to_ascii_lowercase())
+                || generated.iter().any(|name| {
+                    index_names.contains(&name.to_ascii_lowercase())
+                        || collection_tables
+                            .iter()
+                            .any(|t| t.eq_ignore_ascii_case(name))
+                })
+            {
+                problem(
+                    "join table name or its generated index names collide with a collection table or index",
+                );
+            }
+            tables
+                .entry(join.physical_table.to_ascii_lowercase())
+                .or_default()
+                .push((collection, relation));
+        }
+    }
+    for declarations in tables.values() {
+        let mirrored = match declarations.as_slice() {
+            [_] => true,
+            [(a, left), (b, right)] => {
+                let (l, r) = (left.join.as_ref(), right.join.as_ref());
+                left.target == b.id
+                    && right.target == a.id
+                    && l.zip(r).is_some_and(|(l, r)| {
+                        l.physical_table == r.physical_table
+                            && l.source == r.target
+                            && l.target == r.source
+                    })
+            }
+            _ => false,
+        };
+        if !mirrored {
+            for (collection, relation) in declarations {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::InvalidJoinTable,
+                    "a join table is shared only by two exactly inverse relations".to_string(),
+                    &collection.id,
+                    Some(relation.id.as_str()),
+                ));
+            }
         }
     }
 }
@@ -1505,6 +1678,28 @@ impl ValidatedRuntimeSchema {
     /// are rendered in stable-ID order, so declaration/insertion order never changes the bytes.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         self.render(true).into_bytes()
+    }
+
+    /// Every physical table the runtime schema owns: collection tables and the
+    /// distinct many-to-many join tables, in declaration order. Hosts include them
+    /// in the `ManagedTableSet` of owned migrations and mutation environments.
+    pub fn owned_table_names(&self) -> Vec<String> {
+        let mut names = self
+            .schema
+            .collections
+            .iter()
+            .map(|c| c.physical_table.clone())
+            .collect::<Vec<_>>();
+        for relation in self.schema.collections.iter().flat_map(|c| &c.relations) {
+            if let Some(join) = &relation.join
+                && !names
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&join.physical_table))
+            {
+                names.push(join.physical_table.clone());
+            }
+        }
+        names
     }
 
     /// Fingerprint of [`Self::canonical_bytes`]. Detects structural drift including stable-ID
@@ -1742,6 +1937,22 @@ impl ValidatedRuntimeSchema {
                     relation.enforce_foreign_key,
                     on_delete
                 ));
+                // Structural; present only for join relations, so earlier bytes are unchanged.
+                if let Some(join) = &relation.join {
+                    let side = |columns: &[RuntimeJoinColumn], owner: &CollectionId| {
+                        columns
+                            .iter()
+                            .map(|c| format!("{}={}", field_ref(owner, &c.field), c.column))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+                    out.push_str(&format!(
+                        "|join={}|join_source={}|join_target={}",
+                        join.physical_table,
+                        side(&join.source, cid),
+                        side(&join.target, &relation.target)
+                    ));
+                }
                 if with_ids {
                     push_semantic_members(
                         &mut out,
@@ -2162,6 +2373,7 @@ impl RuntimeSchema {
                     on_delete: relation
                         .emit_foreign_key
                         .then(|| relation.on_delete.clone()),
+                    join: None,
                 });
             }
 

@@ -485,6 +485,30 @@ pub struct RuntimeRelationHandle {
     target: RuntimeCollectionHandle,
     cardinality: RelationCardinality,
     key_pairs: Vec<(RuntimeFieldHandle, RuntimeFieldHandle)>,
+    join: Option<RuntimeJoinHandle>,
+}
+
+/// Resolved link table of a many-to-many relation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeJoinHandle {
+    physical_table: String,
+    source: Vec<(RuntimeFieldHandle, String)>,
+    target: Vec<(RuntimeFieldHandle, String)>,
+}
+
+impl RuntimeJoinHandle {
+    /// Validated link table identifier.
+    pub fn physical_table(&self) -> &str {
+        &self.physical_table
+    }
+    /// Source primary-key fields with their link columns, in key order.
+    pub fn source(&self) -> &[(RuntimeFieldHandle, String)] {
+        &self.source
+    }
+    /// Target primary-key fields with their link columns, in key order.
+    pub fn target(&self) -> &[(RuntimeFieldHandle, String)] {
+        &self.target
+    }
 }
 
 impl RuntimeRelationHandle {
@@ -513,9 +537,27 @@ impl RuntimeRelationHandle {
         self.cardinality
     }
 
-    /// Ordered `(source, target)` field handles.
+    /// Ordered `(source, target)` field handles. Empty for join relations.
     pub fn key_pairs(&self) -> &[(RuntimeFieldHandle, RuntimeFieldHandle)] {
         &self.key_pairs
+    }
+
+    /// The link table of a many-to-many relation.
+    pub fn join(&self) -> Option<&RuntimeJoinHandle> {
+        self.join.as_ref()
+    }
+
+    /// Source fields whose values identify a parent's related rows: the key-pair
+    /// sources, or the source primary key of a join relation.
+    pub fn source_key_fields(&self) -> Vec<RuntimeFieldHandle> {
+        match &self.join {
+            Some(join) => join.source.iter().map(|(field, _)| field.clone()).collect(),
+            None => self
+                .key_pairs
+                .iter()
+                .map(|(source, _)| source.clone())
+                .collect(),
+        }
     }
 }
 
@@ -696,6 +738,23 @@ impl ValidatedRuntimeSchema {
                 self.resolve_field(&target, &pair.target)?,
             ));
         }
+        let join = match &relation.join {
+            Some(join) => {
+                let side = |owner: &RuntimeCollectionHandle,
+                            columns: &[super::RuntimeJoinColumn]| {
+                    columns
+                        .iter()
+                        .map(|c| Ok((self.resolve_field(owner, &c.field)?, c.column.clone())))
+                        .collect::<Result<Vec<_>, RuntimeRecordError>>()
+                };
+                Some(RuntimeJoinHandle {
+                    physical_table: join.physical_table.clone(),
+                    source: side(source, &join.source)?,
+                    target: side(&target, &join.target)?,
+                })
+            }
+            None => None,
+        };
         Ok(RuntimeRelationHandle {
             schema_fingerprint: self.fingerprint(),
             source: source.clone(),
@@ -703,6 +762,7 @@ impl ValidatedRuntimeSchema {
             target,
             cardinality: relation.cardinality,
             key_pairs,
+            join,
         })
     }
 

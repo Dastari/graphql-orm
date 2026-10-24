@@ -457,6 +457,104 @@ impl ValidatedRuntimeSchema {
                 add_owned_generated_index(table, &columns);
             }
         }
+        // One ORM-owned link table per join table; inverse declarations share it.
+        let mut join_tables = BTreeSet::new();
+        for collection in &schema.collections {
+            for relation in &collection.relations {
+                let Some(join) = &relation.join else {
+                    continue;
+                };
+                if !join_tables.insert(join.physical_table.to_ascii_lowercase()) {
+                    continue;
+                }
+                let target = by_id[&relation.target];
+                let side = |columns: &[RuntimeJoinColumn], owner: &RuntimeCollection| {
+                    columns
+                        .iter()
+                        .map(|c| {
+                            let field = owner
+                                .fields
+                                .iter()
+                                .find(|f| f.id == c.field)
+                                .expect("validated join key member");
+                            (
+                                c.column.clone(),
+                                field.physical_column.clone(),
+                                field.value_kind,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let source = side(&join.source, collection);
+                let target_side = side(&join.target, target);
+                let keys = source
+                    .iter()
+                    .chain(&target_side)
+                    .map(|(column, _, _)| column.clone())
+                    .collect::<Vec<_>>();
+                let foreign_key = |side: &[(String, String, RuntimeValueKind)],
+                                   owner: &RuntimeCollection| {
+                    ForeignKeyModel {
+                        constraint_name: None,
+                        column_pairs: side
+                            .iter()
+                            .map(|(column, referenced, _)| ForeignKeyColumnPairModel {
+                                source_column: column.clone(),
+                                target_column: referenced.clone(),
+                            })
+                            .collect(),
+                        target_table: owner.physical_table.clone(),
+                        is_multiple: true,
+                        on_delete: DeletePolicy::Cascade,
+                    }
+                };
+                let mut table = OwnedTableModel {
+                    entity_name: join.physical_table.clone(),
+                    table_name: join.physical_table.clone(),
+                    primary_key: keys[0].clone(),
+                    primary_keys: keys.clone(),
+                    default_sort: keys
+                        .iter()
+                        .map(|key| format!("{key} ASC"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    columns: source
+                        .iter()
+                        .chain(&target_side)
+                        .map(|(column, _, kind)| ColumnModel {
+                            name: column.clone(),
+                            sql_type: runtime_sql_type(B::DIALECT, *kind),
+                            spatial: None,
+                            nullable: false,
+                            is_primary_key: true,
+                            is_unique: false,
+                            default: None,
+                        })
+                        .collect(),
+                    indexes: vec![],
+                    composite_unique_indexes: vec![],
+                    foreign_keys: vec![
+                        foreign_key(&source, collection),
+                        foreign_key(&target_side, target),
+                    ],
+                    search_indexes: vec![],
+                    append_only: false,
+                    retention_purge: false,
+                    check_constraints: vec![],
+                };
+                // The primary key serves source lookups; index the target side for
+                // reverse reads and cascades (a composite key does not cover it).
+                let target_columns = target_side
+                    .iter()
+                    .map(|(column, _, _)| column.as_str())
+                    .collect::<Vec<_>>();
+                table.indexes.push(IndexModel::new(
+                    super::core::generated_index_name(&table.table_name, &target_columns),
+                    target_columns.iter().map(|c| (*c).to_owned()).collect(),
+                ));
+                tables.push(table);
+            }
+        }
         let target = OwnedSchemaModel {
             extensions: vec![],
             tables,

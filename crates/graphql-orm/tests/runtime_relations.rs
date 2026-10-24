@@ -71,6 +71,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                         cardinality: RelationCardinality::Many,
                         enforce_foreign_key: false,
                         on_delete: None,
+                        join: None,
                     },
                     RuntimeRelation {
                         description: None,
@@ -86,6 +87,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                         cardinality: RelationCardinality::One,
                         enforce_foreign_key: false,
                         on_delete: None,
+                        join: None,
                     },
                 ],
                 indexes: vec![],
@@ -126,6 +128,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     cardinality: RelationCardinality::Many,
                     enforce_foreign_key: false,
                     on_delete: None,
+                    join: None,
                 }],
                 indexes: vec![],
                 composite_unique: vec![],

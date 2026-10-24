@@ -106,6 +106,7 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                     cardinality: RelationCardinality::One,
                     enforce_foreign_key: true,
                     on_delete: Some(DeletePolicy::Restrict),
+                    join: None,
                 }],
                 indexes: Vec::new(),
                 composite_unique: Vec::new(),

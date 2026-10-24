@@ -19,6 +19,10 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.110.0 to 0.110.1: ORM 0.69.0 alignment
+
+Adopt `graphql-orm-ai` 0.110.1 with ORM/macros 0.69.0 from one workspace release. The private session-activity query schema now states `join: None` for its key relation, following the new `RuntimeRelation::join` member. No AI API, GraphQL SDL, schema module, persistence or data migration is involved.
+
 ## 0.109.1 to 0.110.0: operation catalog 0.5.0
 
 Adopt `graphql-orm-ai` 0.110.0 with operation catalog 0.5.0, AI tool profiles

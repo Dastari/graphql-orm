@@ -322,6 +322,14 @@ Then each delete uses B's
 [dependent-change contract](runtime-mutations.md#cascade-and-set-null-dependents),
 and the mutation hook receives the dependent effects.
 
+Each many-to-many relation adds
+`update<Object><Relation>Links(expectedSchema, key, set | add, remove)` when updates are
+enabled. It returns the source's `…MutationPayload` and requires the host write authority's
+`authorize_links` and `link_target_visibility`. `RuntimeGraphqlMutationOptions::max_link_keys`
+bounds the supplied keys and the visible links read; `max_delete_links` bounds the links a
+generated delete may remove. A denied link write returns the code `denied`. Join relations read as `…Connection` fields like other
+to-many relations. They do not accept relation filters, and payloads cannot select them.
+
 Attach a certified environment, pinned write authority and optional journal hook
 using `with_mutation_environment`, `with_write_authority` and
 `with_mutation_hook`. Each validated response-key group uses B's guarded
