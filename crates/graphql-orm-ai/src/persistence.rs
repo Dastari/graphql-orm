@@ -334,7 +334,10 @@ pub(crate) struct AiRetentionPolicyRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiBudgetPolicyRecord {
+    /// Random for interactive policies; derived from the deployment actor and
+    /// exact identity for provisioned ones.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
     /// Stable non-secret exact scope identity.
@@ -356,6 +359,8 @@ pub(crate) struct AiBudgetPolicyRecord {
     pub maximum_runs: Option<i64>,
     #[filterable(type = "boolean")]
     pub enabled: bool,
+    /// Deployment actor that provisioned this policy; NULL for interactive.
+    pub provisioned_by: Option<String>,
     #[graphql_orm(version, default = "0")]
     pub row_version: i64,
     #[sortable]
@@ -2505,7 +2510,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.72.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.74.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

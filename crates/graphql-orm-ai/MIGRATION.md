@@ -19,6 +19,33 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.112.0 to 0.113.0: deployment budget provisioning, schema module 0.74.0
+
+Apply AI schema module `0.74.0` before runtime admission. It adds a nullable
+`provisioned_by` column to `graphql_orm_ai_budget_policies`. Existing rows
+keep `NULL` (interactive provenance); no data migration is required. The
+policy `id` column is now engine-supplied rather than ORM-generated. This
+changes the module and backup metadata fingerprints, and the PostgreSQL plan
+may adjust the column's default. Plan, review and apply it like any owned
+module upgrade. An upgraded database from the previous module re-plans empty.
+
+No public Rust API or GraphQL SDL change, so no source change is required.
+`AiBudgetPolicyView` does not expose provenance.
+
+To provision a deployment default, construct `OrmAiBudgetPolicyProvisioner`
+in trusted host code with an `AiDeploymentActor` and the same
+`AiBudgetPolicyManagementLimits` passed to the configuration service and
+`AiRestorePolicyAuditLimits`, then call `ensure_budget_policy` at startup.
+Handle `Diverged` (an interactive edit or changed configuration) by reporting
+it; provisioning never overwrites. Hosts that inserted policies through a typed
+mirror of the private table should switch to this API: rows written that way
+have random IDs, are treated as interactive, and are never addressed by
+provisioning.
+
+Restore: a policy audit now marks a provisioned row invalid unless it has a
+valid actor, its derived ID and exactly one creation fact. Restored audit
+events with actor kind `deployment` are expected.
+
 ## 0.110.0 to 0.110.1: ORM 0.69.0 alignment
 
 Adopt `graphql-orm-ai` 0.110.1 with ORM/macros 0.69.0 from one workspace release. The private session-activity query schema now states `join: None` for its key relation, following the new `RuntimeRelation::join` member. No AI API, GraphQL SDL, schema module, persistence or data migration is involved.

@@ -15,6 +15,11 @@ The current workspace selects merged Auth 0.23.0 at reviewed revision
 consumers must select the same revision and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.113.0` adds trusted deployment provisioning of budget policies
+(`OrmAiBudgetPolicyProvisioner`) and requires AI schema module `0.74.0`. See
+[usage and budgets](docs/usage-and-budgets.md#deployment-provisioning) and
+[MIGRATION.md](MIGRATION.md).
+
 Version `0.110.1` aligns with ORM/macros 0.69.0 (`RuntimeRelation::join`).
 There is no AI API or schema change.
 

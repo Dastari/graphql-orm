@@ -51,6 +51,8 @@ mod orm_background;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_budget;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod orm_budget_provisioning;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_checkpoints;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 mod orm_configuration;
@@ -177,6 +179,11 @@ pub use orm_attachments::*;
 pub use orm_background::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_budget::*;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use orm_budget_provisioning::{
+    AI_DEPLOYMENT_ACTOR_KIND, AI_DEPLOYMENT_BUDGET_POLICY_ACTION, AiDeploymentActor,
+    AiDeploymentBudgetPolicy, AiDeploymentBudgetPolicyOutcome, OrmAiBudgetPolicyProvisioner,
+};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use orm_checkpoints::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
