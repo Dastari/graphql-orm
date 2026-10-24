@@ -19,6 +19,44 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.112.0 to 0.113.0: deployment budget provisioning, schema module 0.74.0
+
+Apply AI schema module `0.74.0` before runtime admission. It adds a nullable
+`provisioned_by` column to `graphql_orm_ai_budget_policies`. Existing rows
+keep `NULL` (interactive provenance); no data migration is required. The
+policy `id` is now supplied by the engine instead of the ORM. That changes the
+module and backup metadata fingerprints but no DDL: on SQLite and PostgreSQL
+the upgrade plan is exactly
+`ALTER TABLE graphql_orm_ai_budget_policies ADD COLUMN provisioned_by TEXT`,
+and the upgraded table re-plans empty (ordinary and strict owned).
+
+No public Rust API or GraphQL SDL change, so no source change is required.
+`AiBudgetPolicyView` does not expose provenance.
+
+To provision a deployment default, construct `OrmAiBudgetPolicyProvisioner`
+in trusted host code with an `AiDeploymentActor` and the same
+`AiBudgetPolicyManagementLimits` passed to the configuration service and
+`AiRestorePolicyAuditLimits`, then call `ensure_budget_policy` at startup.
+Handle `Diverged` (an interactive edit or changed configuration) by reporting
+it; provisioning never overwrites. Hosts that inserted policies through a typed
+mirror of the private table should switch to this API: rows written that way
+have random IDs, are treated as interactive, and are never addressed by
+provisioning.
+
+Restore: a policy audit now marks a provisioned row invalid unless it has a
+valid actor, its derived ID and exactly one creation fact. Provisioning facts
+are collected by a dedicated `ai.budget_policy.provision` query bounded by the
+budget-policy limit, independent of `maximum_audit_events`; the evidence digest
+now covers them. Restored audit events with actor kind `deployment` are
+expected. (Pricing-policy creation facts still use the bounded global audit
+scan; moving them to an action-filtered query is a follow-up.)
+
+Adoption notes: renaming the `AiDeploymentActor` provisions a new policy and
+leaves the old one in force; rows inserted by an interim host mirror stay
+interactive and must be disabled or deleted deliberately. Concurrent creation
+of `k` different policies for one scope can exceed the per-scope bound by up to
+`k - 1`, as with the interactive upsert.
+
 ## 0.111.0 to 0.112.0: opt-in host-bound principal projection
 
 No breaking change and no required action. Existing constructors, trait

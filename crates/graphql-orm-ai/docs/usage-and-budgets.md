@@ -128,6 +128,48 @@ provided together. Scope, tenant, principal target, and interval are immutable
 after creation; create a replacement and disable the old policy to change
 them. There is no delete mutation.
 
+### Deployment provisioning
+
+A host that must provide a default policy before any MFA-capable administrator
+exists (a development provider, or an operator configuration file) uses
+`OrmAiBudgetPolicyProvisioner`. It is a Rust-only, trusted host type: it is not
+part of any GraphQL root and is not reachable from `OrmAiConfigurationService`.
+Construct it with an `AiDeploymentActor` (a nonsecret source identity of 1–128
+bytes of `[a-z0-9._:-]`) and the same `AiBudgetPolicyManagementLimits` used for
+interactive management and restore audits.
+
+`ensure_budget_policy(AiDeploymentBudgetPolicy)` validates exactly like an
+interactive upsert, then:
+
+- `Created`: no policy existed, so it inserts one and appends one audit fact in
+  the same transaction (`ai.budget_policy.provision`, actor kind
+  `deployment`, subject = actor, reason `deployment_budget_policy_created`).
+- `Unchanged`: the policy exists with the requested values. Nothing is written.
+- `Diverged`: the policy exists with other ceilings or `enabled`, for example
+  after an MFA-authorized interactive edit. Nothing is written.
+
+The policy ID is a v8 UUID derived from the actor, exact scope, principal
+filter and interval, and the policy records `provisioned_by`. Interactive
+policies keep random IDs, so provisioning can never address, update, widen or
+re-enable one. Interactive edits of a provisioned policy remain authoritative.
+Concurrent ensures of the same policy resolve to one row through its derived
+primary key. The per-scope bound counts both kinds. Like the interactive
+upsert, the bound is checked by a count inside the creating transaction, so
+`k` concurrent creations of *different* policies for one exact scope can all
+pass the count and exceed the bound by up to `k - 1` under isolation levels
+without predicate locking. The restore audit reports such a scope as invalid.
+Deployment policies are ordinary constraints: `reserve` enforces every
+applicable enabled policy, interactive or provisioned. A restore policy audit
+accepts a provisioned row only with a valid actor, its derived ID and exactly
+one matching creation fact.
+
+The actor is part of the policy's identity: renaming the actor provisions a
+new policy and leaves the old one in force. Disable or remove the old policy
+deliberately through the interactive (MFA) path. Rows a host inserted itself
+before adopting this API have random IDs and no provenance, so they remain
+interactive policies that provisioning never addresses; delete or disable them
+deliberately after switching.
+
 A tenant-absent policy is an explicit wildcard for matching scope kind and ID.
 Runtime lookup requests only the exact tenant scope and that wildcard scope,
 then verifies the deterministic scope key and every stored scope field before

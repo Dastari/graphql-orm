@@ -1001,6 +1001,8 @@ impl AiConfigurationService for OrmAiConfigurationService {
                                 return Err(OrmPublicError::new(OrmErrorCode::InvalidInput));
                             }
                             tx.insert::<AiBudgetPolicyRecord>(CreateAiBudgetPolicyRecordInput {
+                                id: uuid::Uuid::new_v4(),
+                                provisioned_by: None,
                                 scope_key: exact_scope_key,
                                 scope_kind: scope.kind,
                                 scope_id: scope.id,
@@ -1502,18 +1504,18 @@ async fn load_retention_policy(
     Ok(record)
 }
 
-struct AuditFact<'a> {
-    actor_principal_kind: &'a str,
-    actor_subject: &'a str,
-    action: &'a str,
-    resource_kind: &'a str,
-    resource_reference: &'a str,
-    outcome: &'a str,
-    reason_code: &'a str,
-    policy_version: Option<String>,
+pub(crate) struct AuditFact<'a> {
+    pub(crate) actor_principal_kind: &'a str,
+    pub(crate) actor_subject: &'a str,
+    pub(crate) action: &'a str,
+    pub(crate) resource_kind: &'a str,
+    pub(crate) resource_reference: &'a str,
+    pub(crate) outcome: &'a str,
+    pub(crate) reason_code: &'a str,
+    pub(crate) policy_version: Option<String>,
 }
 
-async fn insert_audit(
+pub(crate) async fn insert_audit(
     tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
     fact: AuditFact<'_>,
 ) -> Result<(), OrmPublicError> {
@@ -1706,7 +1708,7 @@ fn retention_policy_view(record: &AiRetentionPolicyRecord) -> AiRetentionPolicyV
     }
 }
 
-fn budget_policy_view(record: &AiBudgetPolicyRecord) -> AiBudgetPolicyView {
+pub(crate) fn budget_policy_view(record: &AiBudgetPolicyRecord) -> AiBudgetPolicyView {
     AiBudgetPolicyView {
         id: record.id,
         scope_kind: record.scope_kind.clone(),
@@ -1859,7 +1861,7 @@ fn validate_retention_input(input: &SetAiRetentionPolicyInput) -> Result<(), AiE
     Ok(())
 }
 
-fn normalize_and_validate_budget_policy_input(
+pub(crate) fn normalize_and_validate_budget_policy_input(
     input: &mut UpsertAiBudgetPolicyInput,
     maximum: AiBudgetAmounts,
 ) -> Result<(), AiError> {
@@ -1964,7 +1966,7 @@ fn normalize_endpoint(
     Ok(Some(normalized))
 }
 
-fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
+pub(crate) fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
     if scope.kind.trim().is_empty()
         || scope.id.trim().is_empty()
         || scope.kind.len() > 128
@@ -2009,7 +2011,7 @@ fn unix_seconds() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
-fn map_transaction(error: TransactionError) -> AiError {
+pub(crate) fn map_transaction(error: TransactionError) -> AiError {
     map_orm(error.public_error().clone())
 }
 
@@ -2223,6 +2225,8 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             &database,
             CreateAiBudgetPolicyRecordInput {
+                id: uuid::Uuid::new_v4(),
+                provisioned_by: None,
                 scope_key: scope_key(&scope()),
                 scope_kind: "tenant".to_owned(),
                 scope_id: TENANT.to_owned(),
