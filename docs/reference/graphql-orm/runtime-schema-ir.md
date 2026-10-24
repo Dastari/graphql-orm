@@ -210,8 +210,9 @@ table and maps each primary-key field of the source and target collections, in k
 link column (`RuntimeJoinColumn { field, column }`). Validation (`InvalidJoinTable`) requires:
 
 - the shape above, with the columns covering the complete source and target primary keys;
-- distinct, portable table and column names. The table must not collide with a collection
-  table or index name, and must not use the reserved `__graphql_orm_` prefix;
+- distinct, portable table and column names. The table, its generated primary-key constraint
+  name (`<table>_pkey`) and its generated target-column index name must not collide with a
+  collection table or index name, and must not use the reserved `__graphql_orm_` prefix;
 - at most two relations per link table, and two only as exact inverses (target and source
   swapped), so `posts.tags` and `tags.posts` share one table. A self-relation (source =
   target) uses two different columns.
@@ -222,8 +223,13 @@ schemas keep their bytes. `physical_schema` emits one table per link table. Its 
 the complete pair, so a link exists at most once. It has two foreign keys with `ON DELETE
 CASCADE` and an index on the target columns. Hosts include link tables in their
 `ManagedTableSet`; `ValidatedRuntimeSchema::owned_table_names()` lists every owned table.
-Adding a join relation plans an additive `CreateTable`; removing one plans a destructive
-`DropTable`. Link writes and reads are described in
+Adding a join relation plans an additive `CreateTable`; removing one, or removing a linked
+collection, plans a destructive `DropTable`. The planner has no table rename. Changing a link
+table's `physical_table` is a destructive drop and re-create, so its links are lost; copy them
+first if they must survive. Changing a linked collection's `physical_table` re-creates that
+table empty and repoints the link table's foreign key, which SQLite applies as a controlled
+table rebuild. If links to the old rows exist, the foreign-key check fails and the migration
+rolls back. Link writes and reads are described in
 [runtime mutations](runtime-mutations.md#many-to-many-links) and
 [runtime relations](runtime-relations.md#many-to-many-layers).
 

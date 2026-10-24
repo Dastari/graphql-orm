@@ -17,9 +17,10 @@ pub struct RuntimeGraphqlMutationOptions {
     /// [`RuntimeMutationRequest::with_dependent_changes`]. `None` keeps refusing
     /// such deletes with `unsupported_cascade`.
     pub dependent_changes: Option<RuntimeDependentLimits>,
-    /// Bound on target keys per link mutation, and on links one link mutation or
-    /// delete may read or remove per join relation.
-    pub max_links: usize,
+    /// Bound on target keys per link mutation, and on the visible links it may read.
+    pub max_link_keys: usize,
+    /// Bound on links one delete may remove per join relation side.
+    pub max_delete_links: usize,
 }
 impl Default for RuntimeGraphqlMutationOptions {
     fn default() -> Self {
@@ -30,7 +31,8 @@ impl Default for RuntimeGraphqlMutationOptions {
             limits: Default::default(),
             output_authorization_timeout: std::time::Duration::from_secs(5),
             dependent_changes: None,
-            max_links: RUNTIME_DEFAULT_MAX_LINKS,
+            max_link_keys: RUNTIME_DEFAULT_MAX_LINK_KEYS,
+            max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
         }
     }
 }
@@ -649,7 +651,8 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         .map(|v| input_fields(module, c, &collection, v, planner.limits))
                         .transpose()?
                         .unwrap_or_default();
-                    let max_links = options.max_links;
+                    let max_link_keys = options.max_link_keys;
+                    let max_delete_links = options.max_delete_links;
                     let request = if let Some(relation) = link {
                         let relation = module
                             .schema
@@ -671,7 +674,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                 let Value::List(items) = value else {
                                     return Err(invalid());
                                 };
-                                if items.len() > max_links {
+                                if items.len() > max_link_keys {
                                     return Err(RuntimeGraphqlError::new("cost_exceeded"));
                                 }
                                 items
@@ -718,7 +721,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             key,
                             change,
                             returning.clone(),
-                            max_links,
+                            max_link_keys,
                             limits,
                         )
                     } else if action == RuntimeMutationAction::Create {
@@ -756,7 +759,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     Some(dependents) => request.with_dependent_changes(dependents),
                                     None => Ok(request),
                                 })
-                                .map(|request| request.with_max_links(max_links))
+                                .map(|request| request.with_max_delete_links(max_delete_links))
                         }
                     }
                     .map_err(mutation_error)?;
@@ -845,6 +848,14 @@ impl<B: RuntimeMutationBackend> RuntimeWriteAuthority<B> for AuthorityAdapter<B>
         tx: &'a mut MutationContext<'_, B>,
     ) -> futures::future::BoxFuture<'a, Result<(), RuntimeMutationError>> {
         self.host.authorize_links(check, tx)
+    }
+    fn link_target_visibility<'a>(
+        &'a self,
+        check: RuntimeLinkVisibilityCheck<'a>,
+        tx: &'a mut MutationContext<'_, B>,
+    ) -> futures::future::BoxFuture<'a, Result<Option<RuntimePredicate>, RuntimeMutationError>>
+    {
+        self.host.link_target_visibility(check, tx)
     }
 }
 fn wire_error(code: &'static str) -> async_graphql::Error {

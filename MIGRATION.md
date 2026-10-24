@@ -23,7 +23,8 @@ To adopt many-to-many relations:
 
 - declare `join: Some(RuntimeJoinTable { physical_table, source, target })` on a `Many` relation with no key pairs, and optionally the exact inverse on the target;
 - build `ManagedTableSet` from `ValidatedRuntimeSchema::owned_table_names()` so link tables are owned. Adding a join relation is an additive plan; removing it drops the link table (destructive);
-- implement `RuntimeWriteAuthority::authorize_links`. It denies by default, so link mutations and deletes of rows that have links fail with `denied` until a host approves the presented delta;
+- implement `RuntimeWriteAuthority::link_target_visibility`, a target-collection row predicate or `None`, and `RuntimeWriteAuthority::authorize_links`. Both deny by default, so link mutations, and deletes of rows that have links, fail with `denied` until the host opts in. Decide on `RuntimeLinkCheck::requested_add`/`requested_remove`, not only the effective delta, so responses never reveal hidden links;
+- bound requests with `max_link_keys` and deletes with `RuntimeMutationRequest::with_max_delete_links` (GraphQL: `RuntimeGraphqlMutationOptions::{max_link_keys, max_delete_links}`);
 - journal `RuntimeMutationEffect::links()` in hooks;
 - refresh GraphQL SDL and generated clients for the new `update<Object><Relation>Links` roots.
 

@@ -1598,12 +1598,31 @@ fn validate_join_tables(
             {
                 problem("join table and column names must be distinct portable identifiers");
             }
+            // The planner also names the link table's target index and PostgreSQL
+            // names its primary key `<table>_pkey`; neither may collide.
+            let target_columns = join
+                .target
+                .iter()
+                .map(|c| c.column.as_str())
+                .collect::<Vec<_>>();
+            let generated = [
+                super::core::generated_index_name(&join.physical_table, &target_columns),
+                format!("{}_pkey", join.physical_table),
+            ];
             if collection_tables
                 .iter()
                 .any(|table| table.eq_ignore_ascii_case(&join.physical_table))
                 || index_names.contains(&join.physical_table.to_ascii_lowercase())
+                || generated.iter().any(|name| {
+                    index_names.contains(&name.to_ascii_lowercase())
+                        || collection_tables
+                            .iter()
+                            .any(|t| t.eq_ignore_ascii_case(name))
+                })
             {
-                problem("join table name collides with a collection table or index");
+                problem(
+                    "join table name or its generated index names collide with a collection table or index",
+                );
             }
             tables
                 .entry(join.physical_table.to_ascii_lowercase())

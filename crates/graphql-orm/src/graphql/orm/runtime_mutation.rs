@@ -187,7 +187,7 @@ pub struct RuntimeMutationRequest {
     dependents: Option<RuntimeDependentLimits>,
     cause: Option<RuntimeDependentCause>,
     links: Option<links::LinkSpec>,
-    max_links: usize,
+    max_delete_links: usize,
 }
 macro_rules! redacted_debug {
     ($($ty:ty),+ $(,)?) => {$(impl fmt::Debug for $ty {
@@ -199,7 +199,8 @@ redacted_debug!(RuntimeKey, RuntimeMutationRequest);
 #[path = "runtime_mutation_links.rs"]
 mod links;
 pub use links::{
-    RUNTIME_DEFAULT_MAX_LINKS, RuntimeLink, RuntimeLinkChange, RuntimeLinkCheck, RuntimeLinkEffect,
+    RUNTIME_DEFAULT_MAX_DELETE_LINKS, RUNTIME_DEFAULT_MAX_LINK_KEYS, RuntimeLink,
+    RuntimeLinkChange, RuntimeLinkCheck, RuntimeLinkEffect, RuntimeLinkVisibilityCheck,
 };
 impl RuntimeKey {
     pub(super) fn schema(&self) -> &ValidatedRuntimeSchema {
@@ -349,11 +350,31 @@ pub trait RuntimeWriteAuthority<B: RuntimeMutationBackend>: Send + Sync {
     /// intent and preimage checks and before any write: a link mutation's delta,
     /// or every link of a row being deleted. Denies by default, so a host must
     /// opt in before links can change.
+    /// Approve a many-to-many write before any write. A link mutation presents
+    /// every requested target (`requested_add`, `requested_remove`) as well as the
+    /// effective delta over visible links (`added`, `removed`). Decide on the
+    /// requested targets so the outcome never depends on whether a hidden link
+    /// exists. A delete presents every link of the deleted row as `removed`,
+    /// visible or not, described from the join relation's declaring (source) side
+    /// even when the deleted row is the target. Denies by default, so a host must
+    /// opt in before links can change.
     fn authorize_links<'a>(
         &'a self,
         check: RuntimeLinkCheck<'a>,
         tx: &'a mut MutationContext<'_, B>,
     ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
+        let _ = (check, tx);
+        Box::pin(async { Err(err(RuntimeMutationErrorCode::Denied)) })
+    }
+    /// Row predicate on the join relation's target collection naming the targets
+    /// a link mutation may see. Links to other targets are never read, counted,
+    /// replaced or removed by the mutation; `None` makes every target visible.
+    /// Denies by default.
+    fn link_target_visibility<'a>(
+        &'a self,
+        check: RuntimeLinkVisibilityCheck<'a>,
+        tx: &'a mut MutationContext<'_, B>,
+    ) -> BoxFuture<'a, Result<Option<RuntimePredicate>, RuntimeMutationError>> {
         let _ = (check, tx);
         Box::pin(async { Err(err(RuntimeMutationErrorCode::Denied)) })
     }
@@ -678,7 +699,7 @@ impl ValidatedRuntimeSchema {
             dependents: None,
             cause: None,
             links: None,
-            max_links: RUNTIME_DEFAULT_MAX_LINKS,
+            max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
         })
     }
 }

@@ -248,6 +248,31 @@ struct Authority {
     log: Arc<Mutex<Vec<String>>>,
     /// Pause inside `authorize_links` so a concurrent writer can run.
     pause: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    /// Hide `secret` link targets through `link_target_visibility`.
+    hide_secret_targets: bool,
+    /// Hide source rows with this label through the write grant.
+    hidden_source: Option<&'static str>,
+    /// Deny link mutations naming any of these target ids.
+    deny_targets: Vec<i64>,
+    /// Requested targets seen by `authorize_links`.
+    requested: Arc<Mutex<Vec<String>>>,
+}
+impl Authority {
+    fn label_ne(&self, handle: &RuntimeCollectionHandle, label: &str) -> RuntimePredicate {
+        let field = self
+            .schema
+            .resolve_field(handle, &fid(&format!("{}.label", handle.id().as_str())))
+            .unwrap();
+        self.schema
+            .runtime_compare(
+                handle,
+                &field,
+                RuntimeScalarOperator::Ne,
+                RuntimeValue::String(label.into()),
+                Default::default(),
+            )
+            .unwrap()
+    }
 }
 fn integer(key: &RuntimeKey) -> i64 {
     match key.fields()[0].1 {
@@ -279,7 +304,7 @@ impl RuntimeWriteAuthority<Backend> for Authority {
                 .collect::<Vec<_>>();
             RuntimeWriteGrant::new(
                 self.schema.resolve_projection(handle, &fields).unwrap(),
-                None,
+                self.hidden_source.map(|label| self.label_ne(handle, label)),
             )
         })
     }
@@ -297,12 +322,42 @@ impl RuntimeWriteAuthority<Backend> for Authority {
     ) -> BoxFuture<'a, Result<RuntimeReturnGrant, RuntimeMutationError>> {
         Box::pin(async move { Ok(RuntimeReturnGrant::new(check.intent.returning().cloned())) })
     }
+    fn link_target_visibility<'a>(
+        &'a self,
+        check: RuntimeLinkVisibilityCheck<'a>,
+        _: &'a mut MutationContext<'_, Backend>,
+    ) -> BoxFuture<'a, Result<Option<RuntimePredicate>, RuntimeMutationError>> {
+        Box::pin(async move {
+            Ok(self
+                .hide_secret_targets
+                .then(|| self.label_ne(check.relation.target(), "secret")))
+        })
+    }
     fn authorize_links<'a>(
         &'a self,
         check: RuntimeLinkCheck<'a>,
         _: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
         Box::pin(async move {
+            let ids = |keys: &[RuntimeKey]| {
+                keys.iter()
+                    .map(|k| integer(k).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            self.requested.lock().unwrap().push(format!(
+                "+[{}]-[{}]",
+                ids(check.requested_add),
+                ids(check.requested_remove)
+            ));
+            if check
+                .requested_add
+                .iter()
+                .chain(check.requested_remove)
+                .any(|k| self.deny_targets.contains(&integer(k)))
+            {
+                return Err(RuntimeMutationError::new(RuntimeMutationErrorCode::Denied));
+            }
             self.log.lock().unwrap().push(format!(
                 "{}:+[{}]-[{}]",
                 check.relation.id(),
@@ -478,6 +533,10 @@ impl Fixture {
             allow_links,
             log: Default::default(),
             pause: None,
+            hide_secret_targets: false,
+            hidden_source: None,
+            deny_targets: Vec::new(),
+            requested: Default::default(),
         }
     }
     fn key(&self, collection: &str, id: i64) -> RuntimeKey {
@@ -775,7 +834,7 @@ async fn deleting_either_side_removes_its_links_after_authorization() {
     .unwrap();
     let error = f
         .run(
-            delete("post", 2).with_max_links(1),
+            delete("post", 2).with_max_delete_links(1),
             Arc::new(authority.clone()),
             &hook,
         )
@@ -959,6 +1018,391 @@ async fn removing_a_join_relation_is_a_destructive_plan_and_adding_it_is_additiv
     f.finish().await;
 }
 
+#[tokio::test]
+async fn hidden_link_targets_are_scoped_out_and_reveal_nothing() {
+    let f = Fixture::new().await;
+    let hook = Hook::default();
+    f.run(
+        f.link(1, RuntimeLinkChange::Replace(f.tags(&[10, 13])), 10),
+        Arc::new(f.authority(true)),
+        &hook,
+    )
+    .await
+    .unwrap();
+    let delta = |add: &[i64], remove: &[i64]| RuntimeLinkChange::Delta {
+        add: f.tags(add),
+        remove: f.tags(remove),
+    };
+    // The host decides from the requested targets, so naming hidden tag 13
+    // fails identically whether post 1 links it or post 2 does not.
+    let guarded = Authority {
+        hide_secret_targets: true,
+        deny_targets: vec![13],
+        ..f.authority(true)
+    };
+    for change in [
+        delta(&[13], &[]),
+        delta(&[], &[13]),
+        RuntimeLinkChange::Replace(f.tags(&[10, 13])),
+    ] {
+        let mut outcomes = Vec::new();
+        for post in [1, 2] {
+            let error = f
+                .run(
+                    f.link(post, change.clone(), 10),
+                    Arc::new(guarded.clone()),
+                    &hook,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some("denied"));
+            outcomes.push(error.to_string());
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+    }
+    {
+        let requested = guarded.requested.lock().unwrap();
+        for pair in requested.chunks(2) {
+            assert_eq!(pair[0], pair[1]);
+        }
+    }
+    assert_eq!(f.links("mm_post_tags").await, [(1, 10), (1, 13)]);
+
+    let scoped = Authority {
+        hide_secret_targets: true,
+        ..f.authority(true)
+    };
+    // Replace removes only visible links; the hidden link is preserved and
+    // does not count toward the link-key bound.
+    assert_eq!(
+        f.run(
+            f.link(1, RuntimeLinkChange::Replace(f.tags(&[11])), 1),
+            Arc::new(scoped.clone()),
+            &hook
+        )
+        .await
+        .unwrap(),
+        ["+1-11", "-1-10"]
+    );
+    assert_eq!(f.links("mm_post_tags").await, [(1, 11), (1, 13)]);
+    // Removing a hidden linked target behaves like removing an unlinked one.
+    for post in [1, 2] {
+        assert!(
+            f.run(
+                f.link(post, delta(&[], &[13]), 10),
+                Arc::new(scoped.clone()),
+                &hook
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+    }
+    // Adding an already-linked hidden target inserts nothing.
+    assert!(
+        f.run(
+            f.link(1, delta(&[13], &[]), 10),
+            Arc::new(scoped.clone()),
+            &hook
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(f.links("mm_post_tags").await, [(1, 11), (1, 13)]);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn link_writes_on_a_hidden_source_are_not_found() {
+    let f = Fixture::new().await;
+    let hidden = Authority {
+        hidden_source: Some("second"),
+        ..f.authority(true)
+    };
+    let error = f
+        .run(
+            f.link(2, RuntimeLinkChange::Replace(f.tags(&[10])), 10),
+            Arc::new(hidden.clone()),
+            &Hook::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("not_found"));
+    assert!(hidden.requested.lock().unwrap().is_empty());
+    assert!(f.links("mm_post_tags").await.is_empty());
+    f.finish().await;
+}
+
+#[test]
+fn append_only_sources_refuse_link_writes() {
+    let mut definition = definition();
+    definition.collections[0].append_only = true;
+    let schema = definition.validate().unwrap();
+    let post = schema.resolve_collection(&cid("post")).unwrap();
+    let id = schema.resolve_field(&post, &fid("post.id")).unwrap();
+    let key = schema
+        .runtime_key(&post, &[(id, RuntimeValue::Integer(1))])
+        .unwrap();
+    let relation = schema
+        .resolve_relation(&post, &RelationId::new("tags").unwrap())
+        .unwrap();
+    assert_eq!(
+        schema
+            .runtime_link_request(
+                &relation,
+                key,
+                RuntimeLinkChange::Replace(Vec::new()),
+                None,
+                10,
+                Default::default(),
+            )
+            .unwrap_err()
+            .code(),
+        RuntimeMutationErrorCode::AppendOnly
+    );
+}
+
+#[tokio::test]
+async fn concurrent_adds_from_both_sides_store_one_link() {
+    let f = Fixture::new().await;
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let resume = Arc::new(tokio::sync::Notify::new());
+    let paused = Authority {
+        pause: Some((reached.clone(), resume.clone())),
+        ..f.authority(true)
+    };
+    let hook = Hook::default();
+    let forward = f.run(
+        f.link(
+            1,
+            RuntimeLinkChange::Delta {
+                add: f.tags(&[10]),
+                remove: vec![],
+            },
+            10,
+        ),
+        Arc::new(paused),
+        &hook,
+    );
+    let inverse = f
+        .schema()
+        .runtime_link_request(
+            &f.relation("tag", "posts"),
+            f.key("tag", 10),
+            RuntimeLinkChange::Delta {
+                add: vec![f.key("post", 1)],
+                remove: vec![],
+            },
+            None,
+            10,
+            Default::default(),
+        )
+        .unwrap();
+    let backward = async {
+        // The forward writer has read no current link and is paused.
+        reached.notified().await;
+        let pending = f.run(inverse, Arc::new(f.authority(true)), &hook);
+        tokio::pin!(pending);
+        let early = tokio::time::timeout(std::time::Duration::from_millis(300), &mut pending).await;
+        resume.notify_one();
+        match early {
+            Ok(result) => result,
+            Err(_) => pending.await,
+        }
+    };
+    let (forward, backward) = tokio::join!(forward, backward);
+    // Either writer may observe the other's link (no-op) or, on PostgreSQL,
+    // a retryable serialization failure; neither duplicates nor errors otherwise.
+    for result in [&forward, &backward] {
+        if let Err(error) = result {
+            assert_eq!(code(error), Some("retryable_transaction"), "{error}");
+        }
+    }
+    assert!(forward.is_ok() || backward.is_ok());
+    assert_eq!(f.links("mm_post_tags").await, [(1, 10)]);
+    f.finish().await;
+}
+
+impl Fixture {
+    /// Plan `next`, refuse it without destructive approval, apply it with
+    /// approval, and require an empty replan.
+    async fn migrate_destructively(
+        &self,
+        version: &str,
+        next: RuntimeSchema,
+        extra_tables: &[&str],
+    ) -> Result<(), RuntimeMigrationError> {
+        let next = next.validate().unwrap();
+        let target = next.physical_schema::<Backend>(Default::default()).unwrap();
+        let mut names = self.schema().owned_table_names();
+        names.extend(extra_tables.iter().map(|t| t.to_string()));
+        let ownership = ManagedTableSet::new(names).unwrap();
+        let schema = self.db.schema();
+        let planned = schema
+            .plan_owned_migration(version, version, &target, &ownership, PlanOptions::strict())
+            .await
+            .unwrap();
+        assert!(
+            planned
+                .steps()
+                .iter()
+                .any(|s| s.risk() == MigrationRisk::Destructive)
+        );
+        assert!(
+            self.db
+                .schema()
+                .apply_owned_migration(&planned, ApplyOptions::default())
+                .await
+                .is_err()
+        );
+        self.db
+            .schema()
+            .apply_owned_migration(
+                &planned,
+                ApplyOptions {
+                    allow_destructive: true,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let replanned = schema
+            .plan_owned_migration(
+                "replan",
+                "replan",
+                &target,
+                &ownership,
+                PlanOptions::strict(),
+            )
+            .await
+            .unwrap();
+        assert!(replanned.steps().is_empty(), "{:?}", replanned.steps());
+        Ok(())
+    }
+    async fn tables(&self) -> Vec<String> {
+        #[cfg(feature = "sqlite")]
+        let sql = "SELECT name AS name FROM sqlite_master WHERE type = 'table' AND name LIKE 'mm_%' ORDER BY name";
+        #[cfg(feature = "postgres")]
+        let sql = "SELECT tablename::text AS name FROM pg_tables WHERE schemaname = current_schema() AND tablename LIKE 'mm_%' ORDER BY tablename";
+        Backend::fetch_rows(self.db.pool(), sql, &[])
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| Backend::try_get_string(row, "name").unwrap())
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn removing_a_linked_collection_drops_its_link_table() {
+    let f = Fixture::new().await;
+    f.run(
+        f.link(1, RuntimeLinkChange::Replace(f.tags(&[10])), 10),
+        Arc::new(f.authority(true)),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    let mut next = definition();
+    next.collections.retain(|c| c.id.as_str() != "tag");
+    for c in &mut next.collections {
+        c.relations.retain(|r| r.target.as_str() != "tag");
+    }
+    f.migrate_destructively("drop-tag", next, &[])
+        .await
+        .unwrap();
+    assert_eq!(f.tables().await, ["mm_node", "mm_node_links", "mm_post"]);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn renaming_physical_tables_is_a_destructive_recreate() {
+    let f = Fixture::new().await;
+    f.run(
+        f.link(1, RuntimeLinkChange::Replace(f.tags(&[10])), 10),
+        Arc::new(f.authority(true)),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    // A target collection's physical table: the planner has no rename, so the
+    // table is dropped and re-created empty and the link table's foreign key
+    // (a SQLite table rebuild) follows the new name. Existing links would
+    // dangle, so the migration fails its foreign-key check and rolls back.
+    let mut next = definition();
+    next.collections[1].physical_table = "mm_tag_v2".into();
+    assert!(
+        f.migrate_destructively("rename-tag", next.clone(), &["mm_tag_v2"])
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        f.tables().await,
+        [
+            "mm_node",
+            "mm_node_links",
+            "mm_post",
+            "mm_post_tags",
+            "mm_tag"
+        ]
+    );
+    assert_eq!(f.links("mm_post_tags").await, [(1, 10)]);
+    f.run(
+        f.link(1, RuntimeLinkChange::Replace(Vec::new()), 10),
+        Arc::new(f.authority(true)),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    f.migrate_destructively("rename-tag-unlinked", next.clone(), &["mm_tag_v2"])
+        .await
+        .unwrap();
+    // A link table's physical name: the links are dropped with the old table.
+    for c in &mut next.collections {
+        for r in &mut c.relations {
+            if let Some(join) = &mut r.join
+                && join.physical_table == "mm_post_tags"
+            {
+                join.physical_table = "mm_post_tags_v2".into();
+            }
+        }
+    }
+    f.migrate_destructively(
+        "rename-links",
+        next.clone(),
+        &["mm_tag_v2", "mm_post_tags_v2"],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.tables().await,
+        [
+            "mm_node",
+            "mm_node_links",
+            "mm_post",
+            "mm_post_tags_v2",
+            "mm_tag_v2"
+        ]
+    );
+    // The re-created link table enforces its foreign key against the renamed target.
+    for sql in [
+        "INSERT INTO mm_tag_v2 (id, label) VALUES (10, 'red')",
+        "INSERT INTO mm_post_tags_v2 (post_id, tag_id) VALUES (1, 10)",
+    ] {
+        Backend::fetch_rows(f.db.pool(), sql, &[]).await.unwrap();
+    }
+    assert!(
+        Backend::fetch_rows(
+            f.db.pool(),
+            "INSERT INTO mm_post_tags_v2 (post_id, tag_id) VALUES (1, 99)",
+            &[]
+        )
+        .await
+        .is_err()
+    );
+    f.finish().await;
+}
+
 #[cfg(feature = "runtime-graphql")]
 mod graphql {
     use super::*;
@@ -1018,6 +1462,9 @@ mod graphql {
             .unwrap()
     }
     async fn run(f: &Fixture, api: &Schema, query: &str) -> Value {
+        run_as(f, api, query, f.authority(true)).await
+    }
+    async fn run_as(f: &Fixture, api: &Schema, query: &str, authority: Authority) -> Value {
         let schema = f.schema();
         let response = api
             .execute(
@@ -1033,7 +1480,7 @@ mod graphql {
                             Default::default(),
                         )
                         .with_mutation_environment(f.environment.clone())
-                        .with_write_authority(Arc::new(f.authority(true))),
+                        .with_write_authority(Arc::new(authority)),
                     ),
             )
             .await;
@@ -1140,6 +1587,25 @@ mod graphql {
             json!([{"node": {"label": "green"}}]),
             "{filtered}"
         );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn graphql_denied_link_writes_report_denied() {
+        let f = Fixture::new().await;
+        let api = api(&f);
+        let denied = run_as(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePostTagsLinks(expectedSchema: $schema, key: {id: "1"}, add: [{id: "10"}]) { record { id } } }"#,
+            f.authority(false),
+        )
+        .await;
+        assert_eq!(
+            denied["errors"][0]["extensions"]["code"], "denied",
+            "{denied}"
+        );
+        assert!(f.links("mm_post_tags").await.is_empty());
         f.finish().await;
     }
 }
