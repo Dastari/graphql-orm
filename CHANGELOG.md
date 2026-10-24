@@ -16,6 +16,15 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.67.0**.
+
+- Add runtime relation predicates. `runtime_relation_filter` and `RuntimeFilterBuilder::relation` take `RuntimeRelationQuantifier` (`is`/`isNot` for to-one, `some`/`none`/`every` for to-many) and lower to a correlated `EXISTS` on SQLite and PostgreSQL. The target layer's grant is always applied inside the subquery, so hidden related rows never match. `RuntimeGraphqlOptions::with_relation_filters()` (opt-in) exposes them in every `…WhereInput` through generated `…ToOneFilter`/`…ToManyFilter` inputs. Each target is authorized with `RuntimeReadPurpose::RelationFilter`; a denied target is non-matching, not an error. Offline record matching rejects relation predicates.
+- Runtime GraphQL mutation payloads may select to-one relations, which are authorized like query layers and read after commit through the relation batch executor. Adds `ValidatedRuntimeSchema::runtime_relation_parents`.
+- Relation filters can be admitted per relation (`with_relation_filters_for`) and have a dedicated budget (`with_relation_filter_limits`; defaults 16 per operation, depth 3). Each predicate's correlation key fields appear in the source layer's `filter_operations` as `relation`, so field-level host rules apply to them. Payload relation reads share request budgets.
+- **Breaking (Rust):** `RuntimeReadCheck` is now `#[non_exhaustive]` and gains `relation_filters` and `purpose`, so it can no longer be constructed outside the crate. `RuntimeRelationQuantifier` and `RuntimeReadPurpose` are `#[non_exhaustive]`.
+
+## 0.66.0 (unreleased)
+
 Companion runtime/macros version: **0.66.0**.
 
 - Runtime deletes can opt in to incoming `Cascade` and `SetNull` foreign keys with `RuntimeMutationRequest::with_dependent_changes(RuntimeDependentLimits)` (validated, opaque limits, at most 65 536 rows and depth 64) (GraphQL: `RuntimeGraphqlMutationOptions::dependent_changes`). The ORM locks every dependent row, authorizes each change through `RuntimeWriteAuthority` with `RuntimeWriteIntent::cause()` before any write, performs the SetNull updates and the deletes itself in dependency order, and lists them in `RuntimeMutationEffect::dependents()` for hooks. Restrict references to a deleted row, denied dependents, data cycles, non-runtime modifying sources and exceeded row/depth limits refuse the whole delete before any write. SQLite and PostgreSQL behave alike; a concurrently inserted referencing row is blocked or fails the delete as `retryable_transaction`. Without the opt-in such deletes still refuse with `unsupported_cascade`. `RuntimeMutationEffect` also gains `collection()` and `cause()`.

@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-21
+last_reviewed: 2026-10-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -126,6 +126,41 @@ capabilities captured before constant lowering: empty `in: []` is false and empt
 Explicit nested `and`, `or` and `not` capabilities remain visible to the host.
 Use `RuntimeReadCheck::filter_operations` for requested filter authorization;
 the lowered predicate's referenced fields alone cannot represent constant inputs.
+
+### Relation filters
+
+`RuntimeGraphqlOptions::with_relation_filters()` adds every relation to its
+collection's `…WhereInput`; `with_relation_filters_for([relation ids])` admits only the
+listed relations. Compilation rejects unknown IDs. A relation that is not admitted has no
+entry and no filter input type. `RuntimeGraphqlModule::relation_filter_quantifiers(id)`
+reports each relation's accepted quantifiers, which is empty when it is not admitted. A to-one relation takes `{TargetToOneFilter: is,
+isNot}` and a to-many relation takes `{TargetToManyFilter: some, none, every}`.
+Each value is the target's own `WhereInput`, so filters nest and compose with
+scalar, `and`, `or` and `not` entries. The option is off by default and the SDL
+is unchanged without it. Each occurrence lowers to a
+[relation predicate](runtime-queries.md#relation-predicates).
+
+Every relation predicate is one correlated subquery and one target-layer authorization.
+An operation may contain at most `RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTERS` (16) of
+them, nested at most `RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTER_DEPTH` (3) relation hops
+deep. Change both with `with_relation_filter_limits(max_filters, max_depth)`. Exceeding
+either fails with `cost_exceeded` before any I/O. The general predicate node and depth
+budgets still apply.
+
+`RuntimeReadCheck::relation_filters` lists the relation predicates a layer uses
+directly. Their correlation keys (the source fields of each key pair) also appear in
+`filter_operations` with the operation name `relation`. A host that authorizes field use
+through `filter_operations`, and that does not recognise `relation`, therefore denies a
+predicate over a key field the caller may not read. Every occurrence is then authorized as its own target layer:
+`purpose: RuntimeReadPurpose::RelationFilter(quantifier)`, `relation` set, an
+empty projection, and the client's target filter with its `filter_operations`.
+That grant's row predicate is applied inside the subquery. A target denied with
+`RuntimeGraphqlError::denied()` makes every related row non-matching rather than
+failing the request, so a filter is never an error oracle. Other errors fail the
+request. All grants are obtained before the first ORM statement, and the
+predicate is rebuilt with them. Until a grant is bound, the planned predicate
+uses a deny-all placeholder. Mutation `expected` conditions reject relation
+entries. Ordinary `RuntimeReadCheck`s carry `purpose: RuntimeReadPurpose::Select`.
 
 ## Confidential cursors
 
@@ -267,8 +302,18 @@ actions through mutation options. GraphQL cannot represent empty input objects;
 an enabled create/update action with no writable fields is rejected during
 compilation with `unsupported_capability`. Generated fields are excluded, keys
 are required on create and absent from update. Defaults stay omitted in GraphQL
-SDL so omission and explicit null remain distinct. Nested output relations and
-nested/bulk writes are unsupported.
+SDL so omission and explicit null remain distinct. Payloads may select to-one
+relations of the record, including nested selections under them. The payload
+layer then also loads the record's primary key and the relation's source key
+fields, and the host's read and output checks see them. Each relation is planned
+and authorized like a query layer before the write. After commit and
+`authorize_mutation_result`, it is read through the relation batch executor. A
+related row hidden by its grant is `null`. A nested layer denied outright fails the
+mutation before the write. Payload relation reads share the request's crypto and
+projection call budgets with every other mutation field. A failure while reading the
+payload after commit (`mutation_payload_failed`, with `extensions.outcome = "committed"`)
+means the write committed; clients must not retry it blindly. To-many payload relations
+and nested/bulk writes are unsupported.
 
 Generated deletes refuse `unsupported_cascade` when the collection has incoming
 `Cascade` or `SetNull` foreign keys, unless

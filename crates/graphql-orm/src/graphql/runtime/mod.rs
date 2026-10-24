@@ -57,6 +57,7 @@ mod schema;
 mod semantic;
 pub use execution::{
     RuntimeGraphqlRequest, RuntimeReadAuthority, RuntimeReadCheck, RuntimeReadGrant,
+    RuntimeReadPurpose,
 };
 pub use module::*;
 

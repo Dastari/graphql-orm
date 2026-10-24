@@ -514,6 +514,55 @@ fn record_anchors(
 }
 
 impl ValidatedRuntimeSchema {
+    /// Relation anchors of records obtained outside a runtime read, such as a
+    /// committed mutation result, for a following relation batch. Each record must
+    /// belong to the relation's source collection and load its primary key and the
+    /// relation's source key fields. Anchors follow record order; a record with a
+    /// null source key yields an anchor with no related row.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a stale relation, foreign records, and unloaded or null identity fields.
+    pub fn runtime_relation_parents(
+        &self,
+        relation: &super::RuntimeRelationHandle,
+        records: &[RuntimeRecord],
+    ) -> Result<Vec<RuntimeParentAnchor>, RuntimeRelationError> {
+        let collection = relation.source();
+        if self.resolve_relation(collection, relation.id())? != *relation {
+            return Err(
+                RuntimeRelationError::new(RuntimeRelationErrorCode::InvalidRelation)
+                    .for_relation(relation),
+            );
+        }
+        let metadata = self
+            .schema()
+            .collections
+            .iter()
+            .find(|item| item.id == *collection.id())
+            .ok_or_else(|| RuntimeRelationError::new(RuntimeRelationErrorCode::SchemaMismatch))?;
+        let spec = AnchorSpec {
+            relation: relation.clone(),
+            parent_identity_fields: metadata
+                .primary_key
+                .iter()
+                .map(|id| self.resolve_field(collection, id))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let mut anchors = Vec::with_capacity(records.len());
+        for (index, record) in records.iter().enumerate() {
+            if record.schema_fingerprint() != relation.schema_fingerprint()
+                || record.collection_id() != collection.id()
+            {
+                return Err(RuntimeRelationError::new(
+                    RuntimeRelationErrorCode::SchemaMismatch,
+                ));
+            }
+            anchors.extend(record_anchors(record, std::slice::from_ref(&spec), index)?);
+        }
+        Ok(anchors)
+    }
+
     /// Build a normal runtime read plus opaque source-key capture for relations.
     ///
     /// # Errors

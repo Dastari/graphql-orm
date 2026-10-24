@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.67.0 adds opt-in runtime relation filters (correlated `EXISTS` with
+the target grant inside) and to-one relation selections in runtime mutation
+payloads. See the
+[migration guide](../../MIGRATION.md#0660-to-0670-runtime-relation-filters-and-payload-relations).
+
 Version 0.66.0 lets runtime deletes opt in to authorized, ORM-performed
 `Cascade`/`SetNull` dependent changes. See the
 [migration guide](../../MIGRATION.md#0650-to-0660-opt-in-runtime-cascade-and-set-null-deletes).

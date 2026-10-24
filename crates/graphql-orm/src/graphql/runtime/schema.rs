@@ -1,6 +1,7 @@
 use super::*;
 use crate::graphql::orm::*;
 use async_graphql::{Value, dynamic::*};
+use std::collections::BTreeSet;
 
 // Only the authorized execution path can construct a generated runtime object.
 // Host-owned dynamic types retain their own resolver payloads.
@@ -188,8 +189,74 @@ pub(super) fn filter_name(kind: RuntimeValueKind) -> String {
     };
     format!("{name}Filter")
 }
+/// Relation filter input names, one per target object and cardinality in use.
+pub(super) fn relation_filter_names(module: &RuntimeGraphqlModule) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let collections = &module.schema.schema().collections;
+    for c in collections {
+        for relation in &c.relations {
+            if !module.options.relation_filters.admits(&relation.id) {
+                continue;
+            }
+            if let Some(target) = collections.iter().find(|t| t.id == relation.target) {
+                names.insert(relation_filter_name(
+                    &module.object_name(target),
+                    relation.cardinality,
+                ));
+            }
+        }
+    }
+    names
+}
+fn relation_filter_name(target: &str, cardinality: RelationCardinality) -> String {
+    match cardinality {
+        RelationCardinality::One => format!("{target}ToOneFilter"),
+        RelationCardinality::Many => format!("{target}ToManyFilter"),
+    }
+}
+fn relation_filter_types(module: &RuntimeGraphqlModule) -> Vec<Type> {
+    relation_filter_names(module)
+        .into_iter()
+        .map(|name| {
+            let (target, quantifiers): (&str, &[(&str, &str)]) =
+                if let Some(target) = name.strip_suffix("ToOneFilter") {
+                    (
+                        target,
+                        &[
+                            ("is", "Matches when the related record is visible and matches"),
+                            (
+                                "isNot",
+                                "Matches when no visible related record matches, including when there is none",
+                            ),
+                        ],
+                    )
+                } else {
+                    (
+                        name.strip_suffix("ToManyFilter").unwrap_or(&name),
+                        &[
+                            ("some", "Matches when at least one visible related record matches"),
+                            ("none", "Matches when no visible related record matches"),
+                            (
+                                "every",
+                                "Matches when every visible related record matches, including when there are none",
+                            ),
+                        ],
+                    )
+                };
+            let mut input = InputObject::new(&name)
+                .description(format!("Filter on related {target} records"));
+            for (quantifier, description) in quantifiers {
+                input = input.field(
+                    InputValue::new(*quantifier, TypeRef::named(format!("{target}WhereInput")))
+                        .description(*description),
+                );
+            }
+            input.into()
+        })
+        .collect()
+}
 pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
-    let mut result = Vec::new();
+    let mut result = relation_filter_types(module);
     for c in &module.schema.schema().collections {
         let name = module.object_name(c);
         let mut object = Object::new(&name).description(c.effective_description());
@@ -254,6 +321,15 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
                         &target,
                     ),
                 };
+                if module.options.relation_filters.admits(&relation.id) {
+                    filter = filter.field(
+                        InputValue::new(
+                            &relation.api_name,
+                            TypeRef::named(relation_filter_name(&target, relation.cardinality)),
+                        )
+                        .description(relation.effective_description()),
+                    );
+                }
                 object = object.field(field.description(relation.effective_description()));
             }
         }

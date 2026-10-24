@@ -255,6 +255,14 @@ pub(super) struct Prepared {
     limits: RuntimeGraphqlLimits,
     shape: super::execution::OutputShape,
     projected: Vec<super::projection::ProjectedPlan>,
+    /// Stored fields the client selected; `returning` may add relation keys.
+    selected: Vec<RuntimeFieldHandle>,
+    /// Authorized to-one relation layers read after commit.
+    children: Vec<super::plan::Plan>,
+    protection: Option<super::execution::Protection>,
+    /// Crypto and projection calls of payload relation reads, shared by every
+    /// mutation field of one request.
+    relation_budget: Arc<super::execution::PayloadBudget>,
     response_bytes: Arc<std::sync::atomic::AtomicUsize>,
     // Shared by occurrences of this response key, fresh for every execution.
     outcome: Arc<Mutex<GroupOutcome>>,
@@ -360,9 +368,11 @@ fn input_fields(
         })
         .collect()
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare<B: RuntimeReadBackend>(
     modules: &[RuntimeGraphqlModule],
     context: Option<&RuntimeGraphqlRequest<B>>,
+    protection: Option<&super::execution::Protection>,
     planner: &mut Planner<'_>,
     selections: &SelectionSet,
     root: &str,
@@ -371,6 +381,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
     let mut prepared = BTreeMap::new();
     let mut projection_calls = 0usize;
     let response_bytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let relation_budget = Arc::new(super::execution::PayloadBudget::default());
     for field in planner.selections(selections, root, 0)? {
         for module in modules {
             for c in &module.schema.schema().collections {
@@ -396,6 +407,8 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         .resolve_collection(&c.id)
                         .map_err(record_error)?;
                     let mut fields = vec![];
+                    let mut selected_fields = vec![];
+                    let mut children = vec![];
                     let mut projected = vec![];
                     for payload in planner.selections(
                         &field.selection_set.node,
@@ -412,6 +425,47 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             planner.selections(&payload.selection_set.node, &object, 2)?
                         {
                             if selected.name.node == "__typename" {
+                                continue;
+                            }
+                            // To-one relations are read after commit through the same
+                            // nested layer authorization and batching as queries.
+                            if let Some(r) = c.relations.iter().find(|r| {
+                                r.api_name == selected.name.node.as_str()
+                                    && r.cardinality == RelationCardinality::One
+                            }) {
+                                let relation = module
+                                    .schema
+                                    .resolve_relation(&collection, &r.id)
+                                    .map_err(record_error)?;
+                                let target = module
+                                    .schema
+                                    .schema()
+                                    .collections
+                                    .iter()
+                                    .find(|t| t.id == r.target)
+                                    .ok_or_else(invalid)?;
+                                // Parent identity and source keys anchor the related read.
+                                for id in c
+                                    .primary_key
+                                    .iter()
+                                    .chain(r.key_pairs.iter().map(|pair| &pair.source))
+                                {
+                                    let handle = module
+                                        .schema
+                                        .resolve_field(&collection, id)
+                                        .map_err(record_error)?;
+                                    if !fields.contains(&handle) {
+                                        fields.push(handle);
+                                    }
+                                }
+                                children.push(planner.collection(
+                                    module,
+                                    target,
+                                    &selected,
+                                    Some(relation),
+                                    1,
+                                    3,
+                                )?);
                                 continue;
                             }
                             let f = c
@@ -435,6 +489,9 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     names,
                                 );
                             }
+                            if !selected_fields.contains(&handle) {
+                                selected_fields.push(handle.clone());
+                            }
                             if !fields.contains(&handle) {
                                 fields.push(handle);
                             }
@@ -451,14 +508,14 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         .get("expected")
                         .filter(|v| **v != Value::Null)
                         .map(|value| {
+                            // Relation predicates are not admitted in CAS conditions.
                             super::plan::filter(
                                 &module.schema,
                                 &collection,
-                                c,
                                 value,
                                 planner.limits,
-                                0,
                                 &mut intent,
+                                &mut super::plan::RelationGrants::Disallowed,
                             )
                         })
                         .transpose()?;
@@ -491,9 +548,16 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     .iter()
                                     .map(super::projection::ProjectedPlan::selection)
                                     .collect(),
+                                relation_filters: Vec::new(),
+                                purpose: RuntimeReadPurpose::Select,
                             })
                             .await?
                     };
+                    // Nested layers are authorized like query layers, before any write.
+                    for child in &mut children {
+                        super::execution::authorize(child, context, protection, planner.limits)
+                            .await?;
+                    }
                     let returning = if fields.is_empty() {
                         None
                     } else {
@@ -594,6 +658,10 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             limits: planner.limits,
                             shape,
                             projected,
+                            selected: selected_fields,
+                            children,
+                            protection: protection.cloned(),
+                            relation_budget: relation_budget.clone(),
                             response_bytes: response_bytes.clone(),
                             outcome: Arc::new(Mutex::new(GroupOutcome::Ready)),
                         },
@@ -789,7 +857,7 @@ async fn execute_once<B: RuntimeMutationBackend>(
         .iter()
         .find(|c| &c.id == prepared.collection.id())
         .ok_or_else(|| committed_error("mutation_payload_failed"))?;
-    for field in projection.fields() {
+    for field in &prepared.selected {
         if prepared
             .projected
             .iter()
@@ -846,6 +914,22 @@ async fn execute_once<B: RuntimeMutationBackend>(
                 .pop()
                 .ok_or_else(|| committed_error("mutation_payload_failed"))?,
         );
+    }
+    // Related records are read now, through each child's authorized layer.
+    for (key, value) in super::execution::payload_relations(
+        &database,
+        context,
+        prepared.protection.as_ref(),
+        prepared.limits,
+        &prepared.relation_budget,
+        &prepared.module.schema,
+        record,
+        &prepared.children,
+    )
+    .await
+    .map_err(|_| committed_error("mutation_payload_failed"))?
+    {
+        values.insert(async_graphql::Name::new(key), value);
     }
     let payload = Value::Object(
         [(async_graphql::Name::new("record"), Value::Object(values))]

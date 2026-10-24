@@ -15,6 +15,17 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.66.0 to 0.67.0: runtime relation filters and payload relations
+
+Upgrade runtime/macros together. Breaking only for code that constructs `RuntimeReadCheck` (typically host unit tests). It is now `#[non_exhaustive]`, so test authorities through a composed schema instead. Matches on `RuntimeRelationQuantifier` or `RuntimeReadPurpose` need a wildcard arm. Read authorities need no change while relation filters stay disabled. They receive `purpose: Select` and empty `relation_filters`.
+
+To adopt relation filters, enable `RuntimeGraphqlOptions::with_relation_filters()` or, per relation, `with_relation_filters_for([...])`. Optionally set `with_relation_filter_limits(max_filters, max_depth)` (defaults 16 and 3). That adds relation entries and `…ToOneFilter`/`…ToManyFilter` inputs to the SDL, so refresh SDL snapshots and generated clients. Extend the read authority:
+
+- authorize each `(relation, quantifier)` in `RuntimeReadCheck::relation_filters` for the source layer. The relation's source key fields also appear in `filter_operations` with the operation `relation`, so existing field rules over `filter_operations` cover them;
+- authorize checks with `purpose: RuntimeReadPurpose::RelationFilter(_)` as target layers. They have an empty projection; check the `filter_operations` and return the target's row predicate. Return `RuntimeGraphqlError::denied()` to make the relation non-matching.
+
+Mutation payloads that select a to-one relation now succeed instead of failing with `unsupported_capability`. The payload's read and output checks additionally see the primary key and the relation's source key fields. Selecting a to-many relation in a payload remains unsupported. Hosts using `RuntimeFilterIntentVisitor` directly may implement the new `relation` method, which by default ignores the occurrence. Offline `prepare_match` rejects relation predicates. No data or schema migration is required.
+
 ## 0.65.0 to 0.66.0: opt-in runtime cascade and set-null deletes
 
 Upgrade runtime/macros together. Additive and opt-in; existing code compiles and behaves as before. A runtime delete whose table has incoming `Cascade` or `SetNull` foreign keys still refuses with `unsupported_cascade` unless the request calls `with_dependent_changes(RuntimeDependentLimits::new(max_rows, max_depth))` (defaults 256 rows, depth 8), or the GraphQL module sets `RuntimeGraphqlMutationOptions::dependent_changes = Some(...)`. `RuntimeDependentLimits::new` returns `limit_exceeded` above 65 536 rows or depth 64; read them back with `max_rows()`/`max_depth()`.
