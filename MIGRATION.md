@@ -15,6 +15,14 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.69.0 to 0.70.0: uniform refusal of hidden and missing link targets
+
+Upgrade runtime/macros together. No Rust API, schema, SDL or persistence change. Breaking only in behaviour, for runtime link mutations (`runtime_link_request`, GraphQL `update<Object><Relation>Links`):
+
+- Every requested target must exist and satisfy `link_target_visibility`, otherwise the mutation fails with `denied` before `authorize_links` is called. Clients and hosts that treated `constraint_violation` as "target not found" should treat `denied` the same way. It is deliberately indistinguishable from a hidden target.
+- `remove` of a missing or hidden target, and `add` of an already-linked hidden target, are refused instead of being no-ops. Send only targets the caller can see.
+- `authorize_links` now only receives existing, visible requested targets. Host checks that refused hidden targets themselves stay correct but are no longer the only guard.
+
 ## agql-auth 0.23.0 selection
 
 The workspace selects agql-auth 0.23.0 at reviewed merged revision

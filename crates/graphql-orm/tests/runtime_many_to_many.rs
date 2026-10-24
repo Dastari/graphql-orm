@@ -6,6 +6,7 @@
 ))]
 use futures::future::BoxFuture;
 use graphql_orm::{graphql::errors::OrmPublicError, graphql::orm::*, prelude::*};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 #[cfg(feature = "sqlite")]
 type Backend = SqliteBackend;
@@ -274,14 +275,17 @@ impl Authority {
             .unwrap()
     }
 }
-fn integer(key: &RuntimeKey) -> i64 {
-    match key.fields()[0].1 {
-        RuntimeValue::Integer(id) => id,
+/// Integer and text keys print as-is; UUID keys by their last four hex digits.
+fn show(key: &RuntimeKey) -> String {
+    match &key.fields()[0].1 {
+        RuntimeValue::Integer(id) => id.to_string(),
+        RuntimeValue::String(text) => text.clone(),
+        RuntimeValue::Uuid(id) => id.simple().to_string()[28..].to_string(),
         _ => unreachable!(),
     }
 }
 fn describe(link: &RuntimeLink) -> String {
-    format!("{}-{}", integer(link.source()), integer(link.target()))
+    format!("{}-{}", show(link.source()), show(link.target()))
 }
 impl RuntimeWriteAuthority<Backend> for Authority {
     fn authorize_intent<'a>(
@@ -339,12 +343,7 @@ impl RuntimeWriteAuthority<Backend> for Authority {
         _: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
         Box::pin(async move {
-            let ids = |keys: &[RuntimeKey]| {
-                keys.iter()
-                    .map(|k| integer(k).to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
+            let ids = |keys: &[RuntimeKey]| keys.iter().map(show).collect::<Vec<_>>().join(",");
             self.requested.lock().unwrap().push(format!(
                 "+[{}]-[{}]",
                 ids(check.requested_add),
@@ -354,7 +353,7 @@ impl RuntimeWriteAuthority<Backend> for Authority {
                 .requested_add
                 .iter()
                 .chain(check.requested_remove)
-                .any(|k| self.deny_targets.contains(&integer(k)))
+                .any(|k| self.deny_targets.iter().any(|id| id.to_string() == show(k)))
             {
                 return Err(RuntimeMutationError::new(RuntimeMutationErrorCode::Denied));
             }
@@ -454,6 +453,17 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_definition(
+            definition(),
+            &[
+                "INSERT INTO mm_post (id, label) VALUES (1, 'first'), (2, 'second')",
+                "INSERT INTO mm_tag (id, label) VALUES (10, 'red'), (11, 'green'), (12, 'blue'), (13, 'secret')",
+                "INSERT INTO mm_node (id, label) VALUES (1, 'a'), (2, 'b')",
+            ],
+        )
+        .await
+    }
+    async fn with_definition(definition: RuntimeSchema, seed: &[&str]) -> Self {
         #[cfg(feature = "sqlite")]
         let path = std::env::temp_dir().join(format!(
             "graphql-orm-many-to-many-{}.sqlite",
@@ -474,7 +484,7 @@ impl Fixture {
         let url = owned.url.clone();
         #[cfg(feature = "postgres")]
         let db = Database::<Backend>::connect_postgres(&url).await.unwrap();
-        let schema = Arc::new(definition().validate().unwrap());
+        let schema = Arc::new(definition.validate().unwrap());
         let target = schema
             .physical_schema::<Backend>(Default::default())
             .unwrap();
@@ -490,11 +500,6 @@ impl Fixture {
             )
             .await
             .unwrap();
-        assert!(
-            plan.steps()
-                .iter()
-                .any(|s| s.table_name() == Some("mm_post_tags"))
-        );
         db.schema()
             .apply_owned_migration(&plan, ApplyOptions::default())
             .await
@@ -505,11 +510,7 @@ impl Fixture {
                 .await
                 .unwrap(),
         );
-        for sql in [
-            "INSERT INTO mm_post (id, label) VALUES (1, 'first'), (2, 'second')",
-            "INSERT INTO mm_tag (id, label) VALUES (10, 'red'), (11, 'green'), (12, 'blue'), (13, 'secret')",
-            "INSERT INTO mm_node (id, label) VALUES (1, 'a'), (2, 'b')",
-        ] {
+        for sql in seed {
             Backend::fetch_rows(db.pool(), sql, &[]).await.unwrap();
         }
         Self {
@@ -540,14 +541,15 @@ impl Fixture {
         }
     }
     fn key(&self, collection: &str, id: i64) -> RuntimeKey {
+        self.key_of(collection, RuntimeValue::Integer(id))
+    }
+    fn key_of(&self, collection: &str, id: RuntimeValue) -> RuntimeKey {
         let handle = self.schema().resolve_collection(&cid(collection)).unwrap();
         let field = self
             .schema()
             .resolve_field(&handle, &fid(&format!("{collection}.id")))
             .unwrap();
-        self.schema()
-            .runtime_key(&handle, &[(field, RuntimeValue::Integer(id))])
-            .unwrap()
+        self.schema().runtime_key(&handle, &[(field, id)]).unwrap()
     }
     fn relation(&self, collection: &str, id: &str) -> RuntimeRelationHandle {
         let handle = self.schema().resolve_collection(&cid(collection)).unwrap();
@@ -735,7 +737,8 @@ async fn link_sets_replace_add_remove_with_authority_and_hooks() {
         .await
         .unwrap_err();
     assert_eq!(code(&error), Some("limit_exceeded"));
-    // A missing target fails the foreign key and rolls back.
+    // A missing target is refused before the host is asked or anything is written.
+    let before = authority.log.lock().unwrap().len();
     let error = f
         .run(
             f.link(2, replace(&[10, 99]), 10),
@@ -744,7 +747,8 @@ async fn link_sets_replace_add_remove_with_authority_and_hooks() {
         )
         .await
         .unwrap_err();
-    assert_eq!(code(&error), Some("constraint_violation"));
+    assert_eq!(code(&error), Some("denied"));
+    assert_eq!(authority.log.lock().unwrap().len(), before);
     assert_eq!(f.links("mm_post_tags").await, [(1, 11), (1, 13)]);
     // Hosts that do not opt in to links deny them.
     let error = f
@@ -1033,17 +1037,18 @@ async fn hidden_link_targets_are_scoped_out_and_reveal_nothing() {
         add: f.tags(add),
         remove: f.tags(remove),
     };
-    // The host decides from the requested targets, so naming hidden tag 13
-    // fails identically whether post 1 links it or post 2 does not.
+    // The host decides from the requested targets, so denying visible tag 10
+    // fails identically whether post 1 links it or post 2 does not, and the
+    // host sees the same request in both cases.
     let guarded = Authority {
         hide_secret_targets: true,
-        deny_targets: vec![13],
+        deny_targets: vec![10],
         ..f.authority(true)
     };
     for change in [
-        delta(&[13], &[]),
-        delta(&[], &[13]),
-        RuntimeLinkChange::Replace(f.tags(&[10, 13])),
+        delta(&[10], &[]),
+        delta(&[], &[10]),
+        RuntimeLinkChange::Replace(f.tags(&[10, 11])),
     ] {
         let mut outcomes = Vec::new();
         for post in [1, 2] {
@@ -1062,6 +1067,7 @@ async fn hidden_link_targets_are_scoped_out_and_reveal_nothing() {
     }
     {
         let requested = guarded.requested.lock().unwrap();
+        assert_eq!(requested.len(), 6);
         for pair in requested.chunks(2) {
             assert_eq!(pair[0], pair[1]);
         }
@@ -1085,31 +1091,224 @@ async fn hidden_link_targets_are_scoped_out_and_reveal_nothing() {
         ["+1-11", "-1-10"]
     );
     assert_eq!(f.links("mm_post_tags").await, [(1, 11), (1, 13)]);
-    // Removing a hidden linked target behaves like removing an unlinked one.
-    for post in [1, 2] {
-        assert!(
-            f.run(
-                f.link(post, delta(&[], &[13]), 10),
-                Arc::new(scoped.clone()),
-                &hook
-            )
-            .await
-            .unwrap()
-            .is_empty()
-        );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn hidden_and_missing_link_targets_are_refused_uniformly() {
+    let f = Fixture::new().await;
+    f.run(
+        f.link(1, RuntimeLinkChange::Replace(f.tags(&[10, 13])), 10),
+        Arc::new(f.authority(true)),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    let delta = |add: &[i64], remove: &[i64]| RuntimeLinkChange::Delta {
+        add: f.tags(add),
+        remove: f.tags(remove),
+    };
+    // This host would allow any link; the ORM still refuses hidden tag 13
+    // (linked to post 1, unlinked from post 2) and missing tag 99 identically,
+    // before `authorize_links`, hooks or any write.
+    for hide_secret_targets in [true, false] {
+        let permissive = Authority {
+            hide_secret_targets,
+            ..f.authority(true)
+        };
+        let hook = Hook::default();
+        let mut cases = vec![(2, 99), (1, 99)];
+        if hide_secret_targets {
+            cases.extend([(1, 13), (2, 13)]);
+        }
+        for change in [|t: i64| (vec![t], vec![]), |t: i64| (vec![], vec![t])]
+            .into_iter()
+            .map(Some)
+            .chain([None])
+        {
+            let mut outcomes = BTreeSet::new();
+            for (post, target) in &cases {
+                let change = match change {
+                    Some(f_) => {
+                        let (add, remove) = f_(*target);
+                        delta(&add, &remove)
+                    }
+                    None => RuntimeLinkChange::Replace(f.tags(&[11, *target])),
+                };
+                let error = f
+                    .run(
+                        f.link(*post, change, 10),
+                        Arc::new(permissive.clone()),
+                        &hook,
+                    )
+                    .await
+                    .unwrap_err();
+                outcomes.insert((code(&error), error.to_string()));
+            }
+            assert_eq!(outcomes.len(), 1, "{outcomes:?}");
+            assert_eq!(outcomes.first().unwrap().0, Some("denied"));
+        }
+        assert!(permissive.log.lock().unwrap().is_empty());
+        assert!(permissive.requested.lock().unwrap().is_empty());
+        assert!(hook.seen.lock().unwrap().is_empty());
+        assert_eq!(f.links("mm_post_tags").await, [(1, 10), (1, 13)]);
     }
-    // Adding an already-linked hidden target inserts nothing.
-    assert!(
-        f.run(
-            f.link(1, delta(&[13], &[]), 10),
-            Arc::new(scoped.clone()),
-            &hook
+    f.finish().await;
+}
+
+/// Documents keyed by UUID linked both ways to words keyed by text.
+fn keyed_definition() -> RuntimeSchema {
+    let mut doc = collection("doc", "Doc", "Docs");
+    doc.fields[0].value_kind = RuntimeValueKind::Uuid;
+    let mut word = collection("word", "Word", "Words");
+    word.fields[0].value_kind = RuntimeValueKind::String;
+    doc.relations.push(join(
+        "words",
+        "word",
+        "mm_doc_words",
+        ("doc.id", "doc_id"),
+        ("word.id", "word_id"),
+    ));
+    word.relations.push(join(
+        "docs",
+        "doc",
+        "mm_doc_words",
+        ("word.id", "word_id"),
+        ("doc.id", "doc_id"),
+    ));
+    RuntimeSchema {
+        format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
+        collections: vec![doc, word],
+    }
+}
+
+#[tokio::test]
+async fn uuid_and_text_keys_match_existing_links_exactly() {
+    let f = Fixture::with_definition(keyed_definition(), &[]).await;
+    let authority = f.authority(true);
+    let hook = Hook::default();
+    let doc = |n: u128| RuntimeValue::Uuid(graphql_orm::uuid::Uuid::from_u128(n));
+    let word = |w: &str| RuntimeValue::String(w.into());
+    for (collection, id) in [
+        ("doc", doc(0xa1)),
+        ("doc", doc(0xb2)),
+        ("word", word("alpha")),
+        ("word", word("Beta")),
+        ("word", word("gamma")),
+    ] {
+        let handle = f.schema().resolve_collection(&cid(collection)).unwrap();
+        let field = |name: &str| {
+            f.schema()
+                .resolve_field(&handle, &fid(&format!("{collection}.{name}")))
+                .unwrap()
+        };
+        let request = f
+            .schema()
+            .runtime_create_request(
+                &handle,
+                &[
+                    (field("id"), id),
+                    (field("label"), RuntimeValue::String("x".into())),
+                ],
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        f.run(request, Arc::new(authority.clone()), &hook)
+            .await
+            .unwrap();
+    }
+    let words = |ws: &[&str]| {
+        ws.iter()
+            .map(|w| f.key_of("word", word(w)))
+            .collect::<Vec<_>>()
+    };
+    let link = |d: u128, change: RuntimeLinkChange| {
+        f.schema().runtime_link_request(
+            &f.relation("doc", "words"),
+            f.key_of("doc", doc(d)),
+            change,
+            None,
+            10,
+            Default::default(),
         )
-        .await
-        .unwrap()
-        .is_empty()
+    };
+    let run = |request: RuntimeMutationRequest| f.run(request, Arc::new(authority.clone()), &hook);
+    assert_eq!(
+        run(link(0xa1, RuntimeLinkChange::Replace(words(&["alpha", "Beta"]))).unwrap())
+            .await
+            .unwrap(),
+        ["+00a1-alpha", "+00a1-Beta"]
     );
-    assert_eq!(f.links("mm_post_tags").await, [(1, 11), (1, 13)]);
+    // Existing links are recognised by key value and never re-added.
+    assert_eq!(
+        run(link(0xa1, RuntimeLinkChange::Replace(words(&["Beta", "gamma"]))).unwrap())
+            .await
+            .unwrap(),
+        ["+00a1-gamma", "-00a1-alpha"]
+    );
+    assert_eq!(
+        run(link(
+            0xa1,
+            RuntimeLinkChange::Delta {
+                add: words(&["Beta"]),
+                remove: words(&["gamma", "alpha"]),
+            }
+        )
+        .unwrap())
+        .await
+        .unwrap(),
+        ["-00a1-gamma"]
+    );
+    // Text keys match exactly: a differently cased key names a missing row.
+    let error = run(link(
+        0xa1,
+        RuntimeLinkChange::Delta {
+            add: words(&["beta"]),
+            remove: vec![],
+        },
+    )
+    .unwrap())
+    .await
+    .unwrap_err();
+    assert_eq!(code(&error), Some("denied"));
+    assert_eq!(
+        link(0xa1, RuntimeLinkChange::Replace(words(&["Beta", "Beta"])))
+            .unwrap_err()
+            .code(),
+        RuntimeMutationErrorCode::InvalidInput
+    );
+    // The inverse side matches UUID targets the same way.
+    let inverse = f
+        .schema()
+        .runtime_link_request(
+            &f.relation("word", "docs"),
+            f.key_of("word", word("Beta")),
+            RuntimeLinkChange::Delta {
+                add: vec![f.key_of("doc", doc(0xa1)), f.key_of("doc", doc(0xb2))],
+                remove: vec![],
+            },
+            None,
+            10,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(run(inverse).await.unwrap(), ["+Beta-00b2"]);
+    // Deleting a text-keyed row removes its links, described from the declaring side.
+    let delete = f
+        .schema()
+        .runtime_delete_request(
+            f.key_of("word", word("Beta")),
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    assert_eq!(run(delete).await.unwrap(), ["-00a1-Beta", "-00b2-Beta"]);
+    let rows = Backend::fetch_rows(f.db.pool(), "SELECT COUNT(*) AS n FROM mm_doc_words", &[])
+        .await
+        .unwrap();
+    assert_eq!(Backend::try_get_i64(&rows[0], "n").unwrap(), 0);
     f.finish().await;
 }
 
