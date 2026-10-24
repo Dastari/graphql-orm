@@ -15,6 +15,9 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.64.0 to 0.64.1: SQLite RESTRICT refusal classification
+Upgrade runtime/macros together. On SQLite, a delete or key update refused by an `ON DELETE/UPDATE RESTRICT` foreign key now returns `CONSTRAINT_VIOLATION` (and runtime mutation code `constraint_violation`) instead of `INTERNAL_ERROR` (`database_failed`), the same category PostgreSQL already returned. Behaviour change: a host that matched the SQLite internal/database-failed category for this case, or carried its own mapping for it, should rely on the constraint category on both backends and may remove that mapping. Classification requires extended code `SQLITE_CONSTRAINT_TRIGGER` (1811) together with SQLite's exact `FOREIGN KEY constraint failed` message, so other trigger `RAISE(ABORT, ...)` failures remain internal errors; an application trigger that raises that identical message is indistinguishable and is classified as a constraint violation. No API, SDL, schema or data migration is required.
+
 ## 0.63.0 to 0.64.0: composite and read-only Changed
 
 A successful selected snapshot is released only after a second current source,

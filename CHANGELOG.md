@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.64.1**.
+
+- SQLite classifies a statement refused by a foreign-key `RESTRICT` action as `CONSTRAINT_VIOLATION` (runtime mutation code `constraint_violation`), matching PostgreSQL. SQLite raises `RESTRICT` through its internal trigger program with extended code `SQLITE_CONSTRAINT_TRIGGER` (1811), which sqlx reports as an unclassified error, so such deletes previously surfaced as `INTERNAL_ERROR` / `database_failed`. The rule requires the SQLite driver error, extended code 1811 and SQLite's exact `FOREIGN KEY constraint failed` message; every other trigger failure keeps its previous classification. PostgreSQL, MSSQL and `NO ACTION` (787) are unchanged.
+
+## 0.64.0 (unreleased)
+
 Companion runtime/macros version: **0.64.0**.
 
 - Revalidate the complete current release contract after successful selected
