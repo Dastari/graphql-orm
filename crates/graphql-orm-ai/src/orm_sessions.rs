@@ -69,6 +69,8 @@ pub struct OrmAiSessionService {
     limits: AiSessionServiceLimits,
     run_authorization: Option<Arc<crate::AiRunAuthorization>>,
     execution_selection_resolver: Option<Arc<dyn crate::AiSessionExecutionSelectionResolver>>,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
+    submission_admission: Option<crate::principal_projection::AiSubmissionAdmission>,
 }
 
 impl OrmAiSessionService {
@@ -116,6 +118,8 @@ impl OrmAiSessionService {
             limits: AiSessionServiceLimits::default(),
             run_authorization: None,
             execution_selection_resolver: None,
+            principal_projection: None,
+            submission_admission: None,
         }
     }
 
@@ -144,6 +148,41 @@ impl OrmAiSessionService {
     pub fn with_run_authorization(mut self, authorization: Arc<crate::AiRunAuthorization>) -> Self {
         self.run_authorization = Some(authorization);
         self
+    }
+
+    /// Stamps the host's verified namespace into the reference every new run
+    /// and its first title work persist. Subscription services built on this
+    /// session service apply the same projection. Without it the reference is
+    /// `principal.reference()`, unchanged.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
+    }
+
+    /// Strictly resolves each new submission's final reference before any
+    /// write. The resolver must return exactly that reference and it must still
+    /// be live; otherwise submission fails with
+    /// [`AiError::ReauthorizationFailed`] and nothing is stored. Under a strict
+    /// host resolver this also refuses a missing projection, because the
+    /// unprojected reference does not resolve.
+    #[must_use]
+    pub fn with_submission_admission(
+        mut self,
+        resolver: Arc<dyn agql_auth::CurrentPrincipalResolver>,
+        clock: Arc<dyn agql_auth::Clock>,
+    ) -> Self {
+        self.submission_admission = Some(crate::principal_projection::AiSubmissionAdmission::new(
+            resolver, clock,
+        ));
+        self
+    }
+
+    pub(crate) fn principal_projection(&self) -> Option<&crate::AiPrincipalProjection> {
+        self.principal_projection.as_deref()
     }
 
     /// Returns the underlying ORM database handle for schema composition and
@@ -1582,14 +1621,21 @@ impl AiSessionService for OrmAiSessionService {
                 json!({"sessionId": input.session_id, "messageId": message_id, "runId": run_id}),
             )
             .await?;
+        let admitted = crate::principal_projection::admission_reference(
+            self.principal_projection.as_deref(),
+            principal,
+        )?;
         let reference = match &self.run_authorization {
             Some(authorization) => {
                 authorization
-                    .issue(principal, input.session_id, run_id)
+                    .issue(principal, &admitted, input.session_id, run_id)
                     .await?
             }
-            None => principal.reference(),
+            None => admitted,
         };
+        if let Some(admission) = &self.submission_admission {
+            admission.admit(&reference).await?;
+        }
         let principal_reference =
             serde_json::to_value(reference).map_err(|_| AiError::PersistenceFailed)?;
         let (principal_kind, principal_subject) = principal_identity(principal);

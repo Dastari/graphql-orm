@@ -117,6 +117,7 @@ mod orm_usage;
 mod orm_webhooks;
 mod persistence;
 mod pricing;
+mod principal_projection;
 mod proposals;
 mod provider;
 mod provider_activity;
@@ -246,6 +247,10 @@ pub use persistence::{
     AI_SCHEMA_MODULE_ID, AI_SCHEMA_MODULE_VERSION, AI_TABLE_NAMESPACE, AiSchemaModule,
 };
 pub use pricing::*;
+pub use principal_projection::{
+    AiPrincipalNamespace, AiPrincipalProjection, AiPrincipalProjector,
+    MAX_AI_PRINCIPAL_NAMESPACE_BYTES,
+};
 pub use proposals::*;
 pub use provider::*;
 pub use provider_activity::*;

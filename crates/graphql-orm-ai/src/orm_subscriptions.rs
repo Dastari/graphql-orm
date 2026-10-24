@@ -138,7 +138,12 @@ impl AiSubscriptionService for OrmAiSubscriptionService {
                 "invalid AI subscription bounds".to_owned(),
             ));
         }
-        let principal_reference = principal.reference();
+        let (principal_reference, principal) = crate::principal_projection::admit_stream(
+            self.sessions.principal_projection(),
+            self.principal_resolver.as_ref(),
+            principal,
+        )
+        .await?;
         let mut wakeups = self
             .sessions
             .database()
@@ -292,6 +297,16 @@ impl AiSubscriptionService for OrmAiSubscriptionService {
                             Ok(resolved) => {
                                 grace_deadline = None;
                                 grace_attempt = 0;
+                                if !crate::principal_projection::resolved_identity_matches(
+                                    &resolved,
+                                    &principal_reference,
+                                ) {
+                                    yield AiSessionEventEnvelope::ended(
+                                        AiSessionStreamClose::AuthorizationRevoked,
+                                        delivered_sequence,
+                                    );
+                                    Err(AiError::ReauthorizationFailed)?;
+                                }
                                 current_principal = resolved.into_principal();
                                 if sessions
                                     .session(&current_principal, session_id)

@@ -73,6 +73,7 @@ pub struct OrmAiRunDispositionService {
     clock: Arc<dyn Clock>,
     limits: AiRunDispositionLimits,
     run_authorization: Option<Arc<crate::AiRunAuthorization>>,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
 }
 
 impl OrmAiRunDispositionService {
@@ -95,7 +96,20 @@ impl OrmAiRunDispositionService {
             clock,
             limits,
             run_authorization: None,
+            principal_projection: None,
         }
+    }
+
+    /// Stamps the host's verified namespace into the reference this service
+    /// resolves for each caller and persists on an explicit retry. Must match the projection installed on the
+    /// session service. Without it the reference is `principal.reference()`.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
     }
 
     /// Opts explicit retries into the host's bounded run-authorization policy.
@@ -192,7 +206,10 @@ impl OrmAiRunDispositionService {
                 "invalid run disposition identity".to_owned(),
             ));
         }
-        let requested_reference = principal.reference();
+        let requested_reference = crate::principal_projection::admission_reference(
+            self.principal_projection.as_deref(),
+            principal,
+        )?;
         let current = self.resolve_current(&requested_reference).await?;
         let session = AiSessionRecord::find_by_id(&self.database, &session_id)
             .await
@@ -243,7 +260,9 @@ impl OrmAiRunDispositionService {
         let retry_run_id = matches!(disposition, AiRunDisposition::Retried).then(Uuid::new_v4);
         let reference = match (&self.run_authorization, retry_run_id) {
             (Some(authorization), Some(retry_id)) => {
-                authorization.issue(principal, session_id, retry_id).await?
+                authorization
+                    .issue(principal, current.reference(), session_id, retry_id)
+                    .await?
             }
             _ => current.reference().clone(),
         };

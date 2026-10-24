@@ -112,6 +112,7 @@ pub struct OrmAiProposalService {
     catalog: Arc<AiProposalCatalog>,
     clock: Arc<dyn Clock>,
     limits: AiProposalServiceLimits,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
 }
 
 impl OrmAiProposalService {
@@ -137,7 +138,20 @@ impl OrmAiProposalService {
             catalog,
             clock,
             limits: AiProposalServiceLimits::default(),
+            principal_projection: None,
         }
+    }
+
+    /// Stamps the host's verified namespace into the reference this service
+    /// resolves for each caller. Must match the projection installed on the
+    /// session service. Without it the reference is `principal.reference()`.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
     }
 
     /// Overrides deployment-owned hard limits.
@@ -280,7 +294,13 @@ impl OrmAiProposalService {
         principal: &AuthPrincipal,
     ) -> Result<AuthPrincipal, AiError> {
         Ok(self
-            .resolve_current(&principal.reference(), canonical_second(self.clock.now()))
+            .resolve_current(
+                &crate::principal_projection::admission_reference(
+                    self.principal_projection.as_deref(),
+                    principal,
+                )?,
+                canonical_second(self.clock.now()),
+            )
             .await?
             .into_principal())
     }

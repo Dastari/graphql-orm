@@ -462,6 +462,7 @@ pub struct OrmAiInboxService {
     content_protector: Arc<dyn AiContentProtector>,
     reauthorization_interval: Duration,
     replay_page_size: i64,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
 }
 
 impl OrmAiInboxService {
@@ -482,7 +483,21 @@ impl OrmAiInboxService {
             content_protector,
             reauthorization_interval: Duration::from_secs(30),
             replay_page_size: 100,
+            principal_projection: None,
         }
+    }
+
+    /// Stamps the host's verified namespace into the reference an inbox
+    /// stream resolves. The projected reference is strictly resolved before
+    /// the first page. Must match the session service's projection. Without
+    /// it, streams use `principal.reference()` and the caller as before.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
     }
 
     /// Overrides the periodic principal/session/scope reauthorization
@@ -746,7 +761,12 @@ impl AiInboxService for OrmAiInboxService {
                 "invalid AI inbox subscription bounds".to_owned(),
             ));
         }
-        let principal_reference = principal.reference();
+        let (principal_reference, principal) = crate::principal_projection::admit_stream(
+            self.principal_projection.as_deref(),
+            self.principal_resolver.as_ref(),
+            principal,
+        )
+        .await?;
         let (principal_kind, principal_subject) = principal_identity(&principal);
         let principal_subject = principal_subject.to_owned();
         let mut wakeups = self
@@ -848,6 +868,12 @@ impl AiInboxService for OrmAiInboxService {
                         .resolve(&principal_reference)
                         .await
                         .map_err(|_| AiError::ReauthorizationFailed)?;
+                    if !crate::principal_projection::resolved_identity_matches(
+                        &resolved,
+                        &principal_reference,
+                    ) {
+                        Err(AiError::ReauthorizationFailed)?;
+                    }
                     current_principal = resolved.into_principal();
                     let (current_kind, current_subject) = principal_identity(&current_principal);
                     if current_kind != principal_kind || current_subject != principal_subject {
@@ -870,6 +896,7 @@ impl OrmAiInboxService {
             content_protector: self.content_protector.clone(),
             reauthorization_interval: self.reauthorization_interval,
             replay_page_size: self.replay_page_size,
+            principal_projection: self.principal_projection.clone(),
         }
     }
 }
