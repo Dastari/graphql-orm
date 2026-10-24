@@ -3750,7 +3750,12 @@ pub(super) fn generated_index_name(table_name: &str, columns: &[&str]) -> String
     }
 
     let hash = format!("{:016x}", fnv1a64(full.as_bytes()));
-    let prefix_len = 63usize.saturating_sub(hash.len() + 1);
+    let mut prefix_len = 63usize.saturating_sub(hash.len() + 1);
+    // Sanitized parts are ASCII today; keep the slice on a character boundary
+    // regardless, matching the macro's generated-name bounding.
+    while !full.is_char_boundary(prefix_len) {
+        prefix_len -= 1;
+    }
     format!("{}_{}", &full[..prefix_len], hash)
 }
 

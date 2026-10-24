@@ -16,6 +16,24 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.74.0**.
+
+- **Breaking (generated names):** derived ordinary, unique, spatial and
+  search-vector index names longer than 63 bytes are now shortened
+  deterministically: a 46-byte prefix, `_`, and the 16-digit FNV-1a hash of the
+  complete name, the scheme the runtime already uses for generated index,
+  foreign-key and check-constraint names. PostgreSQL silently truncated those
+  names, so every later strict or owned plan proposed a create plus a drop and
+  `runtime_mutation_environment` reported `BaselineMismatch`. Names of 63 bytes or
+  fewer are byte-identical.
+- **Breaking (PostgreSQL plans):** a PostgreSQL ordinary or owned plan that would
+  create an explicitly declared index, search index, foreign-key or check
+  constraint whose name exceeds 63 bytes is refused with a diagnostic naming the
+  identifier (`InvalidPhysicalContract` with the name as `subject` for owned
+  plans) instead of being truncated. SQLite and MSSQL plans are unchanged.
+
+## 0.73.0 (unreleased)
+
 Companion runtime/macros version: **0.73.0**.
 
 - Create and update requests can carry many-to-many link changes, applied to the written row in the same transaction: `RuntimeMutationRequest::with_link_change(relation, change, max_link_keys)`, one change per join relation of the request's own collection.

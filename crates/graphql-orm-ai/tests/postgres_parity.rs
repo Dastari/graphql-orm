@@ -620,6 +620,180 @@ fn principal(now: OffsetDateTime) -> AuthPrincipal {
     })
 }
 
+/// A database created at schema module 0.72.0 holds the provider webhook-receipt
+/// index under PostgreSQL's truncated 63-byte name. Upgrading replaces exactly
+/// that index once with the bounded name, then re-plans empty.
+#[tokio::test]
+async fn owned_postgres_upgrade_replaces_the_truncated_webhook_receipt_index_once() {
+    use graphql_orm::graphql::orm::{
+        ManagedTableSet, MigrationStep, OwnedSchemaModel, PlanOptions, SchemaModuleCatalog,
+    };
+    const TABLE: &str = "graphql_orm_ai_provider_webhook_receipts";
+    const OLD_NAME: &str = "idx_graphql_orm_ai_provider_webhook_receipts_provider_kind_provider_profile_id_provider_response_id_state";
+
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let catalog = SchemaModuleCatalog::compose(&[&module]).expect("AI module should compose");
+    let bounded = catalog
+        .schema_model()
+        .tables
+        .iter()
+        .find(|table| table.table_name == TABLE)
+        .and_then(|table| table.indexes.iter().find(|index| index.columns.len() == 4))
+        .map(|index| index.name.to_owned())
+        .expect("bounded webhook-receipt index");
+    let initial = database
+        .schema()
+        .plan_migration_to_entities("ai-upgrade-v1", "AI module", module.entities())
+        .await
+        .expect("AI module should plan");
+    database
+        .schema()
+        .apply_migration(&initial, ApplyOptions::default())
+        .await
+        .expect("AI module should apply");
+
+    // Reproduce the module 0.72.0 state: the index was created under its full
+    // 105-byte name, which PostgreSQL stored truncated to 63 bytes.
+    graphql_orm::sqlx::query(&format!("DROP INDEX \"{bounded}\""))
+        .execute(database.pool())
+        .await
+        .expect("bounded index should drop");
+    graphql_orm::sqlx::query(&format!(
+        "CREATE INDEX \"{OLD_NAME}\" ON {TABLE} (provider_kind, provider_profile_id, provider_response_id, state)"
+    ))
+    .execute(database.pool())
+    .await
+    .expect("module 0.72.0 index should create under its truncated name");
+    let truncated = &OLD_NAME[..63];
+    let names = |pool: graphql_orm::sqlx::PgPool| async move {
+        graphql_orm::sqlx::query_as::<_, (String,)>(
+            "SELECT indexname FROM pg_indexes WHERE tablename = $1 ORDER BY indexname",
+        )
+        .bind(TABLE)
+        .fetch_all(&pool)
+        .await
+        .expect("index names should read")
+        .into_iter()
+        .map(|row| row.0)
+        .collect::<Vec<_>>()
+    };
+    let before = names(database.pool().clone()).await;
+    assert!(before.iter().any(|name| name == truncated), "{before:?}");
+    assert!(!before.contains(&bounded), "{before:?}");
+
+    let upgrade = database
+        .schema()
+        .plan_migration_to_entities("ai-upgrade-v2", "bounded index name", module.entities())
+        .await
+        .expect("upgrade should plan");
+    let steps = upgrade
+        .steps
+        .iter()
+        .map(|step| &step.step)
+        .collect::<Vec<_>>();
+    assert_eq!(steps.len(), 2, "{:?}", upgrade.statements);
+    assert!(steps.iter().any(|step| matches!(
+        step,
+        MigrationStep::DropIndex { table_name, index_name }
+            if table_name == TABLE && index_name == truncated
+    )));
+    assert!(steps.iter().any(|step| matches!(
+        step,
+        MigrationStep::CreateIndex { table_name, index }
+            if table_name == TABLE && index.name == bounded
+    )));
+    database
+        .schema()
+        .apply_migration(&upgrade, ApplyOptions::default())
+        .await
+        .expect("upgrade should apply");
+    let after = names(database.pool().clone()).await;
+    assert!(after.contains(&bounded), "{after:?}");
+    assert!(!after.iter().any(|name| name == truncated), "{after:?}");
+    let replan = database
+        .schema()
+        .plan_migration_to_entities("ai-upgrade-v3", "replan", module.entities())
+        .await
+        .expect("upgraded module should re-plan");
+    assert!(replan.steps.is_empty(), "{:?}", replan.statements);
+    let ownership = ManagedTableSet::new(
+        module
+            .entities()
+            .iter()
+            .map(|entity| entity.table_name.to_owned()),
+    )
+    .expect("AI tables form a managed set");
+    let owned = database
+        .schema()
+        .plan_owned_migration(
+            "ai-upgrade-owned",
+            "certify",
+            &OwnedSchemaModel::from(&catalog.schema_model()),
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await
+        .expect("upgraded module should plan as an owned migration");
+    assert!(owned.steps().is_empty(), "{:?}", owned.statements());
+}
+
+/// A strict owned plan of the composed AI module re-plans empty on PostgreSQL:
+/// no identifier is truncated, so certification sees no drift.
+#[tokio::test]
+async fn owned_postgres_ai_schema_module_owned_replan_is_empty() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let catalog = graphql_orm::graphql::orm::SchemaModuleCatalog::compose(&[&module])
+        .expect("AI module should compose");
+    let target = graphql_orm::graphql::orm::OwnedSchemaModel::from(&catalog.schema_model());
+    let ownership = graphql_orm::graphql::orm::ManagedTableSet::new(
+        module
+            .entities()
+            .iter()
+            .map(|entity| entity.table_name.to_owned()),
+    )
+    .expect("AI tables form a managed set");
+    let plan = database
+        .schema()
+        .plan_owned_migration(
+            "ai-owned-v1",
+            "graphql-orm-ai owned PostgreSQL module",
+            &target,
+            &ownership,
+            graphql_orm::graphql::orm::PlanOptions::strict(),
+        )
+        .await
+        .expect("AI module should plan as an owned PostgreSQL migration");
+    database
+        .schema()
+        .apply_owned_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("AI module should apply to the owned PostgreSQL database");
+    let replan = database
+        .schema()
+        .plan_owned_migration(
+            "ai-owned-v2",
+            "graphql-orm-ai owned PostgreSQL re-plan",
+            &target,
+            &ownership,
+            graphql_orm::graphql::orm::PlanOptions::strict(),
+        )
+        .await
+        .expect("AI module should re-plan");
+    assert!(replan.steps().is_empty(), "{:?}", replan.statements());
+}
+
 #[tokio::test]
 async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fencing() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
