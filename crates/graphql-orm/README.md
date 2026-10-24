@@ -118,11 +118,10 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth `v0.22.1` at
-`86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
-correction. Direct Auth consumers must select the same tag and refresh their
-locks to one source; see the
-[workspace migration](../../MIGRATION.md#signed-role-catalogue-transport-bound).
+The current workspace selects merged Auth 0.23.0 at reviewed revision
+`158c79e27117adc5a95d01d58c39c39fd44e6a1a` (no release tag yet). Direct Auth
+consumers must select the same revision and refresh their locks to one source;
+see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.

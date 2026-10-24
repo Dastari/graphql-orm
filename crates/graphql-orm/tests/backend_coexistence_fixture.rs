@@ -73,26 +73,45 @@ fn direct_host_dependency_resolves_one_exact_agql_auth_universe() {
         .lines()
         .find(|line| line.starts_with("agql-auth = "))
         .expect("canonical workspace auth dependency");
-    let field = |name: &str| {
+    let optional_field = |name: &str| {
         let prefix = format!("{name} = \"");
         dependency
             .split_once(prefix.as_str())
             .and_then(|(_, rest)| rest.split_once('"'))
             .map(|(value, _)| value)
-            .expect("reviewed auth dependency field")
     };
-    let tag = field("tag");
-    assert_eq!(tag, format!("v{}", field("version")));
-    // The published v0.22.1 tag retains this reviewed full commit. Require
-    // both the published selector and its locked identity in the host graph.
-    let revision = "86fabec09eea1eec0f675bc150e90e3809734567";
+    let field = |name: &str| optional_field(name).expect("reviewed auth dependency field");
+    // The selector is either an exact reviewed full revision or a published
+    // version tag; never a moving branch.
+    let selector = match (optional_field("rev"), optional_field("tag")) {
+        (Some(rev), None) => {
+            assert!(
+                rev.len() == 40 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "agql-auth rev must be a full commit SHA: {rev}"
+            );
+            format!("rev={rev}")
+        }
+        (None, Some(tag)) => {
+            assert_eq!(tag, format!("v{}", field("version")));
+            format!("tag={tag}")
+        }
+        _ => panic!("agql-auth must select exactly one of rev or tag: {dependency}"),
+    };
     assert_eq!(agql_auth[0]["version"], field("version"));
+    // The host graph must resolve the same locked identity as the workspace.
+    let workspace_lock = include_str!("../../../Cargo.lock");
+    let locked = workspace_lock
+        .split("[[package]]")
+        .find(|package| package.contains("\nname = \"agql-auth\"\n"))
+        .and_then(|package| package.lines().find(|line| line.starts_with("source = \"")))
+        .and_then(|line| line.strip_prefix("source = \"")?.strip_suffix('"'))
+        .expect("workspace lock records agql-auth");
     let source = agql_auth[0]["source"]
         .as_str()
         .expect("agql-auth source must be present");
-    assert_eq!(
-        source,
-        format!("git+{}?tag={tag}#{revision}", field("git")),
-        "unexpected agql-auth source",
+    assert!(
+        source.starts_with(&format!("git+{}?{selector}#", field("git"))),
+        "unexpected agql-auth selector: {source}",
     );
+    assert_eq!(source, locked, "unexpected agql-auth source");
 }

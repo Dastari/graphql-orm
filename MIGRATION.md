@@ -15,6 +15,24 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## agql-auth 0.23.0 selection
+
+The workspace selects agql-auth 0.23.0 at reviewed merged revision
+`158c79e27117adc5a95d01d58c39c39fd44e6a1a` instead of tag `v0.22.1`. No
+graphql-orm, graphql-orm-ai or graphql-orm-router source or behaviour changes.
+Breaking for consumers that use Auth types directly:
+
+- Select the same Auth source and refresh `Cargo.lock` so it holds exactly one
+  `agql-auth` package. Two copies compile but break principal lookup by type
+  (`principal_from_ctx` fails closed).
+- `auth-agql` APIs now take and return 0.23.0 types. Auth's own breaking changes
+  apply: new fields on `OidcProviderConfig`, `OAuthLoginState` and
+  `ValidatedOidcClaims`, new `AuthError` variants, `OAuthLoginState::response_mode`
+  persistence, and `client_secret` no longer serialized. See agql-auth's
+  MIGRATION.md (0.22.1 to 0.23.0).
+
+No schema, SDL, persistence or generated-code migration is required.
+
 ## 0.68.0 to 0.69.0: many-to-many runtime relations
 
 Upgrade runtime/macros together. These are breaking only at Rust compile time: add `join: None` to `RuntimeRelation` literals, and an arm for `RuntimeSchemaDiagnosticCode::InvalidJoinTable` in exhaustive matches. Serialized IR without `join` reads unchanged and keeps its fingerprints. Nothing changes for schemas without join relations.
