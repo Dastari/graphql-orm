@@ -3,7 +3,7 @@ title: "Validated runtime relation batching"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -134,6 +134,15 @@ bind parameters, cursor bytes, and compatible query groups. Arithmetic and
 actual rendered bind counts are checked before execution. Concurrent writes
 remain subject to the database transaction/isolation used by the caller; the
 API does not claim a durable snapshot outside one.
+
+## Many-to-many layers
+
+A join relation is a to-many layer. Parent anchors carry the source primary key
+(`RuntimeRelationHandle::source_key_fields`), and each compatible group selects target rows
+through `EXISTS` on the link table correlated with the target key. Filters, deterministic
+order, keyset pages, cursors and counts therefore apply to the target layer exactly as for key
+relations, and the target grant still restricts the layer. `RuntimeRelationHandle::join()`
+exposes the link table and column mapping, and `key_pairs()` is empty for join relations.
 
 ## Backend and compatibility matrix
 

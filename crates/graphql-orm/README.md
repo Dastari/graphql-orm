@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.69.0 adds many-to-many runtime relations: ORM-owned link tables,
+batched join reads and authorized link writes. See the
+[migration guide](../../MIGRATION.md#0680-to-0690-many-to-many-runtime-relations).
+
 Version 0.68.0 adds validated, fingerprinted runtime collection label fields and
 publishes them in the semantic catalogue. Rust struct literals of
 `RuntimeCollection` need the new member; see the

@@ -66,6 +66,7 @@ fn relation(
         cardinality: RelationCardinality::One,
         enforce_foreign_key: true,
         on_delete: Some(policy),
+        join: None,
     }
 }
 fn collection(

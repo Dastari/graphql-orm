@@ -206,6 +206,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         cardinality: RelationCardinality::One,
         enforce_foreign_key: false,
         on_delete: None,
+        join: None,
     });
     parent.relations.push(RuntimeRelation {
         description: None,
@@ -227,6 +228,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         cardinality: RelationCardinality::Many,
         enforce_foreign_key: false,
         on_delete: None,
+        join: None,
     });
     Arc::new(
         RuntimeSchema {

@@ -16,6 +16,14 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.69.0**.
+
+- Add many-to-many runtime relations. `RuntimeRelation::join: Option<RuntimeJoinTable>` names an ORM-owned link table mapping the source and target primary keys; it is validated (`InvalidJoinTable`), structural in both fingerprints, and planned as one table with a pair primary key, two cascading foreign keys and a target index. Inverse relations may share it. Join relations read as batched, filtered, paged and counted to-many layers through `EXISTS` on the link table.
+- Add link writes. `runtime_link_request` takes `RuntimeLinkChange::{Replace, Delta}`; the exact delta goes to the new `RuntimeWriteAuthority::authorize_links` (deny by default) before any write. Deletes remove their links explicitly after the same authorization. `RuntimeMutationEffect::links()` exposes link effects to hooks. Runtime GraphQL adds `update<Object><Relation>Links` roots, and `RuntimeGraphqlMutationOptions::max_links` bounds them. SQLite and PostgreSQL behave alike.
+- **Breaking (Rust):** `RuntimeRelation` gains the public field `join` (struct literals add `join: None`), and `RuntimeSchemaDiagnosticCode` gains `InvalidJoinTable`.
+
+## 0.68.0 (unreleased)
+
 Companion runtime/macros version: **0.68.0**; operation catalog **0.5.0**; AI tool profiles **0.17.0**; AI **0.110.0**.
 
 - Add `RuntimeCollection::label_fields`: ordered, validated label (display) fields. They are part of the ID-bearing fingerprint when declared (rendered as a JSON array of stable IDs), but not of the structural fingerprint, the physical schema or migration plans. Ineligible members fail with the new diagnostic `InvalidLabelField`, and unknown fields with `UnknownFieldReference`. Runtime GraphQL publishes them in the semantic catalogue, but omits a label that has a projector-served member.

@@ -186,6 +186,8 @@ pub struct RuntimeMutationRequest {
     limits: RuntimeMutationLimits,
     dependents: Option<RuntimeDependentLimits>,
     cause: Option<RuntimeDependentCause>,
+    links: Option<links::LinkSpec>,
+    max_links: usize,
 }
 macro_rules! redacted_debug {
     ($($ty:ty),+ $(,)?) => {$(impl fmt::Debug for $ty {
@@ -193,6 +195,12 @@ macro_rules! redacted_debug {
     })+};
 }
 redacted_debug!(RuntimeKey, RuntimeMutationRequest);
+
+#[path = "runtime_mutation_links.rs"]
+mod links;
+pub use links::{
+    RUNTIME_DEFAULT_MAX_LINKS, RuntimeLink, RuntimeLinkChange, RuntimeLinkCheck, RuntimeLinkEffect,
+};
 impl RuntimeKey {
     pub(super) fn schema(&self) -> &ValidatedRuntimeSchema {
         &self.schema
@@ -242,6 +250,12 @@ impl<'a> RuntimeWriteIntent<'a> {
     /// present for each Cascade/SetNull dependent change of an opted-in delete.
     pub fn cause(self) -> Option<&'a RuntimeDependentCause> {
         self.request.cause.as_ref()
+    }
+    /// The join relation and requested change of a link mutation. A link
+    /// mutation writes no fields; its exact delta reaches
+    /// [`RuntimeWriteAuthority::authorize_links`].
+    pub fn links(self) -> Option<(&'a RuntimeRelationHandle, &'a RuntimeLinkChange)> {
+        self.request.link_change()
     }
 }
 /// Authoritative preimage from the pinned transaction, never a caller preview.
@@ -331,6 +345,18 @@ pub trait RuntimeWriteAuthority<B: RuntimeMutationBackend>: Send + Sync {
         check: RuntimeResultCheck<'a>,
         tx: &'a mut MutationContext<'_, B>,
     ) -> BoxFuture<'a, Result<RuntimeReturnGrant, RuntimeMutationError>>;
+    /// Approve the exact links a many-to-many write adds or removes, after the
+    /// intent and preimage checks and before any write: a link mutation's delta,
+    /// or every link of a row being deleted. Denies by default, so a host must
+    /// opt in before links can change.
+    fn authorize_links<'a>(
+        &'a self,
+        check: RuntimeLinkCheck<'a>,
+        tx: &'a mut MutationContext<'_, B>,
+    ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
+        let _ = (check, tx);
+        Box::pin(async { Err(err(RuntimeMutationErrorCode::Denied)) })
+    }
 }
 /// Pending work, not committed success or an event. Only the runner establishes commit.
 pub struct RuntimeMutationEffect {
@@ -341,8 +367,14 @@ pub struct RuntimeMutationEffect {
     preimage: Option<RuntimeRecord>,
     cause: Option<RuntimeDependentCause>,
     dependents: Vec<RuntimeMutationEffect>,
+    links: Vec<RuntimeLinkEffect>,
 }
 impl RuntimeMutationEffect {
+    /// Pending link changes: the delta of a link mutation, or every link a
+    /// delete removed, one entry per join relation.
+    pub fn links(&self) -> &[RuntimeLinkEffect] {
+        &self.links
+    }
     pub fn action(&self) -> RuntimeMutationAction {
         self.action
     }
@@ -645,6 +677,8 @@ impl ValidatedRuntimeSchema {
             limits,
             dependents: None,
             cause: None,
+            links: None,
+            max_links: RUNTIME_DEFAULT_MAX_LINKS,
         })
     }
 }
@@ -853,13 +887,17 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         let c = collection(&request.schema, &request.collection)?;
         // Without an explicit opt-in the database must never change a row the host
         // did not see, so any incoming modifying action refuses the delete.
+        // Links of the schema's own join tables are removed explicitly below.
         if request.action == RuntimeMutationAction::Delete
             && request.dependents.is_none()
             && request.cause.is_none()
             && environment
                 .incoming_dependencies(&c.physical_table)
                 .iter()
-                .any(|d| !matches!(d.on_delete, DeletePolicy::Restrict))
+                .any(|d| {
+                    !matches!(d.on_delete, DeletePolicy::Restrict)
+                        && !links::is_link_dependency(&request.schema, d)
+                })
         {
             return Err(err(E::UnsupportedCascade));
         }
@@ -995,6 +1033,42 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         } = prepared;
         let c = collection(&request.schema, &request.collection)?;
         let intent = RuntimeWriteIntent { request };
+        if request.links.is_some() {
+            let link_effect = self.apply_runtime_links(request, authority).await?;
+            let result = preimage.clone().ok_or_else(|| err(E::NotFound))?;
+            let return_grant = authority
+                .authorize_result(
+                    RuntimeResultCheck {
+                        intent,
+                        preimage: preimage.as_ref(),
+                        record: &result,
+                    },
+                    self,
+                )
+                .await?;
+            if return_grant.projection != request.returning {
+                return Err(err(E::FieldDenied));
+            }
+            return Ok(RuntimeMutationEffect {
+                action: request.action,
+                record: request
+                    .returning
+                    .as_ref()
+                    .map(|p| result.project(p))
+                    .transpose()?,
+                staged: result,
+                collection: request.collection.clone(),
+                preimage,
+                cause: request.cause.clone(),
+                dependents: Vec::new(),
+                links: vec![link_effect],
+            });
+        }
+        let links = if request.action == RuntimeMutationAction::Delete {
+            self.remove_runtime_links(request, authority).await?
+        } else {
+            Vec::new()
+        };
         let mut values = Vec::new();
         let table = B::DIALECT.quote_identifier(&c.physical_table);
         let sql = match request.action {
@@ -1106,6 +1180,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             preimage,
             cause: request.cause.clone(),
             dependents: Vec::new(),
+            links,
         })
     }
 }

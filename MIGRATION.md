@@ -15,6 +15,20 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.68.0 to 0.69.0: many-to-many runtime relations
+
+Upgrade runtime/macros together. These are breaking only at Rust compile time: add `join: None` to `RuntimeRelation` literals, and an arm for `RuntimeSchemaDiagnosticCode::InvalidJoinTable` in exhaustive matches. Serialized IR without `join` reads unchanged and keeps its fingerprints. Nothing changes for schemas without join relations.
+
+To adopt many-to-many relations:
+
+- declare `join: Some(RuntimeJoinTable { physical_table, source, target })` on a `Many` relation with no key pairs, and optionally the exact inverse on the target;
+- build `ManagedTableSet` from `ValidatedRuntimeSchema::owned_table_names()` so link tables are owned. Adding a join relation is an additive plan; removing it drops the link table (destructive);
+- implement `RuntimeWriteAuthority::authorize_links`. It denies by default, so link mutations and deletes of rows that have links fail with `denied` until a host approves the presented delta;
+- journal `RuntimeMutationEffect::links()` in hooks;
+- refresh GraphQL SDL and generated clients for the new `update<Object><Relation>Links` roots.
+
+`RuntimeRelationHandle::key_pairs()` is empty for join relations. Use `source_key_fields()` and `join()`.
+
 ## 0.67.0 to 0.68.0: runtime collection label fields
 
 Upgrade runtime/macros, the operation catalog (0.5.0), AI tool profiles (0.17.0) and AI (0.110.0) from the same workspace release. Breaking changes:

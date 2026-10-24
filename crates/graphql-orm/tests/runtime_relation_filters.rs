@@ -90,6 +90,7 @@ fn relation(id: &str, target: &str, pairs: &[(&str, &str)], many: bool) -> Runti
         },
         enforce_foreign_key: false,
         on_delete: None,
+        join: None,
     }
 }
 fn schema() -> Arc<ValidatedRuntimeSchema> {

@@ -773,6 +773,9 @@ fn relation_filter(
     relations: &mut RelationGrants<'_>,
 ) -> Result<Vec<RuntimeFilterNode>, RuntimeFilterError> {
     let invalid = || RuntimeFilterError::new(RuntimeFilterErrorCode::InvalidInput);
+    if relation.join.is_some() {
+        return Err(invalid());
+    }
     match relations {
         RelationGrants::Disallowed => return Err(invalid()),
         RelationGrants::Pending { admitted, .. } if !admitted.admits(&relation.id) => {

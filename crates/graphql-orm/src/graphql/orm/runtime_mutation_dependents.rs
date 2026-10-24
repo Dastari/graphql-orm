@@ -185,12 +185,15 @@ fn referenced_projection(
 
 /// Incoming dependencies in a backend-independent order.
 fn sorted_dependencies<'a>(
+    schema: &ValidatedRuntimeSchema,
     environment: &'a RuntimeMutationEnvironment,
     table: &str,
 ) -> Vec<&'a VerifiedRuntimeDependency> {
+    // Links of the schema's own join tables are removed by each row's delete.
     let mut dependencies = environment
         .incoming_dependencies(table)
         .iter()
+        .filter(|d| !super::links::is_link_dependency(schema, d))
         .collect::<Vec<_>>();
     dependencies.sort_by_key(|d| {
         (
@@ -426,7 +429,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             let mut next = Vec::new();
             for index in frontier {
                 let table = nodes[index].collection.physical_table().to_owned();
-                for dependency in sorted_dependencies(environment, &table) {
+                for dependency in sorted_dependencies(&schema, environment, &table) {
                     match dependency.on_delete {
                         // Conservative: a Restrict reference to any row being deleted refuses.
                         DeletePolicy::Restrict => {
@@ -533,7 +536,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         for &index in &order {
             let depth = nodes[index].depth;
             let table = nodes[index].collection.physical_table().to_owned();
-            for dependency in sorted_dependencies(environment, &table)
+            for dependency in sorted_dependencies(&schema, environment, &table)
                 .into_iter()
                 .filter(|d| d.on_delete == DeletePolicy::SetNull)
             {

@@ -124,6 +124,34 @@ depth 32. Bounds also apply to internal policy records; oversized decoding fails
 and poisons the transaction. Driver row decoding still allocates returned values;
 these limits are not a driver-level streaming memory cap.
 
+## Many-to-many links
+
+`runtime_link_request(relation, key, change, returning, max_links, limits)` changes the links
+of one source row through a join relation. `RuntimeLinkChange::Replace(keys)` makes the link set
+exactly `keys`. `RuntimeLinkChange::Delta { add, remove }` removes and then adds; adding an
+existing link or removing an absent one changes nothing. Target keys must belong to the target
+collection and be distinct across the request. At most `max_links` keys may be supplied.
+
+The request is an `Update` of the source row that writes no fields, so the usual intent and
+locked-preimage checks apply; `RuntimeWriteIntent::links()` exposes the relation and change. The
+ORM then locks and reads the row's current links (at most `max_links`, else
+`limit_exceeded`) and computes the exact delta. It calls the new
+`RuntimeWriteAuthority::authorize_links(RuntimeLinkCheck { intent, relation, added, removed })`
+before any write. That method denies by default, so hosts must opt in before links can change.
+The delta is then written explicitly: a missing target fails its foreign key with
+`constraint_violation`. The result check sees the unchanged source row.
+
+Deleting a row of a collection that a link table references removes its links atomically. The
+ORM locks them (at most `RuntimeMutationRequest::with_max_links`, default
+`RUNTIME_DEFAULT_MAX_LINKS` = 1000), presents them to `authorize_links` as `removed`, and
+deletes them before the row. They are reported from the declaring relation's side, and a
+self-relation lists each link once. Link tables of the schema are therefore not
+`unsupported_cascade` dependencies. `RuntimeMutationEffect::links()` lists every pending
+`RuntimeLinkEffect` (relation, added, removed) for `before_commit` hooks. A hook failure rolls
+back the links with the row. A link inserted concurrently cannot slip through: inserting it
+waits on the locked source or target row, and on PostgreSQL an unseen committed link fails the
+row's cascade with a serialization failure.
+
 ## Cancellation, rollback and commit
 
 An operation guard starts on the first poll before any await. Only complete

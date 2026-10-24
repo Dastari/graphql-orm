@@ -201,6 +201,31 @@ projector-served member is not published, because dropping only that member woul
 the label's meaning. Readers older than 0.67.0 reject documents or catalogues that declare
 a label (`deny_unknown_fields`); format versions are unchanged. Static conversion
 leaves the member empty.
+## Many-to-many relations
+
+A relation with `join: Some(RuntimeJoinTable)` links records through an ORM-owned link
+table instead of a key column. It has `Many` cardinality, no key pairs, `enforce_foreign_key:
+false` and no `on_delete`. `RuntimeJoinTable { physical_table, source, target }` names the
+table and maps each primary-key field of the source and target collections, in key order, to a
+link column (`RuntimeJoinColumn { field, column }`). Validation (`InvalidJoinTable`) requires:
+
+- the shape above, with the columns covering the complete source and target primary keys;
+- distinct, portable table and column names. The table must not collide with a collection
+  table or index name, and must not use the reserved `__graphql_orm_` prefix;
+- at most two relations per link table, and two only as exact inverses (target and source
+  swapped), so `posts.tags` and `tags.posts` share one table. A self-relation (source =
+  target) uses two different columns.
+
+The member is structural: present join relations render `|join=…|join_source=…|join_target=…`
+in both the ID-bearing and the structural canonical forms. It is omitted when absent, so other
+schemas keep their bytes. `physical_schema` emits one table per link table. Its primary key is
+the complete pair, so a link exists at most once. It has two foreign keys with `ON DELETE
+CASCADE` and an index on the target columns. Hosts include link tables in their
+`ManagedTableSet`; `ValidatedRuntimeSchema::owned_table_names()` lists every owned table.
+Adding a join relation plans an additive `CreateTable`; removing one plans a destructive
+`DropTable`. Link writes and reads are described in
+[runtime mutations](runtime-mutations.md#many-to-many-links) and
+[runtime relations](runtime-relations.md#many-to-many-layers).
 
 ## Exact decimals
 

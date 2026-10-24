@@ -1041,6 +1041,7 @@ fn self_referencing(action: DeletePolicy) -> RuntimeSchema {
         cardinality: RelationCardinality::One,
         enforce_foreign_key: true,
         on_delete: Some(action),
+        join: None,
     });
     schema
 }

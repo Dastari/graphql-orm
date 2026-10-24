@@ -226,6 +226,7 @@ fn relation(
         cardinality,
         enforce_foreign_key: on_delete.is_some(),
         on_delete,
+        join: None,
     }
 }
 

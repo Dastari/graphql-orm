@@ -122,6 +122,23 @@ pub(super) fn page_arguments(object: &str) -> [(&'static str, String); 6] {
     ]
 }
 
+/// Description of a link mutation root.
+pub(super) fn link_description(object: &str, relation: &str) -> String {
+    format!("Change the {relation} links of one {object} record")
+}
+
+/// Link mutation root arguments, in SDL order. `set` replaces the link set;
+/// otherwise `remove` then `add` apply.
+pub(super) fn link_arguments(object: &str, target: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("expectedSchema", "String!".to_owned()),
+        ("key", format!("{object}KeyInput!")),
+        ("set", format!("[{target}KeyInput!]")),
+        ("add", format!("[{target}KeyInput!]")),
+        ("remove", format!("[{target}KeyInput!]")),
+    ]
+}
+
 /// Mutation root arguments of one action, in SDL order.
 pub(super) fn mutation_arguments(
     action: RuntimeMutationAction,
@@ -274,20 +291,39 @@ impl RuntimeGraphqlModule {
                 )
                 .map_err(invalid)?,
             );
-            for (prefix, action) in mutation::actions(self) {
+            for mutation::Root { name, action, link } in mutation::roots(self, c) {
                 let category = match action {
                     RuntimeMutationAction::Create => GeneratedGraphqlOperationCategory::Create,
                     RuntimeMutationAction::Update => GeneratedGraphqlOperationCategory::Update,
                     RuntimeMutationAction::Delete => GeneratedGraphqlOperationCategory::Delete,
+                };
+                let (description, arguments) = match link {
+                    Some(relation) => {
+                        let target = self
+                            .schema
+                            .schema()
+                            .collections
+                            .iter()
+                            .find(|t| t.id == relation.target)
+                            .ok_or_else(|| RuntimeGraphqlError::new("invalid_semantic_catalog"))?;
+                        (
+                            link_description(&object, &relation.api_name),
+                            link_arguments(&object, &self.object_name(target)),
+                        )
+                    }
+                    None => (
+                        mutation_description(action, &object),
+                        mutation_arguments(action, &object),
+                    ),
                 };
                 operations.push(
                     GraphqlSemanticOperationDescriptor::generated(
                         GraphqlOperationKind::Mutation,
                         category,
                         &object,
-                        format!("{prefix}{object}"),
-                        mutation_description(action, &object),
-                        mutation_arguments(action, &object)
+                        name,
+                        description,
+                        arguments
                             .iter()
                             .map(|(name, ty)| argument(name, ty))
                             .collect(),

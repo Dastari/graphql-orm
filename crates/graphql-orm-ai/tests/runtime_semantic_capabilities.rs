@@ -73,6 +73,7 @@ fn relation(
         description: None,
         classification: None,
         export: None,
+        join: None,
     }
 }
 
