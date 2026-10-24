@@ -44,6 +44,7 @@ fn collection(id: &str, name: &str, plural: &str, fields: Vec<RuntimeField>) -> 
         default_order: vec![],
         description: None,
         classification: None,
+        label_fields: Vec::new(),
     }
 }
 

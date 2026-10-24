@@ -10,6 +10,12 @@ supersedes: []
 
 # Changelog
 
+## 0.17.0 (unreleased)
+
+- Adopt operation catalog 0.5.0 (semantic label fields). Public compile APIs take
+  `GraphqlSemanticCatalog`, so the catalog's breaking release makes this a
+  breaking minor. Capabilities, manifests and fingerprints are unchanged.
+
 ## 0.16.2 (unreleased)
 
 - Compile mixed public/secret generated schemas without exposing private root

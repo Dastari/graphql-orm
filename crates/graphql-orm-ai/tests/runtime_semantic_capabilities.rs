@@ -43,6 +43,7 @@ fn collection(id: &str, name: &str, fields: Vec<RuntimeField>) -> RuntimeCollect
         default_order: vec![],
         description: None,
         classification: None,
+        label_fields: Vec::new(),
     }
 }
 

@@ -1975,6 +1975,7 @@ mod tests {
                     field: id.id,
                     direction: RuntimeOrderDirection::Asc,
                 }],
+                label_fields: Vec::new(),
             }],
         }
         .validate()

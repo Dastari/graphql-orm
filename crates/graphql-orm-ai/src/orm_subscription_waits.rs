@@ -4041,6 +4041,7 @@ mod tests {
             description: "One reviewed parent event.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("id"), scalar("name")].into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Subscription,

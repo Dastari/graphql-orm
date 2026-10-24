@@ -4929,6 +4929,7 @@ fn generate_entity_impl(
                             description: ::std::string::ToString::to_string(#entity_description),
                             default_classification: #entity_classification_tokens,
                             fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
+                            label_fields: ::std::vec::Vec::new(),
                         }
                     }))
                 }
@@ -5434,6 +5435,7 @@ fn generate_entity_impl(
                         description: ::std::string::ToString::to_string(#entity_description),
                         default_classification: #entity_classification_tokens,
                         fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
+                        label_fields: ::std::vec::Vec::new(),
                     }
                 }))
             }

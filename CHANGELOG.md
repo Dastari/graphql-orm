@@ -16,6 +16,16 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.68.0**; operation catalog **0.5.0**; AI tool profiles **0.17.0**; AI **0.110.0**.
+
+- Add `RuntimeCollection::label_fields`: ordered, validated label (display) fields. They are part of the ID-bearing fingerprint when declared (rendered as a JSON array of stable IDs), but not of the structural fingerprint, the physical schema or migration plans. Ineligible members fail with the new diagnostic `InvalidLabelField`, and unknown fields with `UnknownFieldReference`. Runtime GraphQL publishes them in the semantic catalogue, but omits a label that has a projector-served member.
+- Operation catalog 0.5.0: `GraphqlEntitySemanticMetadata` gains `label_fields: Vec<String>`. Each entry must name a selectable, exportable, non-secret, non-relationship scalar or enum field; at most `GRAPHQL_SEMANTIC_MAXIMUM_LABEL_FIELDS` (4). The member is omitted from the wire and fingerprint when empty.
+- **Breaking (Rust):** struct literals of `RuntimeCollection` and `GraphqlEntitySemanticMetadata` must add the field. Generated derives and every workspace construction are updated.
+- **Breaking (wire, older readers):** `RuntimeSchema` documents and semantic catalogues keep format versions 1 and 2, following the convention for optional members. Bytes and fingerprints are unchanged only while every label is empty. A document or catalogue that declares a label is rejected with an unknown-field error by readers older than this release, because both types are `deny_unknown_fields`. That includes routers or AI hosts that parse a subgraph's catalogue. Upgrade readers before writers declare labels.
+- AI tool profiles 0.17.0 and AI 0.110.0: no behaviour change. They take and re-export operation-catalog types in their public API, so the catalog's breaking 0.5.0 makes them breaking minors.
+
+## 0.67.0 (unreleased)
+
 Companion runtime/macros version: **0.67.0**.
 
 - Add runtime relation predicates. `runtime_relation_filter` and `RuntimeFilterBuilder::relation` take `RuntimeRelationQuantifier` (`is`/`isNot` for to-one, `some`/`none`/`every` for to-many) and lower to a correlated `EXISTS` on SQLite and PostgreSQL. The target layer's grant is always applied inside the subquery, so hidden related rows never match. `RuntimeGraphqlOptions::with_relation_filters()` (opt-in) exposes them in every `…WhereInput` through generated `…ToOneFilter`/`…ToManyFilter` inputs. Each target is authorized with `RuntimeReadPurpose::RelationFilter`; a denied target is non-matching, not an error. Offline record matching rejects relation predicates.

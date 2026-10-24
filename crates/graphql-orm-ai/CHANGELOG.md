@@ -18,6 +18,12 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.110.0
+
+- Adopt operation catalog 0.5.0 and AI tool profiles 0.17.0. The crate re-exports
+  the profiles' public API, including catalogue types, so this is a breaking
+  minor. No provider, AI runtime or schema change; AI schema module unchanged.
+
 ## Unreleased - 0.109.1
 
 - Align with ORM/macros 0.56.0 and operation catalogue 0.4.1. A new test proves

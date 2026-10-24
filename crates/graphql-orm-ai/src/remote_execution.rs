@@ -1397,6 +1397,7 @@ mod tests {
             description: "A reviewed application record.".to_owned(),
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,

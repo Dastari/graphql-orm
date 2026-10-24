@@ -85,6 +85,7 @@ fn definition(extra: bool, amount_scale: u8) -> RuntimeSchema {
             default_order: vec![],
             description: None,
             classification: None,
+            label_fields: Vec::new(),
         }],
     }
 }

@@ -94,6 +94,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field: customer_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
+                label_fields: Vec::new(),
             },
             RuntimeCollection {
                 classification: None,
@@ -132,6 +133,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field: contact_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
+                label_fields: Vec::new(),
             },
             RuntimeCollection {
                 description: None,
@@ -155,6 +157,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     field: note_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
+                label_fields: Vec::new(),
             },
         ],
     }

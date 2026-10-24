@@ -19,6 +19,14 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.109.1 to 0.110.0: operation catalog 0.5.0
+
+Adopt `graphql-orm-ai` 0.110.0 with operation catalog 0.5.0, AI tool profiles
+0.17.0 and ORM/macros 0.68.0 from one workspace release. Re-exported catalogue
+types gain `GraphqlEntitySemanticMetadata::label_fields`; struct literals must
+add it. No AI behaviour, GraphQL SDL, schema module, persistence or data
+migration is involved.
+
 ## 0.109.0 to 0.109.1: ORM 0.56.0 alignment
 
 Adopt `graphql-orm-ai` 0.109.1 with ORM/macros 0.56.0 from one workspace

@@ -373,7 +373,18 @@ pub struct RuntimeCollection {
     /// when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classification: Option<GraphqlSemanticClassification>,
+    /// Ordered fields whose values form one human-readable label per record
+    /// (pickers, relation cells, model context). Presentation metadata: part of
+    /// the ID-bearing fingerprint when non-empty, never of the physical schema or
+    /// the structural fingerprint. At most [`RUNTIME_MAX_LABEL_FIELDS`] distinct
+    /// exportable, non-secret scalar fields of this collection. Empty means no
+    /// declared label; omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label_fields: Vec<FieldId>,
 }
+
+/// Maximum ordered label fields of one runtime collection.
+pub const RUNTIME_MAX_LABEL_FIELDS: usize = 4;
 
 /// The serialized IR format version this crate reads and writes.
 pub const RUNTIME_SCHEMA_FORMAT_VERSION: u32 = 1;
@@ -442,6 +453,9 @@ pub enum RuntimeSchemaDiagnosticCode {
     InvalidDescription,
     /// A classification weakens its collection's, or a secret member is exportable.
     InvalidClassification,
+    /// A label field is repeated, too numerous, or not an exportable, non-secret
+    /// scalar (JSON and bytes are ineligible).
+    InvalidLabelField,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -475,6 +489,7 @@ impl RuntimeSchemaDiagnosticCode {
             Self::InvalidFormat => "invalid_format",
             Self::InvalidDescription => "invalid_description",
             Self::InvalidClassification => "invalid_classification",
+            Self::InvalidLabelField => "invalid_label_field",
         }
     }
 }
@@ -1400,6 +1415,55 @@ impl RuntimeSchema {
                 }
             }
 
+            // Label fields.
+            if collection.label_fields.len() > RUNTIME_MAX_LABEL_FIELDS {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    RuntimeSchemaDiagnosticCode::InvalidLabelField,
+                    format!("label_fields lists more than {RUNTIME_MAX_LABEL_FIELDS} fields"),
+                    cid,
+                    None,
+                ));
+            }
+            let mut label_members = BTreeSet::new();
+            for label in &collection.label_fields {
+                let subject = Some(label.as_str());
+                match own_fields.get(label) {
+                    None => diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnknownFieldReference,
+                        format!("label_fields references unknown field `{label}`"),
+                        cid,
+                        subject,
+                    )),
+                    Some(field)
+                        if matches!(
+                            field.value_kind,
+                            RuntimeValueKind::Json | RuntimeValueKind::Bytes
+                        ) || field.effective_classification(collection)
+                            == GraphqlSemanticClassification::Secret
+                            || field.effective_export(collection)
+                                != GraphqlSemanticExport::Exportable =>
+                    {
+                        diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                            RuntimeSchemaDiagnosticCode::InvalidLabelField,
+                            format!(
+                                "label field `{label}` must be an exportable, non-secret scalar"
+                            ),
+                            cid,
+                            subject,
+                        ));
+                    }
+                    Some(_) => {}
+                }
+                if !label_members.insert(label) {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::InvalidLabelField,
+                        format!("label_fields lists field `{label}` more than once"),
+                        cid,
+                        subject,
+                    ));
+                }
+            }
+
             // Default ordering.
             for term in &collection.default_order {
                 if !own_fields.contains_key(&term.field) {
@@ -1545,6 +1609,21 @@ impl ValidatedRuntimeSchema {
                     collection.classification,
                     None,
                 );
+                // Ordered and present only when declared, so earlier bytes are unchanged.
+                // A JSON array frames each ID, which may itself contain commas.
+                if !collection.label_fields.is_empty() {
+                    out.push_str("|label=");
+                    out.push_str(
+                        &serde_json::to_string(
+                            &collection
+                                .label_fields
+                                .iter()
+                                .map(|f| f.as_str())
+                                .collect::<Vec<_>>(),
+                        )
+                        .expect("strings always serialize"),
+                    );
+                }
             }
             out.push('\n');
 
@@ -2168,6 +2247,7 @@ impl RuntimeSchema {
                 indexes,
                 composite_unique,
                 default_order,
+                label_fields: Vec::new(),
             });
         }
 

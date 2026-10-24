@@ -22,6 +22,8 @@ const MAXIMUM_ENTITIES: usize = 4_096;
 const MAXIMUM_FIELDS_PER_ENTITY: usize = 2_048;
 const MAXIMUM_OPERATIONS: usize = 8_192;
 const MAXIMUM_ARGUMENTS: usize = 256;
+/// Maximum ordered label fields of one semantic entity.
+pub const GRAPHQL_SEMANTIC_MAXIMUM_LABEL_FIELDS: usize = 4;
 
 /// Stable validation error for canonical semantic metadata.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -442,6 +444,12 @@ pub struct GraphqlEntitySemanticMetadata {
     pub default_classification: GraphqlSemanticClassification,
     /// Public fields only, in declaration order.
     pub fields: Box<[GraphqlSemanticFieldMetadata]>,
+    /// Ordered fields whose values form one human-readable label per record,
+    /// for pickers, relation cells and model context. Each names a selectable,
+    /// exportable, non-secret, non-list scalar or enum field of this entity. Empty when the
+    /// entity declares no label; omitted from the wire and fingerprint then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label_fields: Vec<String>,
 }
 
 /// Durability advertised by one semantically described subscription.
@@ -1186,6 +1194,31 @@ fn validate_entity(entity: &GraphqlEntitySemanticMetadata) -> Result<(), Graphql
             }
             validate_arguments(&relationship.arguments)?;
             validate_collection_bound(field, relationship)?;
+        }
+    }
+    if entity.label_fields.len() > GRAPHQL_SEMANTIC_MAXIMUM_LABEL_FIELDS {
+        return Err(GraphqlSemanticError::new(
+            "semantic entity has too many label fields",
+        ));
+    }
+    let mut labels = BTreeSet::new();
+    for label in &entity.label_fields {
+        let eligible = entity.fields.iter().any(|field| {
+            &field.field_name == label
+                && field.selectable
+                && field.relationship.is_none()
+                && matches!(
+                    field.type_ref,
+                    GraphqlSemanticTypeRef::Named {
+                        kind: GraphqlSemanticTypeKind::Scalar | GraphqlSemanticTypeKind::Enum,
+                        ..
+                    }
+                )
+                && field.classification != GraphqlSemanticClassification::Secret
+                && field.export == GraphqlSemanticExport::Exportable
+        });
+        if !eligible || !labels.insert(label) {
+            return Err(GraphqlSemanticError::new("semantic label field is invalid"));
         }
     }
     Ok(())

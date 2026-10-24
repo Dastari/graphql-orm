@@ -20,6 +20,10 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version 0.17.0 adopts operation catalog 0.5.0 (semantic label fields). It is a
+breaking minor only because public APIs take catalogue types; capabilities are
+unchanged.
+
 Version 0.16.2 keeps mixed public and secret generated schemas ready: the
 complete finished SDL and canonical semantic catalogue are validated, while
 secret or structurally nonexportable results do not become provider
