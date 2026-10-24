@@ -128,6 +128,18 @@ pub trait RuntimeFilterIntentVisitor {
     fn leave_boolean(&mut self, kind: RuntimeFilterBoolean, ignored: bool);
     /// Visit each original field/operator occurrence, including ignored nulls.
     fn field(&mut self, field: &RuntimeFieldHandle, operator: RuntimeFilterOperator, ignored: bool);
+    /// Visit a relation predicate of this collection. Its target filter belongs to
+    /// the target collection and is not traversed here; the target layer is
+    /// authorized separately and supplies the grant applied inside the subquery.
+    /// The default ignores the occurrence; hosts that build relation predicates
+    /// themselves must authorize the traversal.
+    fn relation(
+        &mut self,
+        relation: &RuntimeRelationHandle,
+        quantifier: RuntimeRelationQuantifier,
+    ) {
+        let _ = (relation, quantifier);
+    }
 }
 #[derive(Clone)]
 enum Intent {
@@ -135,6 +147,7 @@ enum Intent {
     Sequence(Vec<Intent>),
     Boolean(RuntimeFilterBoolean, bool, Vec<Intent>),
     Field(RuntimeFieldHandle, RuntimeFilterOperator, bool),
+    Relation(RuntimeRelationHandle, RuntimeRelationQuantifier),
 }
 impl Intent {
     fn visit(&self, v: &mut dyn RuntimeFilterIntentVisitor) {
@@ -154,6 +167,7 @@ impl Intent {
                 v.leave_boolean(*k, *ignored);
             }
             Self::Field(f, op, ignored) => v.field(f, *op, *ignored),
+            Self::Relation(relation, quantifier) => v.relation(relation, *quantifier),
         }
     }
     fn validate_profile(&self) -> Result<(), RuntimeFilterError> {
@@ -176,6 +190,12 @@ impl Intent {
                     ));
                 }
             }
+            // Offline matching cannot evaluate related rows or their current grants.
+            Self::Relation(..) => {
+                return Err(RuntimeFilterError::new(
+                    RuntimeFilterErrorCode::UnsupportedSemantics,
+                ));
+            }
         }
         Ok(())
     }
@@ -191,6 +211,7 @@ impl Intent {
                     out.push(f.clone())
                 }
             }
+            Self::Relation(..) => {}
         }
     }
 }
@@ -294,6 +315,10 @@ fn check_literals(e: &PredicateExpr, text: usize, binary: usize) -> Result<(), R
             Ok(())
         }
         PredicateExpr::Not(e) => check_literals(e, text, binary),
+        PredicateExpr::Relation { grant, filter, .. } => {
+            check_literals(grant, text, binary)?;
+            check_literals(filter, text, binary)
+        }
         _ => Ok(()),
     }
 }
@@ -302,6 +327,9 @@ fn within_lists(e: &PredicateExpr, max: usize) -> bool {
         PredicateExpr::List { values, .. } => values.len() <= max,
         PredicateExpr::And(v) | PredicateExpr::Or(v) => v.iter().all(|e| within_lists(e, max)),
         PredicateExpr::Not(e) => within_lists(e, max),
+        PredicateExpr::Relation { grant, filter, .. } => {
+            within_lists(grant, max) && within_lists(filter, max)
+        }
         _ => true,
     }
 }
@@ -321,6 +349,8 @@ fn actual_binds(e: &PredicateExpr, duplicate_suffix: bool) -> Option<usize> {
             n.checked_add(actual_binds(e, duplicate_suffix)?)
         }),
         PredicateExpr::Not(e) => actual_binds(e, duplicate_suffix),
+        PredicateExpr::Relation { grant, filter, .. } => actual_binds(grant, duplicate_suffix)?
+            .checked_add(actual_binds(filter, duplicate_suffix)?),
     }
 }
 impl RuntimeFilterBuilder {
@@ -441,6 +471,35 @@ impl RuntimeFilterBuilder {
             RuntimeFilterOperator::Between,
             self.schema
                 .runtime_between(&self.collection, field, low, high, self.limits)?,
+        )
+    }
+    /// Construct a relation predicate of this collection (the relation's source).
+    ///
+    /// `filter` is a finished checked filter of the relation's target collection;
+    /// `target_grant` is the target layer's host read restriction (`None` grants
+    /// every target row). See [`ValidatedRuntimeSchema::runtime_relation_filter`].
+    /// The intent records the relation occurrence only; the target filter's own
+    /// intent stays with the target layer's authorization. Offline record matching
+    /// rejects relation predicates.
+    /// # Errors
+    /// Rejects stale or foreign handles, inapplicable quantifiers and bounds.
+    pub fn relation(
+        &self,
+        relation: &RuntimeRelationHandle,
+        quantifier: RuntimeRelationQuantifier,
+        filter: Option<&CheckedRuntimeFilter>,
+        target_grant: Option<RuntimePredicate>,
+    ) -> Result<RuntimeFilterNode, RuntimeFilterError> {
+        self.node(
+            self.schema.runtime_relation_filter(
+                &self.collection,
+                relation,
+                quantifier,
+                filter.map(|filter| filter.predicate().clone()),
+                target_grant,
+                self.limits,
+            )?,
+            Intent::Relation(relation.clone(), quantifier),
         )
     }
     fn combine(
@@ -715,6 +774,9 @@ fn validate_expr(e: &PredicateExpr) -> Result<(), RuntimeFilterError> {
             Ok(())
         }
         PredicateExpr::Not(e) => validate_expr(e),
+        PredicateExpr::Relation { .. } => Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::UnsupportedSemantics,
+        )),
         _ => Ok(()),
     }
 }
@@ -868,5 +930,10 @@ fn eval(e: &PredicateExpr, r: &RuntimeRecord) -> Result<Option<bool>, RuntimeFil
             result
         }
         PredicateExpr::Not(e) => eval(e, r)?.map(|v| !v),
+        PredicateExpr::Relation { .. } => {
+            return Err(RuntimeFilterError::new(
+                RuntimeFilterErrorCode::UnsupportedSemantics,
+            ));
+        }
     })
 }

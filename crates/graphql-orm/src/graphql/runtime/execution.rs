@@ -13,6 +13,7 @@ use std::{
 };
 
 /// All client-requested capabilities for one selected layer, before protected I/O.
+#[non_exhaustive]
 pub struct RuntimeReadCheck<'a> {
     pub schema: &'a ValidatedRuntimeSchema,
     pub collection: &'a RuntimeCollectionHandle,
@@ -32,6 +33,24 @@ pub struct RuntimeReadCheck<'a> {
     /// Formatted fields served through host projectors and their selected
     /// object fields. Each stored field also appears in `projection`.
     pub projections: Vec<super::RuntimeProjectedSelection<'a>>,
+    /// Relation predicates used directly by this layer's filter, in input order.
+    /// Each target is authorized as its own [`RuntimeReadPurpose::RelationFilter`]
+    /// layer whose grant is applied inside the correlated subquery.
+    pub relation_filters: Vec<(&'a RuntimeRelationHandle, RuntimeRelationQuantifier)>,
+    /// Why this layer is read.
+    pub purpose: RuntimeReadPurpose,
+}
+/// Why a layer is presented to [`RuntimeReadAuthority::authorize`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuntimeReadPurpose {
+    /// Records of this layer are selected and returned.
+    Select,
+    /// The layer is the target of a relation predicate on `relation`. Nothing is
+    /// returned; the grant's row predicate restricts which related rows can match,
+    /// and an `authorization_denied` error makes every related row non-matching.
+    /// `projection` is empty and `filter` is the client's target filter.
+    RelationFilter(RuntimeRelationQuantifier),
 }
 /// Explicit host grant. No provider or error means denial.
 pub struct RuntimeReadGrant {
@@ -354,6 +373,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
             limits,
             expanded: 0,
             cost: Default::default(),
+            relation_filters: 0,
         };
         if operation.node.ty == async_graphql::parser::types::OperationType::Mutation {
             let root = ctx
@@ -365,6 +385,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
             return super::mutation::prepare(
                 &self.modules,
                 request,
+                self.protection.as_ref(),
                 &mut planner,
                 &operation.node.selection_set.node,
                 root,
@@ -451,7 +472,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
         Ok(Results(values, BTreeMap::new()))
     }
 }
-fn authorize<'a, B: RuntimeReadBackend>(
+pub(super) fn authorize<'a, B: RuntimeReadBackend>(
     plan: &'a mut Plan,
     request: &'a RuntimeGraphqlRequest<B>,
     protection: Option<&'a Protection>,
@@ -502,8 +523,18 @@ fn authorize<'a, B: RuntimeReadBackend>(
                     .iter()
                     .map(super::projection::ProjectedPlan::selection)
                     .collect(),
+                relation_filters: plan
+                    .filter_intent
+                    .relations
+                    .iter()
+                    .map(|(relation, quantifier)| (relation, *quantifier))
+                    .collect(),
+                purpose: RuntimeReadPurpose::Select,
             })
             .await?;
+        if !plan.relation_sites.is_empty() {
+            relation_grants(plan, request, limits).await?;
+        }
         if let Some(predicate) = grant.predicate {
             if !predicate.belongs_to(&plan.module.schema.fingerprint(), plan.collection.id()) {
                 return Err(RuntimeGraphqlError::new("invalid_filter"));
@@ -542,6 +573,83 @@ fn authorize<'a, B: RuntimeReadBackend>(
         }
         Ok(())
     })
+}
+/// Authorize every relation filter target layer, then rebuild the layer's filter
+/// with their grants applied inside each subquery. A denied target matches nothing.
+async fn relation_grants<B: RuntimeReadBackend>(
+    plan: &mut Plan,
+    request: &RuntimeGraphqlRequest<B>,
+    limits: RuntimeGraphqlLimits,
+) -> Result<(), RuntimeGraphqlError> {
+    let mut grants = Vec::with_capacity(plan.relation_sites.len());
+    for site in &plan.relation_sites {
+        let decision = request
+            .authority
+            .authorize(RuntimeReadCheck {
+                schema: &plan.module.schema,
+                collection: &site.collection,
+                projection: &[],
+                filter: site.filter.as_ref(),
+                filter_operations: site
+                    .intent
+                    .operations
+                    .iter()
+                    .map(|(field, op)| (field, *op))
+                    .collect(),
+                requested_order: &[],
+                order_was_supplied: false,
+                order: &site.order,
+                logical_operators: site.intent.logical.clone(),
+                relation: Some(&site.relation),
+                include_count: false,
+                projections: Vec::new(),
+                relation_filters: site
+                    .intent
+                    .relations
+                    .iter()
+                    .map(|(relation, quantifier)| (relation, *quantifier))
+                    .collect(),
+                purpose: RuntimeReadPurpose::RelationFilter(site.quantifier),
+            })
+            .await;
+        grants.push(match decision {
+            Ok(grant) => match grant.predicate {
+                Some(predicate)
+                    if !predicate
+                        .belongs_to(&plan.module.schema.fingerprint(), site.collection.id()) =>
+                {
+                    return Err(RuntimeGraphqlError::new("invalid_filter"));
+                }
+                predicate => predicate,
+            },
+            Err(error) if error == RuntimeGraphqlError::denied() => Some(
+                plan.module
+                    .schema
+                    .runtime_or(&site.collection, Vec::new(), limits.query)
+                    .map_err(query_error)?,
+            ),
+            Err(error) => return Err(error),
+        });
+    }
+    let value = plan.where_value.as_ref().ok_or_else(invalid)?;
+    let mut intent = super::plan::FilterIntent::default();
+    let mut bound = super::plan::RelationGrants::Bound {
+        grants: &grants,
+        next: 0,
+    };
+    let predicate = super::plan::filter(
+        &plan.module.schema,
+        &plan.collection,
+        value,
+        limits,
+        &mut intent,
+        &mut bound,
+    )?;
+    if !matches!(bound, super::plan::RelationGrants::Bound { next, .. } if next == grants.len()) {
+        return Err(invalid());
+    }
+    plan.predicate = Some(predicate);
+    Ok(())
 }
 fn page_cursor(page: &RuntimePageRequest) -> Option<&str> {
     match page {
@@ -933,6 +1041,66 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             Ok(output)
         })
     }
+}
+/// Per-request crypto and projection call counts of mutation payload relation reads.
+#[derive(Default)]
+pub(super) struct PayloadBudget {
+    crypto_calls: std::sync::atomic::AtomicUsize,
+    projection_calls: std::sync::atomic::AtomicUsize,
+}
+
+/// Read authorized to-one relation layers of one committed mutation record.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn payload_relations<B: RuntimeReadBackend>(
+    database: &Database<B>,
+    request: &RuntimeGraphqlRequest<B>,
+    protection: Option<&Protection>,
+    limits: RuntimeGraphqlLimits,
+    budget: &PayloadBudget,
+    schema: &ValidatedRuntimeSchema,
+    record: &RuntimeRecord,
+    children: &[Plan],
+) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
+    use std::sync::atomic::Ordering;
+    // Mutation fields of one request run serially; carry their counts forward.
+    let mut executor = Executor {
+        database,
+        request,
+        protection,
+        limits,
+        response_bytes: 0,
+        crypto_calls: budget.crypto_calls.load(Ordering::SeqCst),
+        projection_calls: budget.projection_calls.load(Ordering::SeqCst),
+    };
+    let result = payload_layers(&mut executor, schema, record, children).await;
+    budget
+        .crypto_calls
+        .store(executor.crypto_calls, Ordering::SeqCst);
+    budget
+        .projection_calls
+        .store(executor.projection_calls, Ordering::SeqCst);
+    result
+}
+async fn payload_layers<B: RuntimeReadBackend>(
+    executor: &mut Executor<'_, B>,
+    schema: &ValidatedRuntimeSchema,
+    record: &RuntimeRecord,
+    children: &[Plan],
+) -> Result<Vec<(String, Value)>, RuntimeGraphqlError> {
+    let mut output = Vec::with_capacity(children.len());
+    for child in children {
+        let relation = child.relation.as_ref().ok_or_else(invalid)?;
+        let parents = schema
+            .runtime_relation_parents(relation, std::slice::from_ref(record))
+            .map_err(relation_error)?;
+        let mut values = executor.layer(child, parents).await?;
+        let value = values.pop().ok_or_else(invalid)?;
+        output.push((
+            super::schema::relation_output_key(&child.field_name, &child.response_key),
+            value,
+        ));
+    }
+    Ok(output)
 }
 fn attach(nodes: &mut [Value], key: &str, values: Vec<Value>) -> Result<(), RuntimeGraphqlError> {
     if nodes.len() != values.len() {

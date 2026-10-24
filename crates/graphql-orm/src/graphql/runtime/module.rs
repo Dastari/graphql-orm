@@ -20,8 +20,73 @@ pub struct RuntimeGraphqlOptions {
     pub(super) mutations: Option<RuntimeGraphqlMutationOptions>,
     pub(super) projections: BTreeMap<FieldId, super::projection::ProjectorRef>,
     pub(super) scalar_formats: Vec<(RuntimeFormatNamespace, std::ops::RangeInclusive<u16>)>,
+    pub(super) relation_filters: RelationFilterOptions,
+}
+/// Default bound on relation predicates in one GraphQL operation.
+pub const RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTERS: usize = 16;
+/// Default bound on relation predicate nesting (relation hops) in one `where`.
+pub const RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTER_DEPTH: usize = 3;
+#[derive(Clone, Debug, Default)]
+pub(super) struct RelationFilterOptions {
+    pub enabled: bool,
+    /// `None` admits every relation; otherwise only the listed relations.
+    pub relations: Option<BTreeSet<RelationId>>,
+    /// `(max per operation, max nesting depth)`; defaults when `None`.
+    pub limits: Option<(usize, usize)>,
+}
+impl RelationFilterOptions {
+    pub fn admits(&self, relation: &RelationId) -> bool {
+        self.enabled
+            && self
+                .relations
+                .as_ref()
+                .is_none_or(|relations| relations.contains(relation))
+    }
+    pub fn max_filters(&self) -> usize {
+        self.limits
+            .map_or(RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTERS, |l| l.0)
+    }
+    pub fn max_depth(&self) -> usize {
+        self.limits
+            .map_or(RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTER_DEPTH, |l| l.1)
+    }
 }
 impl RuntimeGraphqlOptions {
+    /// Accept relation predicates on every relation: `{is, isNot}` on to-one and
+    /// `{some, none, every}` on to-many relations, through generated
+    /// `…ToOneFilter`/`…ToManyFilter` inputs in each `…WhereInput`. Each predicate
+    /// lowers to a correlated `EXISTS`. Its target layer is authorized with
+    /// [`RuntimeReadPurpose::RelationFilter`](super::RuntimeReadPurpose) and the
+    /// grant is applied inside the subquery. Off by default, which keeps the SDL
+    /// unchanged. Mutation `expected` conditions never accept relation predicates.
+    /// See [`Self::with_relation_filters_for`] and [`Self::with_relation_filter_limits`].
+    pub fn with_relation_filters(mut self) -> Self {
+        self.relation_filters.enabled = true;
+        self.relation_filters.relations = None;
+        self
+    }
+
+    /// Accept relation predicates only on the listed relations (stable IDs).
+    /// Compilation rejects unknown relations.
+    pub fn with_relation_filters_for(
+        mut self,
+        relations: impl IntoIterator<Item = RelationId>,
+    ) -> Self {
+        self.relation_filters.enabled = true;
+        self.relation_filters.relations = Some(relations.into_iter().collect());
+        self
+    }
+
+    /// Bound relation predicates per GraphQL operation (default
+    /// [`RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTERS`]) and their nesting depth in
+    /// relation hops (default [`RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTER_DEPTH`]).
+    /// Each predicate is one correlated subquery and one target-layer authorization.
+    /// Exceeding either fails the operation with `cost_exceeded` before any I/O.
+    pub fn with_relation_filter_limits(mut self, max_filters: usize, max_depth: usize) -> Self {
+        self.relation_filters.limits = Some((max_filters, max_depth));
+        self
+    }
+
     /// Serve one formatted field through a reviewed projector, keyed by its stable
     /// field ID. Compilation rejects unknown, unformatted, key or incompatible fields.
     pub fn project_field(
@@ -285,6 +350,10 @@ impl RuntimeGraphqlModule {
             if c.fields
                 .iter()
                 .any(|f| f.filterable && matches!(f.api_name.as_str(), "and" | "or" | "not"))
+                || c.relations.iter().any(|r| {
+                    module.options.relation_filters.admits(&r.id)
+                        && matches!(r.api_name.as_str(), "and" | "or" | "not")
+                })
             {
                 return Err(RuntimeGraphqlError::new("name_collision").into());
             }
@@ -331,6 +400,30 @@ impl RuntimeGraphqlModule {
                 }
             }
         }
+        if module
+            .options
+            .relation_filters
+            .relations
+            .as_ref()
+            .is_some_and(|relations| {
+                relations.iter().any(|id| {
+                    !module
+                        .schema
+                        .schema()
+                        .collections
+                        .iter()
+                        .any(|c| c.relations.iter().any(|r| &r.id == id))
+                })
+            })
+        {
+            return Err(RuntimeGraphqlError::new("invalid_composition").into());
+        }
+        for name in super::schema::relation_filter_names(&module) {
+            if !valid_name(&name, true) || !Arc::make_mut(&mut module.descriptor).names.insert(name)
+            {
+                return Err(RuntimeGraphqlError::new("name_collision").into());
+            }
+        }
         for c in &module.schema.schema().collections {
             for name in super::mutation::type_names(&module, c) {
                 if !valid_name(&name, true)
@@ -366,6 +459,34 @@ impl RuntimeGraphqlModule {
     }
     pub fn descriptor(&self) -> &RuntimeGraphqlDescriptor {
         &self.descriptor
+    }
+    /// Relation predicate quantifiers this module accepts for a relation: none
+    /// unless relation filters admit it, else those of its cardinality.
+    pub fn relation_filter_quantifiers(
+        &self,
+        relation: &RelationId,
+    ) -> &'static [RuntimeRelationQuantifier] {
+        let cardinality = self
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .flat_map(|c| &c.relations)
+            .find(|r| &r.id == relation)
+            .map(|r| r.cardinality);
+        match cardinality {
+            Some(_) if !self.options.relation_filters.admits(relation) => &[],
+            Some(RelationCardinality::One) => &[
+                RuntimeRelationQuantifier::Is,
+                RuntimeRelationQuantifier::IsNot,
+            ],
+            Some(RelationCardinality::Many) => &[
+                RuntimeRelationQuantifier::Some,
+                RuntimeRelationQuantifier::None,
+                RuntimeRelationQuantifier::Every,
+            ],
+            None => &[],
+        }
     }
     pub(super) fn projection(
         &self,

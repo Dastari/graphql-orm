@@ -3,7 +3,7 @@ title: "Runtime select, filter, order, and keyset reads"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-21
+last_reviewed: 2026-10-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -160,6 +160,35 @@ a shorter value. SQL NULL remains unknown under NOT as well as direct comparison
 Embedded U+0000 is outside the portable text contract: PostgreSQL TEXT rejects
 it and SQLite string-function length behavior differs. Locale case folding and Unicode normalization are not
 claimed.
+
+## Relation predicates
+
+`runtime_relation_filter(collection, relation, quantifier, filter, target_grant, limits)`
+builds a predicate on a relation's source collection that tests related rows of
+its target collection through a correlated subquery. `RuntimeRelationQuantifier`
+selects the form: `Is`/`IsNot` for to-one relations and `Some`/`None`/`Every` for
+to-many relations. Any other combination is rejected with `unsupported_operator`.
+
+| Quantifier | SQL |
+| --- | --- |
+| `Is`, `Some` | `EXISTS (… WHERE keys AND grant AND filter)` |
+| `IsNot`, `None` | `NOT EXISTS (… WHERE keys AND grant AND filter)` |
+| `Every` | `NOT EXISTS (… WHERE keys AND grant AND NOT ((filter) IS TRUE))` |
+
+`filter` and `target_grant` are predicates of the target collection. The grant is
+the target layer's host read restriction. It is always applied inside the
+subquery, so a related row the grant hides never matches and behaves as absent:
+`Is`/`Some` are false for it, `IsNot`/`None` true and `Every` vacuous. Under `Every`,
+a related row whose filter is SQL NULL (unknown) counts as not matching. `None`
+means every target row is visible. The node counts toward the shared node,
+depth and bind budgets, including nested relation predicates. `referenced_fields()`
+reports only the source correlation keys, and `has_relation_filters()` identifies
+such predicates. `RuntimeFilterBuilder::relation` records the occurrence as
+original intent (`RuntimeFilterIntentVisitor::relation`, default no-op). The
+target filter's own intent belongs to the target layer's authorization. Offline
+record matching (`prepare_match`) rejects relation predicates with
+`unsupported_semantics`. SQLite and PostgreSQL render the same correlated
+subquery, with aliased target tables and outer references qualified by table name.
 
 ## Ordering and cursors
 

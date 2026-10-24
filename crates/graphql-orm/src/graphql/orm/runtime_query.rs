@@ -9,10 +9,10 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use super::{
-    CollectionId, DatabaseBackend, DbAuthContext, FieldId, OrmBackend, RuntimeCollectionHandle,
-    RuntimeFieldHandle, RuntimeOrderDirection, RuntimeProjection, RuntimeRecord,
-    RuntimeRecordError, RuntimeRowDecoder, RuntimeValue, RuntimeValueKind, SchemaFingerprint,
-    SqlDialect, SqlValue, ValidatedRuntimeSchema,
+    CollectionId, DatabaseBackend, DbAuthContext, FieldId, OrmBackend, RelationCardinality,
+    RuntimeCollectionHandle, RuntimeFieldHandle, RuntimeOrderDirection, RuntimeProjection,
+    RuntimeRecord, RuntimeRecordError, RuntimeRelationHandle, RuntimeRowDecoder, RuntimeValue,
+    RuntimeValueKind, SchemaFingerprint, SqlDialect, SqlValue, ValidatedRuntimeSchema,
 };
 
 mod checked;
@@ -209,6 +209,50 @@ enum PredicateExpr {
     And(Vec<PredicateExpr>),
     Or(Vec<PredicateExpr>),
     Not(Box<PredicateExpr>),
+    /// Correlated `EXISTS` over a relation. `grant` is the target layer's host row
+    /// restriction and is always applied inside the subquery.
+    Relation {
+        relation: RuntimeRelationHandle,
+        quantifier: RuntimeRelationQuantifier,
+        grant: Box<PredicateExpr>,
+        filter: Box<PredicateExpr>,
+    },
+}
+
+/// Quantifier of a relation predicate. `Is`/`IsNot` apply to to-one relations,
+/// `Some`/`None`/`Every` to to-many relations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum RuntimeRelationQuantifier {
+    /// The related record exists, is visible under the target grant and matches.
+    Is,
+    /// No related record is visible under the target grant and matches.
+    IsNot,
+    /// At least one visible related record matches.
+    Some,
+    /// No visible related record matches.
+    None,
+    /// Every visible related record matches (true when there are none).
+    Every,
+}
+impl RuntimeRelationQuantifier {
+    /// Stable GraphQL input name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Is => "is",
+            Self::IsNot => "isNot",
+            Self::Some => "some",
+            Self::None => "none",
+            Self::Every => "every",
+        }
+    }
+    /// Whether the quantifier applies to a relation of this cardinality.
+    pub const fn applies_to(self, cardinality: RelationCardinality) -> bool {
+        match cardinality {
+            RelationCardinality::One => matches!(self, Self::Is | Self::IsNot),
+            RelationCardinality::Many => matches!(self, Self::Some | Self::None | Self::Every),
+        }
+    }
 }
 
 /// Owned validated predicate bound to one schema fingerprint and collection.
@@ -256,6 +300,10 @@ impl RuntimePredicate {
                     pending.extend(children)
                 }
                 PredicateExpr::Not(child) => pending.push(child),
+                PredicateExpr::Relation { grant, filter, .. } => {
+                    pending.push(grant);
+                    pending.push(filter);
+                }
                 _ => {}
             }
         }
@@ -281,6 +329,15 @@ impl RuntimePredicate {
                     }
                 }
                 PredicateExpr::Not(node) => visit(node, fields),
+                // Only this collection's correlation keys; target fields belong to
+                // the target layer and its own authorization.
+                PredicateExpr::Relation { relation, .. } => {
+                    for (source, _) in relation.key_pairs() {
+                        if !fields.contains(&source) {
+                            fields.push(source);
+                        }
+                    }
+                }
             }
         }
         let mut fields = Vec::new();
@@ -352,6 +409,10 @@ impl RuntimePredicate {
                     }
                 }
                 PredicateExpr::Not(node) => visit(node, limits, bytes)?,
+                PredicateExpr::Relation { grant, filter, .. } => {
+                    visit(grant, limits, bytes)?;
+                    visit(filter, limits, bytes)?;
+                }
             }
             Ok(())
         }
@@ -365,6 +426,19 @@ impl RuntimePredicate {
 
     pub(crate) fn render(&self, backend: DatabaseBackend, values: &mut Vec<SqlValue>) -> String {
         render_expr(backend, &self.expr, values)
+    }
+
+    /// Whether this predicate contains a relation (correlated subquery) node.
+    pub fn has_relation_filters(&self) -> bool {
+        fn visit(expr: &PredicateExpr) -> bool {
+            match expr {
+                PredicateExpr::Relation { .. } => true,
+                PredicateExpr::And(nodes) | PredicateExpr::Or(nodes) => nodes.iter().any(visit),
+                PredicateExpr::Not(node) => visit(node),
+                _ => false,
+            }
+        }
+        visit(&self.expr)
     }
 }
 
@@ -826,6 +900,99 @@ impl ValidatedRuntimeSchema {
         })
     }
 
+    /// Construct a correlated relation predicate on `collection`, the relation's source.
+    ///
+    /// `filter` and `target_grant` are predicates on the relation's target collection.
+    /// `target_grant` is the target layer's host read restriction (for example the
+    /// row predicate of its read grant); `None` means every target row is visible.
+    /// Both are applied inside the subquery, so a filter never matches, and thus
+    /// never reveals, a related row the grant hides: hidden rows behave as absent.
+    /// `Is`/`Some` render `EXISTS`, `IsNot`/`None` `NOT EXISTS`, and `Every` renders
+    /// `NOT EXISTS` of a visible related row whose filter is not true.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale or foreign handles, a relation whose source is not
+    /// `collection`, a quantifier that does not apply to the relation's
+    /// cardinality, predicates of another collection, and node, depth or bind
+    /// budgets exceeded by the combined tree.
+    pub fn runtime_relation_filter(
+        &self,
+        collection: &RuntimeCollectionHandle,
+        relation: &RuntimeRelationHandle,
+        quantifier: RuntimeRelationQuantifier,
+        filter: Option<RuntimePredicate>,
+        target_grant: Option<RuntimePredicate>,
+        limits: RuntimeQueryLimits,
+    ) -> Result<RuntimePredicate, RuntimeQueryError> {
+        check_collection(self, collection)?;
+        let invalid = || {
+            RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidHandle).collection(collection.id())
+        };
+        if relation.schema_fingerprint() != &self.fingerprint()
+            || relation.source() != collection
+            || relation.key_pairs().is_empty()
+            || self
+                .resolve_relation(collection, relation.id())
+                .map_err(|e| invalid().source(e))?
+                != *relation
+        {
+            return Err(invalid());
+        }
+        if !quantifier.applies_to(relation.cardinality()) {
+            return Err(RuntimeQueryError::new(
+                RuntimeQueryErrorCode::UnsupportedOperator,
+            ));
+        }
+        let target = relation.target().id();
+        let mut nodes = 1usize;
+        let mut depth = 1usize;
+        let mut binds = 0usize;
+        let mut part =
+            |predicate: Option<RuntimePredicate>| -> Result<PredicateExpr, RuntimeQueryError> {
+                let Some(predicate) = predicate else {
+                    return Ok(PredicateExpr::Constant(true));
+                };
+                if predicate.schema != self.fingerprint() || &predicate.collection != target {
+                    return Err(invalid());
+                }
+                nodes = nodes
+                    .checked_add(predicate.nodes)
+                    .ok_or_else(|| limit_error(collection.id()))?;
+                binds = binds
+                    .checked_add(predicate.binds)
+                    .ok_or_else(|| limit_error(collection.id()))?;
+                depth = depth.max(
+                    predicate
+                        .depth
+                        .checked_add(1)
+                        .ok_or_else(|| limit_error(collection.id()))?,
+                );
+                Ok(predicate.expr)
+            };
+        let grant = part(target_grant)?;
+        let filter = part(filter)?;
+        if nodes > limits.max_predicate_nodes
+            || depth > limits.max_predicate_depth
+            || binds > limits.max_bind_parameters
+        {
+            return Err(limit_error(collection.id()));
+        }
+        Ok(RuntimePredicate {
+            schema: self.fingerprint(),
+            collection: collection.id().clone(),
+            expr: PredicateExpr::Relation {
+                relation: relation.clone(),
+                quantifier,
+                grant: Box::new(grant),
+                filter: Box::new(filter),
+            },
+            nodes,
+            depth,
+            binds,
+        })
+    }
+
     /// Resolve a deterministic total runtime order. Missing primary-key fields
     /// are appended in declared key order.
     pub fn runtime_order(
@@ -1188,6 +1355,22 @@ fn render_expr(
     expr: &PredicateExpr,
     values: &mut Vec<SqlValue>,
 ) -> String {
+    render_scoped(backend, expr, values, None, 0)
+}
+
+/// `outer` qualifies the enclosing row inside a relation subquery; the top level
+/// uses the source table name. Unqualified columns resolve to the innermost FROM.
+fn render_scoped(
+    backend: DatabaseBackend,
+    expr: &PredicateExpr,
+    values: &mut Vec<SqlValue>,
+    outer: Option<&str>,
+    level: usize,
+) -> String {
+    let render_expr =
+        |backend: DatabaseBackend, expr: &PredicateExpr, values: &mut Vec<SqlValue>| {
+            render_scoped(backend, expr, values, outer, level)
+        };
     match expr {
         PredicateExpr::Constant(value) => if *value { "1 = 1" } else { "1 = 0" }.to_string(),
         PredicateExpr::IsNull { field, is_null } => format!(
@@ -1280,6 +1463,47 @@ fn render_expr(
                 .join(" OR ")
         ),
         PredicateExpr::Not(child) => format!("NOT ({})", render_expr(backend, child, values)),
+        PredicateExpr::Relation {
+            relation,
+            quantifier,
+            grant,
+            filter,
+        } => {
+            let outer = outer.map_or_else(
+                || backend.quote_identifier(relation.source().physical_table()),
+                str::to_owned,
+            );
+            let alias = backend.quote_identifier(&format!("graphql_orm_relation_{level}"));
+            let correlation = relation
+                .key_pairs()
+                .iter()
+                .map(|(source, target)| {
+                    format!(
+                        "{alias}.{} = {outer}.{}",
+                        backend.quote_identifier(target.physical_column()),
+                        backend.quote_identifier(source.physical_column())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let grant = render_scoped(backend, grant, values, Some(&alias), level + 1);
+            let filter = render_scoped(backend, filter, values, Some(&alias), level + 1);
+            let (negated, condition) = match quantifier {
+                RuntimeRelationQuantifier::Is | RuntimeRelationQuantifier::Some => {
+                    (false, format!("({filter})"))
+                }
+                RuntimeRelationQuantifier::IsNot | RuntimeRelationQuantifier::None => {
+                    (true, format!("({filter})"))
+                }
+                // Unknown counts as not matching, so SQL NULL never satisfies `every`.
+                RuntimeRelationQuantifier::Every => (true, format!("NOT (({filter}) IS TRUE)")),
+            };
+            format!(
+                "{}EXISTS (SELECT 1 FROM {} AS {alias} WHERE {correlation} AND ({grant}) AND {condition})",
+                if negated { "NOT " } else { "" },
+                backend.quote_identifier(relation.target().physical_table()),
+            )
+        }
     }
 }
 

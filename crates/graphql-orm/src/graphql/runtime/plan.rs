@@ -34,6 +34,10 @@ pub(super) struct Plan {
     pub relation: Option<RuntimeRelationHandle>,
     pub children: Vec<Plan>,
     pub projected: Vec<super::projection::ProjectedPlan>,
+    /// The `where` input, rebuilt with target grants once they are authorized.
+    pub where_value: Option<Value>,
+    /// Relation filter occurrences awaiting target-layer authorization, in order.
+    pub relation_sites: Vec<RelationSite>,
 }
 impl Plan {
     pub fn relations(&self) -> Vec<RuntimeRelationHandle> {
@@ -55,6 +59,8 @@ pub(super) struct Planner<'a> {
     pub limits: RuntimeGraphqlLimits,
     pub expanded: usize,
     pub cost: RuntimeGraphqlCost,
+    /// Relation predicates planned in this operation.
+    pub relation_filters: usize,
 }
 impl Planner<'_> {
     pub(super) fn resolve(
@@ -170,18 +176,35 @@ impl Planner<'_> {
             .map_err(record_error)?;
         let args = self.resolve(field)?;
         let mut filter_intent = FilterIntent::default();
-        let predicate = match args.get("where") {
-            Some(value) if value != &Value::Null => Some(filter(
+        let mut relation_sites = Vec::new();
+        let where_value = args.get("where").filter(|v| *v != &Value::Null).cloned();
+        let predicate = match &where_value {
+            Some(value) => Some(filter(
                 &module.schema,
                 &collection,
-                c,
                 value,
                 self.limits,
-                0,
                 &mut filter_intent,
+                &mut if module.options.relation_filters.enabled {
+                    RelationGrants::Pending {
+                        sites: &mut relation_sites,
+                        admitted: &module.options.relation_filters,
+                        level: 0,
+                    }
+                } else {
+                    RelationGrants::Disallowed
+                },
             )?),
-            _ => None,
+            None => None,
         };
+        // Each relation predicate is one subquery and one target authorization.
+        self.relation_filters = self
+            .relation_filters
+            .checked_add(relation_sites.len())
+            .ok_or_else(invalid)?;
+        if self.relation_filters > module.options.relation_filters.max_filters() {
+            return Err(RuntimeGraphqlError::new("cost_exceeded"));
+        }
         let mut input = Vec::new();
         if let Some(orders) = args.get("orderBy").filter(|v| *v != &Value::Null) {
             let orders = list_values(orders);
@@ -419,6 +442,8 @@ impl Planner<'_> {
             relation,
             children,
             projected: projected_fields,
+            where_value,
+            relation_sites,
         })
     }
     /// Validate a projected field's object subselection; returns selected field names.
@@ -449,6 +474,41 @@ impl Planner<'_> {
 pub(super) struct FilterIntent {
     pub operations: Vec<(RuntimeFieldHandle, &'static str)>,
     pub logical: Vec<&'static str>,
+    /// Relation predicates of this layer; their target filters belong to the sites.
+    pub relations: Vec<(RuntimeRelationHandle, RuntimeRelationQuantifier)>,
+}
+
+/// One relation filter occurrence of a layer's `where`, in traversal order.
+#[derive(Clone)]
+pub(super) struct RelationSite {
+    pub relation: RuntimeRelationHandle,
+    pub quantifier: RuntimeRelationQuantifier,
+    /// The relation's target collection.
+    pub collection: RuntimeCollectionHandle,
+    /// Target filter as planned; nested relation grants are still placeholders.
+    pub filter: Option<RuntimePredicate>,
+    pub intent: FilterIntent,
+    /// Target default order, for the target layer's read check.
+    pub order: RuntimeOrder,
+}
+
+/// How relation entries of a `where` input are lowered.
+pub(super) enum RelationGrants<'a> {
+    /// Relation entries are rejected (option disabled, or no authority available).
+    Disallowed,
+    /// Record each occurrence; the target grant is a deny-all placeholder until bound,
+    /// so an unbound predicate can never reveal a related row.
+    Pending {
+        sites: &'a mut Vec<RelationSite>,
+        admitted: &'a super::module::RelationFilterOptions,
+        /// Current relation nesting depth.
+        level: usize,
+    },
+    /// Apply authorized target grants in the recorded order.
+    Bound {
+        grants: &'a [Option<RuntimePredicate>],
+        next: usize,
+    },
 }
 
 /// Lower a host-validated structural Value using the canonical runtime filter path.
@@ -572,21 +632,33 @@ fn prepare_filter_inner(
     } else {
         builder
     };
-    let root = checked_filter(&builder, c, input, limits, 0)?;
+    let root = checked_filter(
+        &builder,
+        schema,
+        collection,
+        c,
+        input,
+        limits,
+        0,
+        &mut RelationGrants::Disallowed,
+    )?;
     builder.finish(root)
 }
 
 pub(super) fn filter(
     schema: &ValidatedRuntimeSchema,
     collection: &RuntimeCollectionHandle,
-    _c: &RuntimeCollection,
     value: &Value,
     limits: RuntimeGraphqlLimits,
-    _depth: usize,
     intent: &mut FilterIntent,
+    relations: &mut RelationGrants<'_>,
 ) -> Result<RuntimePredicate, RuntimeGraphqlError> {
-    let checked = prepare_filter_inner(schema, collection, value, limits, true)
+    let checked = prepare_filter_with(schema, collection, value, limits, relations)
         .map_err(|e| RuntimeGraphqlError::new(e.graphql_code()))?;
+    record_intent(&checked, intent);
+    Ok(checked.predicate().clone())
+}
+fn record_intent(checked: &CheckedRuntimeFilter, intent: &mut FilterIntent) {
     struct Flat<'a>(&'a mut FilterIntent);
     impl RuntimeFilterIntentVisitor for Flat<'_> {
         fn enter_boolean(&mut self, k: RuntimeFilterBoolean, ignored: bool) {
@@ -628,16 +700,186 @@ pub(super) fn filter(
             };
             self.0.operations.push((f.clone(), name));
         }
+        fn relation(
+            &mut self,
+            relation: &RuntimeRelationHandle,
+            quantifier: RuntimeRelationQuantifier,
+        ) {
+            // The subquery reads this layer's correlation keys; hosts that check
+            // field use through filter operations see them like any filtered field.
+            for (source, _) in relation.key_pairs() {
+                self.0.operations.push((source.clone(), "relation"));
+            }
+            self.0.relations.push((relation.clone(), quantifier));
+        }
     }
     checked.visit_intent(&mut Flat(intent));
-    Ok(checked.predicate().clone())
 }
+/// Canonical-execution lowering with explicit relation handling.
+fn prepare_filter_with(
+    schema: &ValidatedRuntimeSchema,
+    collection: &RuntimeCollectionHandle,
+    input: &Value,
+    limits: RuntimeGraphqlLimits,
+    relations: &mut RelationGrants<'_>,
+) -> Result<CheckedRuntimeFilter, RuntimeFilterError> {
+    if limits.query.max_predicate_depth == 0 {
+        return Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::LimitExceeded,
+        ));
+    }
+    let c = collection_metadata(schema, collection)?;
+    let builder = schema
+        .runtime_filter_builder(collection, limits.query)?
+        .with_graphql_literal_limits(
+            limits.scalars.max_text_bytes,
+            limits.scalars.max_decoded_bytes,
+        )
+        .for_canonical_execution();
+    let root = checked_filter(&builder, schema, collection, c, input, limits, 0, relations)?;
+    builder.finish(root)
+}
+fn collection_metadata<'a>(
+    schema: &'a ValidatedRuntimeSchema,
+    collection: &RuntimeCollectionHandle,
+) -> Result<&'a RuntimeCollection, RuntimeFilterError> {
+    let current = schema
+        .resolve_collection(collection.id())
+        .map_err(|_| RuntimeFilterError::new(RuntimeFilterErrorCode::InvalidHandle))?;
+    if &current != collection {
+        return Err(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::SchemaMismatch,
+        ));
+    }
+    schema
+        .schema()
+        .collections
+        .iter()
+        .find(|c| &c.id == collection.id())
+        .ok_or(RuntimeFilterError::new(
+            RuntimeFilterErrorCode::InvalidHandle,
+        ))
+}
+/// Lower one relation entry (`{is: …}`, `{some: …}`, …) of a `where` input.
+#[allow(clippy::too_many_arguments)]
+fn relation_filter(
+    builder: &RuntimeFilterBuilder,
+    schema: &ValidatedRuntimeSchema,
+    collection: &RuntimeCollectionHandle,
+    relation: &RuntimeRelation,
+    value: &Value,
+    limits: RuntimeGraphqlLimits,
+    depth: usize,
+    relations: &mut RelationGrants<'_>,
+) -> Result<Vec<RuntimeFilterNode>, RuntimeFilterError> {
+    let invalid = || RuntimeFilterError::new(RuntimeFilterErrorCode::InvalidInput);
+    match relations {
+        RelationGrants::Disallowed => return Err(invalid()),
+        RelationGrants::Pending { admitted, .. } if !admitted.admits(&relation.id) => {
+            return Err(invalid());
+        }
+        _ => {}
+    }
+    let handle = schema
+        .resolve_relation(collection, &relation.id)
+        .map_err(|_| RuntimeFilterError::new(RuntimeFilterErrorCode::InvalidHandle))?;
+    let target = handle.target().clone();
+    let target_metadata = collection_metadata(schema, &target)?;
+    let Value::Object(entries) = value else {
+        return Err(invalid());
+    };
+    let mut nodes = Vec::new();
+    for (name, value) in entries {
+        let quantifier = [
+            RuntimeRelationQuantifier::Is,
+            RuntimeRelationQuantifier::IsNot,
+            RuntimeRelationQuantifier::Some,
+            RuntimeRelationQuantifier::None,
+            RuntimeRelationQuantifier::Every,
+        ]
+        .into_iter()
+        .find(|q| q.as_str() == name.as_str() && q.applies_to(handle.cardinality()))
+        .ok_or_else(invalid)?;
+        if value == &Value::Null {
+            continue;
+        }
+        // Reserve this occurrence's slot before nested occurrences, so planning and
+        // binding enumerate sites in the same pre-order.
+        let slot = match relations {
+            RelationGrants::Disallowed => return Err(invalid()),
+            RelationGrants::Pending {
+                sites,
+                admitted,
+                level,
+            } => {
+                if *level >= admitted.max_depth() {
+                    return Err(RuntimeFilterError::new(
+                        RuntimeFilterErrorCode::LimitExceeded,
+                    ));
+                }
+                sites.push(RelationSite {
+                    relation: handle.clone(),
+                    quantifier,
+                    collection: target.clone(),
+                    filter: None,
+                    intent: FilterIntent::default(),
+                    order: schema.runtime_order(&target, None, limits.query)?,
+                });
+                sites.len() - 1
+            }
+            RelationGrants::Bound { next, .. } => {
+                *next += 1;
+                *next - 1
+            }
+        };
+        let nested = schema
+            .runtime_filter_builder(&target, limits.query)?
+            .with_graphql_literal_limits(
+                limits.scalars.max_text_bytes,
+                limits.scalars.max_decoded_bytes,
+            )
+            .for_canonical_execution();
+        if let RelationGrants::Pending { level, .. } = relations {
+            *level += 1;
+        }
+        let root = checked_filter(
+            &nested,
+            schema,
+            &target,
+            target_metadata,
+            value,
+            limits,
+            depth + 1,
+            relations,
+        );
+        if let RelationGrants::Pending { level, .. } = relations {
+            *level -= 1;
+        }
+        let checked = nested.finish(root?)?;
+        let grant = match relations {
+            RelationGrants::Disallowed => return Err(invalid()),
+            RelationGrants::Pending { sites, .. } => {
+                let site = &mut sites[slot];
+                site.filter = Some(checked.predicate().clone());
+                record_intent(&checked, &mut site.intent);
+                Some(schema.runtime_or(&target, Vec::new(), limits.query)?)
+            }
+            RelationGrants::Bound { grants, .. } => grants.get(slot).ok_or_else(invalid)?.clone(),
+        };
+        nodes.push(builder.relation(&handle, quantifier, Some(&checked), grant)?);
+    }
+    Ok(nodes)
+}
+#[allow(clippy::too_many_arguments)]
 fn checked_filter(
     builder: &RuntimeFilterBuilder,
+    schema: &ValidatedRuntimeSchema,
+    collection: &RuntimeCollectionHandle,
     c: &RuntimeCollection,
     value: &Value,
     limits: RuntimeGraphqlLimits,
     depth: usize,
+    relations: &mut RelationGrants<'_>,
 ) -> Result<RuntimeFilterNode, RuntimeFilterError> {
     if depth >= limits.query.max_predicate_depth {
         return Err(RuntimeFilterError::new(
@@ -663,7 +905,16 @@ fn checked_filter(
                 continue;
             }
             if kind == RuntimeFilterBoolean::Not {
-                nodes.push(builder.not(checked_filter(builder, c, value, limits, depth + 1)?)?)
+                nodes.push(builder.not(checked_filter(
+                    builder,
+                    schema,
+                    collection,
+                    c,
+                    value,
+                    limits,
+                    depth + 1,
+                    relations,
+                )?)?)
             } else {
                 let values = list_values(value);
                 if values.len() > limits.query.max_predicate_nodes {
@@ -673,7 +924,18 @@ fn checked_filter(
                 }
                 let children = values
                     .into_iter()
-                    .map(|v| checked_filter(builder, c, v, limits, depth + 1))
+                    .map(|v| {
+                        checked_filter(
+                            builder,
+                            schema,
+                            collection,
+                            c,
+                            v,
+                            limits,
+                            depth + 1,
+                            relations,
+                        )
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 nodes.push(if kind == RuntimeFilterBoolean::And {
                     builder.and(children)?
@@ -683,13 +945,25 @@ fn checked_filter(
             }
             continue;
         }
-        let f = c
-            .fields
-            .iter()
-            .find(|f| f.api_name == name.as_str())
-            .ok_or(RuntimeFilterError::new(
-                RuntimeFilterErrorCode::InvalidInput,
-            ))?;
+        let Some(f) = c.fields.iter().find(|f| f.api_name == name.as_str()) else {
+            let relation = c
+                .relations
+                .iter()
+                .find(|r| r.api_name == name.as_str())
+                .ok_or(RuntimeFilterError::new(
+                    RuntimeFilterErrorCode::InvalidInput,
+                ))?;
+            if value != &Value::Null {
+                nodes.extend(relation_filter(
+                    builder, schema, collection, relation, value, limits, depth, relations,
+                )?);
+            } else if matches!(relations, RelationGrants::Disallowed) {
+                return Err(RuntimeFilterError::new(
+                    RuntimeFilterErrorCode::InvalidInput,
+                ));
+            }
+            continue;
+        };
         // Resolve through the already checked builder's schema, never physical names.
         let field = builder.resolve_graphql_field(&f.id)?;
         if value == &Value::Null {
@@ -843,7 +1117,14 @@ mod checked_compatibility_tests {
     ) -> Result<RuntimePredicate, RuntimeGraphqlError> {
         let c = &s.schema().collections[0];
         let h = s.resolve_collection(&c.id).unwrap();
-        filter(s, &h, c, &input, limits, 0, &mut FilterIntent::default())
+        filter(
+            s,
+            &h,
+            &input,
+            limits,
+            &mut FilterIntent::default(),
+            &mut RelationGrants::Disallowed,
+        )
     }
     #[test]
     // Internal old-filter compatibility; these are not claims that unknown or
