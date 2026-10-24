@@ -1,6 +1,6 @@
 #![cfg(feature = "sqlite")]
 
-use graphql_orm::async_graphql::{Context, Guard, Request, Response, Schema, SimpleObject};
+use graphql_orm::async_graphql::{Context, Guard, Request, Response, SimpleObject};
 use graphql_orm::futures::{Stream, StreamExt, future::BoxFuture, future::poll_fn};
 use graphql_orm::prelude::*;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -28,6 +28,7 @@ struct PolicyTarget {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     id: String,
+    #[sortable]
     title: String,
 }
 impl BatchLoadEntity for PolicyTarget {
@@ -67,6 +68,7 @@ struct PascalRecord {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     id: String,
+    #[sortable]
     title: String,
     #[graphql_orm(read_policy = "admin.secret")]
     secret: Option<String>,
@@ -77,7 +79,6 @@ struct PascalRecord {
 }
 
 schema_roots! { backend: "sqlite", auth: "none", generated_mutations: "none", query_custom_ops: [], entities: [GuardedRecord, PascalRecord, PolicyTarget], }
-type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 #[derive(Clone)]
 struct Policy(Arc<AtomicBool>);
@@ -91,9 +92,9 @@ impl RowPolicy for Policy {
     fn can_write_row<'a>(&'a self, _: Option<&'a Context<'_>>, _: &'a Database, _: &'static str, _: Option<&'static str>, _: EntityAccessSurface, _: &'a (dyn std::any::Any + Send + Sync)) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> { Box::pin(async { Ok(true) }) }
 }
 impl FieldPolicy for Policy {
-    fn can_read_field<'a>(&'a self, ctx: &'a Context<'_>, _: &'a Database, _: &'static str, _: &'static str, policy: Option<&'static str>, row: Option<&'a (dyn std::any::Any + Send + Sync)>) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
+    fn can_read_field<'a>(&'a self, ctx: &'a Context<'_>, _: &'a Database, _: &'static str, field: &'static str, policy: Option<&'static str>, row: Option<&'a (dyn std::any::Any + Send + Sync)>) -> BoxFuture<'a, graphql_orm::async_graphql::Result<bool>> {
         Box::pin(async move {
-            if policy == Some("admin.secret") {
+            if policy == Some("admin.secret") || field == "extra" {
                 let _ = row;
                 return Ok(ctx.data::<Actor>()?.admin && self.0.load(Ordering::SeqCst));
             }
@@ -141,6 +142,19 @@ async fn protected_scalar_denial_keeps_public_fields_and_generated_relations() {
     let allowed = schema.execute(request("{ guardedRecord(id: \"r\") { secret } }", true)).await;
     assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
     assert_eq!(allowed.data.into_json().unwrap()["guardedRecord"]["secret"], "private scalar");
+}
+
+#[tokio::test]
+async fn keyless_field_policy_is_enforced_alongside_an_existing_field_guard() {
+    let (db, _) = fixture().await;
+    let schema = schema_builder(db).finish();
+    let query = "{ guardedRecord(id: \"r\") { extra } }";
+    let denied = schema.execute(request(query, false)).await;
+    assert!(!denied.errors.is_empty());
+    assert!(!format!("{:?}", denied.data).contains("extra value"));
+    let allowed = schema.execute(request(query, true)).await;
+    assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
+    assert_eq!(allowed.data.into_json().unwrap()["guardedRecord"]["extra"], "extra value");
 }
 
 #[tokio::test]
