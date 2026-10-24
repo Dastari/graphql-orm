@@ -270,6 +270,13 @@ are required on create and absent from update. Defaults stay omitted in GraphQL
 SDL so omission and explicit null remain distinct. Nested output relations and
 nested/bulk writes are unsupported.
 
+Generated deletes refuse `unsupported_cascade` when the collection has incoming
+`Cascade` or `SetNull` foreign keys, unless
+`RuntimeGraphqlMutationOptions::dependent_changes` is `Some(RuntimeDependentLimits)`.
+Then each delete uses B's
+[dependent-change contract](runtime-mutations.md#cascade-and-set-null-dependents),
+and the mutation hook receives the dependent effects.
+
 Attach a certified environment, pinned write authority and optional journal hook
 using `with_mutation_environment`, `with_write_authority` and
 `with_mutation_hook`. Each validated response-key group uses B's guarded

@@ -5,6 +5,13 @@ use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
 use futures::future::BoxFuture;
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
+#[path = "runtime_mutation_dependents.rs"]
+mod dependents;
+pub use dependents::{
+    RUNTIME_DEPENDENT_MAX_DEPTH, RUNTIME_DEPENDENT_MAX_ROWS, RuntimeDependentCause,
+    RuntimeDependentLimits,
+};
+
 /// Safe runtime mutation category. No variant contains caller values or SQL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -177,6 +184,8 @@ pub struct RuntimeMutationRequest {
     expected: Option<RuntimePredicate>,
     returning: Option<RuntimeProjection>,
     limits: RuntimeMutationLimits,
+    dependents: Option<RuntimeDependentLimits>,
+    cause: Option<RuntimeDependentCause>,
 }
 macro_rules! redacted_debug {
     ($($ty:ty),+ $(,)?) => {$(impl fmt::Debug for $ty {
@@ -228,6 +237,11 @@ impl<'a> RuntimeWriteIntent<'a> {
     }
     pub fn returning(self) -> Option<&'a RuntimeProjection> {
         self.request.returning.as_ref()
+    }
+    /// Why the ORM performs this write. `None` for the requested row itself;
+    /// present for each Cascade/SetNull dependent change of an opted-in delete.
+    pub fn cause(self) -> Option<&'a RuntimeDependentCause> {
+        self.request.cause.as_ref()
     }
 }
 /// Authoritative preimage from the pinned transaction, never a caller preview.
@@ -321,13 +335,30 @@ pub trait RuntimeWriteAuthority<B: RuntimeMutationBackend>: Send + Sync {
 /// Pending work, not committed success or an event. Only the runner establishes commit.
 pub struct RuntimeMutationEffect {
     action: RuntimeMutationAction,
+    collection: RuntimeCollectionHandle,
     record: Option<RuntimeRecord>,
     staged: RuntimeRecord,
     preimage: Option<RuntimeRecord>,
+    cause: Option<RuntimeDependentCause>,
+    dependents: Vec<RuntimeMutationEffect>,
 }
 impl RuntimeMutationEffect {
     pub fn action(&self) -> RuntimeMutationAction {
         self.action
+    }
+    /// Collection of the written row.
+    pub fn collection(&self) -> &RuntimeCollectionHandle {
+        &self.collection
+    }
+    /// Why the ORM performed this dependent write; `None` for the requested row.
+    pub fn cause(&self) -> Option<&RuntimeDependentCause> {
+        self.cause.as_ref()
+    }
+    /// Pending Cascade/SetNull changes the ORM performed before the requested
+    /// delete, in execution order: every SetNull update, then deletes with each
+    /// row after all rows referencing it. Empty unless the request opted in.
+    pub fn dependents(&self) -> &[RuntimeMutationEffect] {
+        &self.dependents
     }
     /// The approved return projection only; this is what callers may release.
     pub fn record(&self) -> Option<&RuntimeRecord> {
@@ -494,7 +525,9 @@ impl ValidatedRuntimeSchema {
             limits,
         )
     }
-    /// Delete exactly one complete key; incoming modifying actions are rejected at execution.
+    /// Delete exactly one complete key. Incoming Cascade/SetNull foreign keys are
+    /// rejected at execution unless the request opts in through
+    /// [`RuntimeMutationRequest::with_dependent_changes`].
     pub fn runtime_delete_request(
         &self,
         key: RuntimeKey,
@@ -610,6 +643,8 @@ impl ValidatedRuntimeSchema {
             expected,
             returning,
             limits,
+            dependents: None,
+            cause: None,
         })
     }
 }
@@ -651,6 +686,14 @@ fn columns(backend: DatabaseBackend, projection: &RuntimeProjection) -> String {
         .map(|f| backend.quote_identifier(f.physical_column()))
         .collect::<Vec<_>>()
         .join(", ")
+}
+/// Authorized, locked state of one write between its checks and its DML.
+pub(super) struct PreparedRuntimeWrite {
+    grant: RuntimeWriteGrant,
+    projection: RuntimeProjection,
+    keys_projection: RuntimeProjection,
+    key_fields: Vec<RuntimeFieldHandle>,
+    preimage: Option<RuntimeRecord>,
 }
 fn bounded_record(
     record: &RuntimeRecord,
@@ -757,6 +800,37 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         request: &RuntimeMutationRequest,
         authority: &dyn RuntimeWriteAuthority<B>,
     ) -> Result<RuntimeMutationEffect, RuntimeMutationError> {
+        let prepared = self
+            .prepare_runtime_write(environment, request, authority)
+            .await?;
+        if request.dependents.is_none() {
+            return self
+                .execute_runtime_write(request, authority, prepared)
+                .await;
+        }
+        let dependents = self
+            .prepare_runtime_dependents(environment, request, authority)
+            .await?;
+        let mut effects = Vec::with_capacity(dependents.len());
+        for (dependent, prepared) in dependents {
+            effects.push(
+                self.execute_runtime_write(&dependent, authority, prepared)
+                    .await?,
+            );
+        }
+        let mut effect = self
+            .execute_runtime_write(request, authority, prepared)
+            .await?;
+        effect.dependents = effects;
+        Ok(effect)
+    }
+    /// Validate, authorize the intent and lock/authorize the preimage. No writes.
+    pub(super) async fn prepare_runtime_write(
+        &mut self,
+        environment: &RuntimeMutationEnvironment,
+        request: &RuntimeMutationRequest,
+        authority: &dyn RuntimeWriteAuthority<B>,
+    ) -> Result<PreparedRuntimeWrite, RuntimeMutationError> {
         use RuntimeMutationErrorCode as E;
         if !B::RUNTIME_MUTATIONS_SUPPORTED
             || B::READ_ONLY
@@ -777,7 +851,11 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             return Err(err(E::SchemaMismatch));
         }
         let c = collection(&request.schema, &request.collection)?;
+        // Without an explicit opt-in the database must never change a row the host
+        // did not see, so any incoming modifying action refuses the delete.
         if request.action == RuntimeMutationAction::Delete
+            && request.dependents.is_none()
+            && request.cause.is_none()
             && environment
                 .incoming_dependencies(&c.physical_table)
                 .iter()
@@ -892,6 +970,31 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         } else {
             None
         };
+        Ok(PreparedRuntimeWrite {
+            grant,
+            projection,
+            keys_projection,
+            key_fields,
+            preimage,
+        })
+    }
+    /// Perform the prepared DML and authorize its result.
+    async fn execute_runtime_write(
+        &mut self,
+        request: &RuntimeMutationRequest,
+        authority: &dyn RuntimeWriteAuthority<B>,
+        prepared: PreparedRuntimeWrite,
+    ) -> Result<RuntimeMutationEffect, RuntimeMutationError> {
+        use RuntimeMutationErrorCode as E;
+        let PreparedRuntimeWrite {
+            grant,
+            projection,
+            keys_projection,
+            key_fields,
+            preimage,
+        } = prepared;
+        let c = collection(&request.schema, &request.collection)?;
+        let intent = RuntimeWriteIntent { request };
         let mut values = Vec::new();
         let table = B::DIALECT.quote_identifier(&c.physical_table);
         let sql = match request.action {
@@ -997,9 +1100,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .transpose()?;
         Ok(RuntimeMutationEffect {
             action: request.action,
+            collection: request.collection.clone(),
             record,
             staged: result,
             preimage,
+            cause: request.cause.clone(),
+            dependents: Vec::new(),
         })
     }
 }

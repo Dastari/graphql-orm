@@ -3,7 +3,7 @@ title: Schema-bound transactional runtime mutations
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-20
+last_reviewed: 2026-10-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -59,9 +59,11 @@ of the composed physical target and managed ownership. It includes incoming
 system/unowned dependencies and the backend identity. A host must pin this
 certificate with its schema generation and fence external DDL; it is not a
 lease that makes arbitrary external schema changes safe. Revalidate after drift.
-Incoming delete CASCADE/SET NULL rejects with `unsupported_cascade`, even when
-no child currently exists. RESTRICT remains usable; database constraint failures
-roll back normally. No migration or pool query occurs inside the mutation engine.
+By default an incoming delete CASCADE/SET NULL rejects with `unsupported_cascade`,
+even when no child currently exists; a delete can opt in to
+[dependent changes](#cascade-and-set-null-dependents). RESTRICT remains usable;
+database constraint failures roll back normally. No migration or pool query occurs
+inside the mutation engine.
 
 SQLite acquires the write lock before callback reads; PostgreSQL uses the
 existing serializable transaction and locks an existing exact-key row. Intent,
@@ -178,3 +180,82 @@ PostgreSQL prefix/suffix CAS and emitted-bind boundaries without test-side skips
 SQLite empty suffixes match every non-null string. Final combined review and
 owner merge/release remain required before downstream adoption. Static APIs and
 their cancellation limitation are unchanged.
+
+## Cascade and set-null dependents
+
+ORM/macros 0.66.0 lets a delete honour incoming `Cascade` and `SetNull` foreign
+keys between runtime collections. It is opt-in per request:
+
+```rust,ignore
+let request = schema
+    .runtime_delete_request(key, None, None, RuntimeMutationLimits::default())?
+    .with_dependent_changes(RuntimeDependentLimits::new(256, 8)?)?;
+let pending = tx.mutate_runtime(&environment, &request, &authority).await?;
+for dependent in pending.dependents() {
+    // dependent.action(), dependent.collection(), dependent.preimage(), dependent.cause()
+}
+tx.run_runtime_before_commit(&journal_hook, &pending).await?;
+```
+
+The ORM never lets the database change a row the host did not see. In the same
+transaction, after the requested row's intent and preimage checks, it:
+
+1. walks the dependency graph from the requested row in level order, locking each
+   referencing row (`FOR UPDATE` on PostgreSQL; SQLite state-machine transactions
+   already hold the write lock). Incoming foreign keys are visited in table and column
+   order, and referencers in primary-key order, so the outcome never depends on storage
+   order. Every row is found at its minimum depth; its `cause()` names the first such
+   path in that order. `Cascade` rows are expanded; `SetNull` rows are collected unless
+   they are deleted anyway;
+2. refuses with `constraint_violation` when any `Restrict` foreign key (from any
+   table, runtime or not) references a row that would be deleted. This is
+   conservative: a restricting row that would itself be cascade-deleted still
+   refuses;
+3. refuses with `limit_exceeded` when more than `max_rows` dependent rows (deleted
+   plus nulled, excluding the requested row) or a row whose minimum depth exceeds
+   `max_depth` relation hops would be changed. Defaults are 256 rows and depth 8;
+   `RuntimeDependentLimits::new` rejects values above `RUNTIME_DEPENDENT_MAX_ROWS`
+   (65 536) and `RUNTIME_DEPENDENT_MAX_DEPTH` (64);
+4. refuses with `unsupported_cascade` for a data cycle, meaning rows that reference each
+   other through cascading relations so no delete order exists. This includes a row that
+   references itself. It also refuses a modifying foreign key whose source table is not a
+   runtime collection;
+5. authorizes every dependent change through the same `RuntimeWriteAuthority`:
+   `authorize_intent` and `authorize_preimage` for all of them before any write.
+   `RuntimeWriteIntent::cause()` is `Some(RuntimeDependentCause)` with the owning
+   relation, the policy, the referenced row's key and the depth. A dependent row
+   hidden by the returned grant predicate, or any denial, refuses the whole delete
+   with `denied`. Because the row exists and is locked, this refusal tells the caller
+   that some dependent they cannot write exists; it never discloses its values;
+6. performs the changes itself: each `SetNull` update (the relation's key fields set
+   to SQL NULL), then the deletes, each row after every row that references it
+   (deepest first, then key order), then the requested row. Each change gets an
+   `authorize_result` check.
+
+A row nulled through several relations gets one `SetNull` update per relation. All
+preimages are captured before any write, so the preimage of a later update still shows
+the key fields an earlier update of the same row cleared.
+
+Bounded limits, every intent and preimage check, and the Restrict check all
+complete before the first write. `RuntimeMutationEffect::dependents()` lists the
+pending dependent effects in execution order, each with `collection()`, `cause()`,
+`staged()` and `preimage()`, so a `before_commit` hook can journal, emit events or
+release resources for every changed row. Any error or hook failure rolls back the
+requested row and every dependent change together.
+
+A referencing row inserted concurrently cannot escape authorization. On SQLite the
+immediate write transaction excludes other writers. On PostgreSQL a writer that has
+not committed before the rows are locked waits and then fails its foreign-key check.
+A row committed after the delete's serializable snapshot is unseen, but the final
+delete's own foreign-key action then fails with a serialization failure
+(`retryable_transaction`), so nothing changes silently. This also covers a
+re-parenting update that commits while the delete waits. Two deletes whose cascades
+overlap can deadlock on PostgreSQL; the loser fails with `40P01`, which is also
+`retryable_transaction`.
+
+Without `with_dependent_changes`, behaviour is unchanged. Only delete requests may
+opt in (`invalid_input` otherwise). Runtime GraphQL deletes opt in through
+`RuntimeGraphqlMutationOptions::dependent_changes`. Dependent intents there go to the
+host write authority without the root collection's read-visibility restriction. The
+GraphQL statement budget reserves only the requested row's statements. The dependent
+work is bounded by these limits instead.

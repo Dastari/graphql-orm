@@ -15,6 +15,12 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.65.0 to 0.66.0: opt-in runtime cascade and set-null deletes
+
+Upgrade runtime/macros together. Additive and opt-in; existing code compiles and behaves as before. A runtime delete whose table has incoming `Cascade` or `SetNull` foreign keys still refuses with `unsupported_cascade` unless the request calls `with_dependent_changes(RuntimeDependentLimits::new(max_rows, max_depth))` (defaults 256 rows, depth 8), or the GraphQL module sets `RuntimeGraphqlMutationOptions::dependent_changes = Some(...)`. `RuntimeDependentLimits::new` returns `limit_exceeded` above 65 536 rows or depth 64; read them back with `max_rows()`/`max_depth()`.
+
+When opting in, review your `RuntimeWriteAuthority`. It now receives intent, preimage and result checks for rows of other collections, or other rows of the same collection, with `RuntimeWriteIntent::cause()` set to the relation, policy, referenced key and depth. Deny them to refuse the whole delete. Journal hooks should iterate `RuntimeMutationEffect::dependents()`, which holds SetNull updates and cascaded deletes in execution order. A `Restrict` reference to any row that would be deleted refuses with `constraint_violation`, including a restricting row that would itself be cascaded. Data cycles and modifying foreign keys from non-runtime tables refuse with `unsupported_cascade`. On PostgreSQL, treat `retryable_transaction` from a concurrent referencing insert as retryable. In the runtime GraphQL adapter, dependent intents are not narrowed by the root collection's read visibility. No SDL, schema or data migration is required.
+
 ## 0.64.1 to 0.65.0: scalar policies with generated relations
 
 Upgrade runtime/macros together. On an entity using `GraphQLEntity`,
@@ -55,6 +61,7 @@ or data migration is needed. Review the scalar SDL if legacy declarations had
 exposed unreadable/private fields.
 
 ## 0.64.0 to 0.64.1: SQLite RESTRICT refusal classification
+
 Upgrade runtime/macros together. On SQLite, a delete or key update refused by an `ON DELETE/UPDATE RESTRICT` foreign key now returns `CONSTRAINT_VIOLATION` (and runtime mutation code `constraint_violation`) instead of `INTERNAL_ERROR` (`database_failed`), the same category PostgreSQL already returned. Behaviour change: a host that matched the SQLite internal/database-failed category for this case, or carried its own mapping for it, should rely on the constraint category on both backends and may remove that mapping. Classification requires extended code `SQLITE_CONSTRAINT_TRIGGER` (1811) together with SQLite's exact `FOREIGN KEY constraint failed` message, so other trigger `RAISE(ABORT, ...)` failures remain internal errors; an application trigger that raises that identical message is indistinguishable and is classified as a constraint violation. No API, SDL, schema or data migration is required.
 
 ## 0.63.0 to 0.64.0: composite and read-only Changed

@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.66.0**.
+
+- Runtime deletes can opt in to incoming `Cascade` and `SetNull` foreign keys with `RuntimeMutationRequest::with_dependent_changes(RuntimeDependentLimits)` (validated, opaque limits, at most 65 536 rows and depth 64) (GraphQL: `RuntimeGraphqlMutationOptions::dependent_changes`). The ORM locks every dependent row, authorizes each change through `RuntimeWriteAuthority` with `RuntimeWriteIntent::cause()` before any write, performs the SetNull updates and the deletes itself in dependency order, and lists them in `RuntimeMutationEffect::dependents()` for hooks. Restrict references to a deleted row, denied dependents, data cycles, non-runtime modifying sources and exceeded row/depth limits refuse the whole delete before any write. SQLite and PostgreSQL behave alike; a concurrently inserted referencing row is blocked or fails the delete as `retryable_transaction`. Without the opt-in such deletes still refuse with `unsupported_cascade`. `RuntimeMutationEffect` also gains `collection()` and `cause()`.
+
+## 0.65.0 (unreleased)
+
 Companion runtime/macros version: **0.65.0**.
 
 - Add `#[graphql_policy_object]` for the `SimpleObject` plus generated-relations

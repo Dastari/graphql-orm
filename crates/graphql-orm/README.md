@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.66.0 lets runtime deletes opt in to authorized, ORM-performed
+`Cascade`/`SetNull` dependent changes. See the
+[migration guide](../../MIGRATION.md#0650-to-0660-opt-in-runtime-cascade-and-set-null-deletes).
+
 Version 0.65.0 adds `#[graphql_policy_object]` to enforce current scalar field
 policies on `SimpleObject` entities that use generated complex relations. Add
 the attribute before the derives; existing relations and guards are preserved.
