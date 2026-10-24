@@ -19,6 +19,39 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.111.0 to 0.112.0: opt-in host-bound principal projection
+
+No breaking change and no required action. Existing constructors, trait
+implementors, GraphQL SDL and stored work are unchanged. The AI schema
+module is unchanged and no data migration is required.
+
+To adopt, a host whose `CurrentPrincipalResolver` requires its verified
+audience builds one `Arc<AiPrincipalProjection>` (`fixed(namespace)` or `new`
+with an `AiPrincipalProjector`) and installs it with `with_principal_projection`
+on `OrmAiSessionService`, `OrmAiRunDispositionService`,
+`OrmAiRunCancellationService`, `OrmAiToolCallResultPreviewService`,
+`OrmAiInboxService`, `OrmAiProposalService` and `OrmAiApprovalService`. A
+service left without it projects `principal.reference()`, which a strict
+resolver refuses: that service fails closed. Optionally add
+`OrmAiSessionService::with_submission_admission(resolver, clock)` so a refused
+submission writes nothing.
+
+Persistence: references written with a projection carry `audience` for user
+sessions. The JSON shape is unchanged; older engines read and resolve these
+records without interpreting the audience. Records written without projection
+are never stamped or upgraded; under a strict resolver they fail closed at
+their next resolution, and an explicit retry admits a new reference.
+
+`AiRunAuthorizationIssuer` implementations need no change. With a projection
+installed the engine persists the projected reference with the issued deadline.
+
+Unsupported: several namespaces sharing one AI store (ownership is still kind
+plus subject, and each host's workers would fail the other's runs closed).
+Hosts that also use `agql-auth` sensitive revalidation with stamped ordinary
+user references must resolve them through
+`ResolvedPrincipal::from_current_session`. See
+[host-bound principal projection](docs/host-principal-projection.md).
+
 ## 0.110.0 to 0.110.1: ORM 0.69.0 alignment
 
 Adopt `graphql-orm-ai` 0.110.1 with ORM/macros 0.69.0 from one workspace release. The private session-activity query schema now states `join: None` for its key relation, following the new `RuntimeRelation::join` member. No AI API, GraphQL SDL, schema module, persistence or data migration is involved.

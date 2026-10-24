@@ -39,6 +39,7 @@ tool-free, and network-free; production integration comes later.
 - [Attachments](attachments.md), [provider files](provider-files.md), [live streaming](live-streaming.md), [context compaction](context-compaction.md), [skills and UI intents](skills-and-ui-intents.md), and [remote GraphQL execution](remote-graphql-execution.md).
 - [Capability index, compact planning, durable broker and conversation bootstrap](capability-discovery-and-execution.md).
 - [Immutable session execution selection](session-execution-selection.md) — owner admission, lease-fenced routing, exact legacy pinning and title isolation.
+- [Host-bound principal projection](host-principal-projection.md) — opt-in namespace stamping of durable principal references for strict host resolvers, submission admission and stream admission.
 - [Session reliability adoption contract](session-reliability-adoption.md) — bootstrap watermark semantics, stream close envelopes, run failure records, retry/acknowledge, and retained-thread disclosure.
 - [Migration guide](../MIGRATION.md) and [changelog](../CHANGELOG.md).
 
