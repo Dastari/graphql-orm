@@ -13,9 +13,19 @@ use agql_auth::{
 use async_trait::async_trait;
 use graphql_orm::graphql::orm::{ApplyOptions, Entity, OrmSchemaModule};
 use graphql_orm::graphql::pagination::KeysetConnectionInput;
-use graphql_orm::prelude::{Database, GraphQLEntity, GraphQLOperations, PostgresBackend};
+use graphql_orm::prelude::{
+    AuthSubject, AuthorizedScanConfig, Database, GraphQLEntity, GraphQLOperations, PostgresBackend,
+    schema_roots,
+};
+use graphql_orm::{
+    async_graphql::Request,
+    futures::{Stream, StreamExt, future::poll_fn},
+};
 use graphql_orm_ai::*;
+use graphql_orm_ai::public_entities::*;
+use std::task::Poll;
 use time::{Duration, OffsetDateTime};
+use tokio::time::timeout;
 use uuid::Uuid;
 
 #[cfg(feature = "provider-openai")]
@@ -31,6 +41,20 @@ use sha2::Sha256;
 
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
 const POSTGRES_IMAGE: &str = "postgres:17-alpine";
+
+schema_roots! {
+    query_custom_ops: [],
+    generated_mutations: "none",
+    entities: [AiPublicSession, AiPublicMessage, AiPublicRun, AiPublicAttachment, AiPublicToolPolicy],
+}
+
+async fn registered<S: Stream<Item = graphql_orm::async_graphql::Response> + Unpin>(stream: &mut S) {
+    poll_fn(|cx| match stream.poll_next_unpin(cx) {
+        Poll::Pending => Poll::Ready(()),
+        other => panic!("unexpected initial event {other:?}"),
+    })
+    .await;
+}
 
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
@@ -1103,5 +1127,128 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     drop(skills);
     drop(rules);
     drop(runs);
+    drop(container);
+}
+
+#[tokio::test]
+async fn owned_postgres_public_projection_rechecks_current_owner_on_query_and_change() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-public-postgres-parity",
+            "disposable generated public metadata parity",
+            module.entities(),
+        )
+        .await
+        .unwrap();
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .unwrap();
+    let database =
+        database.with_authorized_scan_config(AuthorizedScanConfig::new([9; 32], 32, 2048));
+    let now = OffsetDateTime::now_utc();
+    let owner = principal(now);
+    let sessions = OrmAiSessionService::new(
+        database.clone(),
+        Arc::new(AllowAll),
+        Arc::new(ProtectionPolicy),
+        Arc::new(DatabaseManagedContentProtector),
+    );
+    let session = sessions
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: AiScopeInput {
+                    kind: "postgres-parity".into(),
+                    id: "public-projection".into(),
+                    tenant_id: Some("postgres-parity-tenant".into()),
+                },
+                title: Some("Owner metadata".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let access = AiPublicEntityAccess::new(
+        database,
+        Arc::new(AllowAll),
+        Arc::new(ParityPrincipalResolver {
+            principal: owner.clone(),
+            clock: Arc::new(FixedClock::new(now)),
+        }),
+    );
+    let schema = schema_builder(access.database()).finish();
+    let query = format!("{{ aiPublicSession(id: \"{}\") {{ id title }} }}", session.id);
+    let owner_request = || {
+        Request::new(query.clone())
+            .data(owner.clone())
+            .data(AuthSubject::new(owner.subject()))
+    };
+    let response = schema.execute(owner_request()).await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["aiPublicSession"]["title"],
+        "Owner metadata"
+    );
+    let mut other = owner.clone();
+    if let AuthPrincipal::User(user) = &mut other {
+        user.user_id = "postgres-parity-other".into();
+    }
+    let denied = schema
+        .execute(
+            Request::new(query.clone())
+                .data(other.clone())
+                .data(AuthSubject::new(other.subject())),
+        )
+        .await;
+    assert!(!format!("{:?}", denied.data).contains("Owner metadata"));
+    let mut changes = Box::pin(schema.execute_stream(
+        Request::new(format!(
+            "subscription {{ aiPublicSessionChanged(key: \"{}\") {{ sourceId aiPublicSession {{ title }} }} }}",
+            session.id
+        ))
+        .data(owner.clone())
+        .data(AuthSubject::new(owner.subject())),
+    ));
+    registered(&mut changes).await;
+    sessions
+        .rename_session(
+            &owner,
+            RenameAiSessionInput {
+                session_id: session.id,
+                title: "Committed PostgreSQL metadata".into(),
+                client_mutation_id: Uuid::new_v4(),
+                expected_title_revision: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    let response = timeout(StdDuration::from_secs(5), changes.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let value = response.data.into_json().unwrap();
+    assert_eq!(
+        value["aiPublicSessionChanged"]["sourceId"],
+        session.id.to_string()
+    );
+    assert_eq!(
+        value["aiPublicSessionChanged"]["aiPublicSession"]["title"],
+        "Committed PostgreSQL metadata"
+    );
+    drop(changes);
+    drop(schema);
+    drop(access);
+    drop(sessions);
     drop(container);
 }
