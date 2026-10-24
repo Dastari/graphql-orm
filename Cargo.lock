@@ -3274,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-storage"
-version = "0.7.5"
+version = "0.7.6"
 dependencies = [
  "async-trait",
  "aws-credential-types",
@@ -3282,6 +3282,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "libc",
  "picky",
  "picky-krb",
  "secrecy",

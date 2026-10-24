@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
-    ObjectRangeBody, ObjectStorage, StorageBackend, StorageByteStream, StorageError,
-    StorageObjectBody, StoredObject, StreamingObjectStore, collect_storage_stream,
-    validate_blob_key, validate_object_bucket,
+    BoxedMultipartWriter, CapacityBinding, CapacityObservation, CapacityRequest, MultipartWriter,
+    ObjectContentRange, ObjectInfo, ObjectMetadata, ObjectRangeBody, ObjectStorage, StorageBackend,
+    StorageByteStream, StorageError, StorageObjectBody, StoredObject, StreamingObjectStore,
+    collect_storage_stream, validate_blob_key, validate_object_bucket,
 };
 
 const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
@@ -127,6 +127,18 @@ impl BlobStore for LocalStorageBackend {
 
     fn backend(&self) -> StorageBackend {
         StorageBackend::Local
+    }
+
+    fn capacity_binding(&self) -> CapacityBinding {
+        crate::local_capacity::binding(&self.root)
+    }
+
+    async fn observe_capacity(
+        &self,
+        request: &CapacityRequest,
+    ) -> Result<CapacityObservation, StorageError> {
+        let binding = self.capacity_binding();
+        crate::local_capacity::observe(self.root.clone(), binding, *request).await
     }
 
     async fn put_blob(

@@ -3,8 +3,10 @@ use std::{env, sync::Arc, time::Duration};
 use bytes::Bytes;
 use futures_util::{StreamExt, stream};
 use graphql_orm_storage::{
-    BlobPutOptions, BlobStore, SmbDialect, SmbProbeOptions, SmbStorageBackend, SmbStorageConfig,
-    StorageByteStream, collect_storage_stream,
+    BlobPutOptions, BlobStore, CapacityQuota, CapacityRequest, CapacityState,
+    CapacityValidationError, KnownCapacity, SmbDialect, SmbProbeOptions, SmbStorageBackend,
+    SmbStorageConfig, StorageByteStream, StorageError, StorageProviderErrorKind,
+    collect_storage_stream,
 };
 use secrecy::SecretString;
 use uuid::Uuid;
@@ -411,6 +413,112 @@ async fn samba_rejects_invalid_password() {
         .await
         .expect_err("authentication must fail");
     assert!(!error.is_retryable());
+}
+
+async fn connect_with_prefix(root: &str) -> SmbStorageBackend {
+    let config = test_config(root.to_string());
+    SmbStorageBackend::probe(
+        config.clone(),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe creates prefix");
+    SmbStorageBackend::connect(config)
+        .await
+        .expect("connect store")
+}
+
+fn known_capacity(state: &CapacityState) -> &KnownCapacity {
+    match state {
+        CapacityState::Known(known) => known,
+        other => panic!("expected known SMB capacity, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_capacity_observes_authenticated_share_allocation() {
+    let root = format!("graphql-orm-storage-capacity/{}", Uuid::new_v4());
+    let store = connect_with_prefix(&root).await;
+    let observation = store
+        .observe_capacity(&CapacityRequest::default())
+        .await
+        .expect("observe capacity");
+    let state = observation
+        .validate_for(&store.capacity_binding(), observation.observed_at)
+        .expect("fresh observation");
+    let known = known_capacity(state);
+    let total = known.total_bytes.expect("total bytes");
+    let physical = known.physical_available_bytes.expect("physical bytes");
+    assert!(total > 0);
+    assert!(physical <= total);
+    assert!(known.caller_available_bytes <= physical);
+    assert_eq!(known.quota, CapacityQuota::ProviderAccounted);
+    assert!(known.quota_accounted());
+    let placement = observation.placement.clone().expect("volume placement");
+    assert!(placement.0.starts_with("smb:volume-serial="));
+
+    // A second observation of the same destination reports the same volume.
+    let again = store
+        .observe_capacity(&CapacityRequest::default())
+        .await
+        .expect("observe capacity again");
+    assert!(observation.same_placement(&again));
+
+    // A different prefix or account is a different destination binding.
+    let other = connect_with_prefix(&format!("{root}-other")).await;
+    assert_ne!(store.capacity_binding(), other.capacity_binding());
+    assert_eq!(
+        observation.validate_for(&other.capacity_binding(), observation.observed_at),
+        Err(CapacityValidationError::BindingMismatch)
+    );
+
+    // Stale observations are rejected.
+    let stale = observation.valid_until;
+    assert!(matches!(
+        observation.validate_for(&store.capacity_binding(), stale),
+        Err(CapacityValidationError::Expired { .. })
+    ));
+
+    // A missing prefix is an explicit provider failure, never capacity.
+    let missing = SmbStorageBackend::connect(test_config(format!("{root}/missing")))
+        .await
+        .expect("connect without creating prefix");
+    let error = missing
+        .observe_capacity(&CapacityRequest::default())
+        .await
+        .expect_err("missing prefix must fail");
+    assert!(
+        matches!(
+            error,
+            StorageError::RemoteProvider {
+                kind: StorageProviderErrorKind::RemotePathNotFound,
+                ..
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Samba configured with a maximum disk size"]
+async fn samba_capacity_reports_share_size_limit() {
+    let limit = env::var("SMB_TEST_EXPECT_MAX_DISK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("SMB_TEST_EXPECT_MAX_DISK_BYTES");
+    let root = format!("graphql-orm-storage-capacity-limited/{}", Uuid::new_v4());
+    let store = connect_with_prefix(&root).await;
+    let observation = store
+        .observe_capacity(&CapacityRequest::default())
+        .await
+        .expect("observe capacity");
+    let known = known_capacity(&observation.state);
+    assert!(known.total_bytes.expect("total bytes") <= limit);
+    assert!(known.caller_available_bytes <= limit);
+    assert!(known.physical_available_bytes.expect("physical bytes") <= limit);
 }
 
 #[tokio::test(flavor = "multi_thread")]

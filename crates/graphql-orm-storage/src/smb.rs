@@ -18,16 +18,20 @@ use sha2::{Digest, Sha256};
 use smb::{
     Client, ClientConfig, ConnectionConfig, CreateOptions, Dialect, DirAccessMask, Directory, File,
     FileAccessMask, FileAttributes, FileCreateArgs, FileDispositionInformation,
-    FileFullDirectoryInformation, FileRenameInformation, FileStandardInformation, Resource, Status,
-    UncPath, connection::EncryptionMode,
+    FileFsFullSizeInformation, FileFsVolumeInformation, FileFullDirectoryInformation,
+    FileRenameInformation, FileStandardInformation, Resource, Status, UncPath,
+    connection::EncryptionMode,
 };
 use smb_dtyp::binrw_util::sized_wide_string::SizedWideString;
+use time::OffsetDateTime;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    StorageBackend, StorageByteStream, StorageError, StorageProviderErrorKind, validate_blob_key,
+    CapacityBinding, CapacityObservation, CapacityPlacement, CapacityQuota, CapacityRequest,
+    CapacityState, KnownCapacity, StorageBackend, StorageByteStream, StorageError,
+    StorageProviderErrorKind, validate_blob_key,
 };
 
 const DEFAULT_PORT: u16 = 445;
@@ -1139,6 +1143,89 @@ impl SmbStorageBackend {
             })
     }
 
+    async fn observe_capacity_sample(&self) -> Result<SmbCapacitySample, StorageError> {
+        for attempt in 0..2 {
+            let snapshot = self.client_snapshot().await;
+            match self.observe_capacity_once(&snapshot.client).await {
+                Ok(sample) => return Ok(sample),
+                Err(error) if error.is_retryable() => {
+                    self.reconnect_after(snapshot.generation).await?;
+                    if attempt == 1 {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!("capacity observation loop always returns")
+    }
+
+    async fn observe_capacity_once(
+        &self,
+        client: &Client,
+    ) -> Result<SmbCapacitySample, StorageError> {
+        // Query the configured prefix itself, so server-side links, mounted
+        // volumes and quotas below the share root resolve to the real target.
+        let base = self.share_path()?;
+        let target = match &self.inner.config.root_prefix {
+            Some(prefix) => base.with_path(prefix),
+            None => base,
+        };
+        let access = DirAccessMask::new()
+            .with_list_directory(true)
+            .with_read_attributes(true)
+            .with_synchronize(true);
+        let resource = self
+            .with_timeout(
+                "capacity",
+                client.create_file(&target, &FileCreateArgs::make_open_existing(access.into())),
+            )
+            .await?;
+        let directory = match resource {
+            Resource::Directory(directory) => directory,
+            other => {
+                let _ = close_resource(other).await;
+                return Err(remote_error(
+                    StorageProviderErrorKind::Protocol,
+                    "capacity",
+                    "storage root is not a directory",
+                    false,
+                ));
+            }
+        };
+        let sample = self.query_capacity(&directory).await;
+        let closed = self.with_timeout("close", directory.close()).await;
+        let sample = sample?;
+        closed?;
+        Ok(sample)
+    }
+
+    async fn query_capacity(
+        &self,
+        directory: &Directory,
+    ) -> Result<SmbCapacitySample, StorageError> {
+        let full_size = self
+            .with_timeout(
+                "capacity",
+                directory.query_fs_info::<FileFsFullSizeInformation>(),
+            )
+            .await?;
+        // The volume serial binds the observation to its placement. A server
+        // that declines this query only omits the placement.
+        let volume = self
+            .with_timeout(
+                "capacity",
+                directory.query_fs_info::<FileFsVolumeInformation>(),
+            )
+            .await;
+        let volume_serial = match volume {
+            Ok(volume) => Some(volume.volume_serial_number),
+            Err(error) if error.is_retryable() => return Err(error),
+            Err(_) => None,
+        };
+        SmbCapacitySample::from_full_size(&full_size, volume_serial)
+    }
+
     async fn collect_keys(&self) -> Result<Vec<String>, StorageError> {
         for attempt in 0..2 {
             let snapshot = self.client_snapshot().await;
@@ -1614,6 +1701,35 @@ impl BlobStore for SmbStorageBackend {
         StorageBackend::Smb
     }
 
+    fn capacity_binding(&self) -> CapacityBinding {
+        smb_capacity_binding(&self.inner.config)
+    }
+
+    async fn observe_capacity(
+        &self,
+        request: &CapacityRequest,
+    ) -> Result<CapacityObservation, StorageError> {
+        let observed_at = OffsetDateTime::now_utc();
+        let sample = self.observe_capacity_sample().await?;
+        let placement = sample
+            .volume_serial
+            .map(|serial| CapacityPlacement(format!("smb:volume-serial={serial:08x}")));
+        let state = CapacityState::Known(KnownCapacity {
+            caller_available_bytes: sample.caller_available_bytes,
+            total_bytes: Some(sample.total_bytes),
+            physical_available_bytes: Some(sample.actual_available_bytes),
+            quota: CapacityQuota::ProviderAccounted,
+        });
+        let binding = self.capacity_binding();
+        Ok(CapacityObservation::new(
+            binding,
+            placement,
+            state,
+            observed_at,
+            request,
+        ))
+    }
+
     async fn put_blob(
         &self,
         key: &str,
@@ -1868,6 +1984,89 @@ impl BlobStore for SmbStorageBackend {
         validate_blob_key(key)?;
         self.remove_file(key).await
     }
+}
+
+/// Capacity reported by `FileFsFullSizeInformation` for the authenticated
+/// caller. MS-FSCC defines the caller-available units as those available to
+/// the user of the request, so they include any quota the server enforces.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SmbCapacitySample {
+    total_bytes: u64,
+    caller_available_bytes: u64,
+    actual_available_bytes: u64,
+    volume_serial: Option<u32>,
+}
+
+impl SmbCapacitySample {
+    fn from_full_size(
+        info: &FileFsFullSizeInformation,
+        volume_serial: Option<u32>,
+    ) -> Result<Self, StorageError> {
+        let unit = u64::from(info.sectors_per_allocation_unit)
+            .checked_mul(u64::from(info.bytes_per_sector))
+            .filter(|unit| *unit > 0)
+            .ok_or_else(|| {
+                remote_error(
+                    StorageProviderErrorKind::Protocol,
+                    "capacity",
+                    "server reported an invalid allocation unit size",
+                    false,
+                )
+            })?;
+        let bytes = |units: u64| {
+            units.checked_mul(unit).ok_or_else(|| {
+                remote_error(
+                    StorageProviderErrorKind::Protocol,
+                    "capacity",
+                    "server reported a capacity that overflows 64 bits",
+                    false,
+                )
+            })
+        };
+        if info.actual_available_allocation_units > info.total_allocation_units
+            || info.caller_available_allocation_units > info.actual_available_allocation_units
+        {
+            return Err(remote_error(
+                StorageProviderErrorKind::Protocol,
+                "capacity",
+                "server reported inconsistent allocation units",
+                false,
+            ));
+        }
+        Ok(Self {
+            total_bytes: bytes(info.total_allocation_units)?,
+            caller_available_bytes: bytes(info.caller_available_allocation_units)?,
+            actual_available_bytes: bytes(info.actual_available_allocation_units)?,
+            volume_serial,
+        })
+    }
+}
+
+fn smb_capacity_binding(config: &SmbStorageConfig) -> CapacityBinding {
+    let server = config.server.to_ascii_lowercase();
+    let port = config.port.to_string();
+    let account = config.authenticated_username();
+    let dialect = format!("{:?}", config.min_dialect);
+    CapacityBinding::new(
+        StorageBackend::Smb,
+        &[
+            ("server", server.as_str()),
+            ("port", port.as_str()),
+            ("share", config.share.as_str()),
+            ("root_prefix", config.root_prefix.as_deref().unwrap_or("")),
+            ("account", account.as_str()),
+            ("min_dialect", dialect.as_str()),
+            ("require_signing", bool_component(config.require_signing)),
+            (
+                "require_encryption",
+                bool_component(config.require_encryption),
+            ),
+        ],
+    )
+}
+
+const fn bool_component(value: bool) -> &'static str {
+    if value { "true" } else { "false" }
 }
 
 async fn remove_file_without_replay<H, O, D, F>(open: O, dispose: D) -> Result<(), StorageError>
@@ -2249,6 +2448,67 @@ mod tests {
         assert!(config.require_signing);
         assert!(!config.require_encryption);
         assert!(config.validate().is_ok());
+    }
+
+    fn full_size(total: u64, caller: u64, actual: u64) -> FileFsFullSizeInformation {
+        FileFsFullSizeInformation {
+            total_allocation_units: total,
+            caller_available_allocation_units: caller,
+            actual_available_allocation_units: actual,
+            sectors_per_allocation_unit: 8,
+            bytes_per_sector: 512,
+        }
+    }
+
+    #[test]
+    fn capacity_sample_keeps_caller_and_physical_availability_distinct() {
+        let sample = SmbCapacitySample::from_full_size(&full_size(100, 10, 40), Some(7))
+            .expect("valid capacity");
+        assert_eq!(sample.total_bytes, 100 * 4096);
+        assert_eq!(sample.caller_available_bytes, 10 * 4096);
+        assert_eq!(sample.actual_available_bytes, 40 * 4096);
+        assert_eq!(sample.volume_serial, Some(7));
+
+        // Zero caller allocation is a known zero, not an unknown.
+        let full = SmbCapacitySample::from_full_size(&full_size(100, 0, 40), None)
+            .expect("valid capacity");
+        assert_eq!(full.caller_available_bytes, 0);
+    }
+
+    #[test]
+    fn capacity_sample_rejects_invalid_units_overflow_and_inconsistency() {
+        let mut zero_unit = full_size(1, 1, 1);
+        zero_unit.bytes_per_sector = 0;
+        assert!(SmbCapacitySample::from_full_size(&zero_unit, None).is_err());
+        assert!(SmbCapacitySample::from_full_size(&full_size(u64::MAX, 1, 1), None).is_err());
+        // Caller above actual, or actual above total, is inconsistent.
+        assert!(SmbCapacitySample::from_full_size(&full_size(100, 90, 40), None).is_err());
+        assert!(SmbCapacitySample::from_full_size(&full_size(100, 10, 140), None).is_err());
+    }
+
+    #[test]
+    fn capacity_binding_covers_location_and_account_but_not_password() {
+        let base = smb_capacity_binding(&config());
+        assert_eq!(base, smb_capacity_binding(&config()));
+
+        let mut rotated = config();
+        rotated.password = SecretString::from("rotated-password");
+        assert_eq!(base, smb_capacity_binding(&rotated));
+
+        let changed = |change: fn(&mut SmbStorageConfig)| {
+            let mut config = config();
+            change(&mut config);
+            smb_capacity_binding(&config)
+        };
+        assert_ne!(base, changed(|c| c.root_prefix = Some("other".to_string())));
+        assert_ne!(base, changed(|c| c.username = "other-user".to_string()));
+        assert_ne!(base, changed(|c| c.domain = Some("OTHER".to_string())));
+        assert_ne!(base, changed(|c| c.share = "other-share".to_string()));
+        assert_ne!(base, changed(|c| c.port = 1445));
+        assert_ne!(
+            base,
+            changed(|c| c.require_encryption = !c.require_encryption)
+        );
     }
 
     #[test]
