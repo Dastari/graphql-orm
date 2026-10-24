@@ -179,11 +179,11 @@ use syn::{
 mod backend;
 mod custom_operations;
 mod entity;
-mod policy_object;
 mod federation;
 mod mutation_result;
 mod naming;
 mod operations;
+mod policy_object;
 mod relations;
 mod relationship_contract;
 mod repository;
@@ -277,9 +277,12 @@ pub fn mutation_result(input: TokenStream) -> TokenStream {
 /// resolvers remain unchanged. Private and unreadable scalar fields are omitted.
 pub fn graphql_policy_object(args: TokenStream, input: TokenStream) -> TokenStream {
     if !args.is_empty() {
-        return syn::Error::new(proc_macro2::Span::call_site(), "graphql_policy_object takes no arguments")
-            .to_compile_error()
-            .into();
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "graphql_policy_object takes no arguments",
+        )
+        .to_compile_error()
+        .into();
     }
     let input = parse_macro_input!(input as syn::ItemStruct);
     match policy_object::expand(input) {

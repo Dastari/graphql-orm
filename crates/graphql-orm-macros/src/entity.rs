@@ -1221,7 +1221,11 @@ pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> bool {
         attr.parse_args_with(
             syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
         )
-        .is_ok_and(|options| options.iter().any(|option| option.path().is_ident("complex")))
+        .is_ok_and(|options| {
+            options
+                .iter()
+                .any(|option| option.path().is_ident("complex"))
+        })
     })
 }
 

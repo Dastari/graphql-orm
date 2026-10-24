@@ -5,19 +5,31 @@ use syn::{Attribute, Expr, ItemStruct, Lit, Meta, Token, punctuated::Punctuated}
 
 fn guard(attributes: &[Attribute]) -> syn::Result<Option<Expr>> {
     let mut result = None;
-    for attribute in attributes.iter().filter(|attr| attr.path().is_ident("graphql")) {
+    for attribute in attributes
+        .iter()
+        .filter(|attr| attr.path().is_ident("graphql"))
+    {
         let options = attribute.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
         for option in options {
             if let Meta::NameValue(value) = option {
                 if value.path.is_ident("guard") {
                     let Expr::Lit(literal) = &value.value else {
-                        return Err(syn::Error::new_spanned(&value.value, "guard requires a string expression"));
+                        return Err(syn::Error::new_spanned(
+                            &value.value,
+                            "guard requires a string expression",
+                        ));
                     };
                     let Lit::Str(value) = &literal.lit else {
-                        return Err(syn::Error::new_spanned(&literal.lit, "guard requires a string expression"));
+                        return Err(syn::Error::new_spanned(
+                            &literal.lit,
+                            "guard requires a string expression",
+                        ));
                     };
                     if result.is_some() {
-                        return Err(syn::Error::new_spanned(value, "guard may only be declared once"));
+                        return Err(syn::Error::new_spanned(
+                            value,
+                            "guard may only be declared once",
+                        ));
                     }
                     result = Some(value.parse()?);
                 }
@@ -27,7 +39,10 @@ fn guard(attributes: &[Attribute]) -> syn::Result<Option<Expr>> {
     Ok(result)
 }
 
-fn install_guard(attributes: &mut Vec<Attribute>, expression: proc_macro2::TokenStream) -> syn::Result<()> {
+fn install_guard(
+    attributes: &mut Vec<Attribute>,
+    expression: proc_macro2::TokenStream,
+) -> syn::Result<()> {
     let mut retained = Vec::new();
     for attribute in attributes.drain(..) {
         if !attribute.path().is_ident("graphql") {
@@ -49,28 +64,54 @@ fn install_guard(attributes: &mut Vec<Attribute>, expression: proc_macro2::Token
     Ok(())
 }
 
-fn combine(existing: Option<Expr>, generated: &proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+fn combine(
+    existing: Option<Expr>,
+    generated: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     match existing {
-        Some(existing) => quote!(::graphql_orm::async_graphql::GuardExt::and(#existing, #generated)),
+        Some(existing) => {
+            quote!(::graphql_orm::async_graphql::GuardExt::and(#existing, #generated))
+        }
         None => generated.clone(),
     }
 }
 
 pub(crate) fn expand(mut input: ItemStruct) -> syn::Result<proc_macro2::TokenStream> {
     if !has_graphql_complex(&input.attrs) {
-        return Err(syn::Error::new_spanned(&input.ident, "graphql_policy_object requires #[graphql(complex)] and SimpleObject"));
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "graphql_policy_object requires #[graphql(complex)] and SimpleObject",
+        ));
     }
-    let simple = input.attrs.iter().filter(|attr| attr.path().is_ident("derive")).any(|attr| {
-        attr.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
-            .is_ok_and(|paths| paths.iter().any(|path| path.segments.last().is_some_and(|segment| segment.ident == "SimpleObject")))
-    });
+    let simple = input
+        .attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("derive"))
+        .any(|attr| {
+            attr.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)
+                .is_ok_and(|paths| {
+                    paths.iter().any(|path| {
+                        path.segments
+                            .last()
+                            .is_some_and(|segment| segment.ident == "SimpleObject")
+                    })
+                })
+        });
     if !simple {
-        return Err(syn::Error::new_spanned(&input.ident, "place graphql_policy_object before #[derive(..., SimpleObject, ...)]"));
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "place graphql_policy_object before #[derive(..., SimpleObject, ...)]",
+        ));
     }
     let metadata = parse_entity_metadata(&input.attrs)?;
-    let backend = resolve_backend(metadata.backend.as_deref(), input.ident.span(), "graphql_policy_object")?;
+    let backend = resolve_backend(
+        metadata.backend.as_deref(),
+        input.ident.span(),
+        "graphql_policy_object",
+    )?;
     let backend = backend_marker_tokens(backend);
-    let generated = quote!(::graphql_orm::graphql::orm::EntityFieldPolicyGuard::<_, #backend>::new(self));
+    let generated =
+        quote!(::graphql_orm::graphql::orm::EntityFieldPolicyGuard::<_, #backend>::new(self));
     let object_guard = guard(&input.attrs)?;
     install_guard(&mut input.attrs, combine(object_guard, &generated))?;
     for field in input.fields.iter_mut() {
