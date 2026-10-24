@@ -15,6 +15,29 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.69.0 to 0.70.0: bounded PostgreSQL identifiers
+
+Upgrade runtime/macros together. Two breaking changes, both limited to names
+longer than PostgreSQL's 63-byte identifier limit:
+
+- **Generated names change.** A derived index name (`idx_{table}_{columns}`,
+  `idx_{table}_{column}_spatial`, `idx_gom_search_{table}_vector`) longer than
+  63 bytes becomes its first 46 bytes, `_`, and a 16-digit FNV-1a hash of the
+  complete name. Shorter names are unchanged. On PostgreSQL the next plan
+  replaces the truncated index once and later plans are empty, which removes the
+  permanent drift those entities had. On SQLite and MSSQL, where the long name
+  was stored intact, the next plan drops the old index and creates the bounded
+  one; index rebuilds do not touch row data. Hosts that pin exact plans or
+  index names for affected entities must refresh them.
+- **PostgreSQL refuses declared long names.** A PostgreSQL plan that would create
+  an explicitly named index, search index, foreign key or check constraint longer
+  than 63 bytes now fails with a diagnostic naming it (owned plans:
+  `RuntimeMigrationDiagnosticCode::InvalidPhysicalContract`, `subject` = the
+  name). Declare a name of at most 63 bytes. SQLite and MSSQL keep accepting long
+  declared names.
+
+No public Rust API or GraphQL SDL changes. No row-data migration is required.
+
 ## agql-auth 0.23.0 selection
 
 The workspace selects agql-auth 0.23.0 at reviewed merged revision

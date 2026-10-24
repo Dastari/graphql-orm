@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.70.0 bounds generated index names to PostgreSQL's 63-byte identifier
+limit and refuses PostgreSQL plans that would truncate a declared name. See the
+[migration guide](../../MIGRATION.md#0690-to-0700-bounded-postgresql-identifiers).
+
 Version 0.69.0 adds many-to-many runtime relations: ORM-owned link tables,
 batched join reads and authorized link writes. See the
 [migration guide](../../MIGRATION.md#0680-to-0690-many-to-many-runtime-relations).

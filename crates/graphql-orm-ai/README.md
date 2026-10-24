@@ -15,12 +15,20 @@ The current workspace selects merged Auth 0.23.0 at reviewed revision
 consumers must select the same revision and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.111.0` requires AI schema module `0.73.0`: the provider
+webhook-receipt index takes ORM 0.70.0's bounded 63-byte name, so PostgreSQL
+hosts certifying the module no longer see drift. See [MIGRATION.md](MIGRATION.md).
+
 Version `0.110.1` aligns with ORM/macros 0.69.0 (`RuntimeRelation::join`).
 There is no AI API or schema change.
 
 Version `0.110.0` adopts operation catalog 0.5.0 and AI tool profiles 0.17.0.
 Re-exported catalogue types gain `label_fields`; there is no AI behaviour or
 schema change.
+
+Version `0.110.0` requires AI schema module `0.73.0`: the provider
+webhook-receipt index takes ORM 0.66.0's bounded 63-byte name, so PostgreSQL
+hosts certifying the module no longer see drift. See [MIGRATION.md](MIGRATION.md).
 
 Version `0.109.1` aligns with ORM/macros 0.56.0; runtime-composed GraphQL
 collections reach capability indexes through the runtime semantic catalogue

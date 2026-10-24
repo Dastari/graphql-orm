@@ -758,6 +758,33 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
     Ok(metadata)
 }
 
+/// PostgreSQL's identifier limit in bytes. Longer names are truncated by the
+/// server, so generated names that would exceed it are shortened here.
+const MAX_GENERATED_IDENTIFIER_BYTES: usize = 63;
+
+/// Bounds a generated physical identifier to 63 bytes.
+///
+/// Names that already fit are returned unchanged. Longer names keep a 46-byte
+/// prefix (on a character boundary) followed by `_` and the 16-digit FNV-1a
+/// hash of the complete name, matching the runtime's generated index,
+/// foreign-key and check-constraint names. The result is deterministic, so
+/// metadata, DDL and introspection agree on every backend.
+fn bounded_generated_identifier(full: String) -> String {
+    if full.len() <= MAX_GENERATED_IDENTIFIER_BYTES {
+        return full;
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in full.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let mut prefix_len = MAX_GENERATED_IDENTIFIER_BYTES - 17;
+    while !full.is_char_boundary(prefix_len) {
+        prefix_len -= 1;
+    }
+    format!("{}_{hash:016x}", &full[..prefix_len])
+}
+
 fn validate_graphql_order_name(value: &str, span: proc_macro2::Span) -> syn::Result<()> {
     let mut chars = value.chars();
     let valid_start = chars
@@ -3149,10 +3176,9 @@ fn generate_entity_impl(
             }
             db_columns.push(field_meta.db_column.unwrap_or_else(|| requested.clone()));
         }
-        let name = index
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("idx_{}_{}", raw_table_name, db_columns.join("_")));
+        let name = index.name.clone().unwrap_or_else(|| {
+            bounded_generated_identifier(format!("idx_{}_{}", raw_table_name, db_columns.join("_")))
+        });
         let columns = db_columns
             .iter()
             .map(|column| syn::LitStr::new(column, struct_name.span()))
@@ -4220,7 +4246,10 @@ fn generate_entity_impl(
             let geometry_type = spatial_geometry_type_tokens(&spatial.geometry_type, field.span())?;
             let srid = spatial.srid;
             if spatial.index && backend == BackendKind::Postgres {
-                let index_name = format!("idx_{}_{}_spatial", raw_table_name, db_col);
+                let index_name = bounded_generated_identifier(format!(
+                    "idx_{}_{}_spatial",
+                    raw_table_name, db_col
+                ));
                 let col = syn::LitStr::new(&db_col, field.span());
                 index_defs.push(quote! {
                     ::graphql_orm::graphql::orm::IndexDef::spatial_gist(#index_name, &[#col])
@@ -4632,7 +4661,10 @@ fn generate_entity_impl(
     let search_tokenizer = search_config.tokenizer;
     let search_min_token_len = search_config.min_token_len;
     let search_fallback_enabled = search_config.fallback_enabled;
-    let search_index_name = format!("idx_gom_search_{}_vector", raw_table_name.replace('.', "_"));
+    let search_index_name = bounded_generated_identifier(format!(
+        "idx_gom_search_{}_vector",
+        raw_table_name.replace('.', "_")
+    ));
     let search_pk = parsed_fields
         .iter()
         .find(|parsed| {
@@ -7266,5 +7298,41 @@ mod mssql_money_attribute_tests {
                 .to_string()
                 .contains("requires rust_decimal::Decimal")
         );
+    }
+}
+
+#[cfg(test)]
+mod generated_identifier_tests {
+    use super::bounded_generated_identifier;
+
+    #[test]
+    fn names_within_the_limit_are_unchanged() {
+        let exact = format!("idx_{}", "a".repeat(59));
+        assert_eq!(exact.len(), 63);
+        assert_eq!(bounded_generated_identifier(exact.clone()), exact);
+        assert_eq!(
+            bounded_generated_identifier("idx_users_email".to_owned()),
+            "idx_users_email"
+        );
+    }
+
+    #[test]
+    fn long_names_are_deterministically_bounded() {
+        let full = "idx_graphql_orm_ai_provider_webhook_receipts_provider_kind_provider_profile_id_provider_response_id_state".to_owned();
+        let bounded = bounded_generated_identifier(full.clone());
+        assert_eq!(bounded.len(), 63);
+        assert!(bounded.starts_with("idx_graphql_orm_ai_provider_webhook_receipts_p_"));
+        assert_eq!(bounded, bounded_generated_identifier(full.clone()));
+        let other = bounded_generated_identifier(format!("{full}_x"));
+        assert_ne!(bounded, other);
+        assert_eq!(&bounded[..46], &other[..46]);
+    }
+
+    #[test]
+    fn bounding_respects_character_boundaries() {
+        let full = format!("idx_{}é{}", "a".repeat(41), "b".repeat(40));
+        let bounded = bounded_generated_identifier(full);
+        assert!(bounded.len() <= 63);
+        assert!(bounded.is_char_boundary(bounded.len() - 17));
     }
 }

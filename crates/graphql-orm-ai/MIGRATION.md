@@ -19,6 +19,19 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.110.1 to 0.111.0: schema module 0.73.0 bounded index name
+
+Adopt with ORM/macros 0.70.0 from one workspace release and apply AI schema
+module `0.73.0` before runtime admission. The only persistent change is the name
+of the provider webhook-receipt index on `graphql_orm_ai_provider_webhook_receipts`:
+it becomes the 63-byte `idx_graphql_orm_ai_provider_webhook_receipts_p_<hash>`.
+On PostgreSQL the planned migration drops the truncated 63-byte index and
+creates the bounded one; on SQLite and MSSQL it drops the full-length index and
+creates the bounded one. Index rebuilds keep every row; no data migration is
+required. Hosts that renamed this index in their own composition can compose
+`AiSchemaModule` directly again. No Rust API, GraphQL SDL, configuration or
+authorization change.
+
 ## 0.110.0 to 0.110.1: ORM 0.69.0 alignment
 
 Adopt `graphql-orm-ai` 0.110.1 with ORM/macros 0.69.0 from one workspace release. The private session-activity query schema now states `join: None` for its key relation, following the new `RuntimeRelation::join` member. No AI API, GraphQL SDL, schema module, persistence or data migration is involved.
