@@ -30,5 +30,5 @@ pub use crate::graphql::structural_auth::{
 pub use crate::{
     GraphQLEntity, GraphQLOperations, GraphQLRelations, GraphQLSchemaEntity, GraphQLSemanticObject,
     RepositoryEntity, backend_selected_graphql_entity, graphql_complex_object,
-    graphql_orm_custom_operations, mutation_result, schema_roots,
+    graphql_orm_custom_operations, graphql_policy_object, mutation_result, schema_roots,
 };

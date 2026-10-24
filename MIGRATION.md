@@ -15,6 +15,45 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.64.1 to 0.65.0: scalar policies with generated relations
+
+Upgrade runtime/macros together. On an entity using `GraphQLEntity`,
+`GraphQLRelations`, `SimpleObject` and `#[graphql(complex)]`, add the upstream
+attribute **before the derives**:
+
+```rust,ignore
+#[graphql_orm::graphql_policy_object]
+#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone)]
+#[graphql(complex)]
+#[graphql_entity(backend = "sqlite", table = "records", plural = "Records")]
+struct Record {
+    #[primary_key]
+    id: String,
+    #[graphql_orm(read_policy = "records.admin")]
+    secret: Option<String>,
+    // Existing generated relation declarations remain unchanged.
+}
+```
+
+`SimpleObject` owns these scalar getters, so `read_policy` metadata alone did
+not previously invoke the ORM field callback on this composition path. The
+attribute installs `EntityFieldPolicyGuard` for the entity's explicit backend.
+It checks the actual selected API field and concrete row with current ORM
+entity, row and field providers on each scalar read, including subscription
+snapshot serialization. Missing providers for declared policies fail closed
+under strict/declared-policy authorization modes. Existing async-graphql guards
+remain additional restrictions, with their existing object/field precedence.
+Private, input-only and `read = false` scalars are omitted from `SimpleObject`.
+Unknown scalar metadata is denied; place computed fields in the complex impl.
+
+Generated relation resolvers, filters, ordering and Changed preflight keep their
+existing policy checks. This API does not grant scopes or principal authority,
+make a read-only source writable, or authorize external observation. When using
+`backend_selected_graphql_entity`, put that selector before
+`graphql_policy_object` so the selected backend is available. No physical schema
+or data migration is needed. Review the scalar SDL if legacy declarations had
+exposed unreadable/private fields.
+
 ## 0.64.0 to 0.64.1: SQLite RESTRICT refusal classification
 Upgrade runtime/macros together. On SQLite, a delete or key update refused by an `ON DELETE/UPDATE RESTRICT` foreign key now returns `CONSTRAINT_VIOLATION` (and runtime mutation code `constraint_violation`) instead of `INTERNAL_ERROR` (`database_failed`), the same category PostgreSQL already returned. Behaviour change: a host that matched the SQLite internal/database-failed category for this case, or carried its own mapping for it, should rely on the constraint category on both backends and may remove that mapping. Classification requires extended code `SQLITE_CONSTRAINT_TRIGGER` (1811) together with SQLite's exact `FOREIGN KEY constraint failed` message, so other trigger `RAISE(ABORT, ...)` failures remain internal errors; an application trigger that raises that identical message is indistinguishable and is classified as a constraint violation. No API, SDL, schema or data migration is required.
 

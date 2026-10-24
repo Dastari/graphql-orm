@@ -34,6 +34,7 @@ mod runtime_relation;
 mod runtime_schema;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod runtime_transaction;
+mod scalar_policy;
 mod schema_manager;
 mod schema_module;
 mod search;
@@ -73,6 +74,7 @@ pub use runtime_query::*;
 pub use runtime_record::*;
 pub use runtime_relation::*;
 pub use runtime_schema::*;
+pub use scalar_policy::*;
 pub use schema_manager::*;
 pub use schema_module::*;
 pub use search::*;
