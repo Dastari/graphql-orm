@@ -10,6 +10,15 @@ supersedes: []
 
 # graphql-orm-ai
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+Callback-only row authorization also needs a host-supplied bounded
+`AuthorizedScanConfig` on the original database before composing list, count,
+or relation reads. Keep its cursor key stable across instances that share cursors.
+
 The current workspace selects published Auth `v0.22.1` at
 `86fabec09eea1eec0f675bc150e90e3809734567` for the finite signed-catalogue
 correction. Direct Auth consumers must select the same tag and refresh their
@@ -195,6 +204,29 @@ Classified native turns can retain the crate-owned capability broker through
 turn's `with_capability_delivery` binding. Broker operations remain read-only;
 reviewed static bootstrap mutations retain current policy, one-shot approval
 where required, and ordinary resolver authorization.
+
+## Draft generated metadata and notifications
+
+Compose `public_entities::*` through `schema_roots!` using the database returned by
+`AiPublicEntityAccess`. Safe metadata projections are read-only and non-exportable.
+Their backend follows the companion feature, and standard relation-loader adapters
+preserve UUID key types under workspace feature unification. Private AI persistence
+retains schema, backup and protected-content custody.
+Trusted generated after-commit notifications connect private sources to projections,
+with message-to-session/run and attachment-to-message/session propagation. Current
+principals, owner/tenant, AI Read+List and additional host policies are revalidated.
+See [the migration guide](MIGRATION.md#01091-to-01100-generated-metadata-and-trusted-notifications-draft).
+
+This source depends on the core notification drafts and is unqualified until native,
+backend, privacy/revocation and rollback/propagation acceptance passes. Draft #189 and
+issues #184/#191 must not be presented as complete or released.
+
+The internal session-activity reader derives a closed read schema from the five
+owning tables. It omits only the three known same-ID, non-DDL public-notification
+edges; the original entity notification graph remains intact. All ownership,
+backup, field and authorization metadata still passes through the runtime
+converter, which continues to reject unsupported semantics. This read view never
+drives migrations or schema equivalence.
 
 ## Install
 

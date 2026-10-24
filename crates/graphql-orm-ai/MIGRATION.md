@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+Public metadata entities require the `ai.public.metadata` policy binding on all
+three providers. Compose them with `AiPublicEntityAccess::database()`: canonical
+schema builders reject absent or unrelated providers before reads, including
+count-only selections. Existing host binding capabilities remain delegated;
+acknowledging a binding never grants row or field access.
+
 `graphql-orm-ai` is Git-distributed and is not published to crates.io. This guide
 is mandatory so Git consumers and disposable test deployments can track schema
 and API changes without guessing.
@@ -18,6 +24,50 @@ Migration entries preserve the dependency and schema facts for the checkpoint
 they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
+
+## 0.109.1 to 0.110.0: generated metadata and trusted notifications (draft)
+
+Import `public_entities::*` into `schema_roots!` and compose with
+`AiPublicEntityAccess::new(original_database, ai_access_policy, current_principal_resolver).database()`.
+Install a bounded `AuthorizedScanConfig` on `original_database` before this step
+when callback-only row policy serves list, count, or relation reads; missing
+scan bounds fail those operations closed with `AUTHORIZATION_MISCONFIGURED`.
+Keep the original database and `AiSchemaModule` as private persistence/schema/backup
+custody. Public projections remain `external_read_only` and non-exportable, with
+no generated writes or protected-content/custody resolvers.
+
+Public projections select the companion's backend explicitly when ORM features
+are unified with other workspace consumers. Standard generated relation loaders
+retain typed UUID primary identities; current relation and field policy checks
+still govern delivery. No data or physical schema migration is added by this wiring.
+
+Generated ORM commits notify each public metadata projection through an explicit
+private source relation. Message changes propagate to session and run; run changes
+to session; attachment changes to message and session. Reverse collection relations
+retain `propagate_change = "none"`. Every hop retains current source/target, complete
+key, relation and selected-field checks. Raw observer events cannot trigger delivery;
+rollback never publishes queued events. Clients refetch authorized metadata after
+notifications and reconcile reconnect/gap behavior through generated queries.
+
+Only the five exact private source record types may be authorized on the subscription
+read surface. Their field witness admits the public owner-issued ID and projection
+link only. Current principal, exact tenant/owner and AI Read+List decisions are checked
+again during release, and existing host entity/row/field callbacks remain additional
+restrictions. Host policies that match type names must explicitly admit these source
+and public projection types for subscriptions. This adds no private query/mutation
+root, raw persistence re-export, protected content, credential/storage/upload reference,
+principal snapshot, lease or checkpoint to the public schema.
+
+Advance `AI_SCHEMA_MODULE_VERSION` from 0.72.0 to 0.73.0 through the normal owned
+module workflow to record changed relation metadata. All projection edges use
+`emit_fk = false`; persisted columns, tables and custody are unchanged and existing
+rows must be preserved. No physical data/schema migration is intended. Apply no
+schema operation to an externally managed source.
+
+The source still awaits formatter/compiler/Clippy/Rustdoc/backend, privacy,
+revocation, rollback and propagation acceptance under bounded grants. It depends on
+the core notification drafts and is not a released or completed #184/#191 resolution;
+#189 remains draft-incomplete until those gates pass.
 
 ## 0.109.0 to 0.109.1: ORM 0.56.0 alignment
 

@@ -2517,6 +2517,11 @@ impl<B: OrmBackend> EntityPolicy<B> for ScopeEntityPolicy {
 }
 
 pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Declare a host-installed policy contract; this is not an access grant.
+    fn supports_policy_binding(&self, _binding: &str) -> bool {
+        false
+    }
+
     fn can_access_entity<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,
@@ -2529,6 +2534,11 @@ pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Declare a host-installed policy contract; this is not an access grant.
+    fn supports_policy_binding(&self, _binding: &str) -> bool {
+        false
+    }
+
     fn can_read_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,
@@ -2586,6 +2596,11 @@ pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Declare a host-installed policy contract; this is not an access grant.
+    fn supports_policy_binding(&self, _binding: &str) -> bool {
+        false
+    }
+
     /// Describe read visibility for this request, entity, and access surface.
     /// The default preserves callback-only authorization. A complete predicate
     /// (or `Unrestricted`) replaces row callbacks only on read paths that

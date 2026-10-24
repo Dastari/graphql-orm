@@ -62,13 +62,48 @@ fn limits() -> RuntimeQueryLimits {
 /// Ephemeral query description derived from owning entities, never a schema
 /// synchronization/migration or a second persistent projection.
 fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
-    let mut schema = safe(RuntimeSchema::from_static_entities(&[
+    // This fixed, private read query needs the owning tables and scalar fields,
+    // not the virtual after-commit edges into public metadata projections. Keep
+    // all ownership, backup, field and policy metadata intact so the converter
+    // still rejects semantics that its runtime IR cannot represent. Never use
+    // this read view for schema equivalence, DDL or notification registration.
+    let metadata = [
         AiSessionRecord::metadata(),
         AiSessionEventRecord::metadata(),
         AiMessageRecord::metadata(),
         AiRunRecord::metadata(),
         AiRunFailureDispositionRecord::metadata(),
-    ]))?;
+    ];
+    let metadata = metadata.map(|entity| {
+        let mut view = (*entity).clone();
+        view.relations = entity
+            .relations
+            .iter()
+            .filter(|relation| {
+                let projection = match entity.entity_name {
+                    "AiSessionRecord" => Some("AiPublicSession"),
+                    "AiMessageRecord" => Some("AiPublicMessage"),
+                    "AiRunRecord" => Some("AiPublicRun"),
+                    _ => None,
+                };
+                !(projection == Some(relation.target_type)
+                    && relation.field_name == "publicMetadata"
+                    && relation.source_columns == &["id"][..]
+                    && relation.target_columns == &["id"][..]
+                    && !relation.is_multiple
+                    && !relation.emit_foreign_key
+                    && relation.propagate_change == RelationChangePropagation::Up)
+            })
+            .cloned()
+            .collect();
+        view
+    });
+    let mut schema = RuntimeSchema::from_static_entities(&metadata.iter().collect::<Vec<_>>())
+        .map_err(|_diagnostics| {
+            #[cfg(test)]
+            eprintln!("AI activity runtime conversion failed: {_diagnostics:?}");
+            AiError::PersistenceFailed
+        })?;
     // These private primary keys already define the durable keyset identity.
     // The fixed server-authored query admits them only as deterministic tie
     // breakers; this does not expose a new client-selectable sort surface.
@@ -99,7 +134,11 @@ fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
         enforce_foreign_key: false,
         on_delete: None,
     });
-    safe(schema.validate())
+    schema.validate().map_err(|_diagnostics| {
+        #[cfg(test)]
+        eprintln!("AI activity runtime validation failed: {_diagnostics:?}");
+        AiError::PersistenceFailed
+    })
 }
 
 pub(crate) fn activity_state(state: &str) -> Option<AiSessionActivityState> {
@@ -597,7 +636,19 @@ mod tests {
 
     #[test]
     fn activity_query_schema_and_all_run_states_are_closed() {
-        query_schema().unwrap();
+        let schema = query_schema().unwrap();
+        assert_eq!(schema.schema().collections.len(), 5);
+        // The actual entity retains its complete after-commit notification graph.
+        assert!(
+            AiSessionRecord::metadata()
+                .relations
+                .iter()
+                .any(|relation| {
+                    relation.field_name == "publicMetadata"
+                        && relation.target_type == "AiPublicSession"
+                        && relation.propagate_change == RelationChangePropagation::Up
+                })
+        );
         for state in [
             "queued",
             "leased",

@@ -15,6 +15,11 @@ use graphql_orm::graphql::orm::{
 };
 use graphql_orm::prelude::*;
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::public_entities::{
+    AiPublicAttachment, AiPublicMessage, AiPublicRun, AiPublicSession, AiPublicToolPolicy,
+};
+
 mod tool_media;
 pub(crate) use tool_media::*;
 
@@ -258,6 +263,20 @@ pub(crate) struct AiEgressConsentRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiToolPolicyRecord {
+    /// Trusted after-commit metadata projection; never a schema-owning relation.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[serde(skip)]
+    #[graphql(skip)]
+    #[graphql_orm(non_exportable)]
+    #[relation(
+        target = "AiPublicToolPolicy",
+        from = "id",
+        to = "id",
+        propagate_change = "up",
+        emit_fk = false
+    )]
+    pub public_metadata: Option<AiPublicToolPolicy>,
+
     #[primary_key]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
@@ -536,6 +555,20 @@ pub(crate) struct AiBudgetReservationRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiSessionRecord {
+    /// Trusted after-commit metadata projection; never a schema-owning relation.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[serde(skip)]
+    #[graphql(skip)]
+    #[graphql_orm(non_exportable)]
+    #[relation(
+        target = "AiPublicSession",
+        from = "id",
+        to = "id",
+        propagate_change = "up",
+        emit_fk = false
+    )]
+    pub public_metadata: Option<AiPublicSession>,
+
     /// Canonical versioned immutable execution selection; NULL is legacy unbound.
     pub execution_selection: Option<String>,
     /// Session ID.
@@ -879,6 +912,20 @@ pub(crate) struct AiInboxEventRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiMessageRecord {
+    /// Trusted after-commit metadata projection; never a schema-owning relation.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[serde(skip)]
+    #[graphql(skip)]
+    #[graphql_orm(non_exportable)]
+    #[relation(
+        target = "AiPublicMessage",
+        from = "id",
+        to = "id",
+        propagate_change = "up",
+        emit_fk = false
+    )]
+    pub public_metadata: Option<AiPublicMessage>,
+
     /// Message ID.
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
@@ -984,6 +1031,20 @@ pub(crate) struct AiMessageBlockRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiAttachmentRecord {
+    /// Trusted after-commit metadata projection; never a schema-owning relation.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[serde(skip)]
+    #[graphql(skip)]
+    #[graphql_orm(non_exportable)]
+    #[relation(
+        target = "AiPublicAttachment",
+        from = "id",
+        to = "id",
+        propagate_change = "up",
+        emit_fk = false
+    )]
+    pub public_metadata: Option<AiPublicAttachment>,
+
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
@@ -1103,6 +1164,20 @@ pub(crate) struct AiAttachmentArtifactRecord {
 )]
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
 pub(crate) struct AiRunRecord {
+    /// Trusted after-commit metadata projection; never a schema-owning relation.
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    #[serde(skip)]
+    #[graphql(skip)]
+    #[graphql_orm(non_exportable)]
+    #[relation(
+        target = "AiPublicRun",
+        from = "id",
+        to = "id",
+        propagate_change = "up",
+        emit_fk = false
+    )]
+    pub public_metadata: Option<AiPublicRun>,
+
     /// Canonical versioned immutable execution selection; NULL is legacy unbound.
     pub execution_selection: Option<String>,
     /// Run ID.
@@ -2505,7 +2580,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.72.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.73.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

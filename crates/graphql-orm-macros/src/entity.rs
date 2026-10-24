@@ -45,6 +45,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) graphql_rename_fields: Option<String>,
     pub(crate) rls: Option<RlsMetadata>,
     pub(crate) compose_complex_object: bool,
+    pub(crate) policy_binding: Option<String>,
     /// Declared Apollo Federation v2 entity keys, in declaration order.
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
 }
@@ -497,6 +498,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
             attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("compose_complex_object") {
                     metadata.compose_complex_object = true;
+                } else if meta.path.is_ident("policy_binding") {
+                    let value: syn::LitStr = meta.value()?.parse()?;
+                    if value.value().trim().is_empty() { return Err(syn::Error::new_spanned(value, "policy_binding must not be empty")); }
+                    metadata.policy_binding = Some(value.value());
                 } else if meta.path.is_ident("search") {
                     let mut search = SearchEntityMetadata::default();
                     meta.parse_nested_meta(|search_meta| {
@@ -713,6 +718,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.graphql_rename_fields = Some(lit.value());
+                } else if meta.input.peek(syn::Token![=]) {
+                    // async-graphql owns other object options, including guards.
+                    // Consume their values so later ORM naming metadata parses.
+                    let _: syn::Expr = meta.value()?.parse()?;
                 }
                 Ok(())
             })?;
@@ -858,6 +867,46 @@ fn rewrite_named_order_parameters(
         index += 1;
     }
     Ok((output, names))
+}
+
+#[cfg(test)]
+mod graphql_object_attribute_tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn entity_derives_preserve_foreign_object_guard_and_later_naming() {
+        let input: DeriveInput = parse_quote! {
+            #[graphql_entity(table = "guarded_records", plural = "GuardedRecords")]
+            #[graphql(complex, guard = "FieldGuard::new(self)", rename_fields = "PascalCase")]
+            struct GuardedRecord {
+                #[primary_key]
+                id: String,
+            }
+        };
+        let metadata = parse_entity_metadata(&input.attrs).unwrap();
+        assert_eq!(
+            metadata.graphql_rename_fields.as_deref(),
+            Some("PascalCase")
+        );
+        assert!(has_graphql_complex(&input.attrs));
+        assert!(generate_graphql_entity(&input).is_ok());
+        assert!(input.attrs.iter().any(|attribute| {
+            attribute.path().is_ident("graphql")
+                && quote!(#attribute)
+                    .to_string()
+                    .contains("FieldGuard::new(self)")
+        }));
+    }
+
+    #[test]
+    fn malformed_foreign_object_values_still_fail() {
+        let input: DeriveInput = parse_quote! {
+            #[graphql(guard =)]
+            struct GuardedRecord { id: String }
+        };
+        assert!(parse_entity_metadata(&input.attrs).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -3091,6 +3140,11 @@ fn generate_entity_impl(
             quote! { Some(#lit) }
         })
         .unwrap_or_else(|| quote! { None });
+    let policy_binding = entity_meta
+        .policy_binding
+        .as_deref()
+        .map(|binding| quote! { Some(#binding) })
+        .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
@@ -3923,7 +3977,11 @@ fn generate_entity_impl(
                 } else {
                     quote! { &[::graphql_orm::graphql::orm::GraphqlAggregateOperator::Count] }
                 };
-                aggregate_field_variants.push(quote! { #variant });
+                let description = field_meta
+                    .description
+                    .as_deref()
+                    .expect("field descriptions are resolved during parsing");
+                aggregate_field_variants.push(quote! { #[doc = #description] #variant });
                 aggregate_field_match_arms.push(quote! {
                     #aggregate_field_name::#variant => {
                         static FIELD: ::graphql_orm::graphql::orm::AggregateFieldRef =
@@ -4483,6 +4541,7 @@ fn generate_entity_impl(
             }
             sortable_columns.push((order_field_name.clone(), db_col_sql.clone()));
             order_by_fields.push(quote! {
+                #[doc = concat!("Order by the `", #graphql_name, "` field.")]
                 #[graphql(name = #graphql_name)]
                 pub #order_field_name: Option<::graphql_orm::graphql::orm::OrderDirection>,
             });
@@ -4895,6 +4954,7 @@ fn generate_entity_impl(
             }
 
             impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+                const REQUIRED_POLICY_BINDING: Option<&'static str> = #policy_binding;
                 fn entity_name() -> &'static str {
                     #struct_name_str
                 }
@@ -4960,7 +5020,8 @@ fn generate_entity_impl(
         #projection_definitions
         #aggregate_field_definition
 
-        // WhereInput for filtering
+        /// Typed predicates for filtering this entity.
+        #[allow(missing_docs)]
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
         #[graphql(name = #where_input_name_str, rename_fields = #field_case_rule)]
         pub struct #where_input_name {
@@ -4976,7 +5037,8 @@ fn generate_entity_impl(
             pub not: Option<Box<#where_input_name>>,
         }
 
-        // OrderByInput for sorting
+        /// Typed ordering fields for this entity.
+        #[allow(missing_docs)]
         #[derive(::graphql_orm::async_graphql::InputObject, Default, Clone, Debug)]
         #[graphql(name = #order_by_name_str, rename_fields = #field_case_rule)]
         pub struct #order_by_name {
@@ -5400,6 +5462,7 @@ fn generate_entity_impl(
         }
 
         impl ::graphql_orm::graphql::orm::Entity for #struct_name {
+            const REQUIRED_POLICY_BINDING: Option<&'static str> = #policy_binding;
             fn entity_name() -> &'static str {
                 #struct_name_str
             }
