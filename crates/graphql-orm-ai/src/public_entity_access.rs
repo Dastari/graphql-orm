@@ -898,15 +898,101 @@ mod notification_tests {
         );
     }
     #[tokio::test]
-    async fn rolled_back_private_source_update_emits_no_public_metadata() {
+    async fn attachment_update_propagates_to_public_message_and_session() {
         let (db, session, message, _) = fixture().await;
+        let attachment = Uuid::new_v4();
+        AiAttachmentRecord::insert(
+            &db,
+            CreateAiAttachmentRecordInput {
+                id: attachment,
+                owner_principal_kind: "user".into(),
+                owner_subject: "tester".into(),
+                session_id: session,
+                message_id: Some(message),
+                blob_reference: None,
+                quarantine_blob_reference: None,
+                safe_filename: "metadata.txt".into(),
+                declared_mime: Some("text/plain".into()),
+                detected_mime: None,
+                expected_byte_count: Some(1),
+                byte_count: None,
+                sha256: None,
+                upload_token_hash: None,
+                upload_expires_at: None,
+                quarantine_state: "pending".into(),
+                scan_state: "pending".into(),
+                processing_state: "pending".into(),
+                processing_expires_at: None,
+                cleanup_generation: None,
+                cleanup_lease_expires_at: None,
+                cleanup_retry_count: None,
+                cleanup_next_attempt_at: None,
+                scanner_version: None,
+                acceptance_policy_version: None,
+                rejection_code: None,
+                finalized_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        let schema = schema_builder(db.clone())
+            .data(AuthSubject::new("tester"))
+            .finish();
+        let mut messages = Box::pin(schema.execute_stream(format!(
+            "subscription {{ aiPublicMessageChanged(key: \"{message}\") {{ sourceId path }} }}"
+        )));
+        let mut sessions = Box::pin(schema.execute_stream(format!(
+            "subscription {{ aiPublicSessionChanged(key: \"{session}\") {{ sourceId path }} }}"
+        )));
+        registered(&mut messages).await;
+        registered(&mut sessions).await;
+        AiAttachmentRecord::update_by_id(
+            &db,
+            &attachment,
+            UpdateAiAttachmentRecordInput {
+                scan_state: Some("clean".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        for (response, field) in [
+            (
+                timeout(Duration::from_secs(2), messages.next())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "aiPublicMessageChanged",
+            ),
+            (
+                timeout(Duration::from_secs(2), sessions.next())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "aiPublicSessionChanged",
+            ),
+        ] {
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let value = response.data.into_json().unwrap();
+            assert_eq!(value[field]["sourceId"], attachment.to_string());
+            assert!(!value[field]["path"].as_array().unwrap().is_empty());
+        }
+    }
+    #[tokio::test]
+    async fn rolled_back_private_source_update_emits_no_public_metadata() {
+        let (db, session, message, run) = fixture().await;
         let schema = schema_builder(db.clone())
             .data(AuthSubject::new("tester"))
             .finish();
         let mut stream = Box::pin(schema.execute_stream(format!(
             "subscription {{ aiPublicSessionChanged(key: \"{session}\") {{ id }} }}"
         )));
+        let mut run_stream = Box::pin(schema.execute_stream(format!(
+            "subscription {{ aiPublicRunChanged(key: \"{run}\") {{ id }} }}"
+        )));
         registered(&mut stream).await;
+        registered(&mut run_stream).await;
         let result: Result<(), TransactionError> = db
             .transaction(TransactionMode::Default, move |tx| {
                 Box::pin(async move {
@@ -925,6 +1011,11 @@ mod notification_tests {
         assert!(result.is_err());
         assert!(
             timeout(Duration::from_millis(100), stream.next())
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(100), run_stream.next())
                 .await
                 .is_err()
         );
