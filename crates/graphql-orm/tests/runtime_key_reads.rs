@@ -67,6 +67,7 @@ fn definition(composite: bool) -> RuntimeSchema {
             indexes: vec![],
             composite_unique: vec![],
             default_order: vec![],
+            label_fields: Vec::new(),
         }],
     }
 }

@@ -9127,6 +9127,7 @@ pub(crate) mod tests {
                 exportable_scalar_field("label", GraphqlSemanticClassification::Confidential),
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let parent = GraphqlEntitySemanticMetadata {
             entity_name: "Parent".to_owned(),
@@ -9173,6 +9174,7 @@ pub(crate) mod tests {
                 },
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
@@ -9289,6 +9291,7 @@ pub(crate) mod tests {
                 exportable_scalar_field("name", GraphqlSemanticClassification::Confidential),
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let mutation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Mutation,
@@ -9356,6 +9359,7 @@ pub(crate) mod tests {
                 exportable_scalar_field("name", GraphqlSemanticClassification::Confidential),
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let subscription = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Subscription,

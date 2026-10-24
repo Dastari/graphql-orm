@@ -148,6 +148,8 @@ impl RuntimeGraphqlModule {
     /// are no runtime aggregates, so no field is groupable or aggregatable.
     /// To-many relations and projector-served fields are omitted: their result
     /// shapes (a connection, a host object) have no semantic representation.
+    /// `label_fields` lists the collection's declared label fields by API name;
+    /// it is empty when any of them is projector-served.
     pub fn semantic_entities(&self) -> Vec<GraphqlEntitySemanticMetadata> {
         let collections = &self.schema.schema().collections;
         collections
@@ -221,6 +223,22 @@ impl RuntimeGraphqlModule {
                     description: c.effective_description(),
                     default_classification: c.effective_classification(),
                     fields: fields.into_boxed_slice(),
+                    // Declared label order. A projector-served member has no scalar
+                    // entry; dropping only it would change a composite label's
+                    // meaning, so such a label is not published at all.
+                    label_fields: if c
+                        .label_fields
+                        .iter()
+                        .any(|id| self.projection(id).is_some())
+                    {
+                        Vec::new()
+                    } else {
+                        c.label_fields
+                            .iter()
+                            .filter_map(|id| c.fields.iter().find(|f| &f.id == id))
+                            .map(|f| f.api_name.clone())
+                            .collect()
+                    },
                 }
             })
             .collect()

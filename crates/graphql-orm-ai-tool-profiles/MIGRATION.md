@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.16.2 to 0.17.0: operation catalog 0.5.0
+
+Adopt profiles 0.17.0 with operation catalog 0.5.0 from the same workspace
+release. Public compile APIs take `GraphqlSemanticCatalog`, whose entities gain
+`label_fields`; pass catalogues built with 0.5.0. Capability compilation,
+fingerprints and manifests are unchanged, and labels are not used for
+capabilities. No data or schema migration is required.
+
 ## 0.16.1 to 0.16.2: generated result disclosure
 
 Adopt operation catalog 0.4.2 and profiles 0.16.2 from the same qualified

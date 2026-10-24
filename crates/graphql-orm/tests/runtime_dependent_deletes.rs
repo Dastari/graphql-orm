@@ -89,6 +89,7 @@ fn collection(
         indexes: vec![],
         composite_unique: vec![],
         default_order: vec![],
+        label_fields: Vec::new(),
     }
 }
 fn definition() -> RuntimeSchema {

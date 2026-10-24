@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.68.0 adds validated, fingerprinted runtime collection label fields and
+publishes them in the semantic catalogue. Rust struct literals of
+`RuntimeCollection` need the new member; see the
+[migration guide](../../MIGRATION.md#0670-to-0680-runtime-collection-label-fields).
+
 Version 0.67.0 adds opt-in runtime relation filters (correlated `EXISTS` with
 the target grant inside) and to-one relation selections in runtime mutation
 payloads. See the

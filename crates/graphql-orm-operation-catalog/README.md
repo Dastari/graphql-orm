@@ -21,6 +21,12 @@ schema contains custom roots, authorize a resolver, or bind a GraphQL document.
 structural export facts, but those facts do not authorize disclosure or replace
 row, field, resolver, provider-egress, or database policy.
 
+Version 0.5.0 adds `GraphqlEntitySemanticMetadata::label_fields`, the ordered
+fields forming one human-readable record label. They are validated against the
+entity's selectable, exportable, non-secret scalar fields and omitted from the
+wire and fingerprint when empty. Struct literals must add the member; see the
+[migration guide](../../MIGRATION.md#0670-to-0680-runtime-collection-label-fields).
+
 Version 0.4.2 gives generated root results the entity's inherited
 classification and structural export boundary. Pages, keysets, scans, counts
 and Changed envelopes retain that boundary. Entities with no reachable

@@ -113,6 +113,7 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                     field: customer_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
+                label_fields: Vec::new(),
             },
             RuntimeCollection {
                 description: None,
@@ -132,6 +133,7 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                     field: account_id.id.clone(),
                     direction: RuntimeOrderDirection::Asc,
                 }],
+                label_fields: Vec::new(),
             },
         ],
     }

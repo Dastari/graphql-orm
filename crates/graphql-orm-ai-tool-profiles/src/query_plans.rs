@@ -4751,6 +4751,7 @@ mod tests {
                 ),
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let mut name = scalar_field(
             "name",
@@ -4835,6 +4836,7 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         };
         let read = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
@@ -4893,6 +4895,7 @@ mod tests {
                 GraphqlSemanticExport::Exportable,
             )]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         });
         let generated = GeneratedGraphqlOperationDescriptor::generated(
             "tests::Parent",
@@ -5327,6 +5330,7 @@ mod tests {
                 description: "One public graph level.".to_owned(),
                 default_classification: GraphqlSemanticClassification::Internal,
                 fields: fields.into_boxed_slice(),
+                label_fields: Vec::new(),
             });
         }
         let operation = GraphqlSemanticOperationDescriptor::custom(
@@ -5953,6 +5957,7 @@ mod tests {
                 ),
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         });
         base.entities.push(GraphqlEntitySemanticMetadata {
             entity_name: "SearchResult".to_owned(),
@@ -6009,6 +6014,7 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         });
         base.entities.push(GraphqlEntitySemanticMetadata {
             entity_name: "SearchPayload".to_owned(),
@@ -6075,6 +6081,7 @@ mod tests {
                 },
             ]
             .into_boxed_slice(),
+            label_fields: Vec::new(),
         });
         let search = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,

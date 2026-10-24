@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-21
+last_reviewed: 2026-10-24
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,6 +28,8 @@ and `IndexId`.
   [semantic field formats](#semantic-field-formats).
 - `description`, `classification` and `export` on collections, fields and relations. See
   [descriptions, classification and export](#descriptions-classification-and-export).
+- `RuntimeCollection::label_fields`: ordered fields forming one human-readable record label.
+  See [label fields](#label-fields).
 - Relations hold ordered `RelationKeyPair` lists, so source/target key arity mismatches are
   unrepresentable. Delete behavior (`restrict`/`cascade`/`set_null`) belongs only on the
   foreign-key-enforcing side.
@@ -175,6 +177,30 @@ change (a classification change must rebind `expectedSchema`, cursors and catalo
 semantic, not structural: `structural_fingerprint()`, the physical target, plan hashes,
 migration history and DDL are unaffected. Absent members are omitted from serialization.
 Static conversion leaves them absent.
+
+## Label fields
+
+`RuntimeCollection::label_fields: Vec<FieldId>` names, in order, the fields whose values form
+one human-readable label per record, for relation pickers, relation cells and model context.
+It is a collection member rather than a per-field flag, so one list states both membership and
+composition order in a single place. Empty means no declared label, and consumers choose
+their own fallback. At most `RUNTIME_MAX_LABEL_FIELDS` (4) distinct fields of the same
+collection are allowed. Each must be a scalar other than `json` or `bytes`, with an effective
+classification other than `secret` and an effective export of `exportable`. Unknown fields
+fail with `UnknownFieldReference`, so removing a labelled field fails validation until the
+host removes or replaces the label explicitly. Other violations fail with `InvalidLabelField`.
+
+The member serializes as `label_fields` with `serde(default)` and is omitted when empty, so
+earlier documents read unchanged. A declared label joins the ID-bearing collection line as
+`|label=<JSON array of field ids in order>`, which changes `canonical_bytes()` and `fingerprint()`. It is
+presentation metadata: `structural_fingerprint()`, `format_fingerprint()`, the physical
+target, migration plans and DDL are unaffected, so a label-only revision is a metadata-only
+change. Runtime GraphQL publishes the labels by API name as
+`GraphqlEntitySemanticMetadata::label_fields` in the semantic catalogue. A label with a
+projector-served member is not published, because dropping only that member would change
+the label's meaning. Readers older than 0.67.0 reject documents or catalogues that declare
+a label (`deny_unknown_fields`); format versions are unchanged. Static conversion
+leaves the member empty.
 
 ## Exact decimals
 

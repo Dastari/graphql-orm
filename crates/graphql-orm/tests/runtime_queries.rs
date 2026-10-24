@@ -67,6 +67,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 field: fid("rank"),
                 direction: RuntimeOrderDirection::Asc,
             }],
+            label_fields: Vec::new(),
         }],
     }
     .validate()

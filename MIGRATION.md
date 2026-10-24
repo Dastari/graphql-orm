@@ -15,6 +15,17 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.67.0 to 0.68.0: runtime collection label fields
+
+Upgrade runtime/macros, the operation catalog (0.5.0), AI tool profiles (0.17.0) and AI (0.110.0) from the same workspace release. Breaking changes:
+
+- Rust: `RuntimeCollection` gains the public field `label_fields: Vec<FieldId>`, and `GraphqlEntitySemanticMetadata` gains `label_fields: Vec<String>`. Struct literals must add `label_fields: Vec::new()` (or the label).
+- Rust: `RuntimeSchemaDiagnosticCode` gains `InvalidLabelField` (`invalid_label_field`). Exhaustive matches need an arm.
+- Wire: serialized IR without the key still deserializes, and an empty list is omitted, so the bytes and fingerprints of schemas and catalogues without labels are unchanged. Format versions stay 1 (IR) and 2 (catalogue), as for earlier optional members. Readers older than this release reject a document or catalogue that declares a label with an unknown-field error (`deny_unknown_fields`); that includes routers and AI hosts parsing a subgraph catalogue. Deploy upgraded readers first.
+- A decoded catalogue whose label names an unknown, non-selectable, list, object, relationship, secret or non-exportable field, repeats one, or lists more than four now fails validation.
+
+To declare a label, set `label_fields` to up to four distinct exportable, non-secret, non-JSON, non-bytes fields of the same collection, in display order. A label-only revision changes `fingerprint()` but not `structural_fingerprint()`, `format_fingerprint()` or the physical target, so hosts can save it without DDL. Removing a labelled field fails validation (`unknown_field_reference`) until the label is changed. Runtime GraphQL omits a label from the catalogue when any member is projector-served. No data or schema migration is required.
+
 ## 0.66.0 to 0.67.0: runtime relation filters and payload relations
 
 Upgrade runtime/macros together. Breaking only for code that constructs `RuntimeReadCheck` (typically host unit tests). It is now `#[non_exhaustive]`, so test authorities through a composed schema instead. Matches on `RuntimeRelationQuantifier` or `RuntimeReadPurpose` need a wildcard arm. Read authorities need no change while relation filters stay disabled. They receive `purpose: Select` and empty `relation_filters`.
