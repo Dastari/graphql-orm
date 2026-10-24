@@ -402,6 +402,182 @@ async fn samba_constrained_max_write_handles_oversized_input_chunk() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the managed Samba container harness"]
+async fn samba_namespace_marker_lifecycle_and_reserved_aliases() {
+    use graphql_orm_storage::{
+        DomainState, NamespaceFence, NamespaceId, NamespaceInitialisation, NamespaceRelation,
+        NamespaceState, NamespaceTarget, StorageError, TopologyScan, relate_namespaces,
+    };
+
+    let root = format!("graphql-orm-storage-namespace/{}", Uuid::new_v4());
+    let config = test_config(root);
+    SmbStorageBackend::probe(
+        config.clone(),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe creates the owned prefix");
+    let store = SmbStorageBackend::connect(config.clone())
+        .await
+        .expect("connect");
+    let target = NamespaceTarget::Root;
+    let scan = TopologyScan::default();
+
+    let first = store
+        .observe_namespace(&target, &scan)
+        .await
+        .expect("observe");
+    assert_eq!(first.state, NamespaceState::Uninitialised);
+    let id = NamespaceId::new_random();
+    assert_eq!(
+        store.initialise_namespace(&target, id).await.expect("init"),
+        NamespaceInitialisation::Created(id)
+    );
+    assert_eq!(
+        store
+            .initialise_namespace(&target, id)
+            .await
+            .expect("retry"),
+        NamespaceInitialisation::AlreadyInitialisedSame(id)
+    );
+    assert_eq!(
+        store
+            .initialise_namespace(&target, NamespaceId::new_random())
+            .await
+            .expect("other"),
+        NamespaceInitialisation::AlreadyInitialisedOther(id)
+    );
+
+    // A new connection (restart) observes the same identity; never "distinct".
+    let restarted = SmbStorageBackend::connect(config).await.expect("reconnect");
+    let before = store
+        .observe_namespace(&target, &scan)
+        .await
+        .expect("observe");
+    let after = restarted
+        .observe_namespace(&target, &scan)
+        .await
+        .expect("observe");
+    assert_eq!(after.state, NamespaceState::Initialised { id });
+    let relation = relate_namespaces(&before, &after);
+    assert!(
+        matches!(
+            relation,
+            NamespaceRelation::SameNamespace | NamespaceRelation::Unknown
+        ),
+        "{relation:?}"
+    );
+
+    // Case-insensitive, trailing-dot/space, stream and short-name aliases never reach the server.
+    for key in [
+        ".GRAPHQL-ORM-NAMESPACE",
+        "a/.Graphql-Orm-Namespace.",
+        ".graphql-orm-namespace ",
+        ".graphql-orm-namespace:stream",
+        "a/file:stream",
+        "GRAPHQ~1",
+    ] {
+        let body = StorageByteStream::from_bytes(Bytes::from_static(b"overwrite"));
+        assert!(
+            matches!(
+                store.put_blob(key, body, BlobPutOptions::default()).await,
+                Err(StorageError::InvalidStorageKey { .. })
+            ),
+            "{key}"
+        );
+    }
+    store
+        .put_blob(
+            "data/x",
+            StorageByteStream::from_bytes(Bytes::from_static(b"x")),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("ordinary put");
+    assert_eq!(
+        store.list_blobs("").await.expect("list"),
+        vec!["data/x".to_string()]
+    );
+
+    let domain = store.observe_capacity_domain().await.expect("domain");
+    assert!(matches!(domain.state, DomainState::Partial { .. }));
+    assert!(!domain.facts.is_empty());
+
+    let fence = NamespaceFence {
+        target: NamespaceTarget::Root,
+        namespace: id,
+        epoch: before.epoch.clone(),
+    };
+    let payload = |bytes: &'static [u8]| StorageByteStream::from_bytes(Bytes::from_static(bytes));
+    // Overwriting fenced writes are honestly Unsupported on SMB.
+    assert!(matches!(
+        store
+            .put_blob_fenced(
+                "data/overwrite",
+                payload(b"o"),
+                BlobPutOptions::default(),
+                &fence
+            )
+            .await,
+        Err(StorageError::UnsupportedOperation { .. })
+    ));
+    // Session-bound conditional publication: create once, never overwrite.
+    assert!(
+        store
+            .put_blob_if_not_exists_fenced(
+                "data/fenced",
+                payload(b"f"),
+                BlobPutOptions::default(),
+                &fence
+            )
+            .await
+            .expect("fenced create")
+            .is_some()
+    );
+    assert!(
+        store
+            .put_blob_if_not_exists_fenced(
+                "data/fenced",
+                payload(b"g"),
+                BlobPutOptions::default(),
+                &fence
+            )
+            .await
+            .expect("fenced existing")
+            .is_none()
+    );
+    // Keys outside the target and other backend instances are refused.
+    let sub_fence = NamespaceFence {
+        target: NamespaceTarget::SubPrefix("data".to_string()),
+        ..fence.clone()
+    };
+    assert!(
+        store
+            .put_blob_if_not_exists_fenced(
+                "other/x",
+                payload(b"x"),
+                BlobPutOptions::default(),
+                &sub_fence
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        restarted
+            .put_blob_if_not_exists_fenced(
+                "data/stale",
+                payload(b"s"),
+                BlobPutOptions::default(),
+                &fence
+            )
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires the documented Samba container"]
 async fn samba_rejects_invalid_password() {
@@ -457,6 +633,23 @@ async fn samba_reconnects_after_server_restart() {
         )
         .await
         .expect("write before restart");
+    let stale_id = graphql_orm_storage::NamespaceId::new_random();
+    store
+        .initialise_namespace(&graphql_orm_storage::NamespaceTarget::Root, stale_id)
+        .await
+        .expect("initialise before restart");
+    let observed = store
+        .observe_namespace(
+            &graphql_orm_storage::NamespaceTarget::Root,
+            &graphql_orm_storage::TopologyScan::default(),
+        )
+        .await
+        .expect("observe before restart");
+    let stale_fence = graphql_orm_storage::NamespaceFence {
+        target: graphql_orm_storage::NamespaceTarget::Root,
+        namespace: stale_id,
+        epoch: observed.epoch,
+    };
 
     fixture
         .restart_with(|container| {
@@ -501,6 +694,25 @@ async fn samba_reconnects_after_server_restart() {
             .blob_exists("reconnect/blob.bin")
             .await
             .expect("reconnect and inspect remote state")
+    );
+    // A fence observed before the reconnect must not publish through the new session.
+    let fence_after_restart = stale_fence.clone();
+    assert!(
+        store
+            .put_blob_if_not_exists_fenced(
+                "reconnect/fenced.bin",
+                StorageByteStream::from_bytes(Bytes::from_static(b"stale")),
+                BlobPutOptions::default(),
+                &fence_after_restart,
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        !store
+            .blob_exists("reconnect/fenced.bin")
+            .await
+            .expect("inspect")
     );
     let before = store.diagnostics().await.directory_create_requests;
     store
@@ -601,4 +813,290 @@ fn restart_guard_denies_missing_failed_and_mismatched_ownership_without_mutation
     })
     .expect("verified restart callback");
     assert_eq!(mutations.get(), 1);
+}
+
+/// Owned loopback SMB2 fault proxy. It forwards whole NetBIOS frames and, once
+/// armed, closes both sockets instead of forwarding the selected request, so a
+/// fault lands at an exact protocol step of the operation under test.
+mod fault_proxy {
+    use std::{
+        io::{Read, Write},
+        net::{Shutdown, TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    pub const CREATE: u16 = 0x0005;
+    pub const CLOSE: u16 = 0x0006;
+    pub const WRITE: u16 = 0x0009;
+    pub const SET_INFO: u16 = 0x0011;
+
+    #[derive(Default)]
+    struct Rule {
+        active: bool,
+        name: Vec<u8>,
+        command: u16,
+        skip: usize,
+        seen: bool,
+        count: usize,
+    }
+
+    pub struct FaultProxy {
+        pub port: u16,
+        rule: Arc<Mutex<Rule>>,
+        fired: Arc<AtomicBool>,
+    }
+
+    impl FaultProxy {
+        pub fn start(upstream: (String, u16)) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("owned proxy listener");
+            let port = listener.local_addr().expect("proxy address").port();
+            let rule = Arc::new(Mutex::new(Rule::default()));
+            let fired = Arc::new(AtomicBool::new(false));
+            let (accept_rule, accept_fired) = (Arc::clone(&rule), Arc::clone(&fired));
+            std::thread::spawn(move || {
+                for client in listener.incoming() {
+                    let Ok(client) = client else { return };
+                    let Ok(server) = TcpStream::connect((upstream.0.as_str(), upstream.1)) else {
+                        let _ = client.shutdown(Shutdown::Both);
+                        continue;
+                    };
+                    let _ = client.set_nodelay(true);
+                    let _ = server.set_nodelay(true);
+                    let (mut down_from, mut down_to) = (
+                        server.try_clone().expect("server clone"),
+                        client.try_clone().expect("client clone"),
+                    );
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut down_from, &mut down_to);
+                        let _ = down_to.shutdown(Shutdown::Both);
+                    });
+                    let (rule, fired) = (Arc::clone(&accept_rule), Arc::clone(&accept_fired));
+                    std::thread::spawn(move || forward_requests(client, server, &rule, &fired));
+                }
+            });
+            Self { port, rule, fired }
+        }
+
+        /// Drops the `skip`-th request with `command` issued after the first
+        /// CREATE whose path contains `name` (that CREATE itself counts).
+        pub fn arm(&self, name: &str, command: u16, skip: usize) {
+            let name = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            *self.rule.lock().expect("rule") = Rule {
+                active: true,
+                name,
+                command,
+                skip,
+                ..Rule::default()
+            };
+            self.fired.store(false, Ordering::SeqCst);
+        }
+
+        pub fn fired(&self) -> bool {
+            self.fired.load(Ordering::SeqCst)
+        }
+    }
+
+    fn forward_requests(
+        mut client: TcpStream,
+        mut server: TcpStream,
+        rule: &Mutex<Rule>,
+        fired: &AtomicBool,
+    ) {
+        loop {
+            let mut header = [0_u8; 4];
+            if client.read_exact(&mut header).is_err() {
+                break;
+            }
+            let length = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+            let mut frame = vec![0_u8; length];
+            if client.read_exact(&mut frame).is_err() {
+                break;
+            }
+            if should_drop(&mut rule.lock().expect("rule"), &frame) {
+                fired.store(true, Ordering::SeqCst);
+                break;
+            }
+            if server.write_all(&header).is_err() || server.write_all(&frame).is_err() {
+                break;
+            }
+        }
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = server.shutdown(Shutdown::Both);
+    }
+
+    fn should_drop(rule: &mut Rule, frame: &[u8]) -> bool {
+        if !rule.active {
+            return false;
+        }
+        let mut offset = 0;
+        while let Some(message) = frame.get(offset..) {
+            if message.len() < 64 || &message[..4] != b"\xfeSMB" {
+                return false;
+            }
+            let command = u16::from_le_bytes([message[12], message[13]]);
+            let next =
+                u32::from_le_bytes([message[20], message[21], message[22], message[23]]) as usize;
+            let body = if next == 0 {
+                message
+            } else {
+                &message[..next.min(message.len())]
+            };
+            if command == CREATE
+                && !rule.name.is_empty()
+                && body
+                    .windows(rule.name.len())
+                    .any(|window| window == rule.name)
+            {
+                rule.seen = true;
+            }
+            if rule.seen && command == rule.command {
+                if rule.count == rule.skip {
+                    rule.active = false;
+                    return true;
+                }
+                rule.count += 1;
+            }
+            if next == 0 {
+                return false;
+            }
+            offset += next;
+        }
+        false
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the documented Samba container"]
+async fn samba_fenced_create_never_reconnects_or_replays_mid_operation() {
+    use fault_proxy::{CLOSE, CREATE, FaultProxy, SET_INFO, WRITE};
+    use graphql_orm_storage::{
+        NamespaceFence, NamespaceId, NamespaceTarget, StorageError, TopologyScan,
+    };
+
+    let root = format!("graphql-orm-storage-fault/{}", Uuid::new_v4());
+    let mut direct_config = test_config(root);
+    direct_config.operation_timeout = Duration::from_secs(5);
+    SmbStorageBackend::probe(
+        direct_config.clone(),
+        SmbProbeOptions {
+            create_prefix: true,
+        },
+    )
+    .await
+    .expect("probe");
+    let direct = SmbStorageBackend::connect(direct_config.clone())
+        .await
+        .expect("direct connection");
+    let id = NamespaceId::new_random();
+    direct
+        .initialise_namespace(&NamespaceTarget::Root, id)
+        .await
+        .expect("initialise");
+    let proxy = FaultProxy::start((direct_config.server.clone(), direct_config.port));
+    let mut proxied_config = direct_config.clone();
+    proxied_config.server = "127.0.0.1".to_string();
+    proxied_config.port = proxy.port;
+
+    // (key, CREATE path fragment, dropped command, skipped matches, step)
+    let cases = [
+        (
+            "fp-a/deep/object.bin",
+            "fp-a",
+            CREATE,
+            0,
+            "parent directory create",
+        ),
+        (
+            "fp-b/object.bin",
+            "fp-b",
+            CLOSE,
+            0,
+            "parent directory close",
+        ),
+        (
+            "fp-c/fp-c-final.bin",
+            "fp-c-final.bin",
+            CREATE,
+            0,
+            "final exclusive create",
+        ),
+        (
+            "fp-d/fp-d-final.bin",
+            "fp-d-final.bin",
+            WRITE,
+            0,
+            "body write",
+        ),
+        (
+            "fp-e/fp-e-final.bin",
+            "fp-e-final.bin",
+            SET_INFO,
+            1,
+            "set-info before publication",
+        ),
+    ];
+    for (key, name, command, skip, step) in cases {
+        let store = SmbStorageBackend::connect(proxied_config.clone())
+            .await
+            .expect("proxied connection");
+        let observed = store
+            .observe_namespace(&NamespaceTarget::Root, &TopologyScan::default())
+            .await
+            .expect("observe");
+        let fence = NamespaceFence {
+            target: NamespaceTarget::Root,
+            namespace: id,
+            epoch: observed.epoch,
+        };
+        let reconnects = store.diagnostics().await.reconnects;
+        proxy.arm(name, command, skip);
+        let result = store
+            .put_blob_if_not_exists_fenced(
+                key,
+                StorageByteStream::from_bytes(Bytes::from_static(b"fenced")),
+                BlobPutOptions::default(),
+                &fence,
+            )
+            .await;
+        assert!(proxy.fired(), "{step}: the fault point was not reached");
+        assert!(result.is_err(), "{step}: {result:?}");
+        // Spawned drop cleanup must not reconnect either.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            store.diagnostics().await.reconnects,
+            reconnects,
+            "{step}: the fenced path reconnected"
+        );
+        // Nothing was published: the server discards the delete-pending file
+        // with the lost session.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while direct.blob_exists(key).await.expect("inspect") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{step}: object published"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Only an ordinary call repairs the session; the old fence then fails
+        // closed and still writes nothing.
+        let _ = store.blob_exists("unrelated.bin").await;
+        assert!(
+            matches!(
+                store
+                    .put_blob_if_not_exists_fenced(
+                        key,
+                        StorageByteStream::from_bytes(Bytes::from_static(b"stale")),
+                        BlobPutOptions::default(),
+                        &fence,
+                    )
+                    .await,
+                Err(StorageError::PreconditionFailed { .. })
+            ),
+            "{step}: a stale fence was accepted after reconnect"
+        );
+        assert!(!direct.blob_exists(key).await.expect("inspect"), "{step}");
+    }
 }
