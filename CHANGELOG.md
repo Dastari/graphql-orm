@@ -16,7 +16,14 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.64.1**.
+Companion runtime/macros version: **0.65.0**.
+
+- Add `#[graphql_policy_object]` for the `SimpleObject` plus generated-relations
+  path. Selected scalar getters now call current ORM entity, row and field
+  policies, including `read_policy`, while preserving existing host guards.
+- Preserve async-graphql guard expressions when parsing entity naming metadata.
+
+## 0.64.1 (unreleased)
 
 - SQLite classifies a statement refused by a foreign-key `RESTRICT` action as `CONSTRAINT_VIOLATION` (runtime mutation code `constraint_violation`), matching PostgreSQL. SQLite raises `RESTRICT` through its internal trigger program with extended code `SQLITE_CONSTRAINT_TRIGGER` (1811), which sqlx reports as an unclassified error, so such deletes previously surfaced as `INTERNAL_ERROR` / `database_failed`. The rule requires the SQLite driver error, extended code 1811 and SQLite's exact `FOREIGN KEY constraint failed` message; every other trigger failure keeps its previous classification. PostgreSQL, MSSQL and `NO ACTION` (787) are unchanged.
 

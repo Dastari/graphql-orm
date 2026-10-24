@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.65.0 adds `#[graphql_policy_object]` to enforce current scalar field
+policies on `SimpleObject` entities that use generated complex relations. Add
+the attribute before the derives; existing relations and guards are preserved.
+See the [migration guide](../../MIGRATION.md#0641-to-0650-scalar-policies-with-generated-relations).
+
 Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).

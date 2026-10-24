@@ -36,6 +36,7 @@ mod runtime_schema;
 mod runtime_transaction;
 mod schema_manager;
 mod schema_module;
+mod scalar_policy;
 mod search;
 #[cfg(feature = "sqlite")]
 pub mod spatial;
@@ -75,4 +76,5 @@ pub use runtime_relation::*;
 pub use runtime_schema::*;
 pub use schema_manager::*;
 pub use schema_module::*;
+pub use scalar_policy::*;
 pub use search::*;

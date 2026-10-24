@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.65.0 adds `#[graphql_policy_object]` before the derives for the
+`GraphQLEntity + SimpleObject #[graphql(complex)] + GraphQLRelations` pattern.
+It installs backend-specific ORM scalar policy guards, preserves existing
+guards and generated relations, and omits unreadable/private scalar fields.
+See the [migration guide](../../MIGRATION.md#0641-to-0650-scalar-policies-with-generated-relations).
+
 Version 0.64.1 classifies SQLite foreign-key `RESTRICT` refusals as constraint
 violations, matching PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0640-to-0641-sqlite-restrict-refusal-classification).

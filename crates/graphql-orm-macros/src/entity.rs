@@ -713,6 +713,9 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.graphql_rename_fields = Some(lit.value());
+                } else if meta.input.peek(syn::Token![=]) {
+                    // async-graphql owns foreign object options such as guards.
+                    let _: syn::Expr = meta.value()?.parse()?;
                 }
                 Ok(())
             })?;
@@ -1215,14 +1218,10 @@ pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> bool {
             return false;
         }
 
-        let mut is_complex = false;
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("complex") {
-                is_complex = true;
-            }
-            Ok(())
-        });
-        is_complex
+        attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+        )
+        .is_ok_and(|options| options.iter().any(|option| option.path().is_ident("complex")))
     })
 }
 
