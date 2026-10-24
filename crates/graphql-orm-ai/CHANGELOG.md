@@ -18,6 +18,17 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.111.0
+
+- AI schema module 0.73.0. With ORM/macros 0.70.0 the provider webhook-receipt
+  index (`provider_kind, provider_profile_id, provider_response_id, state`) is
+  named `idx_graphql_orm_ai_provider_webhook_receipts_p_<hash>` (63 bytes)
+  instead of a 105-byte name PostgreSQL truncated. A strict owned plan on
+  PostgreSQL proposed recreating it on every run, so hosts that certify a
+  composed profile containing the AI module received `BaselineMismatch`. A test
+  now holds every AI table, column, index and constraint name to 63 bytes.
+  Persistent index change only; no Rust API, GraphQL SDL or data change.
+
 ## Unreleased - 0.110.1
 
 - Align with ORM/macros 0.69.0. The private session-activity query schema sets the new `RuntimeRelation::join` member to `None`. No provider, AI runtime, public API or schema change; AI schema module unchanged.

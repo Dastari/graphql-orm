@@ -1186,6 +1186,19 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             &target.borrowed(),
             DefaultEquivalence::TypedLiteralsV1,
         );
+        if B::DIALECT == DatabaseBackend::Postgres {
+            let steps = physical.steps.iter().map(StepRef::from).collect::<Vec<_>>();
+            if let Some(overlong) = super::migrations::postgres_overlong_identifier(&steps) {
+                return Err(
+                    RuntimeMigrationDiagnostics(vec![RuntimeMigrationDiagnostic {
+                        code: RuntimeMigrationDiagnosticCode::InvalidPhysicalContract,
+                        collection: None,
+                        subject: Some(overlong.name),
+                    }])
+                    .into(),
+                );
+            }
+        }
         let limits = target.limits;
         if physical.steps.len() > limits.max_plan_steps
             || physical.statements.len() > limits.max_plan_statements

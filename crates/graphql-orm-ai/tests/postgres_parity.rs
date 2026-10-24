@@ -620,6 +620,57 @@ fn principal(now: OffsetDateTime) -> AuthPrincipal {
     })
 }
 
+/// A strict owned plan of the composed AI module re-plans empty on PostgreSQL:
+/// no identifier is truncated, so certification sees no drift.
+#[tokio::test]
+async fn owned_postgres_ai_schema_module_owned_replan_is_empty() {
+    let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
+        return;
+    };
+    let database = Database::<PostgresBackend>::connect_postgres(container.connection_url())
+        .await
+        .expect("ORM should connect only to the owned container");
+    let module = AiSchemaModule;
+    let catalog = graphql_orm::graphql::orm::SchemaModuleCatalog::compose(&[&module])
+        .expect("AI module should compose");
+    let target = graphql_orm::graphql::orm::OwnedSchemaModel::from(&catalog.schema_model());
+    let ownership = graphql_orm::graphql::orm::ManagedTableSet::new(
+        module
+            .entities()
+            .iter()
+            .map(|entity| entity.table_name.to_owned()),
+    )
+    .expect("AI tables form a managed set");
+    let plan = database
+        .schema()
+        .plan_owned_migration(
+            "ai-owned-v1",
+            "graphql-orm-ai owned PostgreSQL module",
+            &target,
+            &ownership,
+            graphql_orm::graphql::orm::PlanOptions::strict(),
+        )
+        .await
+        .expect("AI module should plan as an owned PostgreSQL migration");
+    database
+        .schema()
+        .apply_owned_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("AI module should apply to the owned PostgreSQL database");
+    let replan = database
+        .schema()
+        .plan_owned_migration(
+            "ai-owned-v2",
+            "graphql-orm-ai owned PostgreSQL re-plan",
+            &target,
+            &ownership,
+            graphql_orm::graphql::orm::PlanOptions::strict(),
+        )
+        .await
+        .expect("AI module should re-plan");
+    assert!(replan.steps().is_empty(), "{:?}", replan.statements());
+}
+
 #[tokio::test]
 async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fencing() {
     let Some(container) = OwnedPostgres::start().expect("owned PostgreSQL should start") else {
