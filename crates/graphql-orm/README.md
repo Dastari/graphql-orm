@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.70.1 drops a replaced foreign key before adding its replacement, so a changed delete
+policy applies on PostgreSQL. See the
+[migration guide](../../MIGRATION.md#0700-to-0701-foreign-key-replacement-order).
+
 Version 0.70.0 refuses hidden and missing link targets with a uniform `denied`
 before any write; a missing target no longer yields `constraint_violation`. See
 the [migration guide](../../MIGRATION.md#0690-to-0700-uniform-refusal-of-hidden-and-missing-link-targets).

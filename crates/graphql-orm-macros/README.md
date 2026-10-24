@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.70.1 is the companion of the runtime's foreign-key replacement order fix; the macros
+themselves are unchanged.
+
 Version 0.70.0 is the companion of the runtime's uniform refusal of hidden and
 missing link targets; the macros themselves are unchanged. See the
 [migration guide](../../MIGRATION.md#0690-to-0700-uniform-refusal-of-hidden-and-missing-link-targets).
