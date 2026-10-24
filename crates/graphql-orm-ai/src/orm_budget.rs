@@ -1755,6 +1755,8 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             &database,
             CreateAiBudgetPolicyRecordInput {
+                id: uuid::Uuid::new_v4(),
+                provisioned_by: None,
                 scope_key: crate::ai_scope_key(&AiScope::new("tenant", TENANT)),
                 scope_kind: "tenant".to_owned(),
                 scope_id: TENANT.to_owned(),
@@ -1993,11 +1995,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provisioned_deployment_policies_coexist_with_interactive_policies() {
+        let fixture = fixture(100).await;
+        let provisioner = crate::OrmAiBudgetPolicyProvisioner::new(
+            fixture.database.clone(),
+            crate::AiDeploymentActor::new("config-file").unwrap(),
+            crate::AiBudgetPolicyManagementLimits::new(
+                AiBudgetAmounts {
+                    input_tokens: 1_000,
+                    output_tokens: 1_000,
+                    tool_units: 100,
+                    image_units: 100,
+                    cost_microunits: 10_000,
+                    runs: 100,
+                },
+                10,
+            )
+            .unwrap(),
+        );
+        let outcome = provisioner
+            .ensure_budget_policy(crate::AiDeploymentBudgetPolicy {
+                scope: AiScope::new("tenant", TENANT),
+                principal_kind: None,
+                principal_subject: None,
+                interval: crate::AiBudgetIntervalInput::Day,
+                maximum_input_tokens: Some(40),
+                maximum_output_tokens: Some(1_000),
+                maximum_tool_units: None,
+                maximum_image_units: None,
+                maximum_cost_microunits: None,
+                maximum_runs: Some(100),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            crate::AiDeploymentBudgetPolicyOutcome::Created(_)
+        ));
+        let run = seed_running_run(&fixture.database, &fixture.principal, fixture.now).await;
+        // The interactive policy allows 100 input tokens; the stricter
+        // deployment policy also applies and denies 60 without a partial write.
+        assert!(matches!(
+            fixture
+                .service
+                .reserve(
+                    &fixture.principal,
+                    request(run.0, run.1, run.2, 60, "deployment-deny", fixture.now),
+                )
+                .await,
+            Err(AiError::BudgetDenied)
+        ));
+        assert_eq!(counter_count(&fixture.database).await, 0);
+        fixture
+            .service
+            .reserve(
+                &fixture.principal,
+                request(run.0, run.1, run.2, 30, "deployment-fit", fixture.now),
+            )
+            .await
+            .expect("a reservation within both policies should be admitted");
+        assert_eq!(counter_count(&fixture.database).await, 2);
+    }
+
+    #[tokio::test]
     async fn every_applicable_policy_is_checked_before_any_counter_is_written() {
         let fixture = fixture(100).await;
         AiBudgetPolicyRecord::insert(
             &fixture.database,
             CreateAiBudgetPolicyRecordInput {
+                id: uuid::Uuid::new_v4(),
+                provisioned_by: None,
                 scope_key: crate::ai_scope_key(
                     &AiScope::new("tenant", TENANT).with_tenant_id(TENANT),
                 ),
