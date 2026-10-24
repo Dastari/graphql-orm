@@ -15,6 +15,10 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.70.0 to 0.70.1: foreign-key replacement order
+
+Upgrade runtime/macros together. No API, schema, SDL or persistence change. Owned and legacy migration plans that replace a foreign key now list its `DropForeignKey` before its `AddForeignKey`. A delete-policy change that previously failed on PostgreSQL with "constraint already exists" now applies. Plan hashes of such plans change; plans without a foreign-key replacement are unchanged.
+
 ## 0.69.0 to 0.70.0: uniform refusal of hidden and missing link targets
 
 Upgrade runtime/macros together. No Rust API, schema, SDL or persistence change. Breaking only in behaviour, for runtime link mutations (`runtime_link_request`, GraphQL `update<Object><Relation>Links`):

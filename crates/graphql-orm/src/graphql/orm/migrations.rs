@@ -1120,6 +1120,10 @@ pub(super) fn diff_schema_views_with(
             .keys()
             .chain(target_foreign_keys.keys())
             .collect::<std::collections::BTreeSet<_>>();
+        // A replaced foreign key (for example a changed delete policy) keeps its generated
+        // constraint name, so every drop of a table precedes every add: otherwise PostgreSQL
+        // could add the new constraint while the old one still holds the name.
+        let mut added_foreign_keys = Vec::new();
         for key in foreign_key_identities {
             let mut current = current_foreign_keys.get(key).cloned().unwrap_or_default();
             let mut target = target_foreign_keys.get(key).cloned().unwrap_or_default();
@@ -1133,12 +1137,13 @@ pub(super) fn diff_schema_views_with(
                 });
             }
             for foreign_key in target.into_iter().skip(common) {
-                steps.push(OwnedMigrationStep::AddForeignKey {
+                added_foreign_keys.push(OwnedMigrationStep::AddForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: foreign_key.clone(),
                 });
             }
         }
+        steps.extend(added_foreign_keys);
         if table.append_only != target_table.append_only
             || table.retention_purge != target_table.retention_purge
         {

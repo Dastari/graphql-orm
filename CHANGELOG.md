@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.70.1**.
+
+- Fix: replacing a foreign key with the same columns and target (for example changing its delete policy) now drops the old constraint before adding the new one. The generated constraint name does not include the policy, and on PostgreSQL the add could run first and fail because the name was still in use. That happened when the new policy sorted before the old one: `Cascade`/`SetNull` to `Restrict`, or `SetNull` to `Cascade`. Every drop of a table now precedes every add. SQLite rebuilds are unaffected.
+
+## 0.70.0 (unreleased)
+
 Companion runtime/macros version: **0.70.0**.
 
 - Refuse hidden and missing link targets uniformly. A link mutation now requires every requested target (`set`, `add`, `remove`) to be an existing row admitted by `RuntimeWriteAuthority::link_target_visibility`. PostgreSQL locks it `FOR KEY SHARE`. Any other target fails with `denied` before `authorize_links`, hooks or any write. A host that allows such a target can no longer leak a hidden link's existence through `RuntimeLinkEffect::added`, or a row's existence through `constraint_violation` versus success.

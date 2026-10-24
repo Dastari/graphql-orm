@@ -471,6 +471,63 @@ fn postgres_plan_renders_foreign_key_statement() {
 }
 
 #[test]
+fn a_changed_delete_policy_drops_the_old_foreign_key_before_adding_the_new_one() {
+    // The generated constraint name ignores the policy, so the replacement must free it first,
+    // whichever policy sorts first.
+    let policies = [
+        DeletePolicy::Restrict,
+        DeletePolicy::Cascade,
+        DeletePolicy::SetNull,
+    ];
+    for from in &policies {
+        for to in policies.iter().filter(|to| *to != from) {
+            let with = |policy: &DeletePolicy| {
+                let mut posts = posts_with_fk();
+                posts.columns[1].nullable = true;
+                posts.foreign_keys[0].on_delete = policy.clone();
+                SchemaModel {
+                    extensions: Vec::new(),
+                    tables: vec![users_v1(), posts],
+                }
+            };
+            let (current, target) = (with(from), with(to));
+            let diff = diff_schema_models(&current, &target);
+            let kinds = diff
+                .steps
+                .iter()
+                .filter_map(|step| match step {
+                    MigrationStep::DropForeignKey { foreign_key, .. } => {
+                        Some(("drop", foreign_key.on_delete.clone()))
+                    }
+                    MigrationStep::AddForeignKey { foreign_key, .. } => {
+                        Some(("add", foreign_key.on_delete.clone()))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                kinds,
+                [("drop", from.clone()), ("add", to.clone())],
+                "{from:?} -> {to:?}"
+            );
+            let plan = build_migration_plan(DatabaseBackend::Postgres, &current, &target);
+            let position = |needle: &str| {
+                plan.statements
+                    .iter()
+                    .position(|statement| statement.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle} in {:?}", plan.statements))
+            };
+            assert!(
+                position("DROP CONSTRAINT \"fk_posts_author_id_users_id\"")
+                    < position("ADD CONSTRAINT \"fk_posts_author_id_users_id\""),
+                "{from:?} -> {to:?}: {:?}",
+                plan.statements
+            );
+        }
+    }
+}
+
+#[test]
 fn postgres_fk_drop_uses_the_exact_quoted_observed_constraint_name() {
     let mut posts = posts_with_fk();
     posts.foreign_keys[0].constraint_name = Some("Legacy \"Posts\" Author FK".to_string());
