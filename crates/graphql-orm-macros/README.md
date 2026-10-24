@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.66.0 lets runtime deletes opt in to authorized, ORM-performed
+`Cascade`/`SetNull` dependent changes. See the
+[migration guide](../../MIGRATION.md#0650-to-0660-opt-in-runtime-cascade-and-set-null-deletes).
+
 Version 0.65.0 adds `#[graphql_policy_object]` before the derives for the
 `GraphQLEntity + SimpleObject #[graphql(complex)] + GraphQLRelations` pattern.
 It installs backend-specific ORM scalar policy guards, preserves existing

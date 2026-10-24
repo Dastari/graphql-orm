@@ -13,6 +13,10 @@ pub struct RuntimeGraphqlMutationOptions {
     pub limits: RuntimeMutationLimits,
     /// Bounds only post-commit record authorization, not the transaction itself.
     pub output_authorization_timeout: std::time::Duration,
+    /// Opt-in Cascade/SetNull dependents for generated deletes; see
+    /// [`RuntimeMutationRequest::with_dependent_changes`]. `None` keeps refusing
+    /// such deletes with `unsupported_cascade`.
+    pub dependent_changes: Option<RuntimeDependentLimits>,
 }
 impl Default for RuntimeGraphqlMutationOptions {
     fn default() -> Self {
@@ -22,6 +26,7 @@ impl Default for RuntimeGraphqlMutationOptions {
             delete: true,
             limits: Default::default(),
             output_authorization_timeout: std::time::Duration::from_secs(5),
+            dependent_changes: None,
         }
     }
 }
@@ -554,12 +559,13 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                 limits,
                             )
                         } else {
-                            module.schema.runtime_delete_request(
-                                key,
-                                expected,
-                                returning.clone(),
-                                limits,
-                            )
+                            module
+                                .schema
+                                .runtime_delete_request(key, expected, returning.clone(), limits)
+                                .and_then(|request| match options.dependent_changes {
+                                    Some(dependents) => request.with_dependent_changes(dependents),
+                                    None => Ok(request),
+                                })
                         }
                     }
                     .map_err(mutation_error)?;
@@ -611,6 +617,11 @@ impl<B: RuntimeMutationBackend> RuntimeWriteAuthority<B> for AuthorityAdapter<B>
     ) -> futures::future::BoxFuture<'a, Result<RuntimeWriteGrant, RuntimeMutationError>> {
         Box::pin(async move {
             let grant = self.host.authorize_intent(check, tx).await?;
+            // Dependent rows of an opted-in delete belong to other rows or collections;
+            // the host's write authority alone decides them.
+            if check.cause().is_some() {
+                return Ok(grant);
+            }
             grant.graphql_restrict(
                 &self.prepared.module.schema,
                 &self.prepared.collection,
