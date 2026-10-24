@@ -15,6 +15,10 @@ The current workspace selects published Auth release tag `v0.23.0`
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.114.0` lets hosts choose the provider TLS stack (`provider-*-core`
+plus one `provider-tls-*` feature) and runs Responses tool calls without
+provider retention through stateless replay. See [MIGRATION.md](MIGRATION.md).
+
 Version `0.113.0` adds trusted deployment provisioning of budget policies
 (`OrmAiBudgetPolicyProvisioner`) and requires AI schema module `0.74.0`. See
 [usage and budgets](docs/usage-and-budgets.md#deployment-provisioning) and

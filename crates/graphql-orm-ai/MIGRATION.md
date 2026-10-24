@@ -19,6 +19,27 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.113.0 to 0.114.0: provider TLS selection, stateless Responses replay
+
+No action is required. Existing `provider-*` features select the same
+rustls/aws-lc-rs stack as before. To use another stack, replace each
+`provider-X` feature with `provider-X-core` and add exactly one of
+`provider-tls-ring` or `provider-tls-native` (or `provider-tls-aws-lc`). Mixing
+a plain `provider-X` feature with another TLS feature is a compile error,
+because `provider-X` already selects aws-lc. `provider-tls-ring` never installs
+a process-wide rustls default provider. It verifies servers against the system
+CA store, which a Linux runtime image must include (for example
+`ca-certificates`). Run your own `cargo tree -e normal --target <target>` check
+for aws-lc: another dependency enabling rustls's default `aws_lc_rs` feature
+re-adds it.
+
+To run tool calls on a Responses endpoint without provider retention, keep
+`store_responses` (OpenAI) or `provider_retained_continuation` (compatible)
+false, enable custom tools, and send `ModelContinuationMode::StatelessReplay`.
+Egress manifests are unchanged. Reasoning models re-reason from the replayed
+conversation on every turn, which costs more tokens than retained continuation.
+No schema-module, GraphQL SDL or data migration.
+
 ## 0.112.0 to 0.113.0: deployment budget provisioning, schema module 0.74.0
 
 Apply AI schema module `0.74.0` before runtime admission. It adds a nullable

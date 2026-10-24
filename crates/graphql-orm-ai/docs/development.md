@@ -48,6 +48,13 @@ from the environment or command line. It verifies the label again before
 cleanup. CI treats an unavailable Docker socket as failure; a local developer
 run reports a skip.
 
+Check the provider TLS feature selection: the ring build must not depend on
+aws-lc or QUIC, every stack must compile, and zero or two stacks must fail:
+
+```bash
+scripts/check-ai-provider-tls.sh all
+```
+
 Do not run Cargo `--all-features`: the persistence backends are intentionally
 mutually exclusive. Provider feature matrices must select exactly one backend.
 

@@ -23,13 +23,49 @@ authority.
 | `sqlite` | Yes | Initial managed schema and runtime lane. |
 | `postgres` | No | PostgreSQL schema and runtime lane. |
 | `mssql` | No | Schema/compile support; see [capability matrix](backend-capability-matrix.md). |
-| `provider-openai`, `provider-anthropic`, `provider-xai`, `provider-ollama`, `provider-openai-compatible` | No | Explicit provider adapters; each still needs host egress, secret, and budget policy. |
+| `provider-openai`, `provider-anthropic`, `provider-xai`, `provider-ollama`, `provider-openai-compatible` | No | Explicit provider adapters with the rustls/aws-lc-rs TLS stack; each still needs host egress, secret, and budget policy. |
+| `provider-openai-core`, `provider-anthropic-core`, `provider-xai-core`, `provider-ollama-core`, `provider-openai-compatible-core` | No | The same adapters without a TLS stack; combine with exactly one `provider-tls-*` feature. |
+| `provider-tls-aws-lc`, `provider-tls-ring`, `provider-tls-native` | No | Provider HTTP TLS stack: rustls with aws-lc-rs, rustls with an explicit `ring` provider and the platform verifier, or the platform's native TLS. Exactly one is required by any adapter. |
 | `local-harness` | No | Installed, deployment-sandboxed JSON-lines driver; never a generic subprocess launcher. |
 | `provider-codex-app-server` | No | Experimental local Codex/app-server boundary; deployment owns installation, sandboxing, and credentials. |
 | `graphql-case-pascal` | No | Changes the complete public GraphQL naming contract. |
 
 Exactly one persistence backend is required. Provider features do not enable a
 provider or authorize egress.
+
+### Provider TLS stack
+
+Each `provider-*` feature keeps today's stack, rustls with the aws-lc-rs crypto
+provider, which builds `aws-lc-sys` (C and cmake). A host that already ships a
+different stack selects `-core` adapters and exactly one TLS feature instead:
+
+```toml
+graphql-orm-ai = { workspace = true, features = [
+  "provider-openai-compatible-core",
+  "provider-anthropic-core",
+  "provider-tls-ring",
+] }
+```
+
+`provider-tls-ring` builds each provider client from an explicit `ring`
+`CryptoProvider` and the platform certificate verifier. It never reads or
+installs the process-wide default rustls provider, so a host's own default is
+unaffected. Zero or several `provider-tls-*` features with an adapter fail at
+compile time. `scripts/check-ai-provider-tls.sh` verifies, for the Linux,
+Windows and macOS targets, that this crate's ring build contains no
+`aws-lc-rs`, `aws-lc-sys`, `quinn` or `jni`.
+
+The ring stack verifies servers with the operating system's certificate store
+(`rustls-platform-verifier`). On Linux that store must be installed in the
+runtime image, for example the `ca-certificates` package; a minimal image
+without it refuses every TLS provider connection.
+
+Cargo features are additive across the whole build. Any other dependency that
+enables rustls's default `aws_lc_rs` feature (or reqwest's `rustls` feature)
+brings aws-lc back into the host's binary even with `provider-tls-ring`. A host
+that must exclude aws-lc should run its own check, for example
+`cargo tree -e normal --target <target> | grep aws-lc`, against its complete
+feature set.
 
 ## Provider configuration
 
