@@ -10,6 +10,21 @@ supersedes: []
 
 # Migration Guide
 
+## Unreleased: namespace identity
+
+- No change is required for existing callers. New trait methods have defaults.
+- Keys whose components equal `.graphql-orm-namespace` or
+  `.graphql-orm-namespace.publishing` are rejected, case-insensitively on local
+  and SMB stores.
+- On SMB, keys containing `:` are rejected; they previously addressed alternate
+  data streams.
+- Initialisation is an explicit write. Call it only under the consumer's own
+  provider-write authorisation.
+- `AncestorScan` and `NestedScan` literals must set the new `max_duration`,
+  `max_bytes` and `max_results` fields. Out-of-range limits are rejected.
+- On SMB, use `put_blob_if_not_exists_fenced`; the overwriting `put_blob_fenced`
+  is `UnsupportedOperation`.
+
 ## 0.7.4 to 0.7.5: maintained protocol-validation package identity
 
 Update the reviewed workspace Git revision and regenerate the consuming
