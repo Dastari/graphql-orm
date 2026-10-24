@@ -172,7 +172,15 @@ mod postgres_fixture {
     use super::*;
     use graphql_orm::graphql::orm::SqlValue;
 
-    #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq)]
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        Clone,
+        Debug,
+        PartialEq,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
     #[graphql_entity(
         backend = "postgres",
         table = "legacy_labour",
@@ -223,7 +231,15 @@ mod mssql_fixture {
     use super::*;
     use graphql_orm::graphql::orm::{DatabaseBackend, DatabaseEntity, SqlDialect, SqlValue};
 
-    #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, PartialEq)]
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        Clone,
+        Debug,
+        PartialEq,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
     #[graphql_entity(
         backend = "mssql",
         table = "dbo.LegacyLabour",
