@@ -14884,6 +14884,47 @@ mod tests {
             result_only_preview.preview.0,
             json!({"record": {"recordId": "54"}})
         );
+        // A host-bound projection resolves the stamped reference before
+        // disclosure; a refusing projector discloses nothing.
+        struct RefuseProjection;
+        impl crate::AiPrincipalProjector for RefuseProjection {
+            fn namespace(&self, _: &AuthPrincipal) -> Result<crate::AiPrincipalNamespace, AiError> {
+                Err(AiError::Forbidden)
+            }
+        }
+        let preview_input = AiToolCallResultPreviewInput {
+            session_id: fixture.lease.session_id().0,
+            tool_call_id: persisted.id().0,
+        };
+        let projected_preview = OrmAiToolCallResultPreviewService::new(
+            fixture.database.clone(),
+            fixture.runtime.clone(),
+            Arc::new(RecordIdPreviewAuthorizer(preview_allowed.clone())),
+        )
+        .with_principal_projection(Arc::new(crate::AiPrincipalProjection::fixed(
+            crate::AiPrincipalNamespace::new("host:preview").expect("namespace"),
+        )))
+        .result_preview(&fixture.principal, preview_input)
+        .await
+        .expect("projected owner preview should resolve")
+        .expect("projected preview should be present");
+        assert_eq!(
+            projected_preview.preview.0,
+            json!({"record": {"recordId": "54"}})
+        );
+        assert!(matches!(
+            OrmAiToolCallResultPreviewService::new(
+                fixture.database.clone(),
+                fixture.runtime.clone(),
+                Arc::new(RecordIdPreviewAuthorizer(preview_allowed.clone())),
+            )
+            .with_principal_projection(Arc::new(crate::AiPrincipalProjection::new(Arc::new(
+                RefuseProjection
+            ))))
+            .result_preview(&fixture.principal, preview_input)
+            .await,
+            Err(AiError::ReauthorizationFailed)
+        ));
         let successful_protected_result = record
             .protected_result
             .clone()

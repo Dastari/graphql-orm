@@ -26,6 +26,7 @@ pub struct OrmAiToolCallResultPreviewService {
     database: Database<DefaultWriteBackend>,
     runtime: Arc<crate::AiRuntime>,
     authorizer: Arc<dyn AiToolResultPreviewAuthorizer>,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
 }
 
 impl OrmAiToolCallResultPreviewService {
@@ -40,7 +41,20 @@ impl OrmAiToolCallResultPreviewService {
             database,
             runtime,
             authorizer,
+            principal_projection: None,
         }
+    }
+
+    /// Stamps the host's verified namespace into the reference this service
+    /// resolves for each caller. Must match the projection installed on the
+    /// session service. Without it the reference is `principal.reference()`.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
     }
 
     async fn open(
@@ -95,7 +109,10 @@ impl AiToolCallResultPreviewService for OrmAiToolCallResultPreviewService {
                 "invalid tool result preview identity".to_owned(),
             ));
         }
-        let requested_reference = principal.reference();
+        let requested_reference = crate::principal_projection::admission_reference(
+            self.principal_projection.as_deref(),
+            principal,
+        )?;
         let current = self
             .runtime
             .resolve_current_principal(&requested_reference)

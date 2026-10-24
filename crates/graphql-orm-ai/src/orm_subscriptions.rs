@@ -138,7 +138,12 @@ impl AiSubscriptionService for OrmAiSubscriptionService {
                 "invalid AI subscription bounds".to_owned(),
             ));
         }
-        let principal_reference = principal.reference();
+        let (principal_reference, principal) = crate::principal_projection::admit_stream(
+            self.sessions.principal_projection(),
+            self.principal_resolver.as_ref(),
+            principal,
+        )
+        .await?;
         let mut wakeups = self
             .sessions
             .database()

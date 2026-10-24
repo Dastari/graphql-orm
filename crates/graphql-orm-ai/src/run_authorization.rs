@@ -14,6 +14,11 @@ use uuid::Uuid;
 /// is never called to refresh an existing run. It grants no tool, scope, or egress
 /// permission; ordinary current-principal resolution remains mandatory throughout
 /// execution. The returned reference must contain no bearer or role snapshot.
+///
+/// With an [`crate::AiPrincipalProjection`] installed, the issuer may return
+/// either the unprojected or the projected identity; the engine persists the
+/// projected reference with the issued deadline. Projection runs first and is
+/// never implied by issuance.
 #[async_trait]
 pub trait AiRunAuthorizationIssuer: Send + Sync {
     /// Issues a bounded reference for this authenticated submission or explicit retry.
@@ -36,7 +41,9 @@ pub trait AiRunAuthorizationIssuer: Send + Sync {
 /// This opt-in boundary preserves the original reference by default in the session
 /// and disposition services. Its issuer owns authentication policy; this wrapper
 /// enforces unchanged identity/bindings, a still-live submitting user credential,
-/// and a finite future deadline no later than 24 hours after admission.
+/// and a finite future deadline no later than 24 hours after admission. Only the
+/// deadline of the issued reference is adopted: the persisted identity is the
+/// admitting service's reference, projected when a projection is installed.
 pub struct AiRunAuthorization {
     issuer: Arc<dyn AiRunAuthorizationIssuer>,
     clock: Arc<dyn Clock>,
@@ -48,13 +55,21 @@ impl AiRunAuthorization {
         Self { issuer, clock }
     }
 
+    /// `admitted` is the reference the service would persist without an
+    /// issuer: `principal.reference()`, or its namespace projection.
     pub(crate) async fn issue(
         &self,
         principal: &AuthPrincipal,
+        admitted: &PrincipalReference,
         session_id: Uuid,
         run_id: Uuid,
     ) -> Result<PrincipalReference, AiError> {
         let original = principal.reference();
+        let mut admitted_identity = admitted.clone();
+        admitted_identity.audience = original.audience.clone();
+        if admitted_identity != original {
+            return Err(AiError::ReauthorizationFailed);
+        }
         let started_at = self.clock.now();
         if original.kind != PrincipalReferenceKind::UserSession
             || original.session_id.is_none()
@@ -77,7 +92,7 @@ impl AiRunAuthorization {
         let now = self.clock.now();
         let mut identity = issued.clone();
         identity.expires_at = original.expires_at;
-        if identity != original
+        if (identity != original && identity != *admitted)
             || now < started_at
             || original.expires_at.is_none_or(|expiry| expiry <= now)
             || issued
@@ -86,7 +101,9 @@ impl AiRunAuthorization {
         {
             return Err(AiError::ReauthorizationFailed);
         }
-        Ok(issued)
+        let mut reference = admitted.clone();
+        reference.expires_at = issued.expires_at;
+        Ok(reference)
     }
 }
 
@@ -128,7 +145,12 @@ mod tests {
         now: OffsetDateTime,
     ) -> Result<PrincipalReference, AiError> {
         AiRunAuthorization::new(Arc::new(Issuer(reference)), Arc::new(FixedClock::new(now)))
-            .issue(principal, Uuid::from_u128(2), Uuid::from_u128(3))
+            .issue(
+                principal,
+                &principal.reference(),
+                Uuid::from_u128(2),
+                Uuid::from_u128(3),
+            )
             .await
     }
     #[tokio::test]
@@ -188,5 +210,65 @@ mod tests {
             reference.expires_at = Some(now + Duration::hours(1));
             assert!(admit(&principal, reference, now).await.is_err());
         }
+    }
+
+    async fn admit_projected(
+        principal: &AuthPrincipal,
+        admitted: &PrincipalReference,
+        issued: PrincipalReference,
+        now: OffsetDateTime,
+    ) -> Result<PrincipalReference, AiError> {
+        AiRunAuthorization::new(Arc::new(Issuer(issued)), Arc::new(FixedClock::new(now)))
+            .issue(principal, admitted, Uuid::from_u128(2), Uuid::from_u128(3))
+            .await
+    }
+
+    #[tokio::test]
+    async fn projection_composes_with_lifetime_issuance_without_changing_identity() {
+        let now = OffsetDateTime::now_utc();
+        let principal = principal(now);
+        let projected = crate::AiPrincipalProjection::fixed(
+            crate::AiPrincipalNamespace::new("host:admin").unwrap(),
+        )
+        .project(&principal)
+        .unwrap();
+        let deadline = Some(now + Duration::minutes(75));
+        // The issuer may return either identity; the projected one is persisted.
+        for mut issued in [principal.reference(), projected.clone()] {
+            issued.expires_at = deadline;
+            let result = admit_projected(&principal, &projected, issued, now)
+                .await
+                .unwrap();
+            let mut expected = projected.clone();
+            expected.expires_at = deadline;
+            assert_eq!(result, expected);
+        }
+        // A changed identity or a foreign namespace is refused.
+        let mut changed = projected.clone();
+        changed.subject = "another".into();
+        changed.expires_at = deadline;
+        assert!(
+            admit_projected(&principal, &projected, changed, now)
+                .await
+                .is_err()
+        );
+        let mut foreign = projected.clone();
+        foreign.audience = Some("host:other".into());
+        foreign.expires_at = deadline;
+        assert!(
+            admit_projected(&principal, &projected, foreign, now)
+                .await
+                .is_err()
+        );
+        // The admitted reference itself must be a projection of this principal.
+        let mut forged = projected.clone();
+        forged.tenant_id = Some("other".into());
+        let mut issued = principal.reference();
+        issued.expires_at = deadline;
+        assert!(
+            admit_projected(&principal, &forged, issued, now)
+                .await
+                .is_err()
+        );
     }
 }

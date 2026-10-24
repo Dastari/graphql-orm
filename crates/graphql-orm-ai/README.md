@@ -15,6 +15,10 @@ The current workspace selects merged Auth 0.23.0 at reviewed revision
 consumers must select the same revision and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.112.0` adds opt-in host-bound principal projection
+(`AiPrincipalProjection`) and pre-write submission admission. Defaults are
+unchanged; see [MIGRATION.md](MIGRATION.md).
+
 Version `0.110.1` aligns with ORM/macros 0.69.0 (`RuntimeRelation::join`).
 There is no AI API or schema change.
 
@@ -368,6 +372,12 @@ principal checks. Discovery metadata ignores only the reference deadline in its 
 key, so fresh run admission can reuse it; loaded execution handles still bind the full
 reference and deadline. The default retains the original credential deadline. See
 [MIGRATION.md](MIGRATION.md#0982) for the admission and persistence contract.
+
+Hosts whose current-principal resolver requires a verified audience install one
+`AiPrincipalProjection` on every admitting service. The engine stamps only that
+namespace into durable references and keeps identity and deadline unchanged.
+`with_submission_admission` additionally resolves each submission before writing.
+See [host-bound principal projection](docs/host-principal-projection.md).
 
 One bounded `aiConversationBootstrap` snapshot plus durable event replay is the
 supported way to open a conversation. Its watermark is a **resume floor**:

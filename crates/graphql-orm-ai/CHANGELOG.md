@@ -18,6 +18,29 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.112.0
+
+- Add opt-in host-bound principal projection. `AiPrincipalProjector` names the
+  namespace (for example a verified token audience) a host authenticated a
+  principal against; `AiPrincipalProjection::project` stamps it as the
+  reference audience and changes nothing else. Install it with
+  `with_principal_projection` on the session, disposition, cancellation,
+  result-preview, inbox, proposal and approval services; session-event
+  subscriptions inherit the session service's projection. New runs, first
+  title work and explicit retries persist the projected reference, and every
+  admission resolves it, so hosts can keep a strict resolver that requires the
+  audience.
+- Add `OrmAiSessionService::with_submission_admission`, which strictly resolves
+  each submission's final reference before any write.
+- With a projection installed, session-event and inbox streams resolve the
+  projected reference before their first page.
+- `AiRunAuthorization` composes with projection: the issuer may return the
+  projected or unprojected identity and the projected reference is stored with
+  the issued deadline. Without a projection, issuance is unchanged.
+- No breaking change: all additions are new types and builder methods, trait
+  signatures and GraphQL SDL are unchanged, and services without a projection
+  behave exactly as before. No schema-module change.
+
 ## Unreleased - 0.110.1
 
 - Align with ORM/macros 0.69.0. The private session-activity query schema sets the new `RuntimeRelation::join` member to `None`. No provider, AI runtime, public API or schema change; AI schema module unchanged.
