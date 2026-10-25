@@ -410,7 +410,10 @@ async fn compact_chain_inner(
 
     // A composite-key table's rows are identified by a canonical JSON array of key parts. The
     // change journal cannot name such rows, so a chain that changes one would resurrect or
-    // duplicate rows. Refuse it instead.
+    // duplicate rows. Refuse it instead. Manifests carry no key descriptors, so a table counts as
+    // composite when every base row's identity is such an array; a single-key table whose every
+    // key happens to look like one is refused too, which fails closed. The journal already refuses
+    // composite-key events, so this guards chains written by other producers.
     let composite = table_rows
         .iter()
         .filter(|(_, rows)| {

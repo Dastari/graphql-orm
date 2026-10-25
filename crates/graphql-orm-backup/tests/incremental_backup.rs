@@ -154,6 +154,56 @@ async fn compact_chain_writes_synthetic_full_snapshot() {
     assert!(rows.contains(&backup_row("users", "2", "New")));
 }
 
+#[tokio::test]
+async fn compact_chain_refuses_changes_to_composite_key_tables() {
+    let temp = TempDir::new().expect("temp dir");
+    let repository = LocalBackupRepository::new(temp.path());
+    let objects = MockObjectIndex;
+    let source = MockDatabase::with_full(vec![BackupTableExport {
+        table_name: "memberships".to_string(),
+        rows: vec![backup_row("memberships", r#"["a","1"]"#, "owner")],
+    }]);
+    create_full_backup(&repository, &source, &objects, full_request())
+        .await
+        .expect("create full backup");
+    let incremental_source = MockDatabase::with_incremental(vec![BackupChangeExport {
+        table_name: "memberships".to_string(),
+        primary_key: r#"["a","2"]"#.to_string(),
+        action: BackupChangeAction::Create,
+        row: Some(backup_row("memberships", r#"["a","2"]"#, "member")),
+        changed_at: 1_775_174_401,
+    }]);
+    create_incremental_backup(
+        &repository,
+        &incremental_source,
+        &objects,
+        incremental_request(full_id()),
+    )
+    .await
+    .expect("create incremental backup");
+
+    let error = compact_chain(
+        &repository,
+        CompactChainRequest {
+            snapshot_id: compacted_id(),
+            source_snapshot_id: incremental_id(),
+            created_at: 1_775_174_402,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect_err("composite-key changes cannot be compacted");
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("memberships")),
+        "{error:?}"
+    );
+    assert!(
+        load_manifest(&repository, compacted_id()).await.is_err(),
+        "no compacted manifest is written"
+    );
+}
+
 fn full_request() -> FullBackupRequest {
     FullBackupRequest {
         snapshot_id: full_id(),
