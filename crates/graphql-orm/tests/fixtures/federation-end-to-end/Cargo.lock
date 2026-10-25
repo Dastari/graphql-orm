@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "arc-swap",
  "cynic-parser",
