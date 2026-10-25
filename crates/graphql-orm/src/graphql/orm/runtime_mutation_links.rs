@@ -151,35 +151,9 @@ impl ValidatedRuntimeSchema {
         limits: RuntimeMutationLimits,
     ) -> Result<RuntimeMutationRequest, RuntimeMutationError> {
         use RuntimeMutationErrorCode as E;
-        if relation.join().is_none()
-            || self
-                .resolve_relation(relation.source(), relation.id())
-                .map_err(|e| err(E::SchemaMismatch).with_source(e))?
-                != *relation
-        {
-            return Err(err(E::InvalidInput));
-        }
+        self.check_link_change(relation, &change, max_link_keys)?;
         if key.schema.fingerprint() != self.fingerprint() || key.collection != *relation.source() {
             return Err(err(E::SchemaMismatch));
-        }
-        let targets: Vec<&RuntimeKey> = match &change {
-            RuntimeLinkChange::Replace(keys) => keys.iter().collect(),
-            RuntimeLinkChange::Delta { add, remove } => add.iter().chain(remove).collect(),
-        };
-        if max_link_keys == 0 || targets.len() > max_link_keys {
-            return Err(err(E::LimitExceeded));
-        }
-        let mut seen = BTreeSet::new();
-        for target in targets {
-            if target.schema.fingerprint() != self.fingerprint()
-                || target.collection != *relation.target()
-            {
-                return Err(err(E::SchemaMismatch));
-            }
-            target.validate()?;
-            if !seen.insert(key_identity(target)?) {
-                return Err(err(E::InvalidInput));
-            }
         }
         key.validate()?;
         let c = collection(self, relation.source())?;
@@ -206,6 +180,7 @@ impl ValidatedRuntimeSchema {
                 change,
                 max_link_keys,
             }),
+            attached: Vec::new(),
             max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
             dependents: None,
             cause: None,
@@ -213,7 +188,127 @@ impl ValidatedRuntimeSchema {
     }
 }
 
+impl ValidatedRuntimeSchema {
+    /// A current join relation and a bounded change of distinct targets of its target collection.
+    fn check_link_change(
+        &self,
+        relation: &RuntimeRelationHandle,
+        change: &RuntimeLinkChange,
+        max_link_keys: usize,
+    ) -> Result<(), RuntimeMutationError> {
+        use RuntimeMutationErrorCode as E;
+        if relation.join().is_none()
+            || self
+                .resolve_relation(relation.source(), relation.id())
+                .map_err(|e| err(E::SchemaMismatch).with_source(e))?
+                != *relation
+        {
+            return Err(err(E::InvalidInput));
+        }
+        let targets: Vec<&RuntimeKey> = match change {
+            RuntimeLinkChange::Replace(keys) => keys.iter().collect(),
+            RuntimeLinkChange::Delta { add, remove } => add.iter().chain(remove).collect(),
+        };
+        if max_link_keys == 0 || targets.len() > max_link_keys {
+            return Err(err(E::LimitExceeded));
+        }
+        let mut seen = BTreeSet::new();
+        for target in targets {
+            if target.schema.fingerprint() != self.fingerprint()
+                || target.collection != *relation.target()
+            {
+                return Err(err(E::SchemaMismatch));
+            }
+            target.validate()?;
+            if !seen.insert(key_identity(target)?) {
+                return Err(err(E::InvalidInput));
+            }
+        }
+        Ok(())
+    }
+}
+
 impl RuntimeMutationRequest {
+    /// Also change the written row's links through the many-to-many `relation`, in the same
+    /// transaction as a create or update.
+    ///
+    /// After the row write and its result check, the change runs exactly as
+    /// [`ValidatedRuntimeSchema::runtime_link_request`] on the written row's key: the host's
+    /// [`RuntimeWriteAuthority::link_target_visibility`] scopes it, every requested target
+    /// must be existing and visible or the whole write fails with `denied`, and
+    /// [`RuntimeWriteAuthority::authorize_links`] sees an `Update` link intent of the row. Any
+    /// refusal rolls back the row write too. A create's links bind to its generated key.
+    /// [`RuntimeMutationEffect::links`] lists every change. At most one change per relation.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_input` for a delete, a link request, a dependent change, a relation of another
+    /// collection or a second change of one relation; plus the bounds and target checks of
+    /// `runtime_link_request`, before any I/O.
+    pub fn with_link_change(
+        mut self,
+        relation: &RuntimeRelationHandle,
+        change: RuntimeLinkChange,
+        max_link_keys: usize,
+    ) -> Result<Self, RuntimeMutationError> {
+        use RuntimeMutationErrorCode as E;
+        if !matches!(
+            self.action,
+            RuntimeMutationAction::Create | RuntimeMutationAction::Update
+        ) || self.links.is_some()
+            || self.cause.is_some()
+            || relation.source() != &self.collection
+            || self
+                .attached
+                .iter()
+                .any(|spec| spec.relation.id() == relation.id())
+        {
+            return Err(err(E::InvalidInput));
+        }
+        self.schema
+            .check_link_change(relation, &change, max_link_keys)?;
+        if collection(&self.schema, &self.collection)?.append_only {
+            return Err(err(E::AppendOnly));
+        }
+        self.attached.push(LinkSpec {
+            relation: relation.clone(),
+            change,
+            max_link_keys,
+        });
+        Ok(self)
+    }
+    /// The link changes attached to a create or update, in the order they apply.
+    pub fn attached_link_changes(
+        &self,
+    ) -> impl Iterator<Item = (&RuntimeRelationHandle, &RuntimeLinkChange)> {
+        self.attached.iter().map(|l| (&l.relation, &l.change))
+    }
+    /// The link mutation an attached change runs as, on the written row.
+    pub(super) fn attached_link_request(
+        &self,
+        spec: &LinkSpec,
+        key: &[(RuntimeFieldHandle, RuntimeValue)],
+    ) -> RuntimeMutationRequest {
+        RuntimeMutationRequest {
+            schema: self.schema.clone(),
+            collection: self.collection.clone(),
+            action: RuntimeMutationAction::Update,
+            fields: Vec::new(),
+            key: Some(RuntimeKey {
+                schema: self.schema.clone(),
+                collection: self.collection.clone(),
+                fields: key.to_vec(),
+            }),
+            expected: None,
+            returning: None,
+            limits: self.limits,
+            dependents: None,
+            cause: None,
+            links: Some(spec.clone()),
+            attached: Vec::new(),
+            max_delete_links: self.max_delete_links,
+        }
+    }
     /// The join relation and change of a link request.
     pub fn link_change(&self) -> Option<(&RuntimeRelationHandle, &RuntimeLinkChange)> {
         self.links.as_ref().map(|l| (&l.relation, &l.change))

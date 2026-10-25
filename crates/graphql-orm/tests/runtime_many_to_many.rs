@@ -1602,6 +1602,147 @@ async fn renaming_physical_tables_is_a_destructive_recreate() {
     f.finish().await;
 }
 
+#[tokio::test]
+async fn creates_and_updates_carry_link_changes_in_one_transaction() {
+    use RuntimeMutationErrorCode as E;
+    let f = Fixture::new().await;
+    let schema = f.schema().clone();
+    let post = schema.resolve_collection(&cid("post")).unwrap();
+    let field = |name: &str| {
+        schema
+            .resolve_field(&post, &fid(&format!("post.{name}")))
+            .unwrap()
+    };
+    let tags = f.relation("post", "tags");
+    let count = |sql: &'static str| {
+        let db = f.db.clone();
+        async move {
+            let rows = Backend::fetch_rows(db.pool(), sql, &[]).await.unwrap();
+            Backend::try_get_i64(&rows[0], "n").unwrap()
+        }
+    };
+    let create = |id: i64, label: &str| {
+        schema
+            .runtime_create_request(
+                &post,
+                &[
+                    (field("id"), RuntimeValue::Integer(id)),
+                    (field("label"), RuntimeValue::String(label.into())),
+                ],
+                None,
+                Default::default(),
+            )
+            .unwrap()
+    };
+    let relabel = |id: i64, label: &str| {
+        schema
+            .runtime_update_request(
+                f.key("post", id),
+                &[(field("label"), RuntimeValue::String(label.into()))],
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap()
+    };
+
+    // A create binds its links to the generated row, in the same transaction and effect.
+    let request = create(3, "third")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(f.tags(&[10, 11])), 10)
+        .unwrap();
+    assert_eq!(request.attached_link_changes().count(), 1);
+    let applied = f
+        .run(request, Arc::new(f.authority(true)), &Hook::default())
+        .await
+        .unwrap();
+    assert_eq!(applied, ["+3-10", "+3-11"]);
+    assert_eq!(f.links("mm_post_tags").await, [(3, 10), (3, 11)]);
+
+    // An update writes fields and a delta together.
+    let request = relabel(3, "3rd")
+        .with_link_change(
+            &tags,
+            RuntimeLinkChange::Delta {
+                add: f.tags(&[12]),
+                remove: f.tags(&[10]),
+            },
+            10,
+        )
+        .unwrap();
+    f.run(request, Arc::new(f.authority(true)), &Hook::default())
+        .await
+        .unwrap();
+    assert_eq!(f.links("mm_post_tags").await, [(3, 11), (3, 12)]);
+    assert_eq!(
+        count("SELECT COUNT(*) AS n FROM mm_post WHERE id = 3 AND label = '3rd'").await,
+        1
+    );
+
+    // A link refusal rolls the field write back, and so does a missing target.
+    let request = relabel(3, "rolled back")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(f.tags(&[10])), 10)
+        .unwrap();
+    let error = f
+        .run(request, Arc::new(f.authority(false)), &Hook::default())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("denied"));
+    let request = create(4, "fourth")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(f.tags(&[99])), 10)
+        .unwrap();
+    let error = f
+        .run(request, Arc::new(f.authority(true)), &Hook::default())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("denied"));
+    assert_eq!(
+        count("SELECT COUNT(*) AS n FROM mm_post WHERE id = 3 AND label = '3rd'").await,
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) AS n FROM mm_post WHERE id = 4").await,
+        0
+    );
+    assert_eq!(f.links("mm_post_tags").await, [(3, 11), (3, 12)]);
+
+    // Shapes are refused before any I/O: a delete, a repeated relation, another collection's
+    // relation, and the key bound.
+    let delete = schema
+        .runtime_delete_request(f.key("post", 3), None, None, Default::default())
+        .unwrap();
+    let refused = |result: Result<RuntimeMutationRequest, RuntimeMutationError>| {
+        result.err().map(|e| e.code())
+    };
+    assert_eq!(
+        refused(delete.with_link_change(&tags, RuntimeLinkChange::Replace(vec![]), 10)),
+        Some(E::InvalidInput)
+    );
+    let once = create(5, "five")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(vec![]), 10)
+        .unwrap();
+    assert_eq!(
+        refused(once.with_link_change(&tags, RuntimeLinkChange::Replace(vec![]), 10)),
+        Some(E::InvalidInput)
+    );
+    assert_eq!(
+        refused(create(5, "five").with_link_change(
+            &f.relation("node", "links"),
+            RuntimeLinkChange::Replace(vec![]),
+            10
+        )),
+        Some(E::InvalidInput)
+    );
+    assert_eq!(
+        refused(create(5, "five").with_link_change(
+            &tags,
+            RuntimeLinkChange::Replace(f.tags(&[10, 11])),
+            1
+        )),
+        Some(E::LimitExceeded)
+    );
+    f.finish().await;
+}
+
 #[cfg(feature = "runtime-graphql")]
 mod graphql {
     use super::*;
@@ -1786,6 +1927,70 @@ mod graphql {
             json!([{"node": {"label": "green"}}]),
             "{filtered}"
         );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn graphql_writes_take_opt_in_links() {
+        let f = Fixture::new().await;
+        // Off by default: no `links` argument.
+        assert!(!api(&f).sdl().contains("links: PostLinksInput"));
+        let mut options = RuntimeGraphqlMutationOptions::default();
+        options.links_in_writes = true;
+        let module = RuntimeGraphqlModule::compile(
+            f.schema().clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_mutations(options),
+        )
+        .unwrap();
+        let api = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+            .unwrap()
+            .mutation_root("Mutation")
+            .unwrap()
+            .install(module)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let sdl = api.sdl();
+        assert!(sdl.contains("links: PostLinksInput"), "{sdl}");
+        assert!(sdl.contains("input PostTagsLinkChangeInput"), "{sdl}");
+        let created = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { createPost(expectedSchema: $schema, input: {id: "5", label: "five"}, links: {tags: {set: [{id: "10"}, {id: "12"}]}}) { record { id label } } }"#,
+        )
+        .await;
+        assert!(created.get("errors").is_none(), "{created}");
+        assert_eq!(created["data"]["createPost"]["record"]["label"], "five");
+        let updated = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePost(expectedSchema: $schema, key: {id: "5"}, input: {label: "5"}, links: {tags: {add: [{id: "11"}], remove: [{id: "10"}]}}) { record { label } } }"#,
+        )
+        .await;
+        assert!(updated.get("errors").is_none(), "{updated}");
+        assert_eq!(f.links("mm_post_tags").await, [(5, 11), (5, 12)]);
+        // A refused link write leaves the row as it was.
+        let refused = run_as(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePost(expectedSchema: $schema, key: {id: "5"}, input: {label: "nope"}, links: {tags: {set: [{id: "10"}]}}) { record { label } } }"#,
+            f.authority(false),
+        )
+        .await;
+        assert!(refused.get("errors").is_some(), "{refused}");
+        let read = run(
+            &f,
+            &api,
+            r#"{ posts(where: {id: {eq: "5"}}) { edges { node { label } } } }"#,
+        )
+        .await;
+        assert_eq!(
+            read["data"]["posts"]["edges"][0]["node"]["label"], "5",
+            "{read}"
+        );
+        assert_eq!(f.links("mm_post_tags").await, [(5, 11), (5, 12)]);
         f.finish().await;
     }
 

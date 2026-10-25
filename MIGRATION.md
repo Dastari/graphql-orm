@@ -15,6 +15,15 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## Atomic link changes in writes
+
+Upgrade runtime/macros together. Additive; no schema, SDL or persistence change unless opted in.
+
+- Rust hosts can attach link changes to a create or update with `RuntimeMutationRequest::with_link_change(relation, change, max_link_keys)`, one per join relation of the request's collection. A second change for the same relation, a relation of another collection, or a change on a delete request is refused when the request is built.
+- Attached changes run after the row write and its result check, through the same `link_target_visibility`, uniform `denied` and `authorize_links` (an `Update` link intent) as `runtime_link_request`. Any refusal rolls back the row write. Review your `RuntimeWriteAuthority` for link intents that arrive inside a create: the source row is the just-written row.
+- Journal hooks receive every applied change in `RuntimeMutationEffect::links()`, as for a standalone link mutation.
+- Runtime GraphQL exposes `links: <Object>LinksInput` on `create<Object>` and `update<Object>` only when `RuntimeGraphqlMutationOptions::links_in_writes` is set and updates are enabled. Clients that enable it can replace a field write followed by `update<Object><Relation>Links` with one mutation.
+
 ## 0.70.1 to 0.71.0: composite-key backups and link tables
 
 Upgrade runtime/macros together.

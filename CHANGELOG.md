@@ -33,6 +33,11 @@ Companion runtime/macros version: **0.71.0**.
 
 Companion runtime/macros version: **0.70.1**.
 
+- Create and update requests can carry many-to-many link changes, applied to the written row in the same transaction: `RuntimeMutationRequest::with_link_change(relation, change, max_link_keys)`, one change per join relation of the request's own collection.
+  - After the row write and its result check, each change runs exactly like `runtime_link_request` on the written row's key. That means `link_target_visibility` scoping, uniform `denied` for hidden or missing targets, and `authorize_links` with an `Update` link intent.
+  - Any refusal rolls back the row write too. A create's links bind to its generated key. `RuntimeMutationEffect::links` lists every change, and `attached_link_changes` lists the requested changes.
+- Runtime GraphQL `create<Object>`/`update<Object>` take an opt-in `links: <Object>LinksInput` argument (`RuntimeGraphqlMutationOptions::links_in_writes`, default off). It has one `<Object><Relation>LinkChangeInput` per many-to-many relation, with `set`, or `add`/`remove`, keyed like the link roots. It requires updates to be enabled. The semantic catalogue lists the argument when it exists.
+- Not breaking: the option defaults to off, so SDL and catalogues are unchanged unless enabled. See [MIGRATION](MIGRATION.md#atomic-link-changes-in-writes).
 - Select agql-auth by its published release tag `v0.23.0` instead of the reviewed merged revision `158c79e27117adc5a95d01d58c39c39fd44e6a1a`. The tag resolves to that same commit, so no source, behaviour or version changes. Consumers that selected the revision must switch to the tag as well: Cargo treats the two selectors as different sources. See [MIGRATION](MIGRATION.md#agql-auth-0230-selection).
 - Fix: replacing a foreign key with the same columns and target (for example changing its delete policy) now drops the old constraint before adding the new one. The generated constraint name does not include the policy, and on PostgreSQL the add could run first and fail because the name was still in use. That happened when the new policy sorted before the old one: `Cascade`/`SetNull` to `Restrict`, or `SetNull` to `Cascade`. Every drop of a table now precedes every add. SQLite rebuilds are unaffected.
 

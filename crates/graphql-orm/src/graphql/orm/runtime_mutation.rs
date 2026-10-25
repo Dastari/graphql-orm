@@ -187,6 +187,8 @@ pub struct RuntimeMutationRequest {
     dependents: Option<RuntimeDependentLimits>,
     cause: Option<RuntimeDependentCause>,
     links: Option<links::LinkSpec>,
+    /// Link changes a create or update applies to its written row in the same transaction.
+    attached: Vec<links::LinkSpec>,
     max_delete_links: usize,
 }
 macro_rules! redacted_debug {
@@ -698,6 +700,7 @@ impl ValidatedRuntimeSchema {
             dependents: None,
             cause: None,
             links: None,
+            attached: Vec::new(),
             max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
         })
     }
@@ -1084,7 +1087,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                 links: vec![link_effect],
             });
         }
-        let links = if request.action == RuntimeMutationAction::Delete {
+        let mut links = if request.action == RuntimeMutationAction::Delete {
             self.remove_runtime_links(request, authority).await?
         } else {
             Vec::new()
@@ -1186,6 +1189,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .await?;
         if return_grant.projection != request.returning {
             return Err(err(E::FieldDenied));
+        }
+        // Attached link changes of a create or update, after the row write and in the same
+        // transaction, each exactly as a link mutation of the written row.
+        for spec in &request.attached {
+            let link_request = request.attached_link_request(spec, &key);
+            links.push(self.apply_runtime_links(&link_request, authority).await?);
         }
         let record = request
             .returning
