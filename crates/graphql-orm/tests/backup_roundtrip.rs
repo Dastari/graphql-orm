@@ -351,3 +351,26 @@ async fn full_logical_backup_restores_into_empty_database() -> Result<(), Box<dy
 
     Ok(())
 }
+
+/// Single-column keys are unchanged by composite-key support: the schema hash and the serialized
+/// descriptors (the manifest's schema member) are the values graphql-orm 0.70.1 produced.
+#[test]
+fn single_key_schema_hash_and_descriptors_are_unchanged_from_0_70() {
+    use sha2::Digest;
+    let snapshot = graphql_orm::graphql::orm::schema_snapshot_from_entities(
+        graphql_orm::graphql::orm::DatabaseBackend::Sqlite,
+        "pinned",
+        &graphql_orm_entity_metadata(),
+    );
+    let manifest = serde_json::to_string(&snapshot.entities).unwrap();
+    let digest: String = sha2::Sha256::digest(manifest.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    assert_eq!(snapshot.schema_hash, "19ca3667d8a87bfe");
+    assert_eq!(
+        digest,
+        "68078e4ff204b83be3f3ad501dda9c8399eb9e13858af3427560d46b2e5bd07b"
+    );
+    assert!(!manifest.contains("primary_key_columns"));
+}

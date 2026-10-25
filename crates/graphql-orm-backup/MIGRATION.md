@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.10.0 to 0.11.0: composite-key tables
+
+Adopt together with `graphql-orm` 0.71.0 from one reviewed revision. Snapshot
+format and stored data are unchanged.
+
+- `compact_chain` now fails with `BackupError::InvalidManifestChain` for a
+  chain whose incremental changes touch a composite-key table. The 0.71.0
+  change journal refuses composite-key events, so chains produced by the ORM do
+  not contain such changes. A host that writes its own change exports for a
+  composite-key table must take full snapshots of it instead.
+- Schemas with a static composite-key entity get a new schema hash in 0.71.0,
+  so their earlier backups compare as a different schema. Restore them with the
+  previous release, then take a new full backup.
+- Restores refuse orphan references and occupied `EmptyDatabase` targets
+  before writing. Treat these as validation failures, not partial restores.
+
 ## 0.9.0 to 0.10.0: explicit buffer and decompression limits
 
 This is a breaking pre-1.0 capacity-policy change. Previously accepted large

@@ -305,6 +305,24 @@ pub async fn restore_backup_rows(
         }
     }
 
+    // Refuse before any write: every reference must resolve inside the backup, and an
+    // empty-database restore must find every table empty. A later failure can then only be a
+    // database error, never a partial restore of a backup that was invalid from the start.
+    validate_backup_references(&current_snapshot.entities, rows_by_table)?;
+    if context.mode == RestoreMode::EmptyDatabase {
+        let mut tx = database.pool().begin().await?;
+        for entity in &current_snapshot.entities {
+            let count = table_row_count_on(&mut tx, &entity.table_name).await?;
+            if count != 0 {
+                return Err(sqlx::Error::Protocol(format!(
+                    "cannot restore table {} in EmptyDatabase mode because it already contains {} rows",
+                    entity.table_name, count
+                )));
+            }
+        }
+        tx.rollback().await?;
+    }
+
     let mut entities = current_snapshot.entities.clone();
     entities.sort_by_key(|entity| (entity.restore_order, entity.table_name.clone()));
     let mut reports = Vec::new();
@@ -394,6 +412,14 @@ where
     {
         return Ok(());
     }
+    // The journal identifies rows by entity id, which cannot name a composite key; recording
+    // such a row would make incremental chains resurrect or duplicate it. Fail closed.
+    if event.metadata.primary_keys.len() > 1 {
+        return Err(sqlx::Error::Protocol(format!(
+            "the change journal cannot record composite-key entity {}; back it up with full snapshots",
+            event.entity_name
+        )));
+    }
 
     let action = match event.action {
         super::ChangeAction::Created => "create",
@@ -475,11 +501,16 @@ async fn export_table_rows(
         .map(|column| quote_identifier(&column.column_name))
         .collect::<Vec<_>>()
         .join(", ");
+    let key_columns = validated_key_columns(entity)?;
     let sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
         select_columns,
         quote_identifier(&entity.table_name),
-        quote_identifier(&entity.primary_key_column)
+        key_columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     let rows = fetch_snapshot_rows(snapshot, &sql).await?;
@@ -496,15 +527,7 @@ async fn export_table_rows(
             values.insert(column.column_name.clone(), value);
         }
 
-        let primary_key = values
-            .get(&entity.primary_key_column)
-            .ok_or_else(|| {
-                sqlx::Error::Protocol(format!(
-                    "backup export for {} did not include primary key column {}",
-                    entity.table_name, entity.primary_key_column
-                ))
-            })?
-            .primary_key_string();
+        let primary_key = row_identity(entity, &key_columns, &values)?;
         let row_hash = canonical_row_hash(&entity.table_name, &values);
         out.push(BackupRow {
             table_name: entity.table_name.clone(),
@@ -702,6 +725,171 @@ fn validate_backup_value(
     )))
 }
 
+/// A backup row references a row that the backup does not contain. Restore refuses it before
+/// writing anything; read it from the error with [`BackupOrphanReference::from_error`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupOrphanReference {
+    /// Table of the referencing row.
+    pub table_name: String,
+    /// Identity of the referencing row.
+    pub primary_key: String,
+    /// Referencing column.
+    pub column: String,
+    /// Referenced table and column.
+    pub target_table: String,
+    pub target_column: String,
+}
+impl std::fmt::Display for BackupOrphanReference {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "backup row {} of {} references a missing {}.{} through {}",
+            self.primary_key, self.table_name, self.target_table, self.target_column, self.column
+        )
+    }
+}
+impl std::error::Error for BackupOrphanReference {}
+impl BackupOrphanReference {
+    /// The orphan reference that refused a restore, if `error` is one.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref(),
+            _ => None,
+        }
+    }
+}
+
+/// Every non-null dependency value of every backup row names a row of the backup's own target
+/// table. Dependencies on tables outside the snapshot, or on a column the backup excludes, are
+/// left to the database.
+fn validate_backup_references(
+    entities: &[EntityBackupDescriptor],
+    rows_by_table: &BTreeMap<String, Vec<BackupRow>>,
+) -> crate::Result<()> {
+    let empty = Vec::new();
+    let mut targets = BTreeMap::<(&str, &str), Option<std::collections::BTreeSet<String>>>::new();
+    for entity in entities {
+        let rows = rows_by_table.get(&entity.table_name).unwrap_or(&empty);
+        for dependency in &entity.dependencies {
+            let Some(target) = entities
+                .iter()
+                .find(|candidate| candidate.table_name == dependency.table_name)
+            else {
+                continue;
+            };
+            // Only verbatim values can be compared; redacted or excluded columns are left to the
+            // database.
+            if !entity.columns.iter().any(|c| {
+                c.column_name == dependency.source_column
+                    && c.backup_policy == ColumnBackupPolicy::Include
+            }) {
+                continue;
+            }
+            let values = targets
+                .entry((
+                    target.table_name.as_str(),
+                    dependency.target_column.as_str(),
+                ))
+                .or_insert_with(|| {
+                    let column = target
+                        .columns
+                        .iter()
+                        .find(|c| c.column_name == dependency.target_column)?;
+                    if column.backup_policy != ColumnBackupPolicy::Include {
+                        return None;
+                    }
+                    Some(
+                        rows_by_table
+                            .get(&target.table_name)
+                            .unwrap_or(&empty)
+                            .iter()
+                            .filter_map(|row| row.values.get(&dependency.target_column))
+                            .map(BackupValue::primary_key_string)
+                            .collect(),
+                    )
+                });
+            let Some(values) = values else {
+                continue;
+            };
+            for row in rows {
+                match row.values.get(&dependency.source_column) {
+                    None | Some(BackupValue::Null) => {}
+                    Some(value) if values.contains(&value.primary_key_string()) => {}
+                    Some(_) => {
+                        return Err(sqlx::Error::Decode(Box::new(BackupOrphanReference {
+                            table_name: entity.table_name.clone(),
+                            primary_key: row.primary_key.clone(),
+                            column: dependency.source_column.clone(),
+                            target_table: dependency.table_name.clone(),
+                            target_column: dependency.target_column.clone(),
+                        })));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The key columns of `entity`, checked: a composite key lists at least two distinct primary-key
+/// columns of the descriptor, starting with `primary_key_column`.
+fn validated_key_columns(entity: &EntityBackupDescriptor) -> crate::Result<Vec<&str>> {
+    let keys = entity.key_columns();
+    let composite = !entity.primary_key_columns.is_empty();
+    let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len() == keys.len();
+    let declared = keys.iter().all(|key| {
+        entity
+            .columns
+            .iter()
+            .any(|column| column.column_name == *key && column.is_primary_key)
+    });
+    if composite
+        && (keys.len() < 2 || keys[0] != entity.primary_key_column || !distinct || !declared)
+    {
+        return Err(sqlx::Error::Protocol(format!(
+            "backup descriptor for {} has an invalid composite primary key",
+            entity.table_name
+        )));
+    }
+    Ok(keys)
+}
+
+/// A row's stable identity: the single key's value text, unchanged from earlier releases, or the
+/// canonical JSON array of every key part for a composite key.
+fn row_identity(
+    entity: &EntityBackupDescriptor,
+    key_columns: &[&str],
+    values: &BTreeMap<String, BackupValue>,
+) -> crate::Result<String> {
+    let composite = !entity.primary_key_columns.is_empty();
+    let parts = key_columns
+        .iter()
+        .map(|column| {
+            let value = values.get(*column).ok_or_else(|| {
+                sqlx::Error::Protocol(format!(
+                    "backup export for {} did not include primary key column {}",
+                    entity.table_name, column
+                ))
+            })?;
+            // A composite part must be unambiguous: no null (which would read as the text
+            // "null"), and JSON in canonical form. Single-column keys keep their exact identity.
+            match value {
+                BackupValue::Null if composite => Err(sqlx::Error::Protocol(format!(
+                    "backup row of {} has a null primary key part {}",
+                    entity.table_name, column
+                ))),
+                BackupValue::Json(json) if composite => Ok(canonical_json(json)),
+                value => Ok(value.primary_key_string()),
+            }
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    Ok(match parts.as_slice() {
+        [single] if entity.primary_key_columns.is_empty() => single.clone(),
+        _ => serde_json::to_string(&parts)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?,
+    })
+}
+
 fn export_columns(entity: &EntityBackupDescriptor) -> Vec<&super::ColumnBackupDescriptor> {
     entity
         .columns
@@ -734,11 +922,14 @@ fn import_row_order<'a>(
     entity: &EntityBackupDescriptor,
     rows: &'a [BackupRow],
 ) -> crate::Result<Vec<&'a BackupRow>> {
+    // Self-references order rows by a single-column key; a composite-key table has none.
+    let single_key = entity.primary_key_columns.is_empty();
     let self_dependencies = entity
         .dependencies
         .iter()
         .filter(|dependency| {
-            dependency.table_name == entity.table_name
+            single_key
+                && dependency.table_name == entity.table_name
                 && dependency.target_column == entity.primary_key_column
                 && dependency.source_column != entity.primary_key_column
         })
@@ -1189,6 +1380,50 @@ mod tests {
     use crate::graphql::orm::{DeletePolicy, EntityDependencyDescriptor};
 
     #[test]
+    fn composite_identities_are_canonical_and_single_keys_unchanged() {
+        let composite = EntityBackupDescriptor {
+            entity_name: "Pairs".into(),
+            table_name: "pairs".into(),
+            primary_key_column: "a".into(),
+            primary_key_columns: vec!["a".into(), "b".into()],
+            retention_purge: false,
+            export_order: 0,
+            restore_order: 0,
+            columns: vec![],
+            dependencies: vec![],
+        };
+        let values = |json: &str| {
+            BTreeMap::from([
+                ("a".to_string(), BackupValue::Integer(1)),
+                (
+                    "b".to_string(),
+                    BackupValue::Json(serde_json::from_str(json).unwrap()),
+                ),
+            ])
+        };
+        let keys = ["a", "b"];
+        // JSON parts are canonical, so equal documents give one identity.
+        assert_eq!(
+            row_identity(&composite, &keys, &values(r#"{"y":1,"x":2}"#)).unwrap(),
+            row_identity(&composite, &keys, &values(r#"{"x":2,"y":1}"#)).unwrap()
+        );
+        let mut null = values("{}");
+        null.insert("b".into(), BackupValue::Null);
+        assert!(row_identity(&composite, &keys, &null).is_err());
+        // A single-column key keeps its identity text, including null and JSON as before.
+        let single = EntityBackupDescriptor {
+            primary_key_columns: vec![],
+            ..composite
+        };
+        let raw = serde_json::json!({"y": 1, "x": 2});
+        let value = BTreeMap::from([("a".to_string(), BackupValue::Json(raw.clone()))]);
+        assert_eq!(
+            row_identity(&single, &["a"], &value).unwrap(),
+            raw.to_string()
+        );
+    }
+
+    #[test]
     fn decimal_backup_values_validate_definition_and_wire_shape() {
         let definition = super::super::DecimalDef::new(12, 2).expect("valid decimal definition");
         let value = super::super::DecimalValue::new(
@@ -1254,6 +1489,7 @@ mod tests {
             entity_name: "Item".to_string(),
             table_name: "items".to_string(),
             primary_key_column: "id".to_string(),
+            primary_key_columns: Vec::new(),
             retention_purge: false,
             export_order: 0,
             restore_order: 0,

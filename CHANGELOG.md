@@ -16,6 +16,21 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.71.0**.
+
+- Back up and restore composite-key tables. `EntityBackupDescriptor` gains `primary_key_columns`, the complete key in key order when it has more than one column (empty otherwise). Export orders by the whole key. A row's identity (`BackupRow::primary_key`) is the canonical JSON array of every key part, for example `["1","2"]`: JSON parts are canonical, and a null part is refused at export. Restore verification and full-snapshot row maps use that identity. Self-reference ordering still applies to single-column keys only. Static entities with a composite key now describe their whole key; before, only the first column was described and their rows collided.
+- Add `ValidatedRuntimeSchema::join_table_backup_descriptors`. It returns one descriptor per ORM-owned many-to-many link table. Exact inverses share one, described from the side with the lowest (collection ID, relation ID), so collection order never changes it. Each has the composite (source, target) key, `Cascade` dependencies on both endpoint tables, and an export/restore order after both endpoints' orders as the host supplies them. `RuntimeLinkBackupError` reports an unordered or unknown endpoint, an unknown key field, or an unsupported `DateTime` key.
+- `restore_backup_rows` refuses an invalid backup before writing anything, in both `EmptyDatabase` and `DryRun` modes:
+  - every verbatim dependency value must name a row of the backup's own target table, otherwise it fails with a typed `BackupOrphanReference` (`BackupOrphanReference::from_error`);
+  - in `EmptyDatabase` mode every table must be empty.
+  Before, earlier tables were committed when a later table failed.
+- The change journal refuses to record a mutation event for a composite-key entity, because its entity-id row identity cannot name the row. The ORM generates no write path for composite-key entities, so this applies only to events a host emits through `run_mutation_hook`. `compact_chain` refuses incremental changes to a composite-key table. Back such tables up with full snapshots.
+- **Breaking (Rust):** struct literals of `EntityBackupDescriptor` must add `primary_key_columns: Vec::new()` (or the key).
+- **Breaking (restore of older backups):** a schema that contains a static composite-key entity has a new `stable_schema_hash` (composite descriptors add `|key:…`). Restore requires an exact schema hash, so a backup of such a schema taken before 0.71 cannot be restored with 0.71. To migrate, restore it with 0.70, upgrade, and take a new backup. Schemas whose keys are all single-column keep their hashes, manifests and row identities unchanged.
+- **Breaking (behaviour):** with the change journal enabled, a host-emitted mutation event for a composite-key entity fails its transaction instead of recording an unusable journal row. A backup with an orphan reference, or a restore into a non-empty table, is now refused before any table is written instead of partway through.
+
+## 0.70.1 (unreleased)
+
 Companion runtime/macros version: **0.70.1**.
 
 - Select agql-auth by its published release tag `v0.23.0` instead of the reviewed merged revision `158c79e27117adc5a95d01d58c39c39fd44e6a1a`. The tag resolves to that same commit, so no source, behaviour or version changes. Consumers that selected the revision must switch to the tag as well: Cargo treats the two selectors as different sources. See [MIGRATION](MIGRATION.md#agql-auth-0230-selection).

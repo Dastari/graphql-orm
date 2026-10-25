@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.71.0 is the companion of the runtime's composite-key backups; the macros themselves
+are unchanged.
+
 Version 0.70.1 is the companion of the runtime's foreign-key replacement order fix; the macros
 themselves are unchanged.
 
