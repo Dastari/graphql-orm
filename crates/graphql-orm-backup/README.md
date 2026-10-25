@@ -31,7 +31,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.10.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a
@@ -85,6 +85,10 @@ All repository writes use an advisory lock backed by atomic conditional create.
 Never replace it with exists-then-write. Credentials are owned by the storage
 provider; backup manifests and diagnostics must not contain them. Client-side
 encryption and content-defined chunking are out of scope.
+
+Composite-key tables, including many-to-many link tables, are covered by full
+snapshots only: their rows are identified by a JSON array of key parts, and
+`compact_chain` refuses incremental changes to them.
 
 ## Configuration and operations
 

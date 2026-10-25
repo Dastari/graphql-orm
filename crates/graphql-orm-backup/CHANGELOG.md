@@ -10,6 +10,24 @@ supersedes: []
 
 # Changelog
 
+## 0.11.0 (unreleased)
+
+Companion ORM: `graphql-orm` **0.71.0**.
+
+- Full snapshots back up and restore composite-key tables, including the
+  ORM-owned link tables of many-to-many runtime relations. A composite row's
+  identity is the canonical JSON array of its key parts, for example
+  `["a","1"]`. Single-column identities are unchanged.
+- Breaking (behaviour): `compact_chain` refuses a chain whose incremental
+  changes touch a composite-key table, with `InvalidManifestChain`. The change
+  journal cannot name composite rows, so compacting such changes would
+  resurrect or duplicate rows. Manifests carry no key descriptors, so a table
+  counts as composite when every row identity in the base snapshot is such an
+  array. Back these tables up with full snapshots.
+- Breaking (behaviour, through `graphql-orm` 0.71.0): restores with an orphan
+  reference, or an `EmptyDatabase` restore into an occupied table, are refused
+  before any table is written.
+
 ## 0.10.0 - 2026-10-15
 
 - Breaking: compatibility stream buffering and buffered repository reads default
