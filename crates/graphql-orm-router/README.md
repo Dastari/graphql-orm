@@ -15,6 +15,10 @@ The current workspace selects published Auth release tag `v0.23.0`
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.6.6` records the documentation-only Auth `v0.23.0` selection
+note added since the immutable `0.6.5` package tag. Rust code, routing and
+authorization are unchanged. No router executable is distributed by this change.
+
 Version `0.6.5` retains test-child startup errors in hosted CI diagnostics.
 Production routing and authorization are unchanged; this source update does
 not distribute or authorize a new router executable.
@@ -54,7 +58,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.5" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.6" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql

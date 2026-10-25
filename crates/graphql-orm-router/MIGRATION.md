@@ -10,6 +10,14 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.6.5 to 0.6.6: documentation package identity
+
+No API, configuration, SDL or data migration is required. This package bump
+records the README Auth `v0.23.0` selection note added after the immutable
+0.6.5 tag. Direct Auth consumers still select the same published tag as the
+workspace; see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
+No router executable is distributed or activated by this source change.
+
 ## 0.6.4 to 0.6.5: test startup diagnostics
 
 No application, protocol or data migration is required. The package identity

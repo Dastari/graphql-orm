@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## 0.6.6 (unreleased)
+
+- Allocate a new immutable package identity for the README Auth `v0.23.0`
+  selection note added after `graphql-orm-router-v0.6.5`. Rust code, routing,
+  authorization, SDL and persisted data are unchanged. No router executable
+  is distributed by this metadata and documentation update.
+
 ## 0.6.5 (unreleased)
 
 - Forward spawned federation wire-test router stderr to hosted CI, so an early
