@@ -8,7 +8,7 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
 
     assert_eq!(catalog.modules().len(), 1);
     assert_eq!(catalog.modules()[0].version, AI_SCHEMA_MODULE_VERSION);
-    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.72.0");
+    assert_eq!(AI_SCHEMA_MODULE_VERSION, "0.73.0");
     assert_eq!(catalog.entities().len(), 49);
     assert!(
         catalog
@@ -419,4 +419,49 @@ fn ai_schema_module_owns_only_reserved_namespace_tables() {
             .iter()
             .any(|column| column.name == "protected_state" && column.nullable)
     );
+}
+
+#[test]
+fn ai_schema_identifiers_fit_postgres_identifier_limit() {
+    let module = AiSchemaModule;
+    let catalog = SchemaModuleCatalog::compose(&[&module]).expect("AI module should validate");
+    let schema = catalog.schema_model();
+    let mut names = Vec::new();
+    for table in &schema.tables {
+        names.push(table.table_name.clone());
+        names.extend(table.columns.iter().map(|column| column.name.clone()));
+        names.extend(table.indexes.iter().map(|index| index.name.to_owned()));
+        names.extend(
+            table
+                .check_constraints
+                .iter()
+                .map(|check| check.name.to_string()),
+        );
+        names.extend(table.search_indexes.iter().map(|index| index.name.clone()));
+        names.extend(
+            table
+                .foreign_keys
+                .iter()
+                .filter_map(|foreign_key| foreign_key.constraint_name.clone()),
+        );
+    }
+    let too_long = names
+        .into_iter()
+        .filter(|name| name.len() > 63)
+        .collect::<Vec<_>>();
+    assert!(
+        too_long.is_empty(),
+        "identifiers over 63 bytes: {too_long:?}"
+    );
+    let receipts = schema
+        .tables
+        .iter()
+        .find(|table| table.table_name == "graphql_orm_ai_provider_webhook_receipts")
+        .expect("webhook receipts table");
+    assert!(receipts.indexes.iter().any(|index| {
+        index
+            .name
+            .starts_with("idx_graphql_orm_ai_provider_webhook_receipts_p_")
+            && index.name.len() == 63
+    }));
 }

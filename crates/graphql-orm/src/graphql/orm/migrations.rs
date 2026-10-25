@@ -761,7 +761,8 @@ pub(super) fn validate_migration_step_capabilities<'a>(
     steps: impl Iterator<Item = StepRef<'a>>,
 ) -> crate::Result<()> {
     if backend == DatabaseBackend::Postgres {
-        for step in steps {
+        let steps = steps.collect::<Vec<_>>();
+        for step in &steps {
             if let StepRef::AlterColumn { before, after, .. } = step {
                 if !postgres_alter_metadata_supported(before, after) {
                     return Err(sqlx::Error::Protocol(
@@ -770,9 +771,100 @@ pub(super) fn validate_migration_step_capabilities<'a>(
                 }
             }
         }
+        if let Some(overlong) = postgres_overlong_identifier(&steps) {
+            return Err(sqlx::Error::Protocol(overlong.to_string()));
+        }
     }
     Ok(())
 }
+
+/// A declared identifier that PostgreSQL would silently truncate.
+#[derive(Debug)]
+pub(super) struct OverlongPostgresIdentifier {
+    pub table_name: String,
+    pub kind: &'static str,
+    pub name: String,
+}
+
+impl std::fmt::Display for OverlongPostgresIdentifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PostgreSQL {} name `{}` on {} is {} bytes; PostgreSQL truncates identifiers \
+             longer than {POSTGRES_MAX_IDENTIFIER_BYTES} bytes, so declare a shorter name",
+            self.kind,
+            self.name,
+            self.table_name,
+            self.name.len()
+        )
+    }
+}
+
+/// Returns the first index or constraint a PostgreSQL plan would create under
+/// a name longer than 63 bytes. A truncated name never matches its metadata on
+/// introspection, so every later plan would drift. Generated names are already
+/// bounded; only explicitly declared names reach this check.
+pub(super) fn postgres_overlong_identifier(
+    steps: &[StepRef<'_>],
+) -> Option<OverlongPostgresIdentifier> {
+    let mut found = None;
+    let mut check = |table_name: &str, kind: &'static str, name: &str| {
+        if found.is_none() && name.len() > POSTGRES_MAX_IDENTIFIER_BYTES {
+            found = Some(OverlongPostgresIdentifier {
+                table_name: table_name.to_owned(),
+                kind,
+                name: name.to_owned(),
+            });
+        }
+    };
+    for step in steps {
+        match step {
+            StepRef::CreateTable(table) => {
+                for index in &table.indexes {
+                    check(table.table_name, "index", index.name);
+                }
+                for foreign_key in table.foreign_keys {
+                    if let Some(name) = &foreign_key.constraint_name {
+                        check(table.table_name, "foreign key", name);
+                    }
+                }
+                for constraint in table.check_constraints {
+                    check(table.table_name, "check constraint", &constraint.name);
+                }
+                for index in table.search_indexes {
+                    check(table.table_name, "search index", &index.name);
+                }
+            }
+            StepRef::CreateIndex { table_name, index } => check(table_name, "index", index.name),
+            StepRef::CreateSearchIndex { table_name, index }
+            | StepRef::AlterSearchIndex {
+                table_name,
+                after: index,
+                ..
+            } => check(table_name, "search index", &index.name),
+            StepRef::AddForeignKey {
+                table_name,
+                foreign_key,
+            } => {
+                if let Some(name) = &foreign_key.constraint_name {
+                    check(table_name, "foreign key", name);
+                }
+            }
+            StepRef::SetCheckConstraints {
+                table_name, after, ..
+            } => {
+                for constraint in after.iter() {
+                    check(table_name, "check constraint", &constraint.name);
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// PostgreSQL silently truncates identifiers longer than `NAMEDATALEN - 1`.
+const POSTGRES_MAX_IDENTIFIER_BYTES: usize = 63;
 
 pub(super) fn column_changed_for_backend(
     backend: DatabaseBackend,
