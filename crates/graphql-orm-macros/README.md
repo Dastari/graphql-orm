@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.73.0 is the companion of the runtime's atomic link changes in writes; the macros
+themselves are unchanged.
+
 Version 0.71.0 is the companion of the runtime's composite-key backups; the macros themselves
 are unchanged.
 

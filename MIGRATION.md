@@ -15,7 +15,7 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
-## Atomic link changes in writes
+## 0.72.0 to 0.73.0: atomic link changes in writes
 
 Upgrade runtime/macros together. No schema, SDL or persistence change unless opted in.
 
