@@ -18,6 +18,20 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.116.0
+
+- Add `AnthropicProvider::with_endpoint(config, endpoint_policy, secrets,
+  endpoint)` for an exact deployment-approved Messages endpoint (gateway,
+  regional endpoint or local fake). The endpoint is normalized like the
+  OpenAI-compatible adapter and approved by `AiProviderEndpointPolicy` for
+  `AiProviderKindInput::Anthropic`. Every egress manifest must name it as the
+  destination. Redirects stay disabled; the request shape and version header
+  are unchanged; `Debug` redacts the endpoint (`<official>` for `new`).
+- `AnthropicProvider::new` and its fixed official endpoint are unchanged.
+  Removed the test-only `for_loopback_test` constructor; tests use
+  `with_endpoint` with a loopback policy.
+- No breaking change; no schema-module change.
+
 ## Unreleased - 0.115.0
 
 - Add a Chat Completions-compatible adapter (`provider-chat-completions`, or

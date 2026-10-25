@@ -13,7 +13,7 @@ supersedes: []
 Enable `provider-anthropic` for a native adapter to Anthropic's
 [Messages API](https://platform.claude.com/docs/en/api/messages/create) and
 [streaming event contract](https://platform.claude.com/docs/en/build-with-claude/streaming).
-It is not a configurable OpenAI-compatible proxy: the production constructor
+It is not a configurable OpenAI-compatible proxy: `AnthropicProvider::new`
 uses the official HTTPS Messages endpoint, a fixed supported API-version
 header, disabled redirects, and a bounded timeout.
 
@@ -25,6 +25,20 @@ retains only the secret reference. Plaintext is resolved immediately before
 the HTTP request, validated as a header value, and neither retained nor placed
 in errors. Provider profiles, GraphQL values, models, and tool arguments cannot
 set a URL, header, or plaintext credential.
+
+### Policy-checked endpoint
+
+`AnthropicProvider::with_endpoint(config, endpoint_policy, secrets, endpoint)`
+targets an exact Messages endpoint instead of the official one, for example an
+approved gateway, a regional endpoint or a local fake server in tests. The
+endpoint must be `http` or `https` with a host, no user information, query or
+fragment, and a non-root path, and `AiProviderEndpointPolicy::authorize_endpoint`
+must approve its normalized form for `AiProviderKindInput::Anthropic`. The
+request shape, version header and disabled redirects are unchanged. Every
+egress manifest for a request through this provider must name the normalized
+endpoint as its destination, so data approved for the official destination
+cannot reach a gateway. `Debug` output shows `<deployment-authorized>` rather
+than the endpoint. `AnthropicProvider::new` is unchanged.
 
 Only the deployment containing this adapter should receive Anthropic network
 egress and credential-store access. DNS, proxy, firewall, residency, and

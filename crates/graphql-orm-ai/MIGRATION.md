@@ -19,6 +19,17 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.115.0 to 0.116.0: policy-checked Anthropic endpoint
+
+No action is required; `AnthropicProvider::new` is unchanged. To route through
+an approved gateway or to test against a local server, call
+`AnthropicProvider::with_endpoint`, approve the exact normalized endpoint for
+`AiProviderKindInput::Anthropic` in `AiProviderEndpointPolicy`, and make every
+Anthropic egress manifest for those requests name that endpoint as its
+destination; a manifest for the default destination is refused. The only
+visible change for `new` is that `Debug` prints `<official>` instead of the
+endpoint URL. No schema-module, GraphQL SDL or data migration.
+
 ## 0.114.0 to 0.115.0: Chat Completions adapter, schema module 0.75.0
 
 Breaking for Rust consumers that match exhaustively: `ProviderKind`,

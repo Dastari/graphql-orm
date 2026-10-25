@@ -1996,6 +1996,30 @@ impl ProviderRequestContext {
             })
     }
 
+    /// Whether every model/tool transfer for this provider and model names
+    /// `destination`, with at least one model-inference transfer.
+    #[cfg(feature = "provider-anthropic-core")]
+    pub(crate) fn permits_destination(
+        &self,
+        provider_kind: &ProviderKind,
+        request: &ModelRequest,
+        destination: &str,
+    ) -> bool {
+        let mut inference_matched = false;
+        for transfer in &self.transfers {
+            if transfer.manifest.provider_kind == provider_kind.as_str()
+                && transfer.manifest.model == request.model
+            {
+                if transfer.manifest.destination != destination {
+                    return false;
+                }
+                inference_matched |=
+                    transfer.manifest.capability == AiEgressCapability::ModelInference;
+            }
+        }
+        inference_matched
+    }
+
     #[cfg(any(
         feature = "provider-openai-compatible-core",
         feature = "provider-chat-completions-core"
