@@ -77,6 +77,7 @@ pub struct OrmAiRunCancellationService {
     clock: Arc<dyn Clock>,
     limits: AiRunCancellationLimits,
     hub: Arc<AiRunCancellationHub>,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
 }
 
 impl OrmAiRunCancellationService {
@@ -101,7 +102,20 @@ impl OrmAiRunCancellationService {
             clock,
             limits,
             hub,
+            principal_projection: None,
         }
+    }
+
+    /// Stamps the host's verified namespace into the reference this service
+    /// resolves for each caller. Must match the projection installed on the
+    /// session service. Without it the reference is `principal.reference()`.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
     }
 
     /// Returns the process-local hub that should also be installed on the run
@@ -195,7 +209,10 @@ impl AiRunCancellationService for OrmAiRunCancellationService {
                 "invalid run cancellation identity".to_owned(),
             ));
         }
-        let requested_reference = principal.reference();
+        let requested_reference = crate::principal_projection::admission_reference(
+            self.principal_projection.as_deref(),
+            principal,
+        )?;
         let current = self.resolve_current(&requested_reference).await?;
         let session = AiSessionRecord::find_by_id(&self.database, &input.session_id)
             .await

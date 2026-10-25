@@ -338,6 +338,7 @@ pub struct OrmAiApprovalService {
     content_protector: Arc<dyn AiContentProtector>,
     clock: Arc<dyn Clock>,
     limits: AiApprovalServiceLimits,
+    principal_projection: Option<Arc<crate::AiPrincipalProjection>>,
 }
 
 impl OrmAiApprovalService {
@@ -365,7 +366,20 @@ impl OrmAiApprovalService {
             content_protector,
             clock,
             limits: AiApprovalServiceLimits::default(),
+            principal_projection: None,
         }
+    }
+
+    /// Stamps the host's verified namespace into the reference this service
+    /// resolves for each caller. Must match the projection installed on the
+    /// session service. Without it the reference is `principal.reference()`.
+    #[must_use]
+    pub fn with_principal_projection(
+        mut self,
+        projection: Arc<crate::AiPrincipalProjection>,
+    ) -> Self {
+        self.principal_projection = Some(projection);
+        self
     }
 
     /// Overrides deployment-owned hard limits.
@@ -1041,7 +1055,10 @@ impl OrmAiApprovalService {
         principal: &AuthPrincipal,
     ) -> Result<AuthPrincipal, AiError> {
         Ok(self
-            .resolve_current(&principal.reference())
+            .resolve_current(&crate::principal_projection::admission_reference(
+                self.principal_projection.as_deref(),
+                principal,
+            )?)
             .await?
             .into_principal())
     }

@@ -15,6 +15,10 @@ The current workspace selects published Auth release tag `v0.23.0`
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.112.0` adds opt-in host-bound principal projection
+(`AiPrincipalProjection`) and pre-write submission admission. Defaults are
+unchanged; see [MIGRATION.md](MIGRATION.md).
+
 Version `0.111.0` requires AI schema module `0.73.0`: the provider
 webhook-receipt index takes ORM 0.74.0's bounded 63-byte name, so PostgreSQL
 hosts certifying the module no longer see drift. See [MIGRATION.md](MIGRATION.md).
