@@ -17,11 +17,14 @@ published to crates.io.
 
 ## Atomic link changes in writes
 
-Upgrade runtime/macros together. Additive; no schema, SDL or persistence change unless opted in.
+Upgrade runtime/macros together. No schema, SDL or persistence change unless opted in.
+
+- **Breaking (Rust):** `RuntimeWriteIntent::links()` now returns an iterator over `(relation, change)` pairs instead of an `Option`. Replace `if let Some((relation, change)) = intent.links()` with a loop. A host that gates link changes in `authorize_intent` sees a create or update's attached changes on its outer intent, as well as the one change of each link mutation.
 
 - Rust hosts can attach link changes to a create or update with `RuntimeMutationRequest::with_link_change(relation, change, max_link_keys)`, one per join relation of the request's collection. A second change for the same relation, a relation of another collection, or a change on a delete request is refused when the request is built.
-- Attached changes run after the row write and its result check, through the same `link_target_visibility`, uniform `denied` and `authorize_links` (an `Update` link intent) as `runtime_link_request`. Any refusal rolls back the row write. Review your `RuntimeWriteAuthority` for link intents that arrive inside a create: the source row is the just-written row.
-- Journal hooks receive every applied change in `RuntimeMutationEffect::links()`, as for a standalone link mutation.
+- Each attached change then runs as a complete link mutation of the written row, the same as `runtime_link_request`: `authorize_intent` and `authorize_preimage` for a field-less `Update` of the row (a source hidden from that grant is `not_found`), `link_target_visibility`, uniform `denied`, `authorize_links` and `authorize_result`. Any refusal rolls back the row write. Review your `RuntimeWriteAuthority` for link mutations inside a create: the source row is the just-written row. `link_parent()` on the intent, `RuntimeLinkCheck` and `RuntimeLinkVisibilityCheck` is `Some(Create)` or `Some(Update)` for these, and `None` for a standalone link mutation.
+- Journal hooks receive every applied change in `RuntimeMutationEffect::links()`. **Behaviour:** this effect can now be a `Create` or an `Update` with fields. Hooks that read links only from field-less `Update` and `Delete` effects must read them from every effect.
+- Runtime GraphQL reserves one more write of the statement budget for each attached change, so a request near `max_statements` can now fail with `cost_exceeded`.
 - Runtime GraphQL exposes `links: <Object>LinksInput` on `create<Object>` and `update<Object>` only when `RuntimeGraphqlMutationOptions::links_in_writes` is set and updates are enabled. Clients that enable it can replace a field write followed by `update<Object><Relation>Links` with one mutation.
 
 ## 0.70.1 to 0.71.0: composite-key backups and link tables

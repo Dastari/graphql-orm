@@ -865,9 +865,16 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         Some(_) => return Err(invalid()),
                         None => request,
                     };
-                    // Reserve B's preimage, DML and result reads, excluding host hook I/O.
-                    if prepared.len().saturating_add(1).saturating_mul(4)
-                        > planner.limits.max_statements
+                    // Reserve B's preimage, DML and result reads, excluding host hook I/O, for
+                    // every write and for each attached link change, which runs as its own link
+                    // mutation of the written row.
+                    let writes = prepared
+                        .values()
+                        .map(|p: &Prepared| &p.request)
+                        .chain(std::iter::once(&request))
+                        .map(|r| r.attached_link_changes().count().saturating_add(1))
+                        .fold(0usize, usize::saturating_add);
+                    if writes.saturating_mul(4) > planner.limits.max_statements
                         || prepared.len().saturating_add(1) > planner.limits.max_materialized_nodes
                     {
                         return Err(RuntimeGraphqlError::new("cost_exceeded"));

@@ -86,6 +86,13 @@ pub struct RuntimeLinkCheck<'a> {
     pub removed: &'a [RuntimeLink],
 }
 redacted_debug!(RuntimeLinkCheck<'_>);
+impl RuntimeLinkCheck<'_> {
+    /// `Create` or `Update` when these links are a change attached to that write, `None` for a
+    /// standalone link mutation or a delete. See [`RuntimeWriteIntent::link_parent`].
+    pub fn link_parent(&self) -> Option<RuntimeMutationAction> {
+        self.intent.link_parent()
+    }
+}
 
 /// The join relation whose visible targets a link mutation asks for.
 #[non_exhaustive]
@@ -95,6 +102,14 @@ pub struct RuntimeLinkVisibilityCheck<'a> {
     pub relation: &'a RuntimeRelationHandle,
 }
 redacted_debug!(RuntimeLinkVisibilityCheck<'_>);
+impl RuntimeLinkVisibilityCheck<'_> {
+    /// `Create` or `Update` when the link mutation applies a change attached to that write,
+    /// `None` for a standalone link mutation or a delete. See
+    /// [`RuntimeWriteIntent::link_parent`].
+    pub fn link_parent(&self) -> Option<RuntimeMutationAction> {
+        self.intent.link_parent()
+    }
+}
 
 /// Applied link delta of one relation, pending until commit.
 #[derive(Clone)]
@@ -181,6 +196,7 @@ impl ValidatedRuntimeSchema {
                 max_link_keys,
             }),
             attached: Vec::new(),
+            link_parent: None,
             max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
             dependents: None,
             cause: None,
@@ -232,13 +248,16 @@ impl RuntimeMutationRequest {
     /// Also change the written row's links through the many-to-many `relation`, in the same
     /// transaction as a create or update.
     ///
-    /// After the row write and its result check, the change runs exactly as
-    /// [`ValidatedRuntimeSchema::runtime_link_request`] on the written row's key: the host's
-    /// [`RuntimeWriteAuthority::link_target_visibility`] scopes it, every requested target
-    /// must be existing and visible or the whole write fails with `denied`, and
-    /// [`RuntimeWriteAuthority::authorize_links`] sees an `Update` link intent of the row. Any
-    /// refusal rolls back the row write too. A create's links bind to its generated key.
-    /// [`RuntimeMutationEffect::links`] lists every change. At most one change per relation.
+    /// The outer intent lists the change in [`RuntimeWriteIntent::links`]. After the row write
+    /// and its result check, the change runs as a complete
+    /// [`ValidatedRuntimeSchema::runtime_link_request`] of the written row: its own intent and
+    /// locked preimage (a source hidden from that grant is `not_found`),
+    /// [`RuntimeWriteAuthority::link_target_visibility`], a requirement that every requested
+    /// target be existing and visible or the whole write fails with `denied`,
+    /// [`RuntimeWriteAuthority::authorize_links`] and the result check. Those checks report
+    /// the write's action through `link_parent()`. Any refusal rolls back the row write too. A
+    /// create's links bind to its generated key. [`RuntimeMutationEffect::links`] lists every
+    /// change. At most one change per relation.
     ///
     /// # Errors
     ///
@@ -306,6 +325,7 @@ impl RuntimeMutationRequest {
             cause: None,
             links: Some(spec.clone()),
             attached: Vec::new(),
+            link_parent: Some(self.action),
             max_delete_links: self.max_delete_links,
         }
     }
