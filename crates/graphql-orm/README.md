@@ -126,9 +126,9 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects merged Auth 0.23.0 at reviewed revision
-`158c79e27117adc5a95d01d58c39c39fd44e6a1a` (no release tag yet). Direct Auth
-consumers must select the same revision and refresh their locks to one source;
+The current workspace selects published Auth release tag `v0.23.0`
+(commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`). Direct Auth consumers
+must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
 

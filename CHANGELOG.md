@@ -18,6 +18,7 @@ for historical context.
 
 Companion runtime/macros version: **0.70.1**.
 
+- Select agql-auth by its published release tag `v0.23.0` instead of the reviewed merged revision `158c79e27117adc5a95d01d58c39c39fd44e6a1a`. The tag resolves to that same commit, so no source, behaviour or version changes. Consumers that selected the revision must switch to the tag as well: Cargo treats the two selectors as different sources. See [MIGRATION](MIGRATION.md#agql-auth-0230-selection).
 - Fix: replacing a foreign key with the same columns and target (for example changing its delete policy) now drops the old constraint before adding the new one. The generated constraint name does not include the policy, and on PostgreSQL the add could run first and fail because the name was still in use. That happened when the new policy sorted before the old one: `Cascade`/`SetNull` to `Restrict`, or `SetNull` to `Cascade`. Every drop of a table now precedes every add. SQLite rebuilds are unaffected.
 
 ## 0.70.0 (unreleased)
