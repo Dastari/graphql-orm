@@ -14,6 +14,10 @@ use super::*;
 pub enum RuntimeLinkBackupError {
     /// A join relation's endpoint collection has no backup order from the host.
     UnorderedEndpoint(CollectionId),
+    /// A join relation's target collection is not in the schema.
+    UnknownEndpoint(CollectionId),
+    /// A link column names a key field its endpoint collection does not have.
+    UnknownKeyField { table: String, column: String },
     /// A link column's key kind has no portable backup representation.
     UnsupportedKeyKind { table: String, column: String },
 }
@@ -22,6 +26,12 @@ impl fmt::Display for RuntimeLinkBackupError {
         match self {
             Self::UnorderedEndpoint(collection) => {
                 write!(f, "link table endpoint {collection} has no backup order")
+            }
+            Self::UnknownEndpoint(collection) => {
+                write!(f, "link table endpoint {collection} is not in the schema")
+            }
+            Self::UnknownKeyField { table, column } => {
+                write!(f, "link column {table}.{column} names an unknown key field")
             }
             Self::UnsupportedKeyKind { table, column } => {
                 write!(
@@ -50,7 +60,8 @@ fn backup_kind(kind: RuntimeValueKind) -> Option<(BackupValueKind, Option<Decima
 
 impl ValidatedRuntimeSchema {
     /// One backup descriptor per ORM-owned join table, in table-name order. Exact inverse
-    /// relations share one table and yield one descriptor.
+    /// relations share one table and yield one descriptor, described from the declaring side with
+    /// the lowest (collection ID, relation ID), so collection order never changes it.
     ///
     /// The key is composite (source key columns, then target key columns). Each column depends on
     /// its endpoint's key column with `Cascade`. Export and restore order follow both endpoints:
@@ -67,18 +78,30 @@ impl ValidatedRuntimeSchema {
     ) -> Result<Vec<EntityBackupDescriptor>, RuntimeLinkBackupError> {
         let schema = self.schema();
         let collection = |id: &CollectionId| schema.collections.iter().find(|c| &c.id == id);
-        let mut tables = BTreeMap::new();
+        // The canonical declaring side of every join table.
+        let mut sides = BTreeMap::<&str, (&RuntimeCollection, &RuntimeRelation)>::new();
         for source in &schema.collections {
             for relation in &source.relations {
                 let Some(join) = &relation.join else {
                     continue;
                 };
-                if tables.contains_key(&join.physical_table) {
-                    continue;
+                let side = sides
+                    .entry(join.physical_table.as_str())
+                    .or_insert((source, relation));
+                if (&source.id, &relation.id) < (&side.0.id, &side.1.id) {
+                    *side = (source, relation);
                 }
+            }
+        }
+        let mut tables = BTreeMap::new();
+        for (_, (source, relation)) in sides {
+            {
+                let Some(join) = &relation.join else {
+                    continue;
+                };
                 // Validation guarantees both endpoints and every referenced key field exist.
                 let target = collection(&relation.target).ok_or_else(|| {
-                    RuntimeLinkBackupError::UnorderedEndpoint(relation.target.clone())
+                    RuntimeLinkBackupError::UnknownEndpoint(relation.target.clone())
                 })?;
                 let mut columns = Vec::new();
                 let mut dependencies = Vec::new();
@@ -88,8 +111,9 @@ impl ValidatedRuntimeSchema {
                             .fields
                             .iter()
                             .find(|f| f.id == member.field)
-                            .ok_or_else(|| {
-                                RuntimeLinkBackupError::UnorderedEndpoint(endpoint.id.clone())
+                            .ok_or_else(|| RuntimeLinkBackupError::UnknownKeyField {
+                                table: join.physical_table.clone(),
+                                column: member.column.clone(),
                             })?;
                         let (logical_type, decimal) =
                             backup_kind(field.value_kind).ok_or_else(|| {

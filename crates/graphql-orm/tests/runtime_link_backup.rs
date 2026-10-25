@@ -94,6 +94,10 @@ fn join(
 }
 /// Posts and tags linked both ways through `lb_post_tags`; nodes link to nodes.
 fn definition() -> ValidatedRuntimeSchema {
+    ordered(false)
+}
+/// The same schema, optionally with its collections in reverse order.
+fn ordered(reversed: bool) -> ValidatedRuntimeSchema {
     let mut post = collection("post", "Post");
     let mut tag = collection("tag", "Tag");
     let mut node = collection("node", "Node");
@@ -118,14 +122,18 @@ fn definition() -> ValidatedRuntimeSchema {
         ("node.id", "from_id"),
         ("node.id", "to_id"),
     ));
+    let mut collections = vec![post, tag, node];
+    if reversed {
+        collections.reverse();
+    }
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
-        collections: vec![post, tag, node],
+        collections,
     }
     .validate()
     .unwrap()
 }
-/// Host-built descriptors of the endpoint collections, as a host such as Digibase writes them.
+/// Host-built descriptors of the endpoint collections, as an application host writes them.
 fn endpoint(c: &RuntimeCollection) -> EntityBackupDescriptor {
     EntityBackupDescriptor {
         entity_name: c.api_type_name.clone(),
@@ -225,6 +233,17 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+async fn count(db: &Database<Backend>, table: &str) -> i64 {
+    let rows = Backend::fetch_rows(
+        db.pool(),
+        &format!("SELECT COUNT(*) AS n FROM {table}"),
+        &[],
+    )
+    .await
+    .unwrap();
+    use graphql_orm::sqlx::Row;
+    rows[0].try_get::<i64, _>(0).unwrap()
 }
 async fn pairs(db: &Database<Backend>, sql: &str) -> Vec<(i64, i64)> {
     let rows = Backend::fetch_rows(db.pool(), sql, &[]).await.unwrap();
@@ -383,23 +402,130 @@ async fn link_tables_round_trip_and_orphan_links_fail_the_restore() {
         [(1, 1), (1, 2), (2, 1)]
     );
 
-    // A link whose endpoint row is missing is not restored silently.
+    // A link whose endpoint row is missing is refused before anything is written, also as a dry run.
     let mut orphaned = rows.clone();
     orphaned
         .get_mut("lb_post")
         .unwrap()
         .retain(|row| row.primary_key == "1");
     let target = fixture(&schema, &[]).await;
-    assert!(
-        target
+    for context in [RestoreContext::dry_run(), RestoreContext::empty_database()] {
+        let error = target
             .db
-            .restore_backup_rows(
-                &snapshot,
-                &snapshot,
-                &orphaned,
-                &RestoreContext::empty_database()
-            )
+            .restore_backup_rows(&snapshot, &snapshot, &orphaned, &context)
             .await
-            .is_err()
+            .unwrap_err();
+        let orphan = BackupOrphanReference::from_error(&error).expect("typed orphan refusal");
+        assert_eq!(
+            (
+                orphan.table_name.as_str(),
+                orphan.column.as_str(),
+                orphan.target_table.as_str()
+            ),
+            ("lb_post_tags", "post_id", "lb_post"),
+            "{error}"
+        );
+    }
+    for table in [
+        "lb_post",
+        "lb_tag",
+        "lb_node",
+        "lb_post_tags",
+        "lb_node_links",
+    ] {
+        assert_eq!(
+            count(&target.db, table).await,
+            0,
+            "{table} after a refused restore"
+        );
+    }
+
+    // A target that already holds rows is refused before anything is written, and unchanged.
+    let occupied = fixture(
+        &schema,
+        &["INSERT INTO lb_tag (id, label) VALUES (9, 'kept')"],
+    )
+    .await;
+    let error = occupied
+        .db
+        .restore_backup_rows(
+            &snapshot,
+            &snapshot,
+            &rows,
+            &RestoreContext::empty_database(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("already contains 1 rows"),
+        "{error}"
+    );
+    for (table, rows) in [
+        ("lb_post", 0),
+        ("lb_tag", 1),
+        ("lb_node", 0),
+        ("lb_post_tags", 0),
+        ("lb_node_links", 0),
+    ] {
+        assert_eq!(count(&occupied.db, table).await, rows, "{table}");
+    }
+}
+
+#[test]
+fn the_shared_inverse_side_does_not_depend_on_collection_order() {
+    let (forward, reversed) = (definition(), ordered(true));
+    let descriptors = |schema: &ValidatedRuntimeSchema| {
+        schema.join_table_backup_descriptors(|_| Some(1)).unwrap()
+    };
+    assert_eq!(descriptors(&forward), descriptors(&reversed));
+    assert_eq!(
+        stable_schema_hash(&descriptors(&forward)),
+        stable_schema_hash(&descriptors(&reversed))
+    );
+}
+
+/// SQLite admits NULL in a composite primary key; a null part would collide with the text "null".
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn a_null_composite_key_part_is_refused_at_export() {
+    let schema = definition();
+    let source = fixture(
+        &schema,
+        &[
+            "CREATE TABLE lb_loose (a TEXT, b TEXT, PRIMARY KEY (a, b))",
+            "INSERT INTO lb_loose (a, b) VALUES (NULL, 'x')",
+        ],
+    )
+    .await;
+    let column = |name: &str| ColumnBackupDescriptor {
+        column_name: name.into(),
+        rust_field_name: name.into(),
+        logical_type: BackupValueKind::String,
+        decimal: None,
+        nullable: true,
+        is_primary_key: true,
+        is_generated: false,
+        backup_policy: ColumnBackupPolicy::Include,
+    };
+    let loose = EntityBackupDescriptor {
+        entity_name: "Loose".into(),
+        table_name: "lb_loose".into(),
+        primary_key_column: "a".into(),
+        primary_key_columns: vec!["a".into(), "b".into()],
+        retention_purge: false,
+        export_order: 1,
+        restore_order: 1,
+        columns: vec![column("a"), column("b")],
+        dependencies: vec![],
+    };
+    let mut snap = source.db.begin_consistent_snapshot().await.unwrap();
+    let error = source
+        .db
+        .export_table_rows(&mut snap, &loose)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("null primary key part"),
+        "{error}"
     );
 }

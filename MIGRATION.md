@@ -19,9 +19,11 @@ published to crates.io.
 
 Upgrade runtime/macros together.
 
-- Rust: add `primary_key_columns: Vec::new()` to `EntityBackupDescriptor` struct literals, or list the whole key (at least two distinct primary-key columns, starting with `primary_key_column`) for a composite-key table. Export refuses an inconsistent composite key.
-- Hosts that back up runtime many-to-many relations call `ValidatedRuntimeSchema::join_table_backup_descriptors(order_of)`, where `order_of` returns the export/restore order of each endpoint collection's own descriptor, and add the result to their entity set. Link tables restore after both endpoints.
-- Single-column backups are unchanged: same manifests, row identities and schema hashes. A schema that contains a static composite-key entity gets a new schema hash. Backups taken before the upgrade then compare as an older schema; take a new backup after upgrading.
+- **Rust:** add `primary_key_columns: Vec::new()` to `EntityBackupDescriptor` struct literals, or list the whole key: at least two distinct primary-key columns, starting with `primary_key_column`. Export refuses an inconsistent composite key, and a null part of a composite key.
+- **Link tables:** hosts that back up runtime many-to-many relations call `ValidatedRuntimeSchema::join_table_backup_descriptors(order_of)` and add the result to their entity set. `order_of` returns the export/restore order of each endpoint collection's own descriptor. Link tables restore after both endpoints.
+- **Older backups of composite-key schemas:** a schema with a static composite-key entity gets a new schema hash, and restore requires an exact hash. Restore such a backup with 0.70, upgrade to 0.71, then take a new full backup. Schemas with only single-column keys keep their hashes, manifests and row identities.
+- **Change journal:** writes to composite-key entities fail while the journal is enabled, and `compact_chain` refuses incremental changes to composite-key tables. Use full snapshots for those tables.
+- **Restore errors:** handle `BackupOrphanReference::from_error` for a backup whose reference names a row the backup does not contain. Such a backup, or a non-empty target, is refused before any table is written.
 
 ## 0.70.0 to 0.70.1: foreign-key replacement order
 

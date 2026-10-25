@@ -408,8 +408,29 @@ async fn compact_chain_inner(
         }
     }
 
+    // A composite-key table's rows are identified by a canonical JSON array of key parts. The
+    // change journal cannot name such rows, so a chain that changes one would resurrect or
+    // duplicate rows. Refuse it instead.
+    let composite = table_rows
+        .iter()
+        .filter(|(_, rows)| {
+            !rows.is_empty()
+                && rows.keys().all(|key| {
+                    serde_json::from_str::<Vec<String>>(key).is_ok_and(|parts| parts.len() >= 2)
+                })
+        })
+        .map(|(table, _)| table.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     for manifest in chain.iter().skip(1) {
         for change in crate::restore::load_change_exports(repository, manifest).await? {
+            if composite.contains(&change.table_name) {
+                return Err(BackupError::InvalidManifestChain {
+                    reason: format!(
+                        "incremental changes to composite-key table {} cannot be compacted",
+                        change.table_name
+                    ),
+                });
+            }
             let rows = table_rows.entry(change.table_name.clone()).or_default();
             match change.action {
                 BackupChangeAction::Create | BackupChangeAction::Update => {
