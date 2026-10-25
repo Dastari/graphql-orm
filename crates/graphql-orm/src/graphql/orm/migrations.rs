@@ -94,6 +94,30 @@ fn postgres_text_default_literal(default: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod sqlite_add_column_default_tests {
+    use super::*;
+
+    #[test]
+    fn only_constant_defaults_are_added_in_place() {
+        for constant in [
+            "'plain'", "'it''s'", "''", "X'00ff'", "7", "-1.5", "NULL", "TRUE",
+        ] {
+            assert!(sqlite_constant_default(constant), "{constant}");
+        }
+        for expression in [
+            "strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')",
+            "(strftime('%s', 'now'))",
+            "CURRENT_TIMESTAMP",
+            "current_timestamp",
+            "'a' || 'b'",
+            "(1 + 1)",
+        ] {
+            assert!(!sqlite_constant_default(expression), "{expression}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod postgres_text_default_tests {
     use super::*;
 
@@ -1299,14 +1323,42 @@ pub(super) fn migration_step_table_name<'a>(step: &StepRef<'a>) -> Option<&'a st
 }
 
 fn sqlite_requires_table_rebuild(step: &StepRef<'_>) -> bool {
-    matches!(
-        step,
-        StepRef::DropColumn { .. }
-            | StepRef::AlterColumn { .. }
-            | StepRef::AddForeignKey { .. }
-            | StepRef::DropForeignKey { .. }
-            | StepRef::SetCheckConstraints { .. }
-    )
+    match step {
+        // SQLite refuses `ADD COLUMN` with a non-constant default such as the
+        // runtime `CurrentTimestamp` expression. The rebuild omits the new column
+        // from its copy, so the default is evaluated for every existing row.
+        StepRef::AddColumn { column, .. } => column
+            .default
+            .as_deref()
+            .is_some_and(|default| !sqlite_constant_default(default)),
+        _ => matches!(
+            step,
+            StepRef::DropColumn { .. }
+                | StepRef::AlterColumn { .. }
+                | StepRef::AddForeignKey { .. }
+                | StepRef::DropForeignKey { .. }
+                | StepRef::SetCheckConstraints { .. }
+        ),
+    }
+}
+
+/// Whether SQLite accepts `default` in `ALTER TABLE ADD COLUMN`: a quoted string or
+/// blob literal, a signed number, `NULL`, `TRUE` or `FALSE`. `CURRENT_*` keywords and
+/// every function or parenthesized expression are not constant.
+fn sqlite_constant_default(default: &str) -> bool {
+    let value = super::dialect::canonicalize_column_default_expression(default);
+    let quoted = value
+        .strip_prefix(['x', 'X'])
+        .unwrap_or(&value)
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .is_some_and(|inner| !inner.replace("''", "").contains('\''));
+    quoted
+        || (!value.is_empty()
+            && !value.starts_with("CURRENT_")
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')))
 }
 
 fn render_create_index_statement(

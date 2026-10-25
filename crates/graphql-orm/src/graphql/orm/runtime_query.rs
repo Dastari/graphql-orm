@@ -1945,6 +1945,7 @@ mod tests {
             generated: false,
             default: None,
             format: None,
+            auto_timestamp: None,
         }
     }
 

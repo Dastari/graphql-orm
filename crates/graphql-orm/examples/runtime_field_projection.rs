@@ -83,6 +83,7 @@ mod example {
             generated: false,
             default: None,
             format,
+            auto_timestamp: None,
         }
     }
 

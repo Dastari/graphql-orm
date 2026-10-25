@@ -209,6 +209,37 @@ pub enum RuntimeDefault {
     CurrentTimestamp,
 }
 
+/// Server-managed timestamp of a `DateTime` runtime field.
+///
+/// The database clock writes the field (the same expression and encoding as
+/// [`RuntimeDefault::CurrentTimestamp`]); no create or update input may supply
+/// it. See the runtime schema IR reference for the exact semantics.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAutoTimestamp {
+    /// Set by every runtime insert and never changed afterwards.
+    OnCreate,
+    /// Set by every runtime insert and refreshed by every runtime update that
+    /// writes the row.
+    OnCreateAndUpdate,
+}
+
+impl RuntimeAutoTimestamp {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OnCreate => "on_create",
+            Self::OnCreateAndUpdate => "on_create_and_update",
+        }
+    }
+
+    /// Whether a runtime update of the row refreshes the field.
+    pub const fn refreshes_on_update(self) -> bool {
+        matches!(self, Self::OnCreateAndUpdate)
+    }
+}
+
 /// Sort direction for deterministic default ordering.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -268,6 +299,28 @@ pub struct RuntimeField {
     /// Optional export disposition; `exportable` unless secret when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub export: Option<GraphqlSemanticExport>,
+    /// Optional server-managed timestamp; valid only on non-key `DateTime`
+    /// fields that are not generated and have no literal default. Omitted when
+    /// absent, keeping earlier documents and identities byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_timestamp: Option<RuntimeAutoTimestamp>,
+}
+
+impl RuntimeField {
+    /// Whether clients may supply this field's value: neither generated nor a
+    /// server-managed timestamp.
+    pub fn is_client_writable(&self) -> bool {
+        !self.generated && self.auto_timestamp.is_none()
+    }
+
+    /// The default the database applies: the declared default, or
+    /// `CurrentTimestamp` for an automatic timestamp.
+    pub fn effective_default(&self) -> Option<&RuntimeDefault> {
+        match (&self.default, self.auto_timestamp) {
+            (None, Some(_)) => Some(&RuntimeDefault::CurrentTimestamp),
+            (default, _) => default.as_ref(),
+        }
+    }
 }
 
 /// Cardinality of a runtime relation from the declaring collection's perspective.
@@ -493,6 +546,9 @@ pub enum RuntimeSchemaDiagnosticCode {
     /// A many-to-many join table is malformed, collides with another physical
     /// name, or is shared by relations that are not exact inverses.
     InvalidJoinTable,
+    /// An automatic timestamp is declared on a field that is not a `DateTime`,
+    /// is generated, has a literal default, or is a primary or relation key.
+    InvalidAutoTimestamp,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -528,6 +584,7 @@ impl RuntimeSchemaDiagnosticCode {
             Self::InvalidClassification => "invalid_classification",
             Self::InvalidLabelField => "invalid_label_field",
             Self::InvalidJoinTable => "invalid_join_table",
+            Self::InvalidAutoTimestamp => "invalid_auto_timestamp",
         }
     }
 }
@@ -543,6 +600,36 @@ pub enum RuntimeSchemaDiagnosticDetail {
     Default(RuntimeDefaultProblem),
     /// Why a format descriptor was rejected.
     Format(RuntimeFormatProblem),
+    /// Why an automatic timestamp was rejected.
+    AutoTimestamp(RuntimeAutoTimestampProblem),
+}
+
+/// Value-free reason an automatic timestamp declaration is invalid.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RuntimeAutoTimestampProblem {
+    /// The field's value kind is not `DateTime`.
+    NotDateTime,
+    /// The field is also `generated`.
+    Generated,
+    /// The field declares a literal default.
+    LiteralDefault,
+    /// The field is a primary-key member or a relation key.
+    KeyField,
+}
+
+impl RuntimeAutoTimestampProblem {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotDateTime => "not_date_time",
+            Self::Generated => "generated",
+            Self::LiteralDefault => "literal_default",
+            Self::KeyField => "key_field",
+        }
+    }
 }
 
 /// One structured validation or conversion diagnostic.
@@ -1002,6 +1089,25 @@ impl RuntimeSchema {
             // Fields.
             let mut field_api_names = BTreeSet::new();
             let mut field_physical_names = BTreeSet::new();
+            // Primary-key members and relation keys on either side; automatic
+            // timestamps may not be any of them.
+            let key_fields: BTreeSet<&FieldId> = collection
+                .primary_key
+                .iter()
+                .chain(
+                    collection
+                        .relations
+                        .iter()
+                        .flat_map(|r| r.key_pairs.iter().map(|pair| &pair.source)),
+                )
+                .chain(
+                    self.collections
+                        .iter()
+                        .flat_map(|c| &c.relations)
+                        .filter(|r| &r.target == cid)
+                        .flat_map(|r| r.key_pairs.iter().map(|pair| &pair.target)),
+                )
+                .collect();
             for field in &collection.fields {
                 let subject = Some(field.id.as_str());
                 if !valid_graphql_name(&field.api_name) {
@@ -1096,6 +1202,30 @@ impl RuntimeSchema {
                     field.effective_classification(collection),
                     field.export,
                 ));
+                if field.auto_timestamp.is_some() {
+                    let problem = if field.value_kind != RuntimeValueKind::DateTime {
+                        Some(RuntimeAutoTimestampProblem::NotDateTime)
+                    } else if field.generated {
+                        Some(RuntimeAutoTimestampProblem::Generated)
+                    } else if matches!(field.default, Some(RuntimeDefault::Literal(_))) {
+                        Some(RuntimeAutoTimestampProblem::LiteralDefault)
+                    } else if key_fields.contains(&field.id) {
+                        Some(RuntimeAutoTimestampProblem::KeyField)
+                    } else {
+                        None
+                    };
+                    if let Some(problem) = problem {
+                        diagnostics.push(
+                            RuntimeSchemaDiagnostic::scoped(
+                                RuntimeSchemaDiagnosticCode::InvalidAutoTimestamp,
+                                format!("automatic timestamp is invalid ({})", problem.as_str()),
+                                cid,
+                                subject,
+                            )
+                            .with_detail(RuntimeSchemaDiagnosticDetail::AutoTimestamp(problem)),
+                        );
+                    }
+                }
                 if field.generated && matches!(field.value_kind, RuntimeValueKind::Decimal(_)) {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::UnsupportedCapability,
@@ -1866,6 +1996,12 @@ impl ValidatedRuntimeSchema {
                     field.generated,
                     default
                 ));
+                // Write semantics, so structural as well; present only when declared,
+                // so schemas without it keep their exact earlier bytes.
+                if let Some(auto) = field.auto_timestamp {
+                    out.push_str("|auto_timestamp=");
+                    out.push_str(auto.as_str());
+                }
                 // Semantic descriptors join the ID-bearing identity only when present, so
                 // schemas without them keep their exact earlier bytes. The structural
                 // fingerprint stays structural-only.
@@ -2266,6 +2402,7 @@ impl RuntimeSchema {
                     generated: field.is_generated,
                     default,
                     format: None,
+                    auto_timestamp: None,
                 });
             }
 

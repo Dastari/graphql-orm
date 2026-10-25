@@ -35,6 +35,7 @@ fn field(id: &str, kind: RuntimeValueKind) -> RuntimeField {
         generated: false,
         default: None,
         format: None,
+        auto_timestamp: None,
     }
 }
 

@@ -146,7 +146,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
             let mut input = InputObject::new(format!("Create{name}Input"))
                 .description(format!("Values of a new {name} record"));
             let mut count = 0;
-            for f in c.fields.iter().filter(|f| !f.generated) {
+            for f in c.fields.iter().filter(|f| f.is_client_writable()) {
                 let required =
                     !f.nullable && (f.default.is_none() || c.primary_key.contains(&f.id));
                 input = input.field(
@@ -175,7 +175,7 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
             for f in c
                 .fields
                 .iter()
-                .filter(|f| !f.generated && !c.primary_key.contains(&f.id))
+                .filter(|f| f.is_client_writable() && !c.primary_key.contains(&f.id))
             {
                 input = input.field(
                     InputValue::new(

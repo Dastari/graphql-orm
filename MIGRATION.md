@@ -15,6 +15,21 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.74.0 to 0.75.0: automatic runtime timestamps
+
+Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:
+
+- **Rust:** add `auto_timestamp: None` to `RuntimeField` struct literals (or use `..base` update syntax), and an arm for `RuntimeSchemaDiagnosticCode::InvalidAutoTimestamp` in exhaustive matches.
+- **Serialized IR:** a document that declares `auto_timestamp` cannot be read by graphql-orm older than 0.75.0. Upgrade every reader of a catalog before writing the member. Documents without it read, validate and fingerprint exactly as before.
+- **Hosts that build inputs from the IR:** treat `RuntimeField::is_client_writable()` (or `RuntimeFieldHandle::auto_timestamp()`) like `generated`. Supplying an auto field is refused with `field_denied`. Generated runtime GraphQL already omits it from create and update inputs, so refresh SDL and generated clients when you adopt it.
+
+To adopt automatic timestamps:
+
+- declare `auto_timestamp: Some(RuntimeAutoTimestamp::OnCreate)` or `Some(RuntimeAutoTimestamp::OnCreateAndUpdate)` on a non-key `DateTime` field that is not generated, with `default: None` (or `Some(RuntimeDefault::CurrentTimestamp)`);
+- plan and apply the owned migration, then rebuild the mutation environment. A new column backfills existing rows through its `CURRENT_TIMESTAMP` default. Flipping the flag on an existing column is catalog-only when the column already has a `CurrentTimestamp` default; otherwise the plan changes the column default, and existing values are kept;
+- PostgreSQL stores the transaction start time, so every write in one transaction gets the same value; SQLite reads the clock per statement with millisecond resolution;
+- a standalone link mutation does not refresh `OnCreateAndUpdate`; a dependent `SetNull` update does.
+
 ## 0.73.0 to 0.74.0: bounded PostgreSQL identifiers
 
 Upgrade runtime/macros together. Two breaking changes, both limited to names

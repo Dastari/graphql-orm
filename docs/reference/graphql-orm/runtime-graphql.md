@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-24
+last_reviewed: 2026-10-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -300,8 +300,9 @@ runs typed create, CAS update and exact-key delete with atomic typed journal
 inserts, and explicit post-commit public-record release. Enable only the required
 actions through mutation options. GraphQL cannot represent empty input objects;
 an enabled create/update action with no writable fields is rejected during
-compilation with `unsupported_capability`. Generated fields are excluded, keys
-are required on create and absent from update. Defaults stay omitted in GraphQL
+compilation with `unsupported_capability`. Generated fields and
+[automatic timestamps](runtime-schema-ir.md#automatic-timestamps) are excluded from both
+input types, keys are required on create and absent from update. Defaults stay omitted in GraphQL
 SDL so omission and explicit null remain distinct. Payloads may select to-one
 relations of the record, including nested selections under them. The payload
 layer then also loads the record's primary key and the relation's source key

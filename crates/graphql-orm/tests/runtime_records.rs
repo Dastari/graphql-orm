@@ -49,6 +49,7 @@ fn field(id: &str, column: &str, kind: RuntimeValueKind, nullable: bool) -> Runt
         generated: false,
         default: None,
         format: None,
+        auto_timestamp: None,
     }
 }
 

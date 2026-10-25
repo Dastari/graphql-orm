@@ -37,6 +37,7 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind) -> RuntimeField {
         generated: false,
         default: None,
         format: None,
+        auto_timestamp: None,
     }
 }
 fn collection(id: &str, name: &str) -> RuntimeCollection {

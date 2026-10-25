@@ -44,6 +44,7 @@ mod supported {
             generated: false,
             default: None,
             format: None,
+            auto_timestamp: None,
         }
     }
     pub async fn run(db: &Database<Backend>) -> Result<(), Box<dyn std::error::Error>> {

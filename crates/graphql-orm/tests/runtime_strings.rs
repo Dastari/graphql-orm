@@ -53,6 +53,7 @@ fn field(name: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
         generated: false,
         default: None,
         format: None,
+        auto_timestamp: None,
     }
 }
 fn schema() -> ValidatedRuntimeSchema {

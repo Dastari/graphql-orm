@@ -16,6 +16,21 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.75.0**.
+
+- Add server-managed timestamps for runtime fields: `RuntimeField::auto_timestamp: Option<RuntimeAutoTimestamp>` with `OnCreate` and `OnCreateAndUpdate`, like Rails/Django `created_at`/`updated_at`. Valid only on non-key `DateTime` fields that are not generated and have no literal default (`InvalidAutoTimestamp` with a value-free `RuntimeAutoTimestampProblem` detail). See [automatic timestamps](docs/reference/graphql-orm/runtime-schema-ir.md#automatic-timestamps).
+  - Every runtime insert sets the field from the database clock, with the same expression and encoding as `CurrentTimestamp`. Every runtime update of the row refreshes `OnCreateAndUpdate` fields in the same `UPDATE`, also when no stored value changes and for the dependent `SetNull` updates of an opted-in delete. A standalone many-to-many link mutation writes no row field and leaves them unchanged; link changes attached to a create or update ride on that row write.
+  - Create and update requests refuse a supplied value, explicit `Null` included, with `field_denied`. Runtime GraphQL omits the field from `Create<T>Input` and `Update<T>Input`. A required auto field is never `missing_required`.
+  - The column's physical default is `CurrentTimestamp` (`RuntimeField::effective_default`), so adding the column to a table with rows backfills them and the replan is a no-op. Switching the flag is catalog-only when the column already has a `CurrentTimestamp` default; otherwise it plans the default change.
+  - `RuntimeField::is_client_writable` and `RuntimeFieldHandle::auto_timestamp` expose the rule to hosts.
+  - Identity: the member is omitted when absent and joins the field's ID-bearing and structural canonical lines only when present. Serialized documents, canonical bytes, fingerprints, physical targets, plans and SDL of schemas without it are byte-identical (pinned by `tests/runtime_identity_goldens.rs`, captured at 0.74.0, and the 0.50.2 compatibility goldens).
+- Fix: owned SQLite plans apply an `AddColumn` with a non-constant default (such as a `CurrentTimestamp` datetime column) as a controlled table rebuild, because SQLite refuses `ALTER TABLE … ADD COLUMN` with such a default. These plans failed at apply before; the rebuild fills existing rows from the default. Constant defaults still use `ADD COLUMN`, so other plans and their hashes are unchanged.
+- **Breaking (Rust):** `RuntimeField` struct literals must add `auto_timestamp: None`.
+- **Breaking (Rust):** `RuntimeSchemaDiagnosticCode` gains `InvalidAutoTimestamp`; exhaustive matches need an arm. (`RuntimeSchemaDiagnosticDetail` is `#[non_exhaustive]`; its new `AutoTimestamp` variant is additive.)
+- **Breaking (serialized IR):** readers older than 0.75.0 reject a schema document that declares `auto_timestamp` (`deny_unknown_fields`). Documents without it are unchanged and the format version stays 1.
+
+## 0.74.0 (unreleased)
+
 Companion runtime/macros version: **0.74.0**.
 
 - **Breaking (generated names):** derived ordinary, unique, spatial and

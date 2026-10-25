@@ -24,6 +24,7 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind) -> RuntimeField {
         description: None,
         classification: None,
         export: None,
+        auto_timestamp: None,
     }
 }
 
