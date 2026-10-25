@@ -187,6 +187,10 @@ pub struct RuntimeMutationRequest {
     dependents: Option<RuntimeDependentLimits>,
     cause: Option<RuntimeDependentCause>,
     links: Option<links::LinkSpec>,
+    /// Link changes a create or update applies to its written row in the same transaction.
+    attached: Vec<links::LinkSpec>,
+    /// For the link mutation of an attached change, the action of the write it belongs to.
+    link_parent: Option<RuntimeMutationAction>,
     max_delete_links: usize,
 }
 macro_rules! redacted_debug {
@@ -252,11 +256,24 @@ impl<'a> RuntimeWriteIntent<'a> {
     pub fn cause(self) -> Option<&'a RuntimeDependentCause> {
         self.request.cause.as_ref()
     }
-    /// The join relation and requested change of a link mutation. A link
-    /// mutation writes no fields; its exact delta reaches
-    /// [`RuntimeWriteAuthority::authorize_links`].
-    pub fn links(self) -> Option<(&'a RuntimeRelationHandle, &'a RuntimeLinkChange)> {
-        self.request.link_change()
+    /// Every requested link change of this write: the one change of a link mutation, or the
+    /// changes attached to a create or update
+    /// ([`RuntimeMutationRequest::with_link_change`]). Empty otherwise. A link mutation writes
+    /// no fields; each change's exact delta reaches [`RuntimeWriteAuthority::authorize_links`]
+    /// through its own link mutation of the written row.
+    pub fn links(
+        self,
+    ) -> impl Iterator<Item = (&'a RuntimeRelationHandle, &'a RuntimeLinkChange)> + 'a {
+        self.request
+            .link_change()
+            .into_iter()
+            .chain(self.request.attached_link_changes())
+    }
+    /// For the link mutation that applies a change attached to a create or update, that
+    /// write's action (`Create` or `Update`). `None` for a standalone link mutation and for
+    /// every other write.
+    pub fn link_parent(self) -> Option<RuntimeMutationAction> {
+        self.request.link_parent
     }
 }
 /// Authoritative preimage from the pinned transaction, never a caller preview.
@@ -698,6 +715,8 @@ impl ValidatedRuntimeSchema {
             dependents: None,
             cause: None,
             links: None,
+            attached: Vec::new(),
+            link_parent: None,
             max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
         })
     }
@@ -859,7 +878,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .await?;
         if request.dependents.is_none() {
             return self
-                .execute_runtime_write(request, authority, prepared)
+                .execute_runtime_write(environment, request, authority, prepared)
                 .await;
         }
         let dependents = self
@@ -868,12 +887,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         let mut effects = Vec::with_capacity(dependents.len());
         for (dependent, prepared) in dependents {
             effects.push(
-                self.execute_runtime_write(&dependent, authority, prepared)
+                self.execute_runtime_write(environment, &dependent, authority, prepared)
                     .await?,
             );
         }
         let mut effect = self
-            .execute_runtime_write(request, authority, prepared)
+            .execute_runtime_write(environment, request, authority, prepared)
             .await?;
         effect.dependents = effects;
         Ok(effect)
@@ -1039,11 +1058,17 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
     /// Perform the prepared DML and authorize its result.
     async fn execute_runtime_write(
         &mut self,
+        environment: &RuntimeMutationEnvironment,
         request: &RuntimeMutationRequest,
         authority: &dyn RuntimeWriteAuthority<B>,
         prepared: PreparedRuntimeWrite,
     ) -> Result<RuntimeMutationEffect, RuntimeMutationError> {
         use RuntimeMutationErrorCode as E;
+        if request.links.is_some() {
+            return self
+                .execute_runtime_link_write(request, authority, prepared.preimage)
+                .await;
+        }
         let PreparedRuntimeWrite {
             grant,
             projection,
@@ -1053,38 +1078,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         } = prepared;
         let c = collection(&request.schema, &request.collection)?;
         let intent = RuntimeWriteIntent { request };
-        if request.links.is_some() {
-            let link_effect = self.apply_runtime_links(request, authority).await?;
-            let result = preimage.clone().ok_or_else(|| err(E::NotFound))?;
-            let return_grant = authority
-                .authorize_result(
-                    RuntimeResultCheck {
-                        intent,
-                        preimage: preimage.as_ref(),
-                        record: &result,
-                    },
-                    self,
-                )
-                .await?;
-            if return_grant.projection != request.returning {
-                return Err(err(E::FieldDenied));
-            }
-            return Ok(RuntimeMutationEffect {
-                action: request.action,
-                record: request
-                    .returning
-                    .as_ref()
-                    .map(|p| result.project(p))
-                    .transpose()?,
-                staged: result,
-                collection: request.collection.clone(),
-                preimage,
-                cause: request.cause.clone(),
-                dependents: Vec::new(),
-                links: vec![link_effect],
-            });
-        }
-        let links = if request.action == RuntimeMutationAction::Delete {
+        let mut links = if request.action == RuntimeMutationAction::Delete {
             self.remove_runtime_links(request, authority).await?
         } else {
             Vec::new()
@@ -1187,6 +1181,19 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         if return_grant.projection != request.returning {
             return Err(err(E::FieldDenied));
         }
+        // Attached link changes of a create or update, after the row write and in the same
+        // transaction, each as a complete link mutation of the written row: its own intent,
+        // locked preimage, visibility, authorize_links and result checks.
+        for spec in &request.attached {
+            let link_request = request.attached_link_request(spec, &key);
+            let prepared = self
+                .prepare_runtime_write(environment, &link_request, authority)
+                .await?;
+            let effect = self
+                .execute_runtime_link_write(&link_request, authority, prepared.preimage)
+                .await?;
+            links.extend(effect.links);
+        }
         let record = request
             .returning
             .as_ref()
@@ -1201,6 +1208,45 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             cause: request.cause.clone(),
             dependents: Vec::new(),
             links,
+        })
+    }
+    /// Apply a prepared link mutation and authorize its unchanged source row as the result.
+    async fn execute_runtime_link_write(
+        &mut self,
+        request: &RuntimeMutationRequest,
+        authority: &dyn RuntimeWriteAuthority<B>,
+        preimage: Option<RuntimeRecord>,
+    ) -> Result<RuntimeMutationEffect, RuntimeMutationError> {
+        use RuntimeMutationErrorCode as E;
+        let intent = RuntimeWriteIntent { request };
+        let link_effect = self.apply_runtime_links(request, authority).await?;
+        let result = preimage.clone().ok_or_else(|| err(E::NotFound))?;
+        let return_grant = authority
+            .authorize_result(
+                RuntimeResultCheck {
+                    intent,
+                    preimage: preimage.as_ref(),
+                    record: &result,
+                },
+                self,
+            )
+            .await?;
+        if return_grant.projection != request.returning {
+            return Err(err(E::FieldDenied));
+        }
+        Ok(RuntimeMutationEffect {
+            action: request.action,
+            record: request
+                .returning
+                .as_ref()
+                .map(|p| result.project(p))
+                .transpose()?,
+            staged: result,
+            collection: request.collection.clone(),
+            preimage,
+            cause: request.cause.clone(),
+            dependents: Vec::new(),
+            links: vec![link_effect],
         })
     }
 }

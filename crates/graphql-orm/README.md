@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.73.0 lets runtime creates and updates carry many-to-many link changes in the same
+transaction (`RuntimeMutationRequest::with_link_change`, opt-in GraphQL `links`). See the
+[migration guide](../../MIGRATION.md#0720-to-0730-atomic-link-changes-in-writes).
+
 Version 0.71.0 backs up composite-key tables and describes the link tables of many-to-many
 relations (`join_table_backup_descriptors`). See the
 [migration guide](../../MIGRATION.md#0701-to-0710-composite-key-backups-and-link-tables).

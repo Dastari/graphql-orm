@@ -16,6 +16,19 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.73.0**.
+
+- Create and update requests can carry many-to-many link changes, applied to the written row in the same transaction: `RuntimeMutationRequest::with_link_change(relation, change, max_link_keys)`, one change per join relation of the request's own collection.
+  - After the row write and its result check, each change runs as a complete link mutation of the written row, exactly like `runtime_link_request`: its own `authorize_intent` and locked, authorized preimage (a source hidden from it is `not_found`), `link_target_visibility` scoping, uniform `denied` for hidden or missing targets, `authorize_links`, and `authorize_result`.
+  - `RuntimeWriteIntent::link_parent()`, `RuntimeLinkCheck::link_parent()` and `RuntimeLinkVisibilityCheck::link_parent()` return `Create` or `Update` for those link mutations, and `None` for a standalone link mutation.
+  - Any refusal rolls back the row write too. A create's links bind to its generated key. `RuntimeMutationEffect::links` lists every change, and `attached_link_changes` lists the requested changes.
+  - Runtime GraphQL counts each attached change against the statement budget as one more write.
+- Runtime GraphQL `create<Object>`/`update<Object>` take an opt-in `links: <Object>LinksInput` argument (`RuntimeGraphqlMutationOptions::links_in_writes`, default off). It has one `<Object><Relation>LinkChangeInput` per many-to-many relation, with `set`, or `add`/`remove`, keyed like the link roots. It requires updates to be enabled. The semantic catalogue lists the argument when it exists.
+- **Breaking (Rust):** `RuntimeWriteIntent::links()` returns an iterator over every requested link change of the write instead of an `Option`: the one change of a link mutation, or the changes attached to a create or update. The outer intent of a create or update therefore shows its attached changes.
+- **Behaviour:** the effect of a create or update can now carry `links()`. Journal hooks that read links only from field-less `Update` and `Delete` effects miss them. The GraphQL option defaults to off, so SDL and catalogues are unchanged unless enabled. See [MIGRATION](MIGRATION.md#0720-to-0730-atomic-link-changes-in-writes).
+
+## 0.71.0 (unreleased)
+
 Companion runtime/macros version: **0.71.0**.
 
 - Back up and restore composite-key tables. `EntityBackupDescriptor` gains `primary_key_columns`, the complete key in key order when it has more than one column (empty otherwise). Export orders by the whole key. A row's identity (`BackupRow::primary_key`) is the canonical JSON array of every key part, for example `["1","2"]`: JSON parts are canonical, and a null part is refused at export. Restore verification and full-snapshot row maps use that identity. Self-reference ordering still applies to single-column keys only. Static entities with a composite key now describe their whole key; before, only the first column was described and their rows collided.

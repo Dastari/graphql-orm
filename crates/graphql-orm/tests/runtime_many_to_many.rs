@@ -257,6 +257,14 @@ struct Authority {
     deny_targets: Vec<i64>,
     /// Requested targets seen by `authorize_links`.
     requested: Arc<Mutex<Vec<String>>>,
+    /// Hide source rows with this label only from the link mutations of attached changes.
+    hidden_link_source: Option<&'static str>,
+    /// What the host receives: each intent's action, link parent and link changes, and the
+    /// link parent of each visibility and link check.
+    seen: Arc<Mutex<Vec<String>>>,
+}
+fn parent(action: Option<RuntimeMutationAction>) -> String {
+    action.map_or("-".into(), |a| format!("{a:?}"))
 }
 impl Authority {
     fn label_ne(&self, handle: &RuntimeCollectionHandle, label: &str) -> RuntimePredicate {
@@ -306,9 +314,22 @@ impl RuntimeWriteAuthority<Backend> for Authority {
                 .iter()
                 .map(|f| self.schema.resolve_field(handle, &f.id).unwrap())
                 .collect::<Vec<_>>();
+            self.seen.lock().unwrap().push(format!(
+                "intent {:?} parent={} links=[{}]",
+                check.action(),
+                parent(check.link_parent()),
+                check
+                    .links()
+                    .map(|(relation, _)| relation.id().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            let hidden = self.hidden_source.or(self
+                .hidden_link_source
+                .filter(|_| check.link_parent().is_some()));
             RuntimeWriteGrant::new(
                 self.schema.resolve_projection(handle, &fields).unwrap(),
-                self.hidden_source.map(|label| self.label_ne(handle, label)),
+                hidden.map(|label| self.label_ne(handle, label)),
             )
         })
     }
@@ -332,6 +353,10 @@ impl RuntimeWriteAuthority<Backend> for Authority {
         _: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<Option<RuntimePredicate>, RuntimeMutationError>> {
         Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("visibility parent={}", parent(check.link_parent())));
             Ok(self
                 .hide_secret_targets
                 .then(|| self.label_ne(check.relation.target(), "secret")))
@@ -343,6 +368,10 @@ impl RuntimeWriteAuthority<Backend> for Authority {
         _: &'a mut MutationContext<'_, Backend>,
     ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
         Box::pin(async move {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(format!("links parent={}", parent(check.link_parent())));
             let ids = |keys: &[RuntimeKey]| keys.iter().map(show).collect::<Vec<_>>().join(",");
             self.requested.lock().unwrap().push(format!(
                 "+[{}]-[{}]",
@@ -440,6 +469,11 @@ impl RuntimeMutationHook<Backend> for Hook {
     }
 }
 
+const SEED: &[&str] = &[
+    "INSERT INTO mm_post (id, label) VALUES (1, 'first'), (2, 'second')",
+    "INSERT INTO mm_tag (id, label) VALUES (10, 'red'), (11, 'green'), (12, 'blue'), (13, 'secret')",
+    "INSERT INTO mm_node (id, label) VALUES (1, 'a'), (2, 'b')",
+];
 struct Fixture {
     url: String,
     #[cfg(feature = "sqlite")]
@@ -453,15 +487,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        Self::with_definition(
-            definition(),
-            &[
-                "INSERT INTO mm_post (id, label) VALUES (1, 'first'), (2, 'second')",
-                "INSERT INTO mm_tag (id, label) VALUES (10, 'red'), (11, 'green'), (12, 'blue'), (13, 'secret')",
-                "INSERT INTO mm_node (id, label) VALUES (1, 'a'), (2, 'b')",
-            ],
-        )
-        .await
+        Self::with_definition(definition(), SEED).await
     }
     async fn with_definition(definition: RuntimeSchema, seed: &[&str]) -> Self {
         #[cfg(feature = "sqlite")]
@@ -538,6 +564,8 @@ impl Fixture {
             hidden_source: None,
             deny_targets: Vec::new(),
             requested: Default::default(),
+            hidden_link_source: None,
+            seen: Default::default(),
         }
     }
     fn key(&self, collection: &str, id: i64) -> RuntimeKey {
@@ -606,10 +634,10 @@ impl Fixture {
             .await
     }
     async fn links(&self, table: &str) -> Vec<(i64, i64)> {
-        let (a, b) = if table == "mm_post_tags" {
-            ("post_id", "tag_id")
-        } else {
-            ("from_id", "to_id")
+        let (a, b) = match table {
+            "mm_post_tags" => ("post_id", "tag_id"),
+            "mm_post_nodes" => ("post_id", "node_id"),
+            _ => ("from_id", "to_id"),
         };
         let rows = Backend::fetch_rows(
             self.db.pool(),
@@ -1602,6 +1630,374 @@ async fn renaming_physical_tables_is_a_destructive_recreate() {
     f.finish().await;
 }
 
+#[tokio::test]
+async fn creates_and_updates_carry_link_changes_in_one_transaction() {
+    use RuntimeMutationErrorCode as E;
+    let f = Fixture::new().await;
+    let schema = f.schema().clone();
+    let post = schema.resolve_collection(&cid("post")).unwrap();
+    let field = |name: &str| {
+        schema
+            .resolve_field(&post, &fid(&format!("post.{name}")))
+            .unwrap()
+    };
+    let tags = f.relation("post", "tags");
+    let count = |sql: &'static str| {
+        let db = f.db.clone();
+        async move {
+            let rows = Backend::fetch_rows(db.pool(), sql, &[]).await.unwrap();
+            Backend::try_get_i64(&rows[0], "n").unwrap()
+        }
+    };
+    let create = |id: i64, label: &str| {
+        schema
+            .runtime_create_request(
+                &post,
+                &[
+                    (field("id"), RuntimeValue::Integer(id)),
+                    (field("label"), RuntimeValue::String(label.into())),
+                ],
+                None,
+                Default::default(),
+            )
+            .unwrap()
+    };
+    let relabel = |id: i64, label: &str| {
+        schema
+            .runtime_update_request(
+                f.key("post", id),
+                &[(field("label"), RuntimeValue::String(label.into()))],
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap()
+    };
+
+    // A create binds its links to the generated row, in the same transaction and effect.
+    let request = create(3, "third")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(f.tags(&[10, 11])), 10)
+        .unwrap();
+    assert_eq!(request.attached_link_changes().count(), 1);
+    let applied = f
+        .run(request, Arc::new(f.authority(true)), &Hook::default())
+        .await
+        .unwrap();
+    assert_eq!(applied, ["+3-10", "+3-11"]);
+    assert_eq!(f.links("mm_post_tags").await, [(3, 10), (3, 11)]);
+
+    // An update writes fields and a delta together.
+    let request = relabel(3, "3rd")
+        .with_link_change(
+            &tags,
+            RuntimeLinkChange::Delta {
+                add: f.tags(&[12]),
+                remove: f.tags(&[10]),
+            },
+            10,
+        )
+        .unwrap();
+    f.run(request, Arc::new(f.authority(true)), &Hook::default())
+        .await
+        .unwrap();
+    assert_eq!(f.links("mm_post_tags").await, [(3, 11), (3, 12)]);
+    assert_eq!(
+        count("SELECT COUNT(*) AS n FROM mm_post WHERE id = 3 AND label = '3rd'").await,
+        1
+    );
+
+    // A link refusal rolls the field write back, and so does a missing target.
+    let request = relabel(3, "rolled back")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(f.tags(&[10])), 10)
+        .unwrap();
+    let error = f
+        .run(request, Arc::new(f.authority(false)), &Hook::default())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("denied"));
+    let request = create(4, "fourth")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(f.tags(&[99])), 10)
+        .unwrap();
+    let error = f
+        .run(request, Arc::new(f.authority(true)), &Hook::default())
+        .await
+        .unwrap_err();
+    assert_eq!(code(&error), Some("denied"));
+    assert_eq!(
+        count("SELECT COUNT(*) AS n FROM mm_post WHERE id = 3 AND label = '3rd'").await,
+        1
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) AS n FROM mm_post WHERE id = 4").await,
+        0
+    );
+    assert_eq!(f.links("mm_post_tags").await, [(3, 11), (3, 12)]);
+
+    // Shapes are refused before any I/O: a delete, a repeated relation, another collection's
+    // relation, and the key bound.
+    let delete = schema
+        .runtime_delete_request(f.key("post", 3), None, None, Default::default())
+        .unwrap();
+    let refused = |result: Result<RuntimeMutationRequest, RuntimeMutationError>| {
+        result.err().map(|e| e.code())
+    };
+    assert_eq!(
+        refused(delete.with_link_change(&tags, RuntimeLinkChange::Replace(vec![]), 10)),
+        Some(E::InvalidInput)
+    );
+    let once = create(5, "five")
+        .with_link_change(&tags, RuntimeLinkChange::Replace(vec![]), 10)
+        .unwrap();
+    assert_eq!(
+        refused(once.with_link_change(&tags, RuntimeLinkChange::Replace(vec![]), 10)),
+        Some(E::InvalidInput)
+    );
+    assert_eq!(
+        refused(create(5, "five").with_link_change(
+            &f.relation("node", "links"),
+            RuntimeLinkChange::Replace(vec![]),
+            10
+        )),
+        Some(E::InvalidInput)
+    );
+    assert_eq!(
+        refused(create(5, "five").with_link_change(
+            &tags,
+            RuntimeLinkChange::Replace(f.tags(&[10, 11])),
+            1
+        )),
+        Some(E::LimitExceeded)
+    );
+    f.finish().await;
+}
+
+/// [`definition`] plus a second join relation of posts, to nodes.
+fn two_relation_definition() -> RuntimeSchema {
+    let mut definition = definition();
+    definition.collections[0].relations.push(join(
+        "nodes",
+        "node",
+        "mm_post_nodes",
+        ("post.id", "post_id"),
+        ("node.id", "node_id"),
+    ));
+    definition
+}
+
+#[tokio::test]
+async fn attached_links_run_as_complete_link_mutations() {
+    let f = Fixture::with_definition(two_relation_definition(), SEED).await;
+    let schema = f.schema().clone();
+    let field = |collection: &RuntimeCollectionHandle, name: &str| {
+        schema
+            .resolve_field(
+                collection,
+                &fid(&format!("{}.{name}", collection.id().as_str())),
+            )
+            .unwrap()
+    };
+    let create = |collection: &str, id: i64, label: &str| {
+        let handle = schema.resolve_collection(&cid(collection)).unwrap();
+        schema
+            .runtime_create_request(
+                &handle,
+                &[
+                    (field(&handle, "id"), RuntimeValue::Integer(id)),
+                    (field(&handle, "label"), RuntimeValue::String(label.into())),
+                ],
+                None,
+                Default::default(),
+            )
+            .unwrap()
+    };
+    let relabel = |id: i64, label: &str| {
+        let post = schema.resolve_collection(&cid("post")).unwrap();
+        schema
+            .runtime_update_request(
+                f.key("post", id),
+                &[(field(&post, "label"), RuntimeValue::String(label.into()))],
+                None,
+                None,
+                Default::default(),
+            )
+            .unwrap()
+    };
+    let replace = |keys: Vec<RuntimeKey>| RuntimeLinkChange::Replace(keys);
+    let fixture = &f;
+    let posts = move || async move {
+        let rows = Backend::fetch_rows(
+            fixture.db.pool(),
+            "SELECT id, label FROM mm_post ORDER BY id",
+            &[],
+        )
+        .await
+        .unwrap();
+        rows.iter()
+            .map(|row| {
+                format!(
+                    "{}:{}",
+                    Backend::try_get_i64(row, "id").unwrap(),
+                    Backend::try_get_string(row, "label").unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // Two relations in one create. The outer intent lists both changes; each change runs as
+    // its own link mutation of the new row, whose checks name the create as their parent.
+    let authority = f.authority(true);
+    let hook = Hook::default();
+    let request = create("post", 3, "third")
+        .with_link_change(&f.relation("post", "tags"), replace(f.tags(&[10])), 10)
+        .unwrap()
+        .with_link_change(
+            &f.relation("post", "nodes"),
+            replace(vec![f.key("node", 1)]),
+            10,
+        )
+        .unwrap();
+    let applied = f
+        .run(request, Arc::new(authority.clone()), &hook)
+        .await
+        .unwrap();
+    assert_eq!(applied, ["+3-10", "+3-1"]);
+    assert_eq!(f.links("mm_post_tags").await, [(3, 10)]);
+    assert_eq!(f.links("mm_post_nodes").await, [(3, 1)]);
+    assert_eq!(*hook.seen.lock().unwrap(), ["tags:+1-0", "nodes:+1-0"]);
+    let link_checks = |parent: &str, relation: &str| {
+        [
+            format!("intent Update parent={parent} links=[{relation}]"),
+            format!("visibility parent={parent}"),
+            format!("links parent={parent}"),
+        ]
+    };
+    let mut expected = vec!["intent Create parent=- links=[tags,nodes]".to_string()];
+    expected.extend(link_checks("Create", "tags"));
+    expected.extend(link_checks("Create", "nodes"));
+    assert_eq!(*authority.seen.lock().unwrap(), expected);
+
+    // An update's attached change names the update; a standalone link mutation has no parent.
+    let authority = f.authority(true);
+    let request = relabel(3, "3rd")
+        .with_link_change(&f.relation("post", "tags"), replace(f.tags(&[11])), 10)
+        .unwrap();
+    f.run(request, Arc::new(authority.clone()), &Hook::default())
+        .await
+        .unwrap();
+    f.run(
+        f.link(1, replace(f.tags(&[12])), 10),
+        Arc::new(authority.clone()),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    let mut expected = vec!["intent Update parent=- links=[tags]".to_string()];
+    expected.extend(link_checks("Update", "tags"));
+    expected.extend(link_checks("-", "tags"));
+    assert_eq!(*authority.seen.lock().unwrap(), expected);
+    assert_eq!(f.links("mm_post_tags").await, [(1, 12), (3, 11)]);
+
+    // Refusals roll the row write back and never reach the journal hook.
+    let before = posts().await;
+    let refused = move |authority: Authority, request: RuntimeMutationRequest| async move {
+        let hook = Hook::default();
+        let error = fixture
+            .run(request, Arc::new(authority.clone()), &hook)
+            .await
+            .unwrap_err();
+        assert!(hook.seen.lock().unwrap().is_empty());
+        (code(&error), authority)
+    };
+    // A target hidden by the visibility predicate.
+    let (error, _) = refused(
+        Authority {
+            hide_secret_targets: true,
+            ..f.authority(true)
+        },
+        create("post", 4, "fourth")
+            .with_link_change(&f.relation("post", "tags"), replace(f.tags(&[13])), 10)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(error, Some("denied"));
+    // The attached link mutation's own intent hides the new row: its preimage is not found.
+    let (error, authority) = refused(
+        Authority {
+            hidden_link_source: Some("fifth"),
+            ..f.authority(true)
+        },
+        create("post", 5, "fifth")
+            .with_link_change(&f.relation("post", "tags"), replace(f.tags(&[10])), 10)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(error, Some("not_found"));
+    assert!(authority.requested.lock().unwrap().is_empty());
+    // An update of a hidden source.
+    let (error, authority) = refused(
+        Authority {
+            hidden_source: Some("second"),
+            ..f.authority(true)
+        },
+        relabel(2, "seen")
+            .with_link_change(&f.relation("post", "tags"), replace(f.tags(&[10])), 10)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(error, Some("not_found"));
+    assert!(authority.requested.lock().unwrap().is_empty());
+    // More visible links after the change than the bound.
+    let (error, _) = refused(
+        f.authority(true),
+        relabel(3, "over")
+            .with_link_change(
+                &f.relation("post", "tags"),
+                RuntimeLinkChange::Delta {
+                    add: f.tags(&[12]),
+                    remove: Vec::new(),
+                },
+                1,
+            )
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(error, Some("limit_exceeded"));
+    assert_eq!(posts().await, before);
+    assert_eq!(f.links("mm_post_tags").await, [(1, 12), (3, 11)]);
+    assert_eq!(f.links("mm_post_nodes").await, [(3, 1)]);
+
+    // The inverse side and a self link bind to the created row too.
+    f.run(
+        create("tag", 20, "new")
+            .with_link_change(
+                &f.relation("tag", "posts"),
+                replace(vec![f.key("post", 1)]),
+                10,
+            )
+            .unwrap(),
+        Arc::new(f.authority(true)),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.links("mm_post_tags").await, [(1, 12), (1, 20), (3, 11)]);
+    f.run(
+        create("node", 3, "c")
+            .with_link_change(
+                &f.relation("node", "links"),
+                replace(vec![f.key("node", 1), f.key("node", 3)]),
+                10,
+            )
+            .unwrap(),
+        Arc::new(f.authority(true)),
+        &Hook::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.links("mm_node_links").await, [(3, 1), (3, 3)]);
+    f.finish().await;
+}
+
 #[cfg(feature = "runtime-graphql")]
 mod graphql {
     use super::*;
@@ -1786,6 +2182,98 @@ mod graphql {
             json!([{"node": {"label": "green"}}]),
             "{filtered}"
         );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn graphql_writes_take_opt_in_links() {
+        let f = Fixture::new().await;
+        // Off by default: no `links` argument.
+        assert!(!api(&f).sdl().contains("links: PostLinksInput"));
+        let mut options = RuntimeGraphqlMutationOptions::default();
+        options.links_in_writes = true;
+        let module = RuntimeGraphqlModule::compile(
+            f.schema().clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_mutations(options),
+        )
+        .unwrap();
+        let api = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+            .unwrap()
+            .mutation_root("Mutation")
+            .unwrap()
+            .install(module)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let sdl = api.sdl();
+        assert!(sdl.contains("links: PostLinksInput"), "{sdl}");
+        assert!(sdl.contains("input PostTagsLinkChangeInput"), "{sdl}");
+        let created = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { createPost(expectedSchema: $schema, input: {id: "5", label: "five"}, links: {tags: {set: [{id: "10"}, {id: "12"}]}}) { record { id label } } }"#,
+        )
+        .await;
+        assert!(created.get("errors").is_none(), "{created}");
+        assert_eq!(created["data"]["createPost"]["record"]["label"], "five");
+        let updated = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePost(expectedSchema: $schema, key: {id: "5"}, input: {label: "5"}, links: {tags: {add: [{id: "11"}], remove: [{id: "10"}]}}) { record { label } } }"#,
+        )
+        .await;
+        assert!(updated.get("errors").is_none(), "{updated}");
+        assert_eq!(f.links("mm_post_tags").await, [(5, 11), (5, 12)]);
+        // A refused link write leaves the row as it was.
+        let refused = run_as(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePost(expectedSchema: $schema, key: {id: "5"}, input: {label: "nope"}, links: {tags: {set: [{id: "10"}]}}) { record { label } } }"#,
+            f.authority(false),
+        )
+        .await;
+        assert!(refused.get("errors").is_some(), "{refused}");
+        let read = run(
+            &f,
+            &api,
+            r#"{ posts(where: {id: {eq: "5"}}) { edges { node { label } } } }"#,
+        )
+        .await;
+        assert_eq!(
+            read["data"]["posts"]["edges"][0]["node"]["label"], "5",
+            "{read}"
+        );
+        assert_eq!(f.links("mm_post_tags").await, [(5, 11), (5, 12)]);
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn graphql_write_links_need_updates_enabled() {
+        let f = Fixture::new().await;
+        let mut options = RuntimeGraphqlMutationOptions::default();
+        options.links_in_writes = true;
+        options.update = false;
+        let module = RuntimeGraphqlModule::compile(
+            f.schema().clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_mutations(options),
+        )
+        .unwrap();
+        let api = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+            .unwrap()
+            .mutation_root("Mutation")
+            .unwrap()
+            .install(module)
+            .unwrap()
+            .finish()
+            .unwrap();
+        let sdl = api.sdl();
+        assert!(sdl.contains("createPost("), "{sdl}");
+        assert!(!sdl.contains("PostLinksInput"), "{sdl}");
+        assert!(!sdl.contains("LinkChangeInput"), "{sdl}");
         f.finish().await;
     }
 
