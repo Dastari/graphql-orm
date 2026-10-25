@@ -3995,7 +3995,12 @@ impl SchemaTargetValidationReport {
 pub struct EntityBackupDescriptor {
     pub entity_name: String,
     pub table_name: String,
+    /// The first (or only) primary-key column.
     pub primary_key_column: String,
+    /// Every primary-key column in key order when the key has more than one column; empty for a
+    /// single-column key. Export orders by the whole key and a row's identity encodes all of it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub primary_key_columns: Vec<String>,
     /// Whether this entity's append-only enforcement supports bounded purge.
     #[serde(default)]
     pub retention_purge: bool,
@@ -4249,6 +4254,15 @@ pub fn backup_descriptors_from_entities(
                 entity_name: entity.entity_name.to_string(),
                 table_name: entity.table_name.to_string(),
                 primary_key_column: entity.primary_key.to_string(),
+                primary_key_columns: if entity.primary_keys.len() > 1 {
+                    entity
+                        .primary_keys
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 retention_purge: entity.retention_policy.is_some(),
                 export_order,
                 restore_order,
@@ -4257,6 +4271,21 @@ pub fn backup_descriptors_from_entities(
             }
         })
         .collect()
+}
+
+impl EntityBackupDescriptor {
+    /// The primary-key columns in key order: `primary_key_columns`, or the single
+    /// `primary_key_column`.
+    pub fn key_columns(&self) -> Vec<&str> {
+        if self.primary_key_columns.is_empty() {
+            vec![self.primary_key_column.as_str()]
+        } else {
+            self.primary_key_columns
+                .iter()
+                .map(String::as_str)
+                .collect()
+        }
+    }
 }
 
 pub fn schema_snapshot_from_entities(
@@ -4286,6 +4315,11 @@ pub fn stable_schema_hash(entities: &[EntityBackupDescriptor]) -> String {
         canonical.push_str(&entity.table_name);
         canonical.push('|');
         canonical.push_str(&entity.primary_key_column);
+        // Omitted for single-column keys, so their schema hashes are unchanged.
+        if !entity.primary_key_columns.is_empty() {
+            canonical.push_str("|key:");
+            canonical.push_str(&entity.primary_key_columns.join(","));
+        }
         if entity.retention_purge {
             canonical.push_str("|retention_purge");
         }

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.71.0 backs up composite-key tables and describes the link tables of many-to-many
+relations (`join_table_backup_descriptors`). See the
+[migration guide](../../MIGRATION.md#0701-to-0710-composite-key-backups-and-link-tables).
+
 Version 0.70.1 drops a replaced foreign key before adding its replacement, so a changed delete
 policy applies on PostgreSQL. See the
 [migration guide](../../MIGRATION.md#0700-to-0701-foreign-key-replacement-order).

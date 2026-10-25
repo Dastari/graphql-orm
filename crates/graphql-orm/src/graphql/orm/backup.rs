@@ -475,11 +475,16 @@ async fn export_table_rows(
         .map(|column| quote_identifier(&column.column_name))
         .collect::<Vec<_>>()
         .join(", ");
+    let key_columns = validated_key_columns(entity)?;
     let sql = format!(
         "SELECT {} FROM {} ORDER BY {}",
         select_columns,
         quote_identifier(&entity.table_name),
-        quote_identifier(&entity.primary_key_column)
+        key_columns
+            .iter()
+            .map(|column| quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     let rows = fetch_snapshot_rows(snapshot, &sql).await?;
@@ -496,15 +501,7 @@ async fn export_table_rows(
             values.insert(column.column_name.clone(), value);
         }
 
-        let primary_key = values
-            .get(&entity.primary_key_column)
-            .ok_or_else(|| {
-                sqlx::Error::Protocol(format!(
-                    "backup export for {} did not include primary key column {}",
-                    entity.table_name, entity.primary_key_column
-                ))
-            })?
-            .primary_key_string();
+        let primary_key = row_identity(entity, &key_columns, &values)?;
         let row_hash = canonical_row_hash(&entity.table_name, &values);
         out.push(BackupRow {
             table_name: entity.table_name.clone(),
@@ -702,6 +699,57 @@ fn validate_backup_value(
     )))
 }
 
+/// The key columns of `entity`, checked: a composite key lists at least two distinct primary-key
+/// columns of the descriptor, starting with `primary_key_column`.
+fn validated_key_columns(entity: &EntityBackupDescriptor) -> crate::Result<Vec<&str>> {
+    let keys = entity.key_columns();
+    let composite = !entity.primary_key_columns.is_empty();
+    let distinct = keys.iter().collect::<std::collections::BTreeSet<_>>().len() == keys.len();
+    let declared = keys.iter().all(|key| {
+        entity
+            .columns
+            .iter()
+            .any(|column| column.column_name == *key && column.is_primary_key)
+    });
+    if composite
+        && (keys.len() < 2 || keys[0] != entity.primary_key_column || !distinct || !declared)
+    {
+        return Err(sqlx::Error::Protocol(format!(
+            "backup descriptor for {} has an invalid composite primary key",
+            entity.table_name
+        )));
+    }
+    Ok(keys)
+}
+
+/// A row's stable identity: the single key's value text, unchanged from earlier releases, or the
+/// canonical JSON array of every key part for a composite key.
+fn row_identity(
+    entity: &EntityBackupDescriptor,
+    key_columns: &[&str],
+    values: &BTreeMap<String, BackupValue>,
+) -> crate::Result<String> {
+    let parts = key_columns
+        .iter()
+        .map(|column| {
+            values
+                .get(*column)
+                .map(BackupValue::primary_key_string)
+                .ok_or_else(|| {
+                    sqlx::Error::Protocol(format!(
+                        "backup export for {} did not include primary key column {}",
+                        entity.table_name, column
+                    ))
+                })
+        })
+        .collect::<crate::Result<Vec<_>>>()?;
+    Ok(match parts.as_slice() {
+        [single] if entity.primary_key_columns.is_empty() => single.clone(),
+        _ => serde_json::to_string(&parts)
+            .map_err(|error| sqlx::Error::Protocol(error.to_string()))?,
+    })
+}
+
 fn export_columns(entity: &EntityBackupDescriptor) -> Vec<&super::ColumnBackupDescriptor> {
     entity
         .columns
@@ -734,11 +782,14 @@ fn import_row_order<'a>(
     entity: &EntityBackupDescriptor,
     rows: &'a [BackupRow],
 ) -> crate::Result<Vec<&'a BackupRow>> {
+    // Self-references order rows by a single-column key; a composite-key table has none.
+    let single_key = entity.primary_key_columns.is_empty();
     let self_dependencies = entity
         .dependencies
         .iter()
         .filter(|dependency| {
-            dependency.table_name == entity.table_name
+            single_key
+                && dependency.table_name == entity.table_name
                 && dependency.target_column == entity.primary_key_column
                 && dependency.source_column != entity.primary_key_column
         })
@@ -1254,6 +1305,7 @@ mod tests {
             entity_name: "Item".to_string(),
             table_name: "items".to_string(),
             primary_key_column: "id".to_string(),
+            primary_key_columns: Vec::new(),
             retention_purge: false,
             export_order: 0,
             restore_order: 0,

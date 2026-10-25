@@ -15,6 +15,14 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.70.1 to 0.71.0: composite-key backups and link tables
+
+Upgrade runtime/macros together.
+
+- Rust: add `primary_key_columns: Vec::new()` to `EntityBackupDescriptor` struct literals, or list the whole key (at least two distinct primary-key columns, starting with `primary_key_column`) for a composite-key table. Export refuses an inconsistent composite key.
+- Hosts that back up runtime many-to-many relations call `ValidatedRuntimeSchema::join_table_backup_descriptors(order_of)`, where `order_of` returns the export/restore order of each endpoint collection's own descriptor, and add the result to their entity set. Link tables restore after both endpoints.
+- Single-column backups are unchanged: same manifests, row identities and schema hashes. A schema that contains a static composite-key entity gets a new schema hash. Backups taken before the upgrade then compare as an older schema; take a new backup after upgrading.
+
 ## 0.70.0 to 0.70.1: foreign-key replacement order
 
 Upgrade runtime/macros together. No API, schema, SDL or persistence change. Owned and legacy migration plans that replace a foreign key now list its `DropForeignKey` before its `AddForeignKey`. A delete-policy change that previously failed on PostgreSQL with "constraint already exists" now applies. Plan hashes of such plans change; plans without a foreign-key replacement are unchanged.

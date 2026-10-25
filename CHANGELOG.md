@@ -16,6 +16,15 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.71.0**.
+
+- Back up and restore composite-key tables. `EntityBackupDescriptor` gains `primary_key_columns`, the complete key in key order when it has more than one column (empty otherwise). Export orders by the whole key, and a row's identity (`BackupRow::primary_key`) is the canonical JSON array of every key part, for example `["1","2"]`. Restore verification and incremental row maps use that identity; self-reference ordering still applies to single-column keys only. Static entities with a composite key now describe their whole key; before, only the first column was described, so their rows collided.
+- Add `ValidatedRuntimeSchema::join_table_backup_descriptors`. It returns one descriptor per ORM-owned many-to-many link table (exact inverses share one). Each has the composite (source, target) key, `Cascade` dependencies on both endpoint tables, and an export/restore order after both endpoints' orders as the host supplies them. A restore whose link references a missing endpoint row fails on the foreign key and does not drop the link. `DateTime` link keys are refused (`RuntimeLinkBackupError::UnsupportedKeyKind`).
+- **Breaking (Rust):** struct literals of `EntityBackupDescriptor` must add `primary_key_columns: Vec::new()` (or the key).
+- **Compatibility:** single-column descriptors serialize, hash and identify rows exactly as before. Descriptors with a composite key add `|key:…` to `stable_schema_hash`. Schema hashes of static entities with composite keys therefore change, and so do the backups that contain them, which compare as an older schema. The change journal (incremental capture) still records static entities by their entity id; composite-key tables are covered by full snapshots.
+
+## 0.70.1 (unreleased)
+
 Companion runtime/macros version: **0.70.1**.
 
 - Select agql-auth by its published release tag `v0.23.0` instead of the reviewed merged revision `158c79e27117adc5a95d01d58c39c39fd44e6a1a`. The tag resolves to that same commit, so no source, behaviour or version changes. Consumers that selected the revision must switch to the tag as well: Cargo treats the two selectors as different sources. See [MIGRATION](MIGRATION.md#agql-auth-0230-selection).
