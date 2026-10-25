@@ -29,8 +29,12 @@ Upgrade runtime/macros together. No Rust API, schema, SDL or persistence change.
 
 ## agql-auth 0.23.0 selection
 
-The workspace selects agql-auth 0.23.0 at reviewed merged revision
-`158c79e27117adc5a95d01d58c39c39fd44e6a1a` instead of tag `v0.22.1`. No
+The workspace selects agql-auth 0.23.0 by its published release tag
+`v0.23.0` (commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`) instead of tag
+`v0.22.1`. Consumers that already selected the reviewed revision
+`158c79e2…` must switch to `tag = "v0.23.0"`: Cargo treats a tag and a revision
+as different sources even for the same commit, and two sources compile two
+copies of Auth. No
 graphql-orm, graphql-orm-ai or graphql-orm-router source or behaviour changes.
 Breaking for consumers that use Auth types directly:
 
