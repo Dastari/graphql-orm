@@ -28,7 +28,7 @@ tool-free, and network-free; production integration comes later.
 - [Run a durable bounded subscription wait](durable-subscription-waits.md).
 - [Add a read-only application-tool loop](read-only-tool-loop.md) or [supervised mutations](supervised-tool-loop.md).
 - [Set budgets and report usage](usage-and-budgets.md).
-- [Use OpenAI](openai-background.md), [Anthropic](anthropic.md), [xAI](xai.md), [Ollama](ollama.md), or an [OpenAI-compatible endpoint](openai-compatible.md).
+- [Use OpenAI](openai-background.md), [Anthropic](anthropic.md), [xAI](xai.md), [Ollama](ollama.md), an [OpenAI-compatible endpoint](openai-compatible.md), or a [Chat Completions endpoint](chat-completions.md).
 - [Use the installed local harness](local-harness.md) or experimental [Codex app-server adapter](provider-sessions-and-hosted-activity.md).
 - [Recover after backup or restore](recovery-and-restore.md).
 

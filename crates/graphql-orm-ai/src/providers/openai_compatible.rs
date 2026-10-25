@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use url::Url;
 
 use super::openai::{CompatibleRouteBinding, OpenAiProvider, OpenAiProviderConfig};
 use crate::{
@@ -213,7 +212,7 @@ impl OpenAiCompatibleProvider {
         secrets: Arc<dyn AiSecretStore>,
     ) -> Result<Self, ProviderError> {
         validate_config(&config)?;
-        let endpoint = normalized_responses_endpoint(&config.responses_endpoint)?;
+        let endpoint = super::endpoint::normalized_provider_endpoint(&config.responses_endpoint)?;
         if !endpoint_policy
             .authorize_endpoint(AiProviderKindInput::OpenAiCompatible, endpoint.as_str())
         {
@@ -287,31 +286,6 @@ fn validate_config(config: &OpenAiCompatibleProviderConfig) -> Result<(), Provid
         ));
     }
     config.capabilities.validate()
-}
-
-fn normalized_responses_endpoint(value: &str) -> Result<Url, ProviderError> {
-    let mut url = Url::parse(value).map_err(|_| {
-        ProviderError::InvalidConfiguration(
-            "invalid OpenAI-compatible Responses endpoint".to_owned(),
-        )
-    })?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.path().is_empty()
-        || url.path() == "/"
-        || url.path().len() > 2_048
-    {
-        return Err(ProviderError::InvalidConfiguration(
-            "unsafe OpenAI-compatible Responses endpoint".to_owned(),
-        ));
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-    Ok(url)
 }
 
 #[cfg(test)]

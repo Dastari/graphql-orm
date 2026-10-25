@@ -201,9 +201,10 @@ impl AiProviderCallTelemetry {
             ProviderKind::OpenAi => Some("openai"),
             ProviderKind::Anthropic => Some("anthropic"),
             ProviderKind::Xai => Some("x_ai"),
-            ProviderKind::Ollama | ProviderKind::OpenAiCompatible | ProviderKind::LocalHarness => {
-                None
-            }
+            ProviderKind::Ollama
+            | ProviderKind::OpenAiCompatible
+            | ProviderKind::LocalHarness
+            | ProviderKind::ChatCompletions => None,
         }
     }
 }

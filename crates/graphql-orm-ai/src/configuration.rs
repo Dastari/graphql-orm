@@ -74,8 +74,11 @@ pub trait AiProviderEndpointPolicy: Send + Sync {
 }
 
 /// Provider family accepted by GraphQL configuration.
+///
+/// Non-exhaustive: new provider families may be added in minor releases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[non_exhaustive]
 pub enum AiProviderKindInput {
     /// OpenAI native Responses API.
     OpenAi,
@@ -89,6 +92,8 @@ pub enum AiProviderKindInput {
     OpenAiCompatible,
     /// Deployment-registered installed local harness.
     LocalHarness,
+    /// Explicit capability-profiled Chat Completions endpoint.
+    ChatCompletions,
 }
 
 impl AiProviderKindInput {
@@ -101,6 +106,7 @@ impl AiProviderKindInput {
             Self::Ollama => "ollama",
             Self::OpenAiCompatible => "openai_compatible",
             Self::LocalHarness => "local_harness",
+            Self::ChatCompletions => "chat_completions",
         }
     }
 }

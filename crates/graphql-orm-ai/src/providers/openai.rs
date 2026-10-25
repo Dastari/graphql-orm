@@ -11,6 +11,8 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
+use super::sse::SseDecoder;
+
 #[cfg(feature = "provider-openai-core")]
 use crate::{
     AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService,
@@ -1139,7 +1141,7 @@ impl AiProvider for OpenAiProvider {
         let surface_response_id =
             request.continuation_mode != crate::ModelContinuationMode::StatelessReplay;
         let output = async_stream::try_stream! {
-            let mut decoder = SseDecoder::default();
+            let mut decoder = SseDecoder::new(MAXIMUM_SSE_EVENT_BYTES);
             let mut normalizer = OpenAiEventNormalizer::new(
                 request.model,
                 request.maximum_output_tokens,
@@ -1710,68 +1712,6 @@ fn openai_builtin(tool: &ModelBuiltinTool) -> Result<Value, ProviderError> {
             "container": {"type": "auto"}
         })),
         ModelBuiltinTool::ImageGeneration => Ok(json!({"type": "image_generation"})),
-    }
-}
-
-#[derive(Default)]
-struct SseDecoder {
-    buffer: Vec<u8>,
-}
-
-impl SseDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<String>, ProviderError> {
-        self.buffer.extend_from_slice(bytes);
-        if self.buffer.len() > MAXIMUM_SSE_EVENT_BYTES {
-            return Err(ProviderError::Rejected);
-        }
-        let mut payloads = Vec::new();
-        while let Some((position, delimiter_length)) = find_sse_delimiter(&self.buffer) {
-            let frame = self.buffer.drain(..position).collect::<Vec<_>>();
-            self.buffer.drain(..delimiter_length);
-            if let Some(payload) = decode_sse_frame(&frame)? {
-                payloads.push(payload);
-            }
-        }
-        Ok(payloads)
-    }
-
-    fn finish(&self) -> Result<(), ProviderError> {
-        if self.buffer.iter().all(u8::is_ascii_whitespace) {
-            Ok(())
-        } else {
-            Err(ProviderError::Unavailable)
-        }
-    }
-}
-
-fn find_sse_delimiter(bytes: &[u8]) -> Option<(usize, usize)> {
-    bytes
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|position| (position, 2))
-        .or_else(|| {
-            bytes
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .map(|position| (position, 4))
-        })
-}
-
-fn decode_sse_frame(frame: &[u8]) -> Result<Option<String>, ProviderError> {
-    let frame = std::str::from_utf8(frame).map_err(|_| ProviderError::Rejected)?;
-    let mut data = String::new();
-    for line in frame.lines() {
-        if let Some(value) = line.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(value.strip_prefix(' ').unwrap_or(value));
-        }
-    }
-    if data.is_empty() || data == "[DONE]" {
-        Ok(None)
-    } else {
-        Ok(Some(data))
     }
 }
 
@@ -4152,7 +4092,7 @@ mod tests {
 
     #[test]
     fn sse_decoder_handles_chunk_boundaries_and_crlf() {
-        let mut decoder = SseDecoder::default();
+        let mut decoder = SseDecoder::new(MAXIMUM_SSE_EVENT_BYTES);
         assert!(
             decoder
                 .push(b"event: x\r\ndata: {\"type\":\"x\"")

@@ -4531,7 +4531,13 @@ pub(crate) fn validate_attachment_artifact(
         || artifact.provider_kind.as_deref().is_some_and(|value| {
             !matches!(
                 value,
-                "openai" | "anthropic" | "xai" | "ollama" | "openai_compatible" | "local_harness"
+                "openai"
+                    | "anthropic"
+                    | "xai"
+                    | "ollama"
+                    | "openai_compatible"
+                    | "local_harness"
+                    | "chat_completions"
             )
         })
         || artifact.provider_profile_id.as_ref().is_some_and(|value| {
