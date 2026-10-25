@@ -6987,6 +6987,8 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             &database,
             CreateAiBudgetPolicyRecordInput {
+                id: uuid::Uuid::new_v4(),
+                provisioned_by: None,
                 scope_key: crate::ai_scope_key(&scope),
                 scope_kind: scope.kind.clone(),
                 scope_id: scope.id.clone(),

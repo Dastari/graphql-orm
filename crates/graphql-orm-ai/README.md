@@ -15,6 +15,11 @@ The current workspace selects published Auth release tag `v0.23.0`
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.113.0` adds trusted deployment provisioning of budget policies
+(`OrmAiBudgetPolicyProvisioner`) and requires AI schema module `0.74.0`. See
+[usage and budgets](docs/usage-and-budgets.md#deployment-provisioning) and
+[MIGRATION.md](MIGRATION.md).
+
 Version `0.112.0` adds opt-in host-bound principal projection
 (`AiPrincipalProjection`) and pre-write submission admission. Defaults are
 unchanged; see [MIGRATION.md](MIGRATION.md).

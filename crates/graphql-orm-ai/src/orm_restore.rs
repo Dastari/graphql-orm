@@ -16,11 +16,11 @@ use crate::orm_provider_session::AiProviderSessionBindingRecord;
 use crate::persistence::{
     AiApprovalRecord, AiApprovalRecordOrderByInput, AiAttachmentArtifactRecord,
     AiAttachmentArtifactRecordOrderByInput, AiAttachmentRecord, AiAttachmentRecordOrderByInput,
-    AiAuditEventRecord, AiAuditEventRecordOrderByInput, AiBudgetPolicyRecord,
-    AiBudgetPolicyRecordOrderByInput, AiEgressConsentRecord, AiEgressConsentRecordOrderByInput,
-    AiMessageRecord, AiPricingPolicyRecord, AiPricingPolicyRecordOrderByInput, AiRunRecord,
-    AiRunRecordOrderByInput, AiSessionRecord, AiSubscriptionWaitAdoptionRecord,
-    AiSubscriptionWaiterRecord,
+    AiAuditEventRecord, AiAuditEventRecordOrderByInput, AiAuditEventRecordWhereInput,
+    AiBudgetPolicyRecord, AiBudgetPolicyRecordOrderByInput, AiEgressConsentRecord,
+    AiEgressConsentRecordOrderByInput, AiMessageRecord, AiPricingPolicyRecord,
+    AiPricingPolicyRecordOrderByInput, AiRunRecord, AiRunRecordOrderByInput, AiSessionRecord,
+    AiSubscriptionWaitAdoptionRecord, AiSubscriptionWaiterRecord,
 };
 use crate::{
     AiAttachmentServiceLimits, AiBudgetAmounts, AiBudgetPolicyManagementLimits,
@@ -420,11 +420,31 @@ impl OrmAiRestoreFactCollector {
                             .fetch_all()
                             .await
                             .map_err(OrmPublicError::from)?;
+                        // Provisioning facts are collected by action, bounded by
+                        // the budget-policy limit (one fact per provisioned row),
+                        // independently of the global audit scan.
+                        let budget_provision_audits = tx
+                            .query::<AiAuditEventRecord>()
+                            .filter(AiAuditEventRecordWhereInput {
+                                action: Some(graphql_orm::graphql::filters::StringFilter {
+                                    eq: Some(crate::AI_DEPLOYMENT_BUDGET_POLICY_ACTION.to_owned()),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .order_by(AiAuditEventRecordOrderByInput {
+                                created_at: Some(OrderDirection::Asc),
+                            })
+                            .limit(query_limit(policy_limits.maximum_budget_policies))
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
                         Some(CollectedPolicyRows {
                             limits: policy_limits,
                             budget_policies,
                             pricing_policies,
                             pricing_audits,
+                            budget_provision_audits,
                         })
                     } else {
                         None
@@ -521,6 +541,7 @@ struct CollectedPolicyRows {
     budget_policies: Vec<AiBudgetPolicyRecord>,
     pricing_policies: Vec<AiPricingPolicyRecord>,
     pricing_audits: Vec<AiAuditEventRecord>,
+    budget_provision_audits: Vec<AiAuditEventRecord>,
 }
 
 struct CollectedAttachmentMetadataRows {
@@ -1334,6 +1355,7 @@ fn record_unique_reference(
 struct PolicyAuditEvidence {
     limits: PolicyLimitEvidence,
     budget_rows_digest: Option<String>,
+    budget_provision_audit_rows_digest: Option<String>,
     pricing_rows_digest: Option<String>,
     pricing_audit_rows_digest: Option<String>,
 }
@@ -1364,21 +1386,38 @@ impl CollectedPolicyRows {
         // Timestamp ties at the SQL sentinel boundary cannot enter accepted
         // evidence: an overflow clears the whole dependent category, while a
         // complete scan contains every row and is canonically sorted by ID.
-        let budget_truncated = self.budget_policies.len() > self.limits.maximum_budget_policies;
+        // Provisioned policies are validated against their own action-filtered
+        // creation facts, at most one per policy; more facts than the policy
+        // bound leaves the category incomplete.
+        let budget_truncated = self.budget_policies.len() > self.limits.maximum_budget_policies
+            || self.budget_provision_audits.len() > self.limits.maximum_budget_policies;
         if budget_truncated {
             self.budget_policies.clear();
         }
         self.budget_policies
             .sort_by_key(|record| (record.updated_at, record.id));
-        let budget_rows_digest = if budget_truncated {
-            None
+        if budget_truncated {
+            self.budget_provision_audits.clear();
+        }
+        self.budget_provision_audits
+            .sort_by_key(|record| (record.created_at, record.id));
+        let (budget_rows_digest, budget_provision_audit_rows_digest) = if budget_truncated {
+            (None, None)
         } else {
-            Some(serialized_digest(&self.budget_policies)?)
+            (
+                Some(serialized_digest(&self.budget_policies)?),
+                Some(serialized_digest(&self.budget_provision_audits)?),
+            )
         };
         let invalid_budget_policy_count = if budget_truncated {
             0
         } else {
-            invalid_budget_policy_count(&self.budget_policies, self.limits.budget_management)
+            let provision_audits = self.budget_provision_audits.iter().collect::<Vec<_>>();
+            invalid_budget_policy_count(
+                &self.budget_policies,
+                &provision_audits,
+                self.limits.budget_management,
+            )
         };
 
         let pricing_truncated = self.pricing_policies.len() > self.limits.maximum_pricing_policies
@@ -1422,6 +1461,7 @@ impl CollectedPolicyRows {
             evidence: PolicyAuditEvidence {
                 limits: PolicyLimitEvidence::from(self.limits),
                 budget_rows_digest,
+                budget_provision_audit_rows_digest,
                 pricing_rows_digest,
                 pricing_audit_rows_digest,
             },
@@ -1451,6 +1491,7 @@ impl From<AiRestorePolicyAuditLimits> for PolicyLimitEvidence {
 
 fn invalid_budget_policy_count(
     records: &[AiBudgetPolicyRecord],
+    provision_audits: &[&AiAuditEventRecord],
     limits: AiBudgetPolicyManagementLimits,
 ) -> u64 {
     let mut invalid = BTreeSet::new();
@@ -1460,7 +1501,9 @@ fn invalid_budget_policy_count(
             .entry(record.scope_key.as_str())
             .or_default()
             .push(record.id);
-        if !restored_budget_policy_is_valid(record, limits.maximum_ceiling()) {
+        if !restored_budget_policy_is_valid(record, limits.maximum_ceiling())
+            || !restored_budget_policy_provenance_is_valid(record, provision_audits)
+        {
             invalid.insert(record.id);
         }
     }
@@ -1471,6 +1514,39 @@ fn invalid_budget_policy_count(
         invalid.extend(ids.iter().copied());
     }
     invalid.len() as u64
+}
+
+/// An interactive policy has no provenance. A provisioned one must carry a
+/// valid deployment actor, its derived ID, and exactly one matching creation
+/// audit fact.
+fn restored_budget_policy_provenance_is_valid(
+    record: &AiBudgetPolicyRecord,
+    provision_audits: &[&AiAuditEventRecord],
+) -> bool {
+    let Some(actor) = record.provisioned_by.as_deref() else {
+        return true;
+    };
+    let resource_reference = record.id.to_string();
+    let mut linked = provision_audits
+        .iter()
+        .filter(|audit| audit.resource_reference == resource_reference);
+    let (Some(audit), None) = (linked.next(), linked.next()) else {
+        return false;
+    };
+    crate::orm_budget_provisioning::valid_deployment_actor(actor)
+        && record.id
+            == crate::orm_budget_provisioning::deployment_budget_policy_id(
+                actor,
+                &record.scope_key,
+                record.principal_kind.as_deref(),
+                record.principal_subject.as_deref(),
+                &record.interval_kind,
+            )
+        && audit.actor_principal_kind == crate::AI_DEPLOYMENT_ACTOR_KIND
+        && audit.actor_subject == actor
+        && audit.resource_kind == "budget_policy"
+        && audit.outcome == "allowed"
+        && audit.reason_code == crate::orm_budget_provisioning::DEPLOYMENT_BUDGET_POLICY_REASON
 }
 
 fn restored_budget_policy_is_valid(
@@ -1817,6 +1893,8 @@ mod tests {
         AiBudgetPolicyRecord::insert(
             database,
             crate::persistence::CreateAiBudgetPolicyRecordInput {
+                id: uuid::Uuid::new_v4(),
+                provisioned_by: None,
                 scope_key: scope_key_override
                     .map(str::to_owned)
                     .unwrap_or_else(|| crate::ai_scope_key(&scope)),
@@ -2657,6 +2735,153 @@ mod tests {
             .await
             .expect("changed deployment limits should collect");
         assert_ne!(collected.digest(), changed.digest());
+    }
+
+    #[tokio::test]
+    async fn provisioned_budget_policies_require_their_derived_id_and_one_creation_audit() {
+        let database = database().await;
+        let limits = policy_audit_limits(10, 10, 100);
+        let provisioner = crate::OrmAiBudgetPolicyProvisioner::new(
+            database.clone(),
+            crate::AiDeploymentActor::new("config-file").unwrap(),
+            limits.budget_management(),
+        );
+        let created = provisioner
+            .ensure_budget_policy(crate::AiDeploymentBudgetPolicy {
+                scope: AiScope::new("project", "restore-project").with_tenant_id("tenant-1"),
+                principal_kind: None,
+                principal_subject: None,
+                interval: crate::AiBudgetIntervalInput::Month,
+                maximum_input_tokens: Some(1_000),
+                maximum_output_tokens: None,
+                maximum_tool_units: None,
+                maximum_image_units: None,
+                maximum_cost_microunits: Some(0),
+                maximum_runs: Some(10),
+                enabled: true,
+            })
+            .await
+            .unwrap();
+        let policy_id = created.policy().id;
+        seed_budget_policy(&database, None, 100).await;
+        let invalid = |database: Database<SqliteBackend>| async move {
+            let collected = OrmAiRestoreFactCollector::new(database)
+                .with_policy_audits(limits)
+                .collect("module-fingerprint")
+                .await
+                .expect("policy graphs should collect");
+            let complete = collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::BudgetPolicies)
+                == Some(&AiRestoreAuditStatus::Complete);
+            (collected.facts().invalid_budget_policy_count, complete)
+        };
+        assert_eq!(invalid(database.clone()).await, (0, true));
+
+        // A row claiming deployment provenance without its derived ID or audit.
+        AiBudgetPolicyRecord::insert(
+            &database,
+            crate::persistence::CreateAiBudgetPolicyRecordInput {
+                id: uuid::Uuid::new_v4(),
+                provisioned_by: Some("config-file".to_owned()),
+                scope_key: crate::ai_scope_key(&AiScope::new("project", "forged")),
+                scope_kind: "project".to_owned(),
+                scope_id: "forged".to_owned(),
+                tenant_id: None,
+                principal_kind: None,
+                principal_subject: None,
+                interval_kind: "day".to_owned(),
+                maximum_input_tokens: Some(1),
+                maximum_output_tokens: None,
+                maximum_tool_units: None,
+                maximum_image_units: None,
+                maximum_cost_microunits: None,
+                maximum_runs: None,
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(invalid(database.clone()).await.0, 1);
+
+        // A second creation fact for the genuine row makes it ambiguous too.
+        AiAuditEventRecord::insert(
+            &database,
+            crate::persistence::CreateAiAuditEventRecordInput {
+                actor_principal_kind: crate::AI_DEPLOYMENT_ACTOR_KIND.to_owned(),
+                actor_subject: "config-file".to_owned(),
+                action: crate::AI_DEPLOYMENT_BUDGET_POLICY_ACTION.to_owned(),
+                resource_kind: "budget_policy".to_owned(),
+                resource_reference: policy_id.to_string(),
+                outcome: "allowed".to_owned(),
+                reason_code: "deployment_budget_policy_created".to_owned(),
+                correlation_id: uuid::Uuid::new_v4().to_string(),
+                causation_id: None,
+                policy_version: Some("0".to_owned()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(invalid(database).await.0, 2);
+    }
+
+    #[tokio::test]
+    async fn provisioned_policy_audits_do_not_depend_on_the_global_audit_scan_bound() {
+        let database = database().await;
+        // One audit event fits the global scan; provisioning facts are
+        // collected separately and still validate the provisioned row.
+        let limits = policy_audit_limits(10, 10, 1);
+        crate::OrmAiBudgetPolicyProvisioner::new(
+            database.clone(),
+            crate::AiDeploymentActor::new("config-file").unwrap(),
+            limits.budget_management(),
+        )
+        .ensure_budget_policy(crate::AiDeploymentBudgetPolicy {
+            scope: AiScope::new("project", "restore-project").with_tenant_id("tenant-1"),
+            principal_kind: None,
+            principal_subject: None,
+            interval: crate::AiBudgetIntervalInput::Day,
+            maximum_input_tokens: Some(1_000),
+            maximum_output_tokens: None,
+            maximum_tool_units: None,
+            maximum_image_units: None,
+            maximum_cost_microunits: None,
+            maximum_runs: Some(10),
+            enabled: true,
+        })
+        .await
+        .unwrap();
+        for index in 0..3 {
+            AiAuditEventRecord::insert(
+                &database,
+                crate::persistence::CreateAiAuditEventRecordInput {
+                    actor_principal_kind: "user".to_owned(),
+                    actor_subject: "restore-user".to_owned(),
+                    action: "ai.retention_policy.set".to_owned(),
+                    resource_kind: "retention_policy".to_owned(),
+                    resource_reference: format!("unrelated-{index}"),
+                    outcome: "allowed".to_owned(),
+                    reason_code: "unrelated".to_owned(),
+                    correlation_id: uuid::Uuid::new_v4().to_string(),
+                    causation_id: None,
+                    policy_version: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let collected = OrmAiRestoreFactCollector::new(database)
+            .with_policy_audits(limits)
+            .collect("module-fingerprint")
+            .await
+            .expect("policy graphs should collect");
+        assert_eq!(
+            collected
+                .audit_statuses()
+                .get(&AiRestoreAuditKind::BudgetPolicies),
+            Some(&AiRestoreAuditStatus::Complete)
+        );
+        assert_eq!(collected.facts().invalid_budget_policy_count, 0);
     }
 
     #[tokio::test]
