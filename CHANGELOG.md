@@ -24,10 +24,10 @@ Companion runtime/macros version: **0.71.0**.
   - every verbatim dependency value must name a row of the backup's own target table, otherwise it fails with a typed `BackupOrphanReference` (`BackupOrphanReference::from_error`);
   - in `EmptyDatabase` mode every table must be empty.
   Before, earlier tables were committed when a later table failed.
-- The change journal refuses to record a write to a composite-key entity, because its entity-id row identity cannot name the row. `compact_chain` refuses incremental changes to a composite-key table. Back such tables up with full snapshots.
+- The change journal refuses to record a mutation event for a composite-key entity, because its entity-id row identity cannot name the row. The ORM generates no write path for composite-key entities, so this applies only to events a host emits through `run_mutation_hook`. `compact_chain` refuses incremental changes to a composite-key table. Back such tables up with full snapshots.
 - **Breaking (Rust):** struct literals of `EntityBackupDescriptor` must add `primary_key_columns: Vec::new()` (or the key).
 - **Breaking (restore of older backups):** a schema that contains a static composite-key entity has a new `stable_schema_hash` (composite descriptors add `|key:…`). Restore requires an exact schema hash, so a backup of such a schema taken before 0.71 cannot be restored with 0.71. To migrate, restore it with 0.70, upgrade, and take a new backup. Schemas whose keys are all single-column keep their hashes, manifests and row identities unchanged.
-- **Breaking (behaviour):** with the change journal enabled, writes to composite-key entities fail instead of recording an unusable journal row. A backup with an orphan reference, or a restore into a non-empty table, is now refused before any table is written instead of partway through.
+- **Breaking (behaviour):** with the change journal enabled, a host-emitted mutation event for a composite-key entity fails its transaction instead of recording an unusable journal row. A backup with an orphan reference, or a restore into a non-empty table, is now refused before any table is written instead of partway through.
 
 ## 0.70.1 (unreleased)
 

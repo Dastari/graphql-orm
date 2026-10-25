@@ -64,29 +64,18 @@ async fn schema(database: graphql_orm::db::Database) -> graphql_orm::db::Databas
     }
     database
 }
-async fn insert(
-    database: &graphql_orm::db::Database,
-    team: &str,
-    member: i64,
-    role: &str,
-) -> graphql_orm::Result<()> {
-    ScMembership::insert(
-        database,
-        CreateScMembershipInput {
-            team: team.into(),
-            member,
-            role: role.into(),
-        },
-    )
-    .await?;
-    Ok(())
+async fn insert(database: &graphql_orm::db::Database, team: &str, member: i64, role: &str) {
+    let sql = format!(
+        "INSERT INTO sc_memberships (team, member, role) VALUES ('{team}', {member}, '{role}')"
+    );
+    sqlx::query(&sql).execute(database.pool()).await.unwrap();
 }
 
 #[tokio::test]
 async fn a_static_composite_key_entity_round_trips_without_colliding_rows() {
     let source = database().await;
     for (team, member, role) in [("a", 1, "owner"), ("a", 2, "member"), ("b", 1, "member")] {
-        insert(&source, team, member, role).await.unwrap();
+        insert(&source, team, member, role).await;
     }
     let descriptors = source.list_backup_entities(&entities());
     assert_eq!(descriptors[0].key_columns(), ["team", "member"]);
@@ -128,19 +117,5 @@ async fn a_static_composite_key_entity_round_trips_without_colliding_rows() {
             ("a".into(), 2, "member".into()),
             ("b".into(), 1, "member".into())
         ]
-    );
-}
-
-/// The change journal cannot name a composite key, so it refuses to record one instead of
-/// producing incremental chains that resurrect or duplicate rows.
-#[cfg(feature = "change-journal")]
-#[tokio::test]
-async fn the_change_journal_refuses_composite_key_writes() {
-    let database = database().await.with_change_journal();
-    database.ensure_change_journal_table().await.unwrap();
-    let error = insert(&database, "a", 1, "owner").await.unwrap_err();
-    assert!(
-        error.to_string().contains("composite-key entity"),
-        "{error}"
     );
 }
