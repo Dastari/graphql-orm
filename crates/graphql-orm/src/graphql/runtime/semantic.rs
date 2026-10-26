@@ -143,6 +143,7 @@ pub(super) fn link_arguments(object: &str, target: &str) -> Vec<(&'static str, S
 pub(super) fn mutation_arguments(
     action: RuntimeMutationAction,
     object: &str,
+    collection: &RuntimeCollection,
     links: bool,
 ) -> Vec<(&'static str, String)> {
     let mut arguments = vec![("expectedSchema", "String!".to_owned())];
@@ -151,7 +152,10 @@ pub(super) fn mutation_arguments(
         arguments.push(("expected", format!("{object}WhereInput")));
     }
     match action {
-        RuntimeMutationAction::Create => arguments.push(("input", format!("Create{object}Input!"))),
+        RuntimeMutationAction::Create if mutation::has_create_input(collection) => {
+            arguments.push(("input", format!("Create{object}Input!")))
+        }
+        RuntimeMutationAction::Create => {}
         RuntimeMutationAction::Update => arguments.push(("input", format!("Update{object}Input!"))),
         RuntimeMutationAction::Delete => {}
     }
@@ -317,7 +321,7 @@ impl RuntimeGraphqlModule {
                     }
                     None => (
                         mutation_description(action, &object),
-                        mutation_arguments(action, &object, mutation::write_links(self, c)),
+                        mutation_arguments(action, &object, c, mutation::write_links(self, c)),
                     ),
                 };
                 operations.push(

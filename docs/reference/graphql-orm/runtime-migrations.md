@@ -359,20 +359,28 @@ same declared type and default as a `CurrentTimestamp` datetime field: `TEXT` wi
 is `None`.
 
 - **Adding the column to a table with rows** backfills every existing row with the clock
-  value at apply time, also when it is `NOT NULL`. PostgreSQL evaluates the default in
+  value at apply time, also when it is `NOT NULL`. A backfilled `createdAt` is therefore the
+  migration time, not the row's real creation time; copy a known value explicitly if it
+  matters. PostgreSQL evaluates the default in
   `ADD COLUMN`. SQLite refuses `ADD COLUMN` with a non-constant default, so owned SQLite
   plans now apply such an `AddColumn` as the controlled table rebuild that column
   alterations already use. The copy omits the new column, so its default fills it. This
-  also fixes adding a plain `CurrentTimestamp` datetime column, or any other
-  non-constant default, to an existing SQLite table, which failed before with "Cannot add a
+  rebuild runs with foreign keys suspended outside the migration transaction and checks
+  them afterwards (`PRAGMA foreign_key_check`), so rows that reference the rebuilt table are
+  kept and are not cascaded or nulled. This also fixes adding a plain `CurrentTimestamp`
+  datetime column, or any other non-constant default, to an existing SQLite table, which failed before with "Cannot add a
   column with non-constant default". Constant defaults still use `ADD COLUMN`. A fresh
   replan is a no-op and `runtime_mutation_environment` certifies the result on both
-  backends.
+  backends. The public single-step renderer `render_migration_step` cannot rebuild a table,
+  so for such a step on SQLite it emits a `-- sqlite requires table rebuild …` marker (as it
+  already does for column drops and alterations) instead of DDL SQLite would refuse.
 - **Switching the flag on an existing column** is a catalog-only identity change when the
   column already has a `CurrentTimestamp` default (and the same type and nullability): the
   plan is empty. Otherwise the plan contains the default change, an `AlterColumn` (`SET
-  DEFAULT` on PostgreSQL, a table rebuild on SQLite). Existing values are kept: a column that
-  held NULLs keeps them until the row is next updated (`OnCreateAndUpdate`). Turning the flag
+  DEFAULT` on PostgreSQL, a table rebuild on SQLite). Existing values are kept: switching the
+  flag on never backfills, so a nullable column keeps its old NULLs (an `OnCreate` column
+  keeps them for good; an `OnCreateAndUpdate` column until the row is next updated).
+  Backfill them explicitly if readers expect a value. Turning the flag
   off removes the effective default unless `default: CurrentTimestamp` stays declared.
 
 ## Released repository capability compatibility

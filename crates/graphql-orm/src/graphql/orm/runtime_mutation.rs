@@ -983,6 +983,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .map(|id| request.schema.resolve_field(&request.collection, id))
             .collect::<Result<Vec<_>, _>>()?;
         fields.extend(key_fields.clone());
+        // Automatic timestamps are always part of the staged image, so hooks see
+        // the stamped values even when the host's grant does not project them.
+        // Client output remains limited to the approved return projection.
+        for f in c.fields.iter().filter(|f| f.auto_timestamp.is_some()) {
+            fields.push(request.schema.resolve_field(&request.collection, &f.id)?);
+        }
         fields.extend(request.fields.iter().map(|(f, _)| f.clone()));
         if let Some(expected) = &request.expected {
             fields.extend(expected.referenced_fields().into_iter().cloned());

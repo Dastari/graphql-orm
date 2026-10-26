@@ -15,7 +15,13 @@ type Backend = PostgresBackend;
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 
-const TABLES: [&str; 4] = ["ats_parents", "ats_notes", "ats_tags", "ats_note_tags"];
+const TABLES: [&str; 5] = [
+    "ats_parents",
+    "ats_notes",
+    "ats_tags",
+    "ats_note_tags",
+    "ats_stamps",
+];
 
 fn fid(id: &str) -> FieldId {
     FieldId::new(id).unwrap()
@@ -131,9 +137,27 @@ fn definition() -> RuntimeSchema {
             }),
         },
     ];
+    // Only a generated key and automatic timestamps: nothing is client-writable.
+    let stamped = collection(
+        "stamp",
+        "Stamp",
+        vec![
+            RuntimeField {
+                generated: true,
+                sortable: true,
+                ..field("stamp", "id", RuntimeValueKind::Uuid, false)
+            },
+            stamp("stamp", "createdAt", RuntimeAutoTimestamp::OnCreate),
+            stamp(
+                "stamp",
+                "updatedAt",
+                RuntimeAutoTimestamp::OnCreateAndUpdate,
+            ),
+        ],
+    );
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
-        collections: vec![parent, note, tag],
+        collections: vec![parent, note, tag, stamped],
     }
 }
 
@@ -219,7 +243,7 @@ fn validation_accepts_datetime_fields_and_rejects_every_invalid_combination() {
 fn serialization_and_identity_include_the_flag_only_when_declared() {
     let with = definition().validate().unwrap();
     let mut plain = definition();
-    for field in &mut plain.collections[1].fields {
+    for field in plain.collections.iter_mut().flat_map(|c| &mut c.fields) {
         field.auto_timestamp = None;
     }
     let json = serde_json::to_string(&plain).unwrap();
@@ -416,8 +440,17 @@ impl Fixture {
         request: RuntimeMutationRequest,
         rollback: bool,
     ) -> Result<RuntimeMutationEffect, TransactionError> {
+        self.try_run_as(request, rollback, false).await
+    }
+    /// With `narrow`, the write grant projects only the primary key.
+    async fn try_run_as(
+        &self,
+        request: RuntimeMutationRequest,
+        rollback: bool,
+        narrow: bool,
+    ) -> Result<RuntimeMutationEffect, TransactionError> {
         let environment = self.environment.clone();
-        let authority = Authority(self.environment.schema().clone());
+        let authority = Authority(self.environment.schema().clone(), narrow);
         self.db
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
@@ -434,6 +467,25 @@ impl Fixture {
                 })
             })
             .await
+    }
+    /// Wait until the database clock is past `previous`, so the next write's
+    /// timestamp is strictly later on both backends regardless of load.
+    async fn tick_past(&self, previous: &RuntimeDateTime) {
+        #[cfg(feature = "sqlite")]
+        let sql = "SELECT strftime('%Y-%m-%dT%H:%M:%f000Z', 'now') AS n";
+        #[cfg(feature = "postgres")]
+        let sql = "SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', \
+                   'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS n";
+        for _ in 0..1000 {
+            let rows = Backend::fetch_rows(self.db.pool(), sql, &[]).await.unwrap();
+            let now =
+                RuntimeDateTime::parse(&Backend::try_get_string(&rows[0], "n").unwrap()).unwrap();
+            if now > *previous {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        panic!("database clock did not advance past {previous:?}");
     }
     async fn sql(&self, sql: &str) {
         Backend::fetch_rows(self.db.pool(), sql, &[]).await.unwrap();
@@ -516,7 +568,7 @@ async fn migrate_steps(
 
 /// Approves every write of this isolated fixture, including link changes.
 #[derive(Clone)]
-struct Authority(Arc<ValidatedRuntimeSchema>);
+struct Authority(Arc<ValidatedRuntimeSchema>, bool);
 impl RuntimeWriteAuthority<Backend> for Authority {
     fn authorize_intent<'a>(
         &'a self,
@@ -534,6 +586,7 @@ impl RuntimeWriteAuthority<Backend> for Authority {
                 .unwrap()
                 .fields
                 .iter()
+                .filter(|f| !self.1 || f.api_name == "id")
                 .map(|f| self.0.resolve_field(handle, &f.id).unwrap())
                 .collect::<Vec<_>>();
             RuntimeWriteGrant::new(self.0.resolve_projection(handle, &fields).unwrap(), None)
@@ -576,11 +629,6 @@ fn stamp_of(record: &RuntimeRecord, field: &RuntimeFieldHandle) -> RuntimeDateTi
     }
 }
 
-/// Distinct clock readings on both backends (SQLite stores milliseconds).
-async fn tick() {
-    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
-}
-
 #[tokio::test]
 async fn create_sets_both_and_every_row_update_refreshes_only_on_create_and_update() {
     let f = Fixture::new("auto-timestamps-writes").await;
@@ -596,7 +644,7 @@ async fn create_sets_both_and_every_row_update_refreshes_only_on_create_and_upda
         "{text}"
     );
 
-    tick().await;
+    f.tick_past(&u0).await;
     let effect = f.run(f.retitle(1, "b")).await;
     let record = effect.record().unwrap();
     let (c1, u1) = (stamp_of(record, &created), stamp_of(record, &updated));
@@ -605,20 +653,19 @@ async fn create_sets_both_and_every_row_update_refreshes_only_on_create_and_upda
     assert_eq!(stamp_of(effect.staged(), &updated), u1);
 
     // An update that changes no value still refreshes the timestamp.
-    tick().await;
+    f.tick_past(&u1).await;
     let effect = f.run(f.retitle(1, "b")).await;
     let u2 = stamp_of(effect.record().unwrap(), &updated);
     assert!(u2 > u1);
     assert_eq!(stamp_of(effect.record().unwrap(), &created), c0);
 
     // A rolled-back update leaves the stored value unchanged.
-    tick().await;
+    f.tick_past(&u2).await;
     let error = f.try_run(f.retitle(1, "c"), true).await.unwrap_err();
     assert_eq!(
         error.public_error().runtime_mutation_code(),
         Some("hook_failed")
     );
-    tick().await;
     let effect = f.run(f.retitle(1, "d")).await;
     let record = effect.record().unwrap();
     assert!(stamp_of(record, &updated) > u2);
@@ -634,8 +681,12 @@ async fn create_sets_both_and_every_row_update_refreshes_only_on_create_and_upda
 #[tokio::test]
 async fn rollback_leaves_values_unchanged() {
     let f = Fixture::new("auto-timestamps-rollback").await;
-    f.run(f.create(1, None)).await;
-    tick().await;
+    let created = f.run(f.create(1, None)).await;
+    f.tick_past(&stamp_of(
+        created.record().unwrap(),
+        &f.field("note.updatedAt"),
+    ))
+    .await;
     f.try_run(f.retitle(1, "rolled back"), true)
         .await
         .unwrap_err();
@@ -659,7 +710,7 @@ async fn set_null_dependents_refresh_and_link_only_updates_do_not() {
     );
 
     // A standalone link mutation writes no row field, so the row is not updated.
-    tick().await;
+    f.tick_past(&u0).await;
     let tags = f
         .schema()
         .resolve_relation(&f.note(), &RelationId::new("note.tags").unwrap())
@@ -696,7 +747,6 @@ async fn set_null_dependents_refresh_and_link_only_updates_do_not() {
     );
 
     // Deleting the parent nulls the note's key through the ORM: the row changed.
-    tick().await;
     let parent = f.schema().resolve_collection(&cid("parent")).unwrap();
     let key = f
         .schema()
@@ -738,21 +788,46 @@ async fn set_null_dependents_refresh_and_link_only_updates_do_not() {
 #[tokio::test]
 async fn adding_auto_columns_backfills_rows_and_toggling_is_catalog_only_when_physical_matches() {
     let f = Fixture::new("auto-timestamps-migration").await;
-    // Existing rows, then a revision that adds a third, required automatic timestamp.
-    f.run(f.create(1, None)).await;
+    // Existing rows, including child rows that reference both tables gaining a
+    // column: notes reference parents (SetNull) and links reference notes (Cascade).
+    f.sql("INSERT INTO ats_parents (id) VALUES (1)").await;
+    f.sql("INSERT INTO ats_tags (id) VALUES (10)").await;
+    f.run(f.create(1, Some(1))).await;
     f.run(f.create(2, None)).await;
+    f.sql("INSERT INTO ats_note_tags (note_id, tag_id) VALUES (1, 10)")
+        .await;
+    // Then a revision that adds a required automatic timestamp to both. On SQLite
+    // each table is rebuilt; the referencing rows must survive unchanged.
     let mut added = definition();
     added.collections[1].fields.push(stamp(
         "note",
         "touchedAt",
         RuntimeAutoTimestamp::OnCreateAndUpdate,
     ));
+    added.collections[0]
+        .fields
+        .push(stamp("parent", "touchedAt", RuntimeAutoTimestamp::OnCreate));
     let (steps, environment) = migrate_steps(&f.db, added.clone(), "add").await;
     assert!(!steps.is_empty());
     assert_eq!(
         f.count("SELECT COUNT(*) AS n FROM ats_notes WHERE touchedat IS NOT NULL")
             .await,
         2
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) AS n FROM ats_parents WHERE touchedat IS NOT NULL")
+            .await,
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) AS n FROM ats_notes WHERE parentid = 1")
+            .await,
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) AS n FROM ats_note_tags WHERE note_id = 1 AND tag_id = 10")
+            .await,
+        1
     );
     drop(environment);
 
@@ -814,7 +889,7 @@ async fn adding_auto_columns_backfills_rows_and_toggling_is_catalog_only_when_ph
             Default::default(),
         )
         .unwrap();
-    let authority = Authority(schema.clone());
+    let authority = Authority(schema.clone(), false);
     let effect =
         f.db.transaction(TransactionMode::StateMachine, move |tx| {
             Box::pin(async move {
@@ -883,5 +958,127 @@ async fn graphql_inputs_omit_automatic_timestamps_and_refuse_supplied_values() {
         response.errors
     );
     assert_eq!(f.count("SELECT COUNT(*) AS n FROM ats_notes").await, 0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn staged_images_carry_timestamps_under_a_narrow_grant() {
+    let f = Fixture::new("auto-timestamps-narrow").await;
+    let (created, updated) = (f.field("note.createdAt"), f.field("note.updatedAt"));
+    let create = f
+        .schema()
+        .runtime_create_request(
+            &f.note(),
+            &[
+                (f.field("note.id"), RuntimeValue::Integer(1)),
+                (f.field("note.title"), RuntimeValue::String("a".into())),
+            ],
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    // The grant projects only the key and nothing is returned, yet hooks see the
+    // stamped values in the staged image.
+    let effect = f.try_run_as(create, false, true).await.unwrap();
+    assert!(effect.record().is_none());
+    let (c0, u0) = (
+        stamp_of(effect.staged(), &created),
+        stamp_of(effect.staged(), &updated),
+    );
+    assert_eq!(c0, u0);
+    f.tick_past(&u0).await;
+    let update = f
+        .schema()
+        .runtime_update_request(
+            f.key(1),
+            &[(f.field("note.title"), RuntimeValue::String("b".into()))],
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap();
+    let effect = f.try_run_as(update, false, true).await.unwrap();
+    assert!(effect.record().is_none());
+    assert_eq!(stamp_of(effect.staged(), &created), c0);
+    assert!(stamp_of(effect.staged(), &updated) > u0);
+    assert_eq!(stamp_of(effect.preimage().unwrap(), &updated), u0);
+    f.finish().await;
+}
+
+#[cfg(feature = "runtime-graphql")]
+#[tokio::test]
+async fn graphql_builds_collections_without_writable_fields() {
+    use graphql_orm::async_graphql::{Request, Variables};
+    use graphql_orm::graphql::runtime::*;
+    struct Read;
+    impl RuntimeReadAuthority for Read {
+        fn authorize_mutation_result<'a>(
+            &'a self,
+            _: RuntimeMutationOutputCheck<'a>,
+        ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn authorize<'a>(
+            &'a self,
+            _: RuntimeReadCheck<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+            Box::pin(async { Ok(RuntimeReadGrant::new(None)) })
+        }
+    }
+    let f = Fixture::new("auto-timestamps-graphql-empty").await;
+    let module = RuntimeGraphqlModule::compile(
+        Arc::new(f.schema().clone()),
+        RuntimeGraphqlOptions::default()
+            .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+            .with_mutations(Default::default()),
+    )
+    .unwrap();
+    let api = RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+        .unwrap()
+        .mutation_root("Mutation")
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let sdl = api.sdl();
+    // `createStamp` takes no input; there is nothing to update, so no `updateStamp`.
+    let start = sdl.find("createStamp(").expect("createStamp root");
+    let create = &sdl[start..start + sdl[start..].find("): StampMutationPayload!").unwrap()];
+    assert!(create.contains("expectedSchema: String!"), "{create}");
+    assert!(!create.contains("input:"), "{create}");
+    assert!(!sdl.contains("CreateStampInput") && !sdl.contains("UpdateStampInput"));
+    assert!(!sdl.contains("updateStamp("));
+    assert!(sdl.contains("deleteStamp("));
+    let response = api
+        .execute(
+            Request::new(
+                "mutation($schema: String!) { createStamp(expectedSchema: $schema) { record { id createdAt updatedAt } } }",
+            )
+            .variables(Variables::from_json(
+                serde_json::json!({"schema": f.schema().fingerprint().to_string()}),
+            ))
+            .data(
+                RuntimeGraphqlRequest::<Backend>::new(
+                    f.schema().fingerprint(),
+                    Arc::new(Read),
+                    None,
+                    Default::default(),
+                )
+                .with_mutation_environment(f.environment.clone())
+                .with_write_authority(Arc::new(Authority(f.environment.schema().clone(), false))),
+            ),
+        )
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    let record = &data["createStamp"]["record"];
+    assert_eq!(record["createdAt"], record["updatedAt"]);
+    assert!(
+        record["createdAt"]
+            .as_str()
+            .is_some_and(|v| v.ends_with('Z'))
+    );
+    assert_eq!(f.count("SELECT COUNT(*) AS n FROM ats_stamps").await, 1);
     f.finish().await;
 }

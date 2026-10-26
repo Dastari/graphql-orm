@@ -115,6 +115,39 @@ mod sqlite_add_column_default_tests {
             assert!(!sqlite_constant_default(expression), "{expression}");
         }
     }
+
+    #[test]
+    fn single_step_rendering_marks_non_constant_sqlite_add_column() {
+        let column = |default: &str| ColumnModel {
+            name: "stamped".into(),
+            sql_type: "TEXT".into(),
+            spatial: None,
+            nullable: false,
+            is_primary_key: false,
+            is_unique: false,
+            default: Some(default.into()),
+        };
+        let step = |default: &str| MigrationStep::AddColumn {
+            table_name: "notes".into(),
+            column: column(default),
+        };
+        let now = "strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')";
+        assert_eq!(
+            render_migration_step(DatabaseBackend::Sqlite, &step(now)),
+            vec![
+                "-- sqlite requires table rebuild to add column stamped with a non-constant default to notes"
+                    .to_string()
+            ]
+        );
+        assert!(
+            render_migration_step(DatabaseBackend::Sqlite, &step("'x'"))[0]
+                .starts_with("ALTER TABLE notes ADD COLUMN")
+        );
+        assert!(
+            render_migration_step(DatabaseBackend::Postgres, &step("CURRENT_TIMESTAMP"))[0]
+                .starts_with("ALTER TABLE notes ADD COLUMN")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2154,6 +2187,13 @@ fn render_sqlite_table_rebuild_statements(
     statements
 }
 
+/// Render one step in isolation.
+///
+/// SQLite steps that need a table rebuild (dropping or altering a column, foreign-key
+/// changes, and adding a column with a non-constant default such as a timestamp
+/// expression) cannot be rebuilt from a single step. They render a
+/// `-- sqlite requires table rebuild …` marker instead of executable DDL. Use a migration
+/// plan, which renders the controlled rebuild.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     render_migration_step_view(backend, &StepRef::from(step))
 }
@@ -2199,6 +2239,16 @@ pub(super) fn render_migration_step_view(
         }
         StepRef::DropTable { table_name } => {
             vec![format!("DROP TABLE {}", table_name)]
+        }
+        // Like the other rebuild-only SQLite steps, a single step cannot rebuild
+        // its table; owned plans render the rebuild instead of this marker.
+        StepRef::AddColumn { table_name, column }
+            if backend == DatabaseBackend::Sqlite && sqlite_requires_table_rebuild(step) =>
+        {
+            vec![format!(
+                "-- sqlite requires table rebuild to add column {} with a non-constant default to {}",
+                column.name, table_name
+            )]
         }
         StepRef::AddColumn { table_name, column } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",

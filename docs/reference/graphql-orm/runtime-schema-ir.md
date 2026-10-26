@@ -216,7 +216,8 @@ PocketBase autodate field. Field names are the host's choice.
 
 - **Input.** The field is never writable: `runtime_create_request` and
   `runtime_update_request` refuse it with `field_denied` (no value is echoed), explicit
-  `Null` included. Runtime GraphQL omits it from `Create<T>Input` and `Update<T>Input`. A
+  `Null` included. Runtime GraphQL omits it from `Create<T>Input` and `Update<T>Input`; a collection with no
+  other client-writable field gets an input-less `create<T>` and no `update<T>`. A
   required (non-null) auto field is never `missing_required`. `RuntimeField::is_client_writable`
   and `RuntimeFieldHandle::auto_timestamp` expose the rule to hosts.
 - **Clock.** Writes use exactly the `CurrentTimestamp` expression: on SQLite
@@ -224,11 +225,20 @@ PocketBase autodate field. Field names are the host's choice.
   resolution; on PostgreSQL `CURRENT_TIMESTAMP` into `timestamptz`. PostgreSQL returns the
   transaction start time, so every write in one transaction stores the same value. SQLite
   reads the clock per statement. Both timestamps of one insert are always equal.
+- **Not a sync cursor.** On PostgreSQL a transaction that started earlier but commits later
+  stores an earlier `updatedAt` than rows already committed by a later-starting transaction.
+  `updatedAt` is therefore not monotonic in commit order and cannot serve as a change-feed
+  or synchronization cursor ("everything after T"). Use a journal or sequence for that. It
+  records when the writing transaction started, which is what Rails/Django also store.
 - **Updates.** Every runtime update request writes at least one field, so it always issues
   an `UPDATE` and refreshes `OnCreateAndUpdate` fields, even when no stored value changes.
   The dependent `SetNull` updates of an opted-in delete are row updates too and refresh the
   nulled rows. A rolled-back update leaves the value unchanged. Mutation results and staged
-  effects are reread after the write, so they return the stored values.
+  effects are reread after the write, so they return the stored values. The staged image
+  (`RuntimeMutationEffect::staged`, and the preimage) always includes the collection's
+  automatic timestamps, even when the host's write grant does not project them, so
+  `before_commit` journal and realtime hooks see the stamped values. Client output is still
+  limited to the approved return projection.
 - **Link-only changes do not count.** A standalone many-to-many link mutation writes rows of
   the link table, not the source row, so it does not touch the source row's timestamps.
   The rule is "the row's own columns were written". Link changes attached to a create or

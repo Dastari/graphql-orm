@@ -298,9 +298,12 @@ Enable `RuntimeGraphqlOptions::with_mutations(RuntimeGraphqlMutationOptions::def
 and compose `mutation_root("Mutation")`. The existing executable host example now
 runs typed create, CAS update and exact-key delete with atomic typed journal
 inserts, and explicit post-commit public-record release. Enable only the required
-actions through mutation options. GraphQL cannot represent empty input objects;
-an enabled create/update action with no writable fields is rejected during
-compilation with `unsupported_capability`. Generated fields and
+actions through mutation options. GraphQL cannot represent empty input objects,
+so when a collection has no client-writable field `create<Object>` takes no `input`
+argument (it inserts defaults, generated values and automatic timestamps), and when it
+has no client-writable non-key field `update<Object>` and `Update<Object>Input` are
+omitted. Before 0.75.0 such a module failed to compile with `unsupported_capability`.
+Link roots and deletes are unaffected. Generated fields and
 [automatic timestamps](runtime-schema-ir.md#automatic-timestamps) are excluded from both
 input types, keys are required on create and absent from update. Defaults stay omitted in GraphQL
 SDL so omission and explicit null remain distinct. Payloads may select to-one

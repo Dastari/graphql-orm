@@ -28,7 +28,11 @@ To adopt automatic timestamps:
 - declare `auto_timestamp: Some(RuntimeAutoTimestamp::OnCreate)` or `Some(RuntimeAutoTimestamp::OnCreateAndUpdate)` on a non-key `DateTime` field that is not generated, with `default: None` (or `Some(RuntimeDefault::CurrentTimestamp)`);
 - plan and apply the owned migration, then rebuild the mutation environment. A new column backfills existing rows through its `CURRENT_TIMESTAMP` default. Flipping the flag on an existing column is catalog-only when the column already has a `CurrentTimestamp` default; otherwise the plan changes the column default, and existing values are kept;
 - PostgreSQL stores the transaction start time, so every write in one transaction gets the same value; SQLite reads the clock per statement with millisecond resolution;
-- a standalone link mutation does not refresh `OnCreateAndUpdate`; a dependent `SetNull` update does.
+- a standalone link mutation does not refresh `OnCreateAndUpdate`; a dependent `SetNull` update does;
+- do not use `updatedAt` as a sync cursor: on PostgreSQL it is the transaction start time, which is not monotonic in commit order;
+- a backfilled `createdAt` is the migration time, and switching the flag on does not fill existing NULLs.
+
+Runtime GraphQL now builds collections without client-writable fields (input-less `create<Object>`, no `update<Object>`) instead of failing with `unsupported_capability`. Regenerate SDL and clients for such modules.
 
 ## 0.73.0 to 0.74.0: bounded PostgreSQL identifiers
 
