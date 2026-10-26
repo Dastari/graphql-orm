@@ -161,7 +161,8 @@ async fn runtime_collections_reach_the_capability_index() {
     let arguments = serde_json::json!({"where": {"number": {"eq": "INV-1", "notIn": ["INV-hidden"]}},
         "orderBy": [{"field": "number", "direction": "ASC", "nulls": "LAST"}]});
     let compact = invoice_query.compile_compact(serde_json::json!({
-        "arguments": arguments, "selections": ["id", "number"], "maximumItems": 1
+        "arguments": arguments, "selections": ["id", "number"], "maximumItems": 1,
+        "relationshipArguments": {}, "relationshipMaximumItems": {}
     })).expect("real runtime filtered and ordered compact plan");
     let nested = invoice_query.compile(serde_json::json!({
         "arguments": arguments, "fields": {"id": true, "number": true}, "relationships": {}, "maximumItems": 1

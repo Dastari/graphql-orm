@@ -4427,13 +4427,13 @@ impl<'a> CompileContext<'a> {
     }
 
     fn variable_schema(&self) -> Result<Value, AiError> {
-        let value = json!({
+        let value = finish_json_schema(json!({
             "$schema": JSON_SCHEMA_2020_12,
             "type": "object",
             "properties": self.variable_schemas,
             "required": self.variable_schemas.keys().cloned().collect::<Vec<_>>(),
             "additionalProperties": false,
-        });
+        }))?;
         jsonschema::validator_for(&value)
             .map_err(|_| configuration_error("compiled variable contract is invalid"))?;
         Ok(value)
@@ -6450,7 +6450,7 @@ mod tests {
                     }
                 }
             },
-            "selections": ["Id", "Name", "CustomerId", "PlanName"]
+            "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["Id", "Name", "CustomerId", "PlanName"]
                 .map(|name| input_collision_name(name, pascal)),
             "maximumItems": 1
         })
@@ -6803,7 +6803,7 @@ mod tests {
             let rows = input_collision_capabilities(&rows_sdl, &rows_semantics);
             assert_input_collision_plan_pair(
                 rows.capabilities().next().unwrap(),
-                json!({"arguments": {}, "selections": ["id"], "maximumItems": 1}),
+                json!({"arguments": {}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"], "maximumItems": 1}),
                 json!({"v0": {"limit": 1}}),
                 "($v0: PageInput) { Rows(page: $v0) { edges { node { id } } } }",
             );
@@ -6833,7 +6833,7 @@ mod tests {
             } else {
                 json!({"criteria": {"limit": 7}})
             };
-            let compact = json!({"arguments": {"input": criteria}, "selections": ["id"]});
+            let compact = json!({"arguments": {"input": criteria}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]});
             let nested = json!({
                 "arguments": compact["arguments"], "fields": {"id": true}, "relationships": {}
             });
@@ -6863,7 +6863,7 @@ mod tests {
             };
             private
                 .compile_compact(json!({
-                    "arguments": {"input": safe_criteria}, "selections": ["id"]
+                    "arguments": {"input": safe_criteria}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]
                 }))
                 .expect("public id without private input remains usable");
 
@@ -7093,7 +7093,7 @@ mod tests {
             };
             let value = argument_value(json!({"id": {"eq": "public-id"}}));
             let compact = json!({
-                "arguments": {(argument_name): value}, "selections": ["id"]
+                "arguments": {(argument_name): value}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]
             });
             let nested = json!({
                 "arguments": compact["arguments"], "fields": {"id": true}, "relationships": {}
@@ -7231,7 +7231,7 @@ mod tests {
 
     fn assert_json_codec_admission(capability: &AiGraphqlQueryCapability, value: &Value, accepted: bool) {
         let arguments = json!({"where": {"location": {"intersects": value}}});
-        let compact = capability.compile_compact(json!({"arguments": arguments, "selections": ["id"]}));
+        let compact = capability.compile_compact(json!({"arguments": arguments, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]}));
         let nested = capability.compile(json!({"arguments": arguments, "fields": {"id": true}, "relationships": {}}));
         assert_eq!(compact.is_ok(), accepted);
         assert_eq!(nested.is_ok(), accepted);
@@ -7239,6 +7239,12 @@ mod tests {
             let compact = compact.unwrap(); let nested = nested.unwrap();
             assert_eq!(compact.variables(), &json!({"v0": arguments["where"]}));
             assert_eq!(compact.variables(), nested.variables());
+            for plan in [&compact, &nested] {
+                let schema = &plan.descriptor().argument_schema;
+                assert!(schema.get("$defs").is_some());
+                assert!(schema["properties"]["v0"].get("$defs").is_none());
+                assert!(jsonschema::validator_for(schema).unwrap().is_valid(plan.variables()));
+            }
             assert_eq!(compact.descriptor().document, format!("query AiQuery_{}($v0: SpatialRecordWhereInput) {{ GetSpatialRecord(where: $v0) {{ id }} }}", &compact.plan_fingerprint()[..20]));
         }
         let root = capability.schema.operation_root_field(GraphqlOperationKind::Query, "GetSpatialRecord").unwrap();
@@ -7246,6 +7252,67 @@ mod tests {
         assert_eq!(context.compile_arguments(&root.arguments, &capability.operation.arguments,
             arguments.as_object().unwrap(), None, false, false, "root").is_ok(), accepted);
         if !accepted { assert!(context.variables.is_empty()); }
+    }
+
+    #[test]
+    fn canonical_json_final_variable_contract_resolves_refs_and_retains_closed_bounds() {
+        fn assert_local_refs(root: &Value, schema: &Value, at_root: bool) {
+            match schema {
+                Value::Object(object) => {
+                    if !at_root { assert!(!object.contains_key("$defs")); }
+                    if let Some(reference) = object.get("$ref") {
+                        let reference = reference.as_str().unwrap();
+                        assert!(reference.starts_with("#/$defs/canonical_json_"));
+                        assert!(root.pointer(&reference[1..]).is_some(), "{reference}");
+                    }
+                    for child in object.values() { assert_local_refs(root, child, false); }
+                }
+                Value::Array(values) => for child in values { assert_local_refs(root, child, false); },
+                _ => {}
+            }
+        }
+        let limits = AiGraphqlQueryCapabilityLimits::default();
+        let capability = json_codec_capability(limits);
+        let geometry = json!({"type": "Point", "coordinates": [0, 0]});
+        let arguments = json!({"where": {"location": {"intersects": geometry}}});
+        let compact = capability.compile_compact(json!({"arguments": arguments, "selections": ["id"],
+            "relationshipArguments": {}, "relationshipMaximumItems": {}})).expect("complete compact compilation");
+        let nested = capability.compile(json!({"arguments": arguments, "fields": {"id": true}, "relationships": {}}))
+            .expect("complete nested compilation");
+        for plan in [&compact, &nested] {
+            let schema = &plan.descriptor().argument_schema;
+            assert_eq!(schema["additionalProperties"], json!(false));
+            assert_eq!(schema["required"], json!(["v0"]));
+            assert!(schema.get("$defs").is_some());
+            assert_local_refs(schema, schema, true);
+            let validator = jsonschema::validator_for(schema).unwrap();
+            assert!(validator.is_valid(plan.variables()));
+            assert_eq!(plan.variables(), &json!({"v0": arguments["where"]}));
+            let mut private_field = plan.variables().clone();
+            private_field["v0"]["location"]["privateId"] = json!("secret");
+            assert!(!validator.is_valid(&private_field));
+            let mut unknown_variable = plan.variables().clone();
+            unknown_variable["v1"] = json!("secret");
+            assert!(!validator.is_valid(&unknown_variable));
+            let mut excessive_depth = Value::Null;
+            for _ in 0..limits.maximum_input_depth { excessive_depth = json!([excessive_depth]); }
+            let mut invalid = plan.variables().clone();
+            invalid["v0"]["location"]["intersects"] = excessive_depth;
+            assert!(!validator.is_valid(&invalid));
+            invalid["v0"]["location"]["intersects"] = Value::Array(vec![Value::Null; limits.maximum_list_items as usize + 1]);
+            assert!(!validator.is_valid(&invalid));
+        }
+        for missing in ["relationshipArguments", "relationshipMaximumItems"] {
+            let mut incomplete = json!({"arguments": arguments, "selections": ["id"],
+                "relationshipArguments": {}, "relationshipMaximumItems": {}});
+            incomplete.as_object_mut().unwrap().remove(missing);
+            assert!(capability.compile_compact(incomplete).is_err());
+        }
+        let mut private_input = arguments;
+        private_input["where"]["location"]["privateId"] = json!("secret");
+        assert!(capability.compile_compact(json!({"arguments": private_input, "selections": ["id"],
+            "relationshipArguments": {}, "relationshipMaximumItems": {}})).is_err());
+        assert!(capability.compile(json!({"arguments": private_input, "fields": {"id": true}, "relationships": {}})).is_err());
     }
 
     #[test]
@@ -7274,7 +7341,7 @@ mod tests {
             ("opaque", json!({"a": 1}), false), ("unprovenJson", json!("text"), true),
             ("unprovenJson", json!({"a": 1}), false)] {
             let arguments = Value::Object(Map::from_iter([(name.into(), value)]));
-            assert_eq!(capability.compile_compact(json!({"arguments": arguments, "selections": ["id"]})).is_ok(), accepted);
+            assert_eq!(capability.compile_compact(json!({"arguments": arguments, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]})).is_ok(), accepted);
             assert_eq!(capability.compile(json!({"arguments": arguments, "fields": {"id": true}, "relationships": {}})).is_ok(), accepted);
         }
         assert!(serde_json::from_str::<Value>("NaN").is_err());
@@ -7370,7 +7437,7 @@ mod tests {
             "date": {"between": {"start": "2026-01-01", "end": "2026-12-31"}, "gteRelative": {"days": -7}},
             "bytes": {"eq": [0, 255], "inList": [[1, 2], []]}
         }});
-        let compact = capability.compile_compact(json!({"arguments": arguments, "selections": ["text"]})).unwrap();
+        let compact = capability.compile_compact(json!({"arguments": arguments, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["text"]})).unwrap();
         let nested = capability.compile(json!({"arguments": arguments, "fields": {"text": true}, "relationships": {}})).unwrap();
         assert_eq!(compact.variables(), &json!({"v0": arguments["where"]}));
         assert_eq!(compact.variables(), nested.variables());
@@ -7380,7 +7447,7 @@ mod tests {
         for invalid in [json!({"text": {"similar": {"value": "public", "privateId": "secret"}}}),
             json!({"date": {"between": {"start": "2026-01-01"}}}),
             json!({"bytes": {"eq": [null]}}), json!({"bytes": {"inList": [null]}})] {
-            assert!(capability.compile_compact(json!({"arguments": {"where": invalid}, "selections": ["text"]})).is_err());
+            assert!(capability.compile_compact(json!({"arguments": {"where": invalid}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["text"]})).is_err());
             assert!(capability.compile(json!({"arguments": {"where": invalid}, "fields": {"text": true}, "relationships": {}})).is_err());
         }
         for invalid_sdl in [sdl.replace("value: String!", "value: String! privateId: String"),
@@ -7418,7 +7485,7 @@ mod tests {
         }], &GraphqlOperationCatalog::compose(std::iter::empty()), [operation]).unwrap();
         let catalog = input_collision_capabilities(sdl, &semantics);
         let capability = catalog.capabilities().next().unwrap();
-        let compact = json!({"arguments": {"where": {"id": {"eq": "public"}}}, "selections": ["id"]});
+        let compact = json!({"arguments": {"where": {"id": {"eq": "public"}}}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]});
         let nested = json!({"arguments": compact["arguments"], "fields": {"id": true}, "relationships": {}});
         for plan in [capability.compile_compact(compact.clone()).unwrap(), capability.compile(nested.clone()).unwrap()] {
             assert_eq!(plan.variables(), &json!({"v0": {"id": {"eq": "public"}}}));
@@ -7448,7 +7515,7 @@ mod tests {
             let mut context = CompileContext::new(&staged);
             let root = staged.schema.operation_root_field(GraphqlOperationKind::Query, "GetStringFilter").unwrap();
             assert!(context.compile_arguments(&root.arguments, &staged.operation.arguments, &supplied, None, false, false, "root").is_err());
-            let invalid_compact = json!({"arguments": supplied, "selections": ["id"]});
+            let invalid_compact = json!({"arguments": supplied, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]});
             let invalid_nested = json!({"arguments": supplied, "fields": {"id": true}, "relationships": {}});
             assert!(staged.compile_compact(invalid_compact).is_err());
             assert!(staged.compile(invalid_nested).is_err());
@@ -7466,7 +7533,7 @@ mod tests {
         let enum_catalog = input_collision_capabilities(&enum_sdl, &enums);
         let enum_capability = enum_catalog.capabilities().next().unwrap();
         let args = json!({"where": {"id": {"eq": "OPEN"}}});
-        enum_capability.compile_compact(json!({"arguments": args, "selections": ["id"]})).unwrap();
+        enum_capability.compile_compact(json!({"arguments": args, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["id"]})).unwrap();
         enum_capability.compile(json!({"arguments": args, "fields": {"id": true}, "relationships": {}})).unwrap();
     }
 

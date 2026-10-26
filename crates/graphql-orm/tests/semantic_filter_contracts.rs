@@ -175,11 +175,15 @@ fn actual_derived_spatial_contract_compiles_exact_json_plans_for_all_predicates(
         let value = if operator.operator == GraphqlSemanticFilterOperator::IsNull { json!(false) } else { point.clone() };
         let filter = Value::Object(graphql_orm::serde_json::Map::from_iter([(location.field_name.clone(),
             Value::Object(graphql_orm::serde_json::Map::from_iter([(operator.graphql_name.clone(), value)])))]));
-        let compact = capability.compile_compact(json!({"arguments": {"where": filter}, "selections": [id]})).unwrap();
+        let compact = capability.compile_compact(json!({"arguments": {"where": filter}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": [id]})).unwrap();
         let nested = capability.compile(json!({"arguments": {"where": filter}, "fields": {(id.clone()): true}, "relationships": {}})).unwrap();
         assert_eq!(compact.variables(), &json!({"v0": filter}));
         assert_eq!(compact.variables(), nested.variables());
         for plan in [&compact, &nested] {
+            let variables_schema = &plan.descriptor().argument_schema;
+            assert!(variables_schema.get("$defs").is_some());
+            assert!(variables_schema["properties"]["v0"].get("$defs").is_none());
+            // Final descriptor construction validates this complete wrapper.
             assert_eq!(plan.descriptor().document, format!("query AiQuery_{}($v0: FilterContractRowWhereInput) {{ GetSpatial(where: $v0) {{ {id} }} }}", &plan.plan_fingerprint()[..20]));
         }
     }
@@ -190,7 +194,7 @@ fn actual_derived_spatial_contract_compiles_exact_json_plans_for_all_predicates(
     for value in [Value::Null, json!([1, null, {"opaque": true}]), json!({}), json!("opaque scalar string")] {
         let filter = Value::Object(graphql_orm::serde_json::Map::from_iter([(location.field_name.clone(),
             Value::Object(graphql_orm::serde_json::Map::from_iter([(intersects.graphql_name.clone(), value)])))]));
-        capability.compile_compact(json!({"arguments": {"where": filter}, "selections": [id]})).unwrap();
+        capability.compile_compact(json!({"arguments": {"where": filter}, "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": [id]})).unwrap();
         capability.compile(json!({"arguments": {"where": filter}, "fields": {(id.clone()): true}, "relationships": {}})).unwrap();
     }
 }
