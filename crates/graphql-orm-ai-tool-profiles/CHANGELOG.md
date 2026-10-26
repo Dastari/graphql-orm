@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.17.1 (unreleased)
+
+- Preserve independently exportable scalar filters and ordering beside a
+  private relation with a shared name prefix (#236).
+- Bind generated input types to exact entity/type shapes; reject ambiguous
+  owners and omit unknown, private or unclassified relation-derived fields.
+- Cover bounded compact and nested plans, canonical input naming, entity-name
+  collisions, private controls and fingerprint/operation drift bindings.
+- Affected capability input schemas and fingerprints change; regenerate
+  definitions and retained bindings. No public API or database migration.
+
 ## 0.17.0 (unreleased)
 
 - Adopt operation catalog 0.5.0 (semantic label fields). Public compile APIs take

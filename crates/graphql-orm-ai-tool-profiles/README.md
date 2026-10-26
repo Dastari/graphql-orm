@@ -20,6 +20,13 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version 0.17.1 resolves entity-owned input fields by their exact canonical
+semantic name. A private `Customer` relation does not hide an independently
+exportable, filterable `CustomerId` scalar. Unknown or private field and
+relation-derived inputs remain absent, and ambiguous entity input ownership
+fails readiness. Rebuild affected capability definitions and retained bindings;
+resolver authorization, disclosure and result limits remain mandatory.
+
 Version 0.17.0 adopts operation catalog 0.5.0 (semantic label fields). It is a
 breaking minor only because public APIs take catalogue types; capabilities are
 unchanged.
@@ -36,7 +43,7 @@ authorization policies. No downstream catalogue filtering is needed.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.2" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.17.1" }
 serde_json = "1"
 ```
 

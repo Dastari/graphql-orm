@@ -10,6 +10,28 @@ supersedes: []
 
 # Migration Guide
 
+## 0.17.0 to 0.17.1: semantic input ownership
+
+Recompile capability catalogues from the complete finished SDL and canonical
+semantics, then replace affected capability/provider definitions and retained
+fingerprint bindings. A `NeverExport` relation such as `Customer` no longer
+removes the distinct exportable/filterable scalar `CustomerId` from its owning
+`WhereInput` or sortable `OrderByInput`.
+
+Entity-owned input properties require an exact exportable non-secret scalar
+semantic field and the corresponding filter/order capability. Unknown or
+relation-derived properties without that identity remain unavailable; do not
+restore them through a host allow-list. Generated input type names resolve to
+exact entity/type shapes, and ambiguous ownership fails closed instead of
+choosing a longer entity prefix. Entity-prefixed custom inputs also reject
+ambiguous owners; unrelated custom inputs retain their finished-SDL contract.
+
+Private fields/relations, closed schemas, result disclosure and bounds, and
+ordinary resolver/current-principal authorization remain enforced. Public
+Rust types, manifest wire versions, GraphQL SDL and stored data are unchanged;
+no database or schema migration is required. Do not retain an old capability
+fingerprint on a regenerated input schema.
+
 ## 0.16.2 to 0.17.0: operation catalog 0.5.0
 
 Adopt profiles 0.17.0 with operation catalog 0.5.0 from the same workspace
