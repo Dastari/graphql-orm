@@ -507,17 +507,26 @@ fn parse_comparable_date_value(value: &str) -> Option<chrono::NaiveDateTime> {
         .and_then(|value| value.and_hms_opt(0, 0, 0))
 }
 
-
 // These declarations belong to the existing filter implementations. SDL only
 // checks them; it never supplies operator authority or untyped record inputs.
 fn semantic_filter_name(snake: &str, renamed: bool) -> String {
     use convert_case::{Case, Casing};
     if renamed {
-        if cfg!(feature = "field-case-pascal") { return snake.to_case(Case::Pascal); }
-        if cfg!(feature = "field-case-snake") { return snake.to_owned(); }
-        if cfg!(feature = "field-case-screaming-snake") { return snake.to_ascii_uppercase(); }
-        if cfg!(feature = "field-case-lower") { return snake.replace('_', ""); }
-        if cfg!(feature = "field-case-upper") { return snake.replace('_', "").to_ascii_uppercase(); }
+        if cfg!(feature = "field-case-pascal") {
+            return snake.to_case(Case::Pascal);
+        }
+        if cfg!(feature = "field-case-snake") {
+            return snake.to_owned();
+        }
+        if cfg!(feature = "field-case-screaming-snake") {
+            return snake.to_ascii_uppercase();
+        }
+        if cfg!(feature = "field-case-lower") {
+            return snake.replace('_', "");
+        }
+        if cfg!(feature = "field-case-upper") {
+            return snake.replace('_', "").to_ascii_uppercase();
+        }
     }
     snake.to_case(Case::Camel)
 }
@@ -533,9 +542,14 @@ fn semantic_filter_optional(
     ty
 }
 
-fn semantic_filter_scalar(name: &str, nullable: bool) -> crate::graphql::orm::GraphqlSemanticTypeRef {
+fn semantic_filter_scalar(
+    name: &str,
+    nullable: bool,
+) -> crate::graphql::orm::GraphqlSemanticTypeRef {
     crate::graphql::orm::GraphqlSemanticTypeRef::named(
-        name, crate::graphql::orm::GraphqlSemanticTypeKind::Scalar, nullable,
+        name,
+        crate::graphql::orm::GraphqlSemanticTypeKind::Scalar,
+        nullable,
     )
 }
 
@@ -545,50 +559,106 @@ fn semantic_filter_object<T: async_graphql::InputType>(
     use crate::graphql::orm::*;
     GraphqlSemanticFilterOperandObject {
         graphql_name: T::type_name().into_owned(),
-        fields: fields.iter().map(|(name, ty)| GraphqlSemanticArgumentDescriptor {
-            graphql_name: semantic_filter_name(name, true),
-            description: "Typed filter operand.".to_owned(),
-            type_ref: parse_graphql_type(ty).expect("built-in operand type"),
-        }).collect(),
+        fields: fields
+            .iter()
+            .map(|(name, ty)| GraphqlSemanticArgumentDescriptor {
+                graphql_name: semantic_filter_name(name, true),
+                description: "Typed filter operand.".to_owned(),
+                type_ref: parse_graphql_type(ty).expect("built-in operand type"),
+            })
+            .collect(),
     }
 }
 
 fn semantic_filter_contract<T: async_graphql::InputType>(
     value_type: crate::graphql::orm::GraphqlSemanticTypeRef,
-    members: Vec<(crate::graphql::orm::GraphqlSemanticFilterOperator, &str,
-        crate::graphql::orm::GraphqlSemanticTypeRef)>,
+    members: Vec<(
+        crate::graphql::orm::GraphqlSemanticFilterOperator,
+        &str,
+        crate::graphql::orm::GraphqlSemanticTypeRef,
+    )>,
     objects: Vec<crate::graphql::orm::GraphqlSemanticFilterOperandObject>,
     renamed: bool,
 ) -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
     use crate::graphql::orm::*;
     GraphqlSemanticFilterInputMetadata::new(
-        GraphqlSemanticTypeRef::named(T::type_name().into_owned(), GraphqlSemanticTypeKind::Object, true),
+        GraphqlSemanticTypeRef::named(
+            T::type_name().into_owned(),
+            GraphqlSemanticTypeKind::Object,
+            true,
+        ),
         value_type,
-        members.into_iter().map(|(operator, name, operand_type)| GraphqlSemanticFilterInputOperator {
-            graphql_name: semantic_filter_name(name, renamed), operator, operand_type,
-        }).collect(),
+        members
+            .into_iter()
+            .map(
+                |(operator, name, operand_type)| GraphqlSemanticFilterInputOperator {
+                    graphql_name: semantic_filter_name(name, renamed),
+                    operator,
+                    operand_type,
+                },
+            )
+            .collect(),
         objects,
-    ).expect("built-in canonical filter contract")
+    )
+    .expect("built-in canonical filter contract")
 }
 
 impl StringFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
-        use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeKind, GraphqlSemanticTypeRef};
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
+        use crate::graphql::orm::{
+            GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeKind, GraphqlSemanticTypeRef,
+        };
         let value = semantic_filter_scalar("String", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
-                (Contains, "contains", semantic_filter_optional(value.clone())),
-                (StartsWith, "starts_with", semantic_filter_optional(value.clone())),
-                (EndsWith, "ends_with", semantic_filter_optional(value.clone())),
-                (In, "in_list", GraphqlSemanticTypeRef::list(true, None, value.clone())),
-                (NotIn, "not_in", GraphqlSemanticTypeRef::list(true, None, value.clone())),
+                (
+                    Contains,
+                    "contains",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    StartsWith,
+                    "starts_with",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    EndsWith,
+                    "ends_with",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    In,
+                    "in_list",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
+                (
+                    NotIn,
+                    "not_in",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-                (Similar, "similar", GraphqlSemanticTypeRef::named(<SimilarityInput as async_graphql::InputType>::type_name().into_owned(), GraphqlSemanticTypeKind::Object, true)),
-            ], vec![semantic_filter_object::<SimilarityInput>(&[("value", "String!")])], true)
+                (
+                    Similar,
+                    "similar",
+                    GraphqlSemanticTypeRef::named(
+                        <SimilarityInput as async_graphql::InputType>::type_name().into_owned(),
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                ),
+            ],
+            vec![semantic_filter_object::<SimilarityInput>(&[(
+                "value", "String!",
+            )])],
+            true,
+        )
     }
 }
 
@@ -596,16 +666,30 @@ impl UuidFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
         use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeRef};
         let value = semantic_filter_scalar("UUID", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
-                (In, "in_list", GraphqlSemanticTypeRef::list(true, None, value.clone())),
-                (NotIn, "not_in", GraphqlSemanticTypeRef::list(true, None, value.clone())),
+                (
+                    In,
+                    "in_list",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
+                (
+                    NotIn,
+                    "not_in",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-            ], vec![], true)
+            ],
+            vec![],
+            true,
+        )
     }
 }
 
@@ -613,20 +697,42 @@ impl IntFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
         use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeRef};
         let value = semantic_filter_scalar("Int", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
                 (LessThan, "lt", semantic_filter_optional(value.clone())),
-                (LessThanOrEqual, "lte", semantic_filter_optional(value.clone())),
+                (
+                    LessThanOrEqual,
+                    "lte",
+                    semantic_filter_optional(value.clone()),
+                ),
                 (GreaterThan, "gt", semantic_filter_optional(value.clone())),
-                (GreaterThanOrEqual, "gte", semantic_filter_optional(value.clone())),
-                (In, "in_list", GraphqlSemanticTypeRef::list(true, None, value.clone())),
-                (NotIn, "not_in", GraphqlSemanticTypeRef::list(true, None, value.clone())),
+                (
+                    GreaterThanOrEqual,
+                    "gte",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    In,
+                    "in_list",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
+                (
+                    NotIn,
+                    "not_in",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-            ], vec![], true)
+            ],
+            vec![],
+            true,
+        )
     }
 }
 
@@ -634,18 +740,32 @@ impl DecimalFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
         use crate::graphql::orm::GraphqlSemanticFilterOperator::*;
         let value = semantic_filter_scalar("Decimal", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
                 (LessThan, "lt", semantic_filter_optional(value.clone())),
-                (LessThanOrEqual, "lte", semantic_filter_optional(value.clone())),
+                (
+                    LessThanOrEqual,
+                    "lte",
+                    semantic_filter_optional(value.clone()),
+                ),
                 (GreaterThan, "gt", semantic_filter_optional(value.clone())),
-                (GreaterThanOrEqual, "gte", semantic_filter_optional(value.clone())),
+                (
+                    GreaterThanOrEqual,
+                    "gte",
+                    semantic_filter_optional(value.clone()),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-            ], vec![], true)
+            ],
+            vec![],
+            true,
+        )
     }
 }
 
@@ -653,14 +773,20 @@ impl BoolFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
         use crate::graphql::orm::GraphqlSemanticFilterOperator::*;
         let value = semantic_filter_scalar("Boolean", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-            ], vec![], true)
+            ],
+            vec![],
+            true,
+        )
     }
 }
 
@@ -668,16 +794,30 @@ impl BytesFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
         use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeRef};
         let value = crate::graphql::orm::parse_graphql_type("[Int!]!").expect("byte-list type");
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
-                (In, "in_list", GraphqlSemanticTypeRef::list(true, None, value.clone())),
-                (NotIn, "not_in", GraphqlSemanticTypeRef::list(true, None, value.clone())),
+                (
+                    In,
+                    "in_list",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
+                (
+                    NotIn,
+                    "not_in",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-            ], vec![], false)
+            ],
+            vec![],
+            false,
+        )
     }
 }
 
@@ -685,26 +825,84 @@ impl DateFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
-        use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeKind, GraphqlSemanticTypeRef};
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
+        use crate::graphql::orm::{
+            GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeKind, GraphqlSemanticTypeRef,
+        };
         let value = semantic_filter_scalar("String", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
                 (Equal, "eq", semantic_filter_optional(value.clone())),
                 (NotEqual, "ne", semantic_filter_optional(value.clone())),
                 (LessThan, "lt", semantic_filter_optional(value.clone())),
-                (LessThanOrEqual, "lte", semantic_filter_optional(value.clone())),
+                (
+                    LessThanOrEqual,
+                    "lte",
+                    semantic_filter_optional(value.clone()),
+                ),
                 (GreaterThan, "gt", semantic_filter_optional(value.clone())),
-                (GreaterThanOrEqual, "gte", semantic_filter_optional(value.clone())),
-                (Between, "between", GraphqlSemanticTypeRef::named(<DateRangeInput as async_graphql::InputType>::type_name().into_owned(), GraphqlSemanticTypeKind::Object, true)),
+                (
+                    GreaterThanOrEqual,
+                    "gte",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    Between,
+                    "between",
+                    GraphqlSemanticTypeRef::named(
+                        <DateRangeInput as async_graphql::InputType>::type_name().into_owned(),
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
                 (InPast, "in_past", semantic_filter_scalar("Boolean", true)),
-                (InFuture, "in_future", semantic_filter_scalar("Boolean", true)),
+                (
+                    InFuture,
+                    "in_future",
+                    semantic_filter_scalar("Boolean", true),
+                ),
                 (IsToday, "is_today", semantic_filter_scalar("Boolean", true)),
-                (RecentDays, "recent_days", semantic_filter_scalar("Int", true)),
-                (WithinDays, "within_days", semantic_filter_scalar("Int", true)),
-                (GteRelative, "gte_relative", GraphqlSemanticTypeRef::named(<RelativeDateInput as async_graphql::InputType>::type_name().into_owned(), GraphqlSemanticTypeKind::Object, true)),
-                (LteRelative, "lte_relative", GraphqlSemanticTypeRef::named(<RelativeDateInput as async_graphql::InputType>::type_name().into_owned(), GraphqlSemanticTypeKind::Object, true)),
-            ], vec![semantic_filter_object::<DateRangeInput>(&[("start", "String!"), ("end", "String!")]), semantic_filter_object::<RelativeDateInput>(&[("days", "Int!")])], true)
+                (
+                    RecentDays,
+                    "recent_days",
+                    semantic_filter_scalar("Int", true),
+                ),
+                (
+                    WithinDays,
+                    "within_days",
+                    semantic_filter_scalar("Int", true),
+                ),
+                (
+                    GteRelative,
+                    "gte_relative",
+                    GraphqlSemanticTypeRef::named(
+                        <RelativeDateInput as async_graphql::InputType>::type_name().into_owned(),
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                ),
+                (
+                    LteRelative,
+                    "lte_relative",
+                    GraphqlSemanticTypeRef::named(
+                        <RelativeDateInput as async_graphql::InputType>::type_name().into_owned(),
+                        GraphqlSemanticTypeKind::Object,
+                        true,
+                    ),
+                ),
+            ],
+            vec![
+                semantic_filter_object::<DateRangeInput>(&[
+                    ("start", "String!"),
+                    ("end", "String!"),
+                ]),
+                semantic_filter_object::<RelativeDateInput>(&[("days", "Int!")]),
+            ],
+            true,
+        )
     }
 }
 
@@ -712,19 +910,57 @@ impl SpatialFilter {
     /// Declares this implementation's exact canonical operator input contract.
     ///
     /// Generated metadata uses this declaration; it grants no resolver authority.
-    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata {
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
         use crate::graphql::orm::GraphqlSemanticFilterOperator::*;
         let value = semantic_filter_scalar("JSON", false);
-        semantic_filter_contract::<Self>(value.clone(), vec![
-                (SpatialEquals, "equals", semantic_filter_optional(value.clone())),
-                (SpatialDisjoint, "disjoint", semantic_filter_optional(value.clone())),
-                (SpatialIntersects, "intersects", semantic_filter_optional(value.clone())),
-                (SpatialTouches, "touches", semantic_filter_optional(value.clone())),
-                (SpatialCrosses, "crosses", semantic_filter_optional(value.clone())),
-                (SpatialWithin, "within", semantic_filter_optional(value.clone())),
-                (SpatialContains, "contains", semantic_filter_optional(value.clone())),
-                (SpatialOverlaps, "overlaps", semantic_filter_optional(value.clone())),
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
+                (
+                    SpatialEquals,
+                    "equals",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialDisjoint,
+                    "disjoint",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialIntersects,
+                    "intersects",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialTouches,
+                    "touches",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialCrosses,
+                    "crosses",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialWithin,
+                    "within",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialContains,
+                    "contains",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    SpatialOverlaps,
+                    "overlaps",
+                    semantic_filter_optional(value.clone()),
+                ),
                 (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
-            ], vec![], true)
+            ],
+            vec![],
+            true,
+        )
     }
 }

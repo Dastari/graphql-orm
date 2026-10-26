@@ -3769,18 +3769,29 @@ fn generate_entity_impl(
                 match field_meta.filterable.as_deref() {
                     Some(kind) => {
                         let helper = match kind {
-                            "string" => "StringFilter", "uuid" => "UuidFilter",
-                            "number" => "IntFilter", "decimal" => "DecimalFilter",
-                            "boolean" | "bool" => "BoolFilter", "bytes" => "BytesFilter",
-                            "date" => "DateFilter", "spatial" => "SpatialFilter",
-                            _ => return Err(syn::Error::new_spanned(field, "unsupported canonical filter type")),
+                            "string" => "StringFilter",
+                            "uuid" => "UuidFilter",
+                            "number" => "IntFilter",
+                            "decimal" => "DecimalFilter",
+                            "boolean" | "bool" => "BoolFilter",
+                            "bytes" => "BytesFilter",
+                            "date" => "DateFilter",
+                            "spatial" => "SpatialFilter",
+                            _ => {
+                                return Err(syn::Error::new_spanned(
+                                    field,
+                                    "unsupported canonical filter type",
+                                ));
+                            }
                         };
                         let helper = syn::Ident::new(helper, field.span());
                         quote! { Some(::graphql_orm::graphql::filters::#helper::graphql_semantic_filter_input()) }
                     }
                     None => quote! { None },
                 }
-            } else { quote! { None } };
+            } else {
+                quote! { None }
+            };
             let groupable = !field_meta.is_json_field
                 && field_meta.spatial.is_none()
                 && !is_byte_vec_type(field_type);
