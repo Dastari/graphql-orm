@@ -24,15 +24,18 @@ requires `sortable`; generated keyset inputs also retain declared public primary
 keys whose ordinary sortable flag is false. Runtime ordering validates its
 structural members/operator enums and restricts its field enum to exact public
 sortable scalar identities. Unknown or relation-derived properties without
-that identity remain unavailable; do not
-restore them through a host allow-list. Generated input type names resolve to
+that identity remain unavailable; do not restore them through a host allow-list.
+Generated input type names resolve to
 exact entity/type shapes, and ambiguous ownership fails closed instead of
 choosing a longer entity prefix. Shared page and scalar-filter helper ownership
 comes from typed references, so entities named `Page` or `StringFilter` do not
 capture those helpers. Entity-prefixed custom input ownership requires a
 matching canonical operation argument and entity result/generated identity;
-unknown owners or conflicting shared/custom roles fail closed. Unrelated custom
-inputs retain their finished-SDL contract.
+ownership also follows nested input references from operation and relationship
+arguments through list/non-null wrappers. Unknown owners or conflicting
+shared/custom roles, including transitive conflicts, fail closed. Type traversal
+is finite and cycle-safe; ordinary input recursion and depth limits still apply.
+Unrelated custom inputs retain their finished-SDL contract.
 
 Private fields/relations, closed schemas, result disclosure and bounds, and
 ordinary resolver/current-principal authorization remain enforced. Public

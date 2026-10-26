@@ -24,6 +24,9 @@ supersedes: []
 - Validate runtime order object/operator shapes and restrict their field enums
   to exact public sortable scalars; cover actual bounded compact/nested ordered
   plans and private, non-sortable, unknown and conflicting-owner controls.
+- Follow transitive nested input references from canonical operation and
+  relationship arguments before admitting shared helpers; fail closed on
+  nested custom/helper conflicts while retaining wrapper, cycle and depth rules.
 - Affected capability input schemas and fingerprints change; regenerate
   definitions and retained bindings. No public API or database migration.
 

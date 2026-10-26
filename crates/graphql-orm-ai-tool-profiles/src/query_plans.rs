@@ -3714,20 +3714,7 @@ fn restrict_input_fields(
             let shared = shared_input_helper(schema, catalog, input_name);
             let mut owners = catalog.entities.iter().filter(|entity| {
                 input_name.starts_with(&entity.entity_name)
-                    && catalog.operations.iter().any(|operation| {
-                        operation.arguments.iter().any(|argument| {
-                            named_type(&render_type_ref(&argument.type_ref)).ok()
-                                == Some(input_name)
-                                && !is_page_argument(
-                                    &argument.graphql_name,
-                                    &render_type_ref(&argument.type_ref),
-                                    schema,
-                                )
-                        }) && (operation.generated_entity_name.as_deref()
-                            == Some(entity.entity_name.as_str())
-                            || named_type(&render_type_ref(&operation.result_type)).ok()
-                                == Some(entity.entity_name.as_str()))
-                    })
+                    && semantic_input_owner(schema, catalog, &entity.entity_name, input_name)
             });
             let Some(entity) = owners.next() else {
                 if !shared
@@ -3826,6 +3813,73 @@ fn generated_input_kind(input_name: &str, entity_name: &str) -> Option<SemanticI
     } else {
         None
     }
+}
+
+fn semantic_input_owner(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    entity_name: &str,
+    input_name: &str,
+) -> bool {
+    catalog.operations.iter().any(|operation| {
+        (operation.generated_entity_name.as_deref() == Some(entity_name)
+            || named_type(&render_type_ref(&operation.result_type)).ok() == Some(entity_name))
+            && operation
+                .arguments
+                .iter()
+                .any(|argument| argument_reaches_owned_input(schema, argument, input_name))
+    }) || catalog.entities.iter().any(|entity| {
+        entity.fields.iter().any(|field| {
+            field.relationship.as_ref().is_some_and(|relationship| {
+                relationship.target == entity_name
+                    && relationship
+                        .arguments
+                        .iter()
+                        .any(|argument| argument_reaches_owned_input(schema, argument, input_name))
+            })
+        })
+    })
+}
+
+fn argument_reaches_owned_input(
+    schema: &FinishedSchema,
+    argument: &graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor,
+    input_name: &str,
+) -> bool {
+    let ty = render_type_ref(&argument.type_ref);
+    // Only the direct pagination role is shared. A helper nested inside a
+    // custom argument retains that argument's entity ownership, including
+    // when the outer argument itself happens to be named page.
+    if list_item_type(&ty).is_none()
+        && named_type(&ty).ok() == Some(input_name)
+        && is_page_argument(&argument.graphql_name, &ty, schema)
+    {
+        return false;
+    }
+    input_type_reaches(schema, &ty, input_name)
+}
+
+fn input_type_reaches(schema: &FinishedSchema, graphql_type: &str, input_name: &str) -> bool {
+    // Explore the finite finished input-type graph, not recursive values.
+    // Sorted work/visited sets make this deterministic and cycle-safe without
+    // weakening the ordinary value-schema recursion and depth checks.
+    let mut pending = BTreeSet::from([graphql_type.to_owned()]);
+    let mut visited = BTreeSet::new();
+    while let Some(ty) = pending.pop_first() {
+        let Ok(name) = named_type(&ty) else {
+            continue;
+        };
+        if name == input_name {
+            return true;
+        }
+        if !visited.insert(name.to_owned()) {
+            continue;
+        }
+        if let Some(SchemaType::InputObject(fields)) = schema.types.get(name) {
+            pending.extend(fields.values().map(|field| field.ty.clone()));
+        }
+    }
+    false
 }
 
 fn shared_input_helper(
@@ -6264,6 +6318,300 @@ mod tests {
         assert!(
             restrict_input_fields(&unsafe_schema, &semantics, "PageInput", unsafe_page).is_err()
         );
+    }
+
+    #[test]
+    fn semantic_input_ownership_rejects_transitive_custom_helper_conflicts() {
+        for wrapped in [false, true] {
+            let lookup_types = if wrapped {
+                "input LookupInput { criteria: [LookupCriteriaInput!]! } \
+                 input LookupCriteriaInput { criteria: PageInput }"
+            } else {
+                "input LookupInput { criteria: PageInput }"
+            };
+            let sdl = format!(
+                r#"
+                schema {{ query: Query }}
+                type Query {{
+                    Rows(page: PageInput): RowConnection!
+                    GetPage(input: LookupInput!): Page!
+                }}
+                type RowConnection {{ edges: [RowEdge!]! }}
+                type RowEdge {{ node: Row! }}
+                type Row {{ id: String! }}
+                type Page {{ id: String!, limit: Int! }}
+                input PageInput {{ limit: Int, offset: Int }}
+                {lookup_types}
+                input CycleInput {{ next: CycleInput }}
+                input CycleReachInput {{ next: CycleReachInput, criteria: PageInput }}
+                "#
+            );
+            let public_id = || {
+                scalar_field(
+                    "id",
+                    GraphqlSemanticClassification::Internal,
+                    GraphqlSemanticExport::Exportable,
+                )
+            };
+            let mut private_limit = scalar_field(
+                "limit",
+                GraphqlSemanticClassification::Internal,
+                GraphqlSemanticExport::NeverExport,
+            );
+            private_limit.type_ref = named("Int", false);
+            let entity = |name: &str, fields: Vec<GraphqlSemanticFieldMetadata>| {
+                GraphqlEntitySemanticMetadata {
+                    entity_name: name.to_owned(),
+                    description: format!("Reviewed {name} record."),
+                    default_classification: GraphqlSemanticClassification::Internal,
+                    fields: fields.into_boxed_slice(),
+                    label_fields: Vec::new(),
+                }
+            };
+            let argument = |name: &str, ty: &str, nullable: bool| {
+                GraphqlSemanticArgumentDescriptor {
+                    graphql_name: name.to_owned(),
+                    description: format!("Typed {name} argument."),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        ty,
+                        GraphqlSemanticTypeKind::Object,
+                        nullable,
+                    ),
+                }
+            };
+            let operation = |name: &str, argument, result: &str| {
+                GraphqlSemanticOperationDescriptor::custom(
+                    GraphqlOperationKind::Query,
+                    name,
+                    format!("Read the reviewed {name} result."),
+                    vec![argument],
+                    GraphqlSemanticTypeRef::named(
+                        result,
+                        GraphqlSemanticTypeKind::Object,
+                        false,
+                    ),
+                    true,
+                )
+                .unwrap()
+            };
+            let semantics = GraphqlSemanticCatalog::compose_with_custom(
+                [
+                    entity("Row", vec![public_id()]),
+                    entity("Page", vec![public_id(), private_limit]),
+                ],
+                &GraphqlOperationCatalog::compose(std::iter::empty()),
+                [
+                    operation("Rows", argument("page", "PageInput", true), "RowConnection"),
+                    operation("GetPage", argument("input", "LookupInput", false), "Page"),
+                ],
+            )
+            .unwrap();
+            let schema = FinishedSchema::parse(&sdl).unwrap();
+
+            // The unrelated bounded list remains a real helper positive control
+            // even with a Page entity whose integer limit is NeverExport.
+            let rows_sdl = sdl.replace("GetPage(input: LookupInput!): Page!", "");
+            let mut rows_semantics = semantics.clone();
+            rows_semantics
+                .operations
+                .retain(|operation| operation.field_name == "Rows");
+            let rows_semantics = input_collision_recompose(rows_semantics);
+            let rows = input_collision_capabilities(&rows_sdl, &rows_semantics);
+            assert_input_collision_plan_pair(
+                rows.capabilities().next().unwrap(),
+                json!({"arguments": {}, "selections": ["id"], "maximumItems": 1}),
+                json!({"v0": {"limit": 1}}),
+                "($v0: PageInput) { Rows(page: $v0) { edges { node { id } } } }",
+            );
+
+            let lookup_sdl = sdl.replace("Rows(page: PageInput): RowConnection!", "");
+            let mut lookup_semantics = semantics.clone();
+            lookup_semantics
+                .operations
+                .retain(|operation| operation.field_name == "GetPage");
+            let lookup_semantics = input_collision_recompose(lookup_semantics);
+            let mut public_semantics = lookup_semantics.clone();
+            public_semantics
+                .entities
+                .iter_mut()
+                .find(|entity| entity.entity_name == "Page")
+                .unwrap()
+                .fields
+                .iter_mut()
+                .find(|field| field.field_name == "limit")
+                .unwrap()
+                .export = GraphqlSemanticExport::Exportable;
+            let public_semantics = input_collision_recompose(public_semantics);
+            let public = input_collision_capabilities(&lookup_sdl, &public_semantics);
+            let public = public.capabilities().next().unwrap();
+            let criteria = if wrapped {
+                json!({"criteria": [{"criteria": {"limit": 7}}]})
+            } else {
+                json!({"criteria": {"limit": 7}})
+            };
+            let compact = json!({"arguments": {"input": criteria}, "selections": ["id"]});
+            let nested = json!({
+                "arguments": compact["arguments"], "fields": {"id": true}, "relationships": {}
+            });
+            // Same SDL/value/selection succeeds with public limit metadata:
+            // privacy failures below cannot be unrelated type or bound errors.
+            for compiled in [
+                public.compile_compact(compact.clone()).unwrap(),
+                public.compile(nested.clone()).unwrap(),
+            ] {
+                assert_eq!(compiled.variables(), &json!({"v0": criteria}));
+                assert_eq!(
+                    compiled.descriptor().document,
+                    format!(
+                        "query AiQuery_{}($v0: LookupInput!) {{ GetPage(input: $v0) {{ id }} }}",
+                        &compiled.plan_fingerprint()[..20],
+                    )
+                );
+            }
+            let private = input_collision_capabilities(&lookup_sdl, &lookup_semantics);
+            let private = private.capabilities().next().unwrap();
+            assert!(private.compile_compact(compact.clone()).is_err());
+            assert!(private.compile(nested.clone()).is_err());
+            let safe_criteria = if wrapped {
+                json!({"criteria": [{"criteria": {}}]})
+            } else {
+                json!({"criteria": {}})
+            };
+            private
+                .compile_compact(json!({
+                    "arguments": {"input": safe_criteria}, "selections": ["id"]
+                }))
+                .expect("public id without private input remains usable");
+
+            assert!(matches!(
+                AiGraphqlQueryCapabilityCatalog::compile(
+                    "inventory",
+                    GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                    &sdl,
+                    &semantics,
+                    AiGraphqlQueryCapabilityLimits::default(),
+                ),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "query input semantic ownership is ambiguous"
+            ));
+            // Fresh readiness rejects the mixed roles. Also exercise the final
+            // argument compiler behind previously valid provider schemas, so a
+            // staged input definition cannot bypass the same ownership check.
+            assert!(
+                jsonschema::validator_for(public.compact_argument_schema())
+                    .unwrap()
+                    .is_valid(&compact)
+            );
+            assert!(
+                jsonschema::validator_for(public.argument_schema())
+                    .unwrap()
+                    .is_valid(&nested)
+            );
+            let mut staged = public.clone();
+            staged.schema = schema.clone();
+            staged.semantic_catalog = semantics.clone();
+            for result in [staged.compile_compact(compact), staged.compile(nested)] {
+                assert!(matches!(
+                    result,
+                    Err(AiError::InvalidConfiguration(message))
+                        if message == "query input semantic ownership is ambiguous"
+                ));
+            }
+
+            // Canonical relationship arguments carry their target's ownership
+            // through the same nested input graph as root operation arguments.
+            let mut relationship_semantics = rows_semantics;
+            let row = relationship_semantics
+                .entities
+                .iter_mut()
+                .find(|entity| entity.entity_name == "Row")
+                .unwrap();
+            let mut fields = row.fields.to_vec();
+            fields.push(GraphqlSemanticFieldMetadata {
+                field_name: "page".to_owned(),
+                description: "Read the related Page record.".to_owned(),
+                type_ref: GraphqlSemanticTypeRef::named(
+                    "Page",
+                    GraphqlSemanticTypeKind::Object,
+                    true,
+                ),
+                selectable: true,
+                filter_operators: Vec::new(),
+                sortable: false,
+                groupable: false,
+                aggregate_operators: Vec::new(),
+                aggregate_value_kind: None,
+                relationship: Some(GraphqlSemanticRelationshipDescriptor {
+                    target: "Page".to_owned(),
+                    cardinality: GraphqlSemanticRelationshipCardinality::One,
+                    arguments: vec![argument("input", "LookupInput", false)],
+                    collection_bound: None,
+                }),
+                classification: GraphqlSemanticClassification::Internal,
+                export: GraphqlSemanticExport::Exportable,
+                has_field_policy: true,
+            });
+            row.fields = fields.into_boxed_slice();
+            let relationship_semantics = input_collision_recompose(relationship_semantics);
+            let relationship_sdl = rows_sdl.replace(
+                "type Row { id: String! }",
+                "type Row { id: String!, page(input: LookupInput!): Page }",
+            );
+            let relationship_schema = FinishedSchema::parse(&relationship_sdl).unwrap();
+            validate_semantic_entities_against_schema(
+                &relationship_schema,
+                &relationship_semantics,
+            )
+            .expect("relationship control matches finished SDL");
+            let Some(SchemaType::InputObject(page_fields)) =
+                relationship_schema.types.get("PageInput")
+            else {
+                panic!("page input");
+            };
+            assert!(matches!(
+                restrict_input_fields(
+                    &relationship_schema,
+                    &relationship_semantics,
+                    "PageInput",
+                    page_fields,
+                ),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "query input semantic ownership is ambiguous"
+            ));
+
+            assert!(input_type_reaches(&schema, "[LookupInput!]!", "PageInput"));
+            assert!(!input_type_reaches(&schema, "CycleInput!", "PageInput"));
+            assert!(input_type_reaches(&schema, "[CycleReachInput!]!", "PageInput"));
+            assert!(matches!(
+                input_type_schema(
+                    &schema,
+                    &public_semantics,
+                    "CycleInput",
+                    None,
+                    AiGraphqlQueryCapabilityLimits::default(),
+                    0,
+                    &mut Vec::new(),
+                ),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "recursive query inputs are unsupported"
+            ));
+            assert!(matches!(
+                input_type_schema(
+                    &schema,
+                    &public_semantics,
+                    "LookupInput!",
+                    None,
+                    AiGraphqlQueryCapabilityLimits {
+                        maximum_input_depth: 1,
+                        ..AiGraphqlQueryCapabilityLimits::default()
+                    },
+                    0,
+                    &mut Vec::new(),
+                ),
+                Err(AiError::InvalidConfiguration(message))
+                    if message == "query input nesting is too deep"
+            ));
+        }
     }
 
     #[test]

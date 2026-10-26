@@ -30,9 +30,12 @@ resolver authorization, disclosure and result limits remain mandatory.
 Ordinary ordering still requires sortable scalar metadata. A generated keyset
 input also admits its declared public primary-key fields when that ordinary
 sortable flag is false. Shared pagination and scalar-filter inputs are identified
-by their typed usage, not an entity-name prefix; conflicting custom entity-input
-usage fails closed. Runtime ordering preserves its validated `field`, `direction`
-and `nulls` structure and restricts the field enum to exact public, non-secret,
+by their typed usage, not an entity-name prefix. Custom ownership follows nested
+input references from canonical operation and relationship arguments, including
+list/non-null wrappers; conflicting shared/custom roles fail closed. The finite
+type traversal is cycle-safe and retains ordinary input depth/recursion failures.
+Runtime ordering preserves its validated `field`, `direction` and `nulls`
+structure and restricts the field enum to exact public, non-secret,
 sortable scalar identities.
 
 Version 0.17.0 adopts operation catalog 0.5.0 (semantic label fields). It is a
