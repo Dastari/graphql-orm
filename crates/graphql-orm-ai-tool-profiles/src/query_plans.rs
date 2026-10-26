@@ -6651,6 +6651,8 @@ mod tests {
     }
 
     fn input_collision_plan(pascal: bool) -> Value {
+        let selections = ["Id", "Name", "CustomerId", "PlanName"]
+            .map(|name| input_collision_name(name, pascal));
         json!({
             "arguments": {
                 (input_collision_name("Where", pascal)): {
@@ -6659,8 +6661,7 @@ mod tests {
                     }
                 }
             },
-            "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": ["Id", "Name", "CustomerId", "PlanName"]
-                .map(|name| input_collision_name(name, pascal)),
+            "relationshipArguments": {}, "relationshipMaximumItems": {}, "selections": selections,
             "maximumItems": 1
         })
     }
@@ -8368,10 +8369,13 @@ mod tests {
                     suffix
                 )
             );
+            let fields = ["Id", "Name", "CustomerId", "PlanName"]
+                .into_iter()
+                .map(|field| (name(field), json!(true)))
+                .collect::<Map<_, _>>();
             let nested = json!({
                 "arguments": plan["arguments"],
-                "fields": ["Id", "Name", "CustomerId", "PlanName"].into_iter()
-                    .map(|field| (name(field), json!(true))).collect::<Map<_, _>>(),
+                "fields": fields,
                 "relationships": {}, "maximumItems": 1
             });
             let nested = capability.compile(nested).expect("same closed nested plan");
