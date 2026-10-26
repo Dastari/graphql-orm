@@ -19,12 +19,20 @@ removes the distinct exportable/filterable scalar `CustomerId` from its owning
 `WhereInput` or sortable `OrderByInput`.
 
 Entity-owned input properties require an exact exportable non-secret scalar
-semantic field and the corresponding filter/order capability. Unknown or
-relation-derived properties without that identity remain unavailable; do not
+semantic field and the corresponding filter/order capability. Ordinary ordering
+requires `sortable`; generated keyset inputs also retain declared public primary
+keys whose ordinary sortable flag is false. Runtime ordering validates its
+structural members/operator enums and restricts its field enum to exact public
+sortable scalar identities. Unknown or relation-derived properties without
+that identity remain unavailable; do not
 restore them through a host allow-list. Generated input type names resolve to
 exact entity/type shapes, and ambiguous ownership fails closed instead of
-choosing a longer entity prefix. Entity-prefixed custom inputs also reject
-ambiguous owners; unrelated custom inputs retain their finished-SDL contract.
+choosing a longer entity prefix. Shared page and scalar-filter helper ownership
+comes from typed references, so entities named `Page` or `StringFilter` do not
+capture those helpers. Entity-prefixed custom input ownership requires a
+matching canonical operation argument and entity result/generated identity;
+unknown owners or conflicting shared/custom roles fail closed. Unrelated custom
+inputs retain their finished-SDL contract.
 
 Private fields/relations, closed schemas, result disclosure and bounds, and
 ordinary resolver/current-principal authorization remain enforced. Public

@@ -18,6 +18,12 @@ supersedes: []
   owners and omit unknown, private or unclassified relation-derived fields.
 - Cover bounded compact and nested plans, canonical input naming, entity-name
   collisions, private controls and fingerprint/operation drift bindings.
+- Preserve declared public keyset primary-key ordering independently of the
+  ordinary sortable flag; resolve shared page/scalar-filter helpers by typed
+  usage rather than lexical entity prefixes.
+- Validate runtime order object/operator shapes and restrict their field enums
+  to exact public sortable scalars; cover actual bounded compact/nested ordered
+  plans and private, non-sortable, unknown and conflicting-owner controls.
 - Affected capability input schemas and fingerprints change; regenerate
   definitions and retained bindings. No public API or database migration.
 

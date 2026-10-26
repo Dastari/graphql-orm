@@ -3650,7 +3650,7 @@ fn input_type_schema(
     let named = named_type(graphql_type)?;
     let mut value = match schema.types.get(named) {
         Some(SchemaType::Enum(values)) => {
-            let values = restricted_enum_values(catalog, named, values);
+            let values = restricted_enum_values(schema, catalog, named, values)?;
             if values.is_empty() {
                 return Err(configuration_error(
                     "query enum has no exportable semantic values",
@@ -3665,7 +3665,7 @@ fn input_type_schema(
                 ));
             }
             ancestry.push(named.to_owned());
-            let restricted = restrict_input_fields(catalog, named, fields)?;
+            let restricted = restrict_input_fields(schema, catalog, named, fields)?;
             let value = input_object_schema(
                 schema,
                 catalog,
@@ -3691,6 +3691,7 @@ fn input_type_schema(
 }
 
 fn restrict_input_fields(
+    schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
     input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
@@ -3707,17 +3708,41 @@ fn restrict_input_fields(
     let (entity, kind) = match generated.as_slice() {
         [(entity, kind)] => (*entity, *kind),
         [] => {
-            // Retain protection for entity-prefixed custom inputs, but never
-            // guess between multiple possible owners. Unrelated custom inputs
-            // keep their finished-SDL contract.
-            let mut owners = catalog
-                .entities
-                .iter()
-                .filter(|entity| input_name.starts_with(&entity.entity_name));
+            // A lexical prefix is not ownership: PageInput and StringFilterInput
+            // may be shared by entities named Page and StringFilter. Resolve
+            // helper usage and custom operation ownership from actual references.
+            let shared = shared_input_helper(schema, catalog, input_name);
+            let mut owners = catalog.entities.iter().filter(|entity| {
+                input_name.starts_with(&entity.entity_name)
+                    && catalog.operations.iter().any(|operation| {
+                        operation.arguments.iter().any(|argument| {
+                            named_type(&render_type_ref(&argument.type_ref)).ok()
+                                == Some(input_name)
+                                && !is_page_argument(
+                                    &argument.graphql_name,
+                                    &render_type_ref(&argument.type_ref),
+                                    schema,
+                                )
+                        }) && (operation.generated_entity_name.as_deref()
+                            == Some(entity.entity_name.as_str())
+                            || named_type(&render_type_ref(&operation.result_type)).ok()
+                                == Some(entity.entity_name.as_str()))
+                    })
+            });
             let Some(entity) = owners.next() else {
+                if !shared
+                    && catalog
+                        .entities
+                        .iter()
+                        .any(|entity| input_name.starts_with(&entity.entity_name))
+                {
+                    return Err(configuration_error(
+                        "query input semantic ownership is unknown",
+                    ));
+                }
                 return Ok(fields.clone());
             };
-            if owners.next().is_some() {
+            if shared || owners.next().is_some() {
                 return Err(configuration_error(
                     "query input semantic ownership is ambiguous",
                 ));
@@ -3730,6 +3755,9 @@ fn restrict_input_fields(
             ));
         }
     };
+    if matches!(kind, SemanticInputKind::RuntimeOrder) {
+        validate_runtime_order_input(schema, &entity.entity_name, fields)?;
+    }
     Ok(fields
         .iter()
         .filter(|(name, _)| {
@@ -3738,6 +3766,9 @@ fn restrict_input_fields(
                 // not entity fields. The enum is independently restricted below.
                 return name.eq_ignore_ascii_case("field")
                     || name.eq_ignore_ascii_case("operator");
+            }
+            if matches!(kind, SemanticInputKind::RuntimeOrder) {
+                return matches!(name.as_str(), "field" | "direction" | "nulls");
             }
             entity.fields.iter().any(|field| {
                 // Exact canonical names win over lexical similarity. In
@@ -3751,8 +3782,14 @@ fn restrict_input_fields(
                     && match kind {
                         SemanticInputKind::Where => !field.filter_operators.is_empty(),
                         SemanticInputKind::OrderBy => field.sortable,
+                        // The finished generated keyset input is the declared
+                        // allow-list: primary keys are present even when ordinary
+                        // scalar metadata does not mark them sortable.
+                        SemanticInputKind::KeysetOrderBy => true,
                         SemanticInputKind::Fields => true,
-                        SemanticInputKind::AggregateMetric => false,
+                        SemanticInputKind::AggregateMetric | SemanticInputKind::RuntimeOrder => {
+                            false
+                        }
                     }
             })
         })
@@ -3764,6 +3801,8 @@ fn restrict_input_fields(
 enum SemanticInputKind {
     Where,
     OrderBy,
+    KeysetOrderBy,
+    RuntimeOrder,
     Fields,
     AggregateMetric,
 }
@@ -3771,10 +3810,12 @@ enum SemanticInputKind {
 fn generated_input_kind(input_name: &str, entity_name: &str) -> Option<SemanticInputKind> {
     if input_name == format!("{entity_name}WhereInput") {
         Some(SemanticInputKind::Where)
-    } else if input_name == format!("{entity_name}OrderByInput")
-        || input_name == format!("{entity_name}KeysetOrderByInput")
-    {
+    } else if input_name == format!("{entity_name}OrderByInput") {
         Some(SemanticInputKind::OrderBy)
+    } else if input_name == format!("{entity_name}KeysetOrderByInput") {
+        Some(SemanticInputKind::KeysetOrderBy)
+    } else if input_name == format!("{entity_name}OrderInput") {
+        Some(SemanticInputKind::RuntimeOrder)
     } else if input_name == format!("{entity_name}AggregateMetricInput") {
         Some(SemanticInputKind::AggregateMetric)
     } else if input_name == format!("{entity_name}KeyInput")
@@ -3787,37 +3828,138 @@ fn generated_input_kind(input_name: &str, entity_name: &str) -> Option<SemanticI
     }
 }
 
+fn shared_input_helper(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    input_name: &str,
+) -> bool {
+    let page_shape = match schema.types.get(input_name) {
+        Some(SchemaType::InputObject(fields)) => {
+            fields.keys().any(|name| {
+                name.eq_ignore_ascii_case("limit") || name.eq_ignore_ascii_case("first")
+            }) && fields.iter().all(|(name, field)| {
+                (name.eq_ignore_ascii_case("limit")
+                    || name.eq_ignore_ascii_case("first")
+                    || name.eq_ignore_ascii_case("offset"))
+                    && field.ty == "Int"
+                    && !field.has_default
+            })
+        }
+        _ => false,
+    };
+    let page_argument = |argument: &graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor| {
+        let ty = render_type_ref(&argument.type_ref);
+        page_shape
+            && named_type(&ty).ok() == Some(input_name)
+            && is_page_argument(&argument.graphql_name, &ty, schema)
+    };
+    catalog
+        .operations
+        .iter()
+        .any(|operation| operation.arguments.iter().any(page_argument))
+        || catalog.entities.iter().any(|entity| {
+            entity.fields.iter().any(|field| {
+                field.relationship.as_ref().is_some_and(|relationship| {
+                    relationship.arguments.iter().any(page_argument)
+                })
+            }) || match schema.types.get(&format!("{}WhereInput", entity.entity_name)) {
+                Some(SchemaType::InputObject(fields)) => entity.fields.iter().any(|field| {
+                    field.relationship.is_none()
+                        && !field.filter_operators.is_empty()
+                        && fields.get(&field.field_name).is_some_and(|input| {
+                            named_type(&input.ty).ok() == Some(input_name)
+                        })
+                }),
+                _ => false,
+            }
+        })
+}
+
+fn validate_runtime_order_input(
+    schema: &FinishedSchema,
+    entity_name: &str,
+    fields: &BTreeMap<String, SchemaInput>,
+) -> Result<(), AiError> {
+    for (name, ty) in [
+        ("field", format!("{entity_name}OrderField!")),
+        ("direction", "RuntimeOrderDirection".to_owned()),
+        ("nulls", "RuntimeNullPlacement".to_owned()),
+    ] {
+        if fields
+            .get(name)
+            .is_none_or(|field| field.ty != ty || field.has_default)
+        {
+            return Err(configuration_error("runtime order input shape is invalid"));
+        }
+    }
+    for (name, expected) in [
+        ("RuntimeOrderDirection", ["ASC", "DESC"]),
+        ("RuntimeNullPlacement", ["FIRST", "LAST"]),
+    ] {
+        if !matches!(schema.types.get(name), Some(SchemaType::Enum(values))
+            if values.len() == expected.len()
+                && expected.iter().all(|value| values.iter().any(|actual| actual.as_str() == *value)))
+        {
+            return Err(configuration_error("runtime order operator enum is invalid"));
+        }
+    }
+    if !matches!(
+        schema.types.get(&format!("{entity_name}OrderField")),
+        Some(SchemaType::Enum(_))
+    ) {
+        return Err(configuration_error("runtime order field enum is missing"));
+    }
+    Ok(())
+}
+
 fn restricted_enum_values(
+    schema: &FinishedSchema,
     catalog: &GraphqlSemanticCatalog,
     enum_name: &str,
     values: &[String],
-) -> Vec<String> {
-    let entity = catalog
-        .entities
-        .iter()
-        .filter(|entity| enum_name.starts_with(&entity.entity_name))
-        .max_by_key(|entity| entity.entity_name.len());
-    let Some(entity) = entity else {
-        return values.to_vec();
+) -> Result<Vec<String>, AiError> {
+    let mut owners = catalog.entities.iter().filter(|entity| {
+        enum_name == format!("{}AggregateField", entity.entity_name)
+            || enum_name == format!("{}OrderField", entity.entity_name)
+    });
+    let Some(entity) = owners.next() else {
+        return Ok(values.to_vec());
     };
-    if !enum_name[entity.entity_name.len()..]
-        .to_ascii_lowercase()
-        .contains("aggregatefield")
-    {
-        return values.to_vec();
+    if owners.next().is_some() {
+        return Err(configuration_error(
+            "query enum semantic ownership is ambiguous",
+        ));
     }
-    values
+    let runtime_order = enum_name == format!("{}OrderField", entity.entity_name);
+    if runtime_order {
+        let Some(SchemaType::InputObject(fields)) =
+            schema.types.get(&format!("{}OrderInput", entity.entity_name))
+        else {
+            return Err(configuration_error("runtime order enum has no owning input"));
+        };
+        validate_runtime_order_input(schema, &entity.entity_name, fields)?;
+    }
+    Ok(values
         .iter()
         .filter(|value| {
             entity.fields.iter().any(|field| {
-                semantic_name_key(&field.field_name) == semantic_name_key(value)
+                (if runtime_order {
+                    field.field_name.as_str() == value.as_str()
+                } else {
+                    semantic_name_key(&field.field_name) == semantic_name_key(value)
+                })
                     && field.export == GraphqlSemanticExport::Exportable
                     && field.classification != GraphqlSemanticClassification::Secret
-                    && (field.groupable || !field.aggregate_operators.is_empty())
+                    && field.relationship.is_none()
+                    && if runtime_order {
+                        field.sortable
+                    } else {
+                        field.groupable || !field.aggregate_operators.is_empty()
+                    }
             })
         })
         .cloned()
-        .collect()
+        .collect())
 }
 
 fn semantic_name_key(value: &str) -> String {
@@ -5876,6 +6018,386 @@ mod tests {
         })
     }
 
+    fn input_collision_recompose(semantics: GraphqlSemanticCatalog) -> GraphqlSemanticCatalog {
+        let operations = semantics.operations.into_iter().map(|operation| {
+            GraphqlSemanticOperationDescriptor::custom(
+                operation.kind,
+                operation.field_name,
+                operation.description,
+                operation.arguments,
+                operation.result_type,
+                operation.has_authorization_policy,
+            )
+            .expect("rebind changed custom operation arguments")
+        });
+        GraphqlSemanticCatalog::compose_with_custom(
+            semantics.entities,
+            &GraphqlOperationCatalog::compose(std::iter::empty()),
+            operations,
+        )
+        .expect("rebound canonical semantics")
+    }
+
+    fn input_collision_nested_plan(compact: &Value) -> Value {
+        json!({
+            "arguments": compact["arguments"],
+            "fields": compact["selections"].as_array().unwrap().iter()
+                .map(|field| (field.as_str().unwrap().to_owned(), json!(true)))
+                .collect::<Map<_, _>>(),
+            "relationships": {},
+            "maximumItems": compact["maximumItems"]
+        })
+    }
+
+    fn assert_input_collision_plan_pair(
+        capability: &AiGraphqlQueryCapability,
+        plan: Value,
+        variables: Value,
+        document_suffix: &str,
+    ) {
+        let compact = capability
+            .compile_compact(plan.clone())
+            .expect("compact plan");
+        let nested = capability
+            .compile(input_collision_nested_plan(&plan))
+            .expect("nested plan");
+        for compiled in [&compact, &nested] {
+            assert_eq!(compiled.variables(), &variables);
+            assert_eq!(
+                compiled.descriptor().document,
+                format!(
+                    "query AiQuery_{}{}",
+                    &compiled.plan_fingerprint()[..20],
+                    document_suffix
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_input_ownership_preserves_declared_keyset_primary_key_order() {
+        let (mut sdl, mut semantics) = input_collision_fixture(false);
+        sdl = sdl.replace(
+            "input SubscriptionOrderByInput {",
+            "input SubscriptionOrderByInput { id: OrderDirection,",
+        );
+        sdl.push_str(
+            "\ninput SubscriptionKeysetOrderByInput { id: OrderDirection, \
+             customerEmail: OrderDirection, unknown: OrderDirection }",
+        );
+        semantics
+            .entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Subscription")
+            .unwrap()
+            .fields
+            .iter_mut()
+            .find(|field| field.field_name == "id")
+            .unwrap()
+            .sortable = false;
+        // Ordinary OrderBy still requires sortable, even if SDL declares id.
+        let ordinary =
+            input_collision_capabilities(&sdl, &input_collision_recompose(semantics.clone()));
+        let ordinary = ordinary.capabilities().next().unwrap();
+        let mut plan = input_collision_plan(false);
+        plan["arguments"]["orderBy"] = json!([{ "id": "DESC" }]);
+        assert!(ordinary.compile_compact(plan.clone()).is_err());
+        assert!(ordinary.compile(input_collision_nested_plan(&plan)).is_err());
+        let mut sortable = plan.clone();
+        sortable["arguments"]["orderBy"] = json!([{ "customerId": "ASC" }]);
+        ordinary
+            .compile_compact(sortable)
+            .expect("ordinary sortable field");
+
+        sdl = sdl.replace(
+            "[SubscriptionOrderByInput!]",
+            "[SubscriptionKeysetOrderByInput!]",
+        );
+        let order = semantics.operations[0]
+            .arguments
+            .iter_mut()
+            .find(|argument| argument.graphql_name == "orderBy")
+            .unwrap();
+        order.type_ref = GraphqlSemanticTypeRef::list(
+            true,
+            None,
+            GraphqlSemanticTypeRef::named(
+                "SubscriptionKeysetOrderByInput",
+                GraphqlSemanticTypeKind::Object,
+                false,
+            ),
+        );
+        let catalog = input_collision_capabilities(&sdl, &input_collision_recompose(semantics));
+        let capability = catalog.capabilities().next().unwrap();
+        assert_input_collision_plan_pair(
+            capability,
+            plan.clone(),
+            json!({
+                "v0": [{"id": "DESC"}], "v1": {"limit": 1},
+                "v2": {"customerId": {"eq": "customer-1"}}
+            }),
+            "($v0: [SubscriptionKeysetOrderByInput!], $v1: PageInput, $v2: SubscriptionWhereInput) { Subscriptions(orderBy: $v0, page: $v1, where: $v2) { edges { node { id name customerId planName } } } }",
+        );
+        for denied in ["customerEmail", "unknown", "ID"] {
+            let mut invalid = plan.clone();
+            invalid["arguments"]["orderBy"] = json!([{ (denied): "DESC" }]);
+            assert!(
+                capability.compile_compact(invalid.clone()).is_err(),
+                "{denied}"
+            );
+            assert!(capability.compile(input_collision_nested_plan(&invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn semantic_input_ownership_uses_shared_helper_references_not_entity_prefixes() {
+        let (mut sdl, mut semantics) = input_collision_fixture(false);
+        for entity_name in ["Page", "StringFilter"] {
+            sdl.push_str(&format!(
+                "\ntype {entity_name} {{ id: String!, title: String! }}"
+            ));
+            semantics.entities.push(GraphqlEntitySemanticMetadata {
+                entity_name: entity_name.to_owned(),
+                description: format!("A real {entity_name} entity, not an input helper."),
+                default_classification: GraphqlSemanticClassification::Internal,
+                fields: ["id", "title"]
+                    .into_iter()
+                    .map(|name| {
+                        scalar_field(
+                            name,
+                            GraphqlSemanticClassification::Internal,
+                            if name == "title" {
+                                GraphqlSemanticExport::NeverExport
+                            } else {
+                                GraphqlSemanticExport::Exportable
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+                label_fields: Vec::new(),
+            });
+        }
+        let semantics = input_collision_recompose(semantics);
+        let catalog = input_collision_capabilities(&sdl, &semantics);
+        let capability = catalog.capabilities().next().unwrap();
+        let plan = input_collision_plan(false);
+        assert_input_collision_plan_pair(
+            capability,
+            plan.clone(),
+            json!({"v0": {"limit": 1}, "v1": {"customerId": {"eq": "customer-1"}}}),
+            "($v0: PageInput, $v1: SubscriptionWhereInput) { Subscriptions(page: $v0, where: $v1) { edges { node { id name customerId planName } } } }",
+        );
+        let mut invalid = plan;
+        invalid["arguments"]["where"] = json!({"customerEmail": {"eq": "private"}});
+        assert!(capability.compile_compact(invalid).is_err());
+
+        let schema = FinishedSchema::parse(&sdl).unwrap();
+        let Some(SchemaType::InputObject(page)) = schema.types.get("PageInput") else {
+            panic!("page helper");
+        };
+        // A helper used as a custom entity input has conflicting provenance;
+        // being a page elsewhere must not exempt private custom entity inputs.
+        let mut mixed = semantics.clone();
+        mixed.operations.push(
+            GraphqlSemanticOperationDescriptor::custom(
+                GraphqlOperationKind::Mutation,
+                "ChangePage",
+                "Change an explicitly described Page record.",
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: "input".to_owned(),
+                    description: "Entity-owned input, not a pagination argument.".to_owned(),
+                    type_ref: GraphqlSemanticTypeRef::named(
+                        "PageInput",
+                        GraphqlSemanticTypeKind::Object,
+                        false,
+                    ),
+                }],
+                GraphqlSemanticTypeRef::named("Page", GraphqlSemanticTypeKind::Object, false),
+                true,
+            )
+            .unwrap(),
+        );
+        let mixed = input_collision_recompose(mixed);
+        assert!(restrict_input_fields(&schema, &mixed, "PageInput", page).is_err());
+        assert!(restrict_input_fields(&schema, &semantics, "PageSecretInput", page).is_err());
+
+        let mut custom = mixed;
+        let operation = custom
+            .operations
+            .iter_mut()
+            .find(|operation| operation.field_name == "ChangePage")
+            .unwrap();
+        operation.arguments[0].type_ref =
+            GraphqlSemanticTypeRef::named(
+                "PageMutationInput",
+                GraphqlSemanticTypeKind::Object,
+                false,
+            );
+        let custom = input_collision_recompose(custom);
+        let custom_sdl = format!("{sdl}\ninput PageMutationInput {{ id: String, title: String }}");
+        let custom_schema = FinishedSchema::parse(&custom_sdl).unwrap();
+        let Some(SchemaType::InputObject(custom_fields)) =
+            custom_schema.types.get("PageMutationInput")
+        else {
+            panic!("custom entity input");
+        };
+        let restricted = restrict_input_fields(
+            &custom_schema,
+            &custom,
+            "PageMutationInput",
+            custom_fields,
+        )
+        .unwrap();
+        assert_eq!(
+            restricted.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["id"]
+        );
+        let unsafe_sdl = sdl.replace(
+            "input PageInput { limit: Int, offset: Int }",
+            "input PageInput { limit: Int, offset: Int, secret: String }",
+        );
+        let unsafe_schema = FinishedSchema::parse(&unsafe_sdl).unwrap();
+        let Some(SchemaType::InputObject(unsafe_page)) = unsafe_schema.types.get("PageInput") else {
+            panic!("modified page input");
+        };
+        assert!(
+            restrict_input_fields(&unsafe_schema, &semantics, "PageInput", unsafe_page).is_err()
+        );
+    }
+
+    #[test]
+    fn semantic_input_ownership_preserves_runtime_order_shape_and_restricts_field_enum() {
+        let (mut sdl, mut semantics) = input_collision_fixture(false);
+        let root_start = sdl.find("type Query {").unwrap();
+        let root_end = root_start + sdl[root_start..].find('}').unwrap() + 1;
+        sdl.replace_range(
+            root_start..root_end,
+            r#"type Query {
+            Subscriptions(where: SubscriptionWhereInput, orderBy: [SubscriptionOrderInput!],
+                first: Int, after: String, last: Int, before: String): SubscriptionConnection!
+        }"#,
+        );
+        sdl = sdl.replace("type Subscription {", "type Subscription { number: String!,");
+        sdl.push_str(
+            r#"
+            input SubscriptionOrderInput {
+                field: SubscriptionOrderField!, direction: RuntimeOrderDirection,
+                nulls: RuntimeNullPlacement, unexpected: String
+            }
+            enum SubscriptionOrderField { number customerEmail name secret unknown NUMBER }
+            enum RuntimeOrderDirection { ASC DESC }
+            enum RuntimeNullPlacement { FIRST LAST }
+        "#,
+        );
+        let entity = semantics
+            .entities
+            .iter_mut()
+            .find(|entity| entity.entity_name == "Subscription")
+            .unwrap();
+        entity
+            .fields
+            .iter_mut()
+            .find(|field| field.field_name == "name")
+            .unwrap()
+            .sortable = false;
+        let mut number = scalar_field(
+            "number",
+            GraphqlSemanticClassification::Internal,
+            GraphqlSemanticExport::Exportable,
+        );
+        number.sortable = true;
+        entity.fields = entity
+            .fields
+            .iter()
+            .cloned()
+            .chain([number])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        semantics.operations[0].arguments = [
+            (
+                "where",
+                GraphqlSemanticTypeRef::named(
+                    "SubscriptionWhereInput",
+                    GraphqlSemanticTypeKind::Object,
+                    true,
+                ),
+            ),
+            (
+                "orderBy",
+                GraphqlSemanticTypeRef::list(
+                    true,
+                    None,
+                    GraphqlSemanticTypeRef::named(
+                        "SubscriptionOrderInput",
+                        GraphqlSemanticTypeKind::Object,
+                        false,
+                    ),
+                ),
+            ),
+            ("first", named("Int", true)),
+            ("after", named("String", true)),
+            ("last", named("Int", true)),
+            ("before", named("String", true)),
+        ]
+        .into_iter()
+        .map(|(name, type_ref)| GraphqlSemanticArgumentDescriptor {
+            graphql_name: name.to_owned(),
+            description: format!("Runtime {name} argument."),
+            type_ref,
+        })
+        .collect();
+        let semantics = input_collision_recompose(semantics);
+        let catalog = input_collision_capabilities(&sdl, &semantics);
+        let capability = catalog.capabilities().next().unwrap();
+        let mut plan = input_collision_plan(false);
+        plan["selections"] = json!(["id", "number"]);
+        plan["arguments"]["orderBy"] =
+            json!([{ "field": "number", "direction": "ASC", "nulls": "LAST" }]);
+        assert_input_collision_plan_pair(
+            capability,
+            plan.clone(),
+            json!({"v0": 1, "v1": [{"field": "number", "direction": "ASC", "nulls": "LAST"}],
+                "v2": {"customerId": {"eq": "customer-1"}}}),
+            "($v0: Int, $v1: [SubscriptionOrderInput!], $v2: SubscriptionWhereInput) { Subscriptions(first: $v0, orderBy: $v1, where: $v2) { edges { node { id number } } } }",
+        );
+        for denied in ["customerEmail", "name", "secret", "unknown", "NUMBER"] {
+            let mut invalid = plan.clone();
+            invalid["arguments"]["orderBy"][0]["field"] = json!(denied);
+            assert!(
+                capability.compile_compact(invalid.clone()).is_err(),
+                "{denied}"
+            );
+            assert!(capability.compile(input_collision_nested_plan(&invalid)).is_err());
+        }
+        for (key, value) in [
+            ("direction", "SIDEWAYS"),
+            ("nulls", "MIDDLE"),
+            ("unexpected", "private"),
+        ] {
+            let mut invalid = plan.clone();
+            invalid["arguments"]["orderBy"][0][key] = json!(value);
+            assert!(capability.compile_compact(invalid).is_err(), "{key}");
+        }
+        let mut descending = plan;
+        descending["arguments"]["orderBy"][0]["direction"] = json!("DESC");
+        descending["arguments"]["orderBy"][0]["nulls"] = json!("FIRST");
+        capability
+            .compile_compact(descending)
+            .expect("remaining runtime operators");
+        let malformed = sdl.replace("field: SubscriptionOrderField!", "field: String!");
+        assert!(
+            AiGraphqlQueryCapabilityCatalog::compile(
+                "inventory",
+                GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                &malformed,
+                &semantics,
+                AiGraphqlQueryCapabilityLimits::default(),
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn semantic_input_ownership_preserves_public_prefix_scalar_and_closed_plans() {
         for pascal in [false, true] {
@@ -6081,7 +6603,8 @@ mod tests {
 
     #[test]
     fn semantic_input_ownership_rejects_ambiguous_generated_entity_names() {
-        let (_, mut semantics) = input_collision_fixture(true);
+        let (sdl, mut semantics) = input_collision_fixture(true);
+        let schema = FinishedSchema::parse(&sdl).unwrap();
         let mut overlap = semantics
             .entities
             .iter()
@@ -6095,6 +6618,7 @@ mod tests {
         for _ in 0..2 {
             assert!(matches!(
                 restrict_input_fields(
+                    &schema,
                     &semantics,
                     "SubscriptionKeysetOrderByInput",
                     &BTreeMap::new()

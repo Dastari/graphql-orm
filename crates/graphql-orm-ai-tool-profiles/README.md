@@ -27,6 +27,14 @@ relation-derived inputs remain absent, and ambiguous entity input ownership
 fails readiness. Rebuild affected capability definitions and retained bindings;
 resolver authorization, disclosure and result limits remain mandatory.
 
+Ordinary ordering still requires sortable scalar metadata. A generated keyset
+input also admits its declared public primary-key fields when that ordinary
+sortable flag is false. Shared pagination and scalar-filter inputs are identified
+by their typed usage, not an entity-name prefix; conflicting custom entity-input
+usage fails closed. Runtime ordering preserves its validated `field`, `direction`
+and `nulls` structure and restricts the field enum to exact public, non-secret,
+sortable scalar identities.
+
 Version 0.17.0 adopts operation catalog 0.5.0 (semantic label fields). It is a
 breaking minor only because public APIs take catalogue types; capabilities are
 unchanged.
