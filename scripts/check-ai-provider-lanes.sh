@@ -19,6 +19,7 @@ providers=(
   provider-xai
   provider-ollama
   provider-openai-compatible
+  provider-chat-completions
   local-harness
   provider-codex-app-server
   provider-grok-acp

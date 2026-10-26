@@ -1284,6 +1284,7 @@ fn normalize_optional_provider_kinds(
                     AiProviderKindInput::Ollama => ProviderKind::Ollama,
                     AiProviderKindInput::OpenAiCompatible => ProviderKind::OpenAiCompatible,
                     AiProviderKindInput::LocalHarness => ProviderKind::LocalHarness,
+                    AiProviderKindInput::ChatCompletions => ProviderKind::ChatCompletions,
                 })
                 .collect()
         }),

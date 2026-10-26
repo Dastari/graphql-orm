@@ -24,7 +24,7 @@ esac
 repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
-adapters=provider-openai-core,provider-anthropic-core,provider-xai-core,provider-ollama-core,provider-openai-compatible-core
+adapters=provider-openai-core,provider-anthropic-core,provider-xai-core,provider-ollama-core,provider-openai-compatible-core,provider-chat-completions-core
 forbidden=(aws-lc-rs aws-lc-sys quinn jni)
 # cargo tree resolves the host target only unless asked; check the shipped ones.
 targets=(x86_64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-apple-darwin)

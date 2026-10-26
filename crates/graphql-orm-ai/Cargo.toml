@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai"
-version = "0.114.0"
+version = "0.115.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Project-agnostic AI agent runtime for graphql-orm applications"
@@ -29,11 +29,13 @@ provider-anthropic = ["provider-anthropic-core", "provider-tls-aws-lc"]
 provider-xai = ["provider-xai-core", "provider-tls-aws-lc"]
 provider-ollama = ["provider-ollama-core", "provider-tls-aws-lc"]
 provider-openai-compatible = ["provider-openai-compatible-core", "provider-tls-aws-lc"]
+provider-chat-completions = ["provider-chat-completions-core", "provider-tls-aws-lc"]
 provider-openai-core = ["dep:base64", "dep:hmac", "dep:reqwest"]
 provider-anthropic-core = ["dep:reqwest"]
 provider-xai-core = ["dep:base64", "dep:reqwest"]
 provider-ollama-core = ["dep:base64", "dep:reqwest"]
 provider-openai-compatible-core = ["dep:base64", "dep:reqwest"]
+provider-chat-completions-core = ["dep:reqwest"]
 # Provider HTTP TLS stacks; exactly one is required by any adapter.
 provider-tls-aws-lc = ["reqwest?/rustls"]
 provider-tls-ring = [

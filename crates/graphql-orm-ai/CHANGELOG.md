@@ -18,6 +18,32 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.115.0
+
+- Add a Chat Completions-compatible adapter (`provider-chat-completions`, or
+  `provider-chat-completions-core` with one `provider-tls-*` feature):
+  `ChatCompletionsProvider`, `ChatCompletionsProviderConfig` and
+  `ChatCompletionsCapabilities`. It speaks `POST /v1/chat/completions` with
+  streamed `chat.completion.chunk` events for Ollama, LM Studio, vLLM,
+  llama.cpp server, LocalAI and gateways. It binds an exact
+  deployment-authorized endpoint, takes an optional credential, uses declared
+  capabilities only (strict function tools, parallel calls, JSON-schema
+  output), replays every turn statelessly, assembles fragmented tool calls by
+  index, and requires reported usage: a stream without usage fails the turn
+  instead of being estimated.
+- New provider kind `chat_completions`: `ProviderKind::ChatCompletions`,
+  `AiProviderKindInput::ChatCompletions` (GraphQL enum value) and
+  `AiSessionProviderKind::ChatCompletions`. Profiles reuse the
+  OpenAI-compatible reviewed contract with retained continuation refused.
+- AI schema module 0.75.0: persisted provider-kind validation accepts
+  `chat_completions`.
+- **Breaking (Rust):** `ProviderKind`, `AiProviderKindInput` and
+  `AiSessionProviderKind` gain a variant and are now `#[non_exhaustive]`, so
+  downstream exhaustive `match`es need a wildcard arm. This is intended as the
+  last break of this kind; later provider kinds are additive.
+- `SseDecoder` and endpoint normalization are shared internal helpers; the
+  OpenAI-compatible adapter's behaviour is unchanged.
+
 ## Unreleased - 0.114.0
 
 - Hosts can choose the provider TLS stack. New adapter-only features

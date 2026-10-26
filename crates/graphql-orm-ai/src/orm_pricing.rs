@@ -748,7 +748,13 @@ fn validate_scope(scope: &AiScope) -> Result<(), AiError> {
 fn is_provider_kind(kind: &str) -> bool {
     matches!(
         kind,
-        "openai" | "anthropic" | "xai" | "ollama" | "openai_compatible" | "local_harness"
+        "openai"
+            | "anthropic"
+            | "xai"
+            | "ollama"
+            | "openai_compatible"
+            | "local_harness"
+            | "chat_completions"
     )
 }
 

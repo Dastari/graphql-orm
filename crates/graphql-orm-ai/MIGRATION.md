@@ -19,6 +19,30 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.114.0 to 0.115.0: Chat Completions adapter, schema module 0.75.0
+
+Breaking for Rust consumers that match exhaustively: `ProviderKind`,
+`AiProviderKindInput` and `AiSessionProviderKind` gain `ChatCompletions` and
+become `#[non_exhaustive]`. Add a wildcard arm (`_ => ...`) to every exhaustive
+`match` on them; future provider kinds will not break again. GraphQL clients
+see one new enum value, `CHAT_COMPLETIONS` (or `ChatCompletions` with
+PascalCase naming), on the provider-kind enums.
+
+Apply AI schema module `0.75.0`. No table, column or index changes; persisted
+provider-kind validation (pricing, usage, retention, checkpoints) now accepts
+`chat_completions`, so engines before 0.115.0 must not read rows written with
+it. No data migration is required.
+
+To adopt, enable `provider-chat-completions` (or
+`provider-chat-completions-core` plus one `provider-tls-*` feature), allow the
+exact endpoint for `AiProviderKindInput::ChatCompletions` in
+`AiProviderEndpointPolicy`, save a profile with kind `ChatCompletions`, the
+endpoint as `base_url` and an `openai_compatible` contract with
+`provider_retained_continuation: false`, and build the adapter with
+`ChatCompletionsProviderConfig::from_profile`. Endpoints must report usage
+(`stream_options.include_usage`); a turn without usage fails. See
+[Chat Completions endpoints](docs/chat-completions.md).
+
 ## 0.113.0 to 0.114.0: provider TLS selection, stateless Responses replay
 
 No action is required. Existing `provider-*` features select the same
