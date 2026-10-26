@@ -10,7 +10,15 @@ supersedes: []
 
 # Changelog
 
-## 0.17.1 (unreleased)
+## 0.18.0 (unreleased)
+
+- Consolidate the unpublished 0.17.1 input-ownership fixes below into this
+  breaking minor adopting operation catalog 0.6.0 and semantic wire 3.
+- Require canonical operator/operand/auxiliary contracts at all filter-helper
+  boundaries. Reject private record helpers, renamed/wrong object operands,
+  unknown operators, defaults, extra properties and ambiguous shared roles.
+- Add real producer parity and typed operand regressions; native verification
+  and the separate JSON/spatial geometry codec gate remain outstanding.
 
 - Preserve independently exportable scalar filters and ordering beside a
   private relation with a shared name prefix (#236).
@@ -31,7 +39,7 @@ supersedes: []
   preserving public filters for an entity named StringFilter without weakening
   private/nonfilterable fields or separate custom-input ownership checks.
 - Affected capability input schemas and fingerprints change; regenerate
-  definitions and retained bindings. No public API or database migration.
+  definitions and retained bindings. No database migration.
 
 ## 0.17.0 (unreleased)
 

@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.115.0` adopts profiles 0.18.0, operation catalog 0.6.0 and ORM
+0.76.0 as one public type universe. Filter capabilities require canonical typed
+operator contracts and semantic wire 3. Rebuild definitions and bindings from
+producer metadata and finished SDL; see [MIGRATION.md](MIGRATION.md). No AI
+schema-module, persistence, provider or authorization behavior changes. The
+spatial/JSON scalar-codec gate remains outstanding.
+
 The current workspace selects published Auth release tag `v0.23.0`
 (commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`). Direct Auth consumers
 must select the same tag and refresh their locks to one source;

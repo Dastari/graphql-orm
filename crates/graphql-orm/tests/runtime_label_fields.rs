@@ -219,6 +219,7 @@ fn semantic_catalogue_validates_label_fields() {
                 ),
                 selectable: true,
                 filter_operators: Vec::new(),
+                filter_input: None,
                 sortable: false,
                 groupable: false,
                 aggregate_operators: Vec::new(),

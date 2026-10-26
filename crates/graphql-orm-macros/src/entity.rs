@@ -3488,6 +3488,7 @@ fn generate_entity_impl(
                             type_ref: #relationship_type,
                             selectable: true,
                             filter_operators: vec![],
+                            filter_input: None,
                             sortable: false,
                             groupable: false,
                             aggregate_operators: vec![],
@@ -3764,55 +3765,22 @@ fn generate_entity_impl(
             );
             let is_float = matches!(type_name.as_str(), "f32" | "f64");
             let is_decimal = type_name == "Decimal";
-            let is_string = type_name == "String";
-            let filter_operators = if field_meta.filter && field_meta.filterable.is_some() {
-                if field_meta.is_date_field {
-                    quote! { vec![
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThan,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThanOrEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThan,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThanOrEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Between,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::IsNull,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::InPast,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::InFuture,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::IsToday,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::RecentDays,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::WithinDays,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GteRelative,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LteRelative,
-                    ] }
-                } else if is_string {
-                    quote! { vec![
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::In,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Contains,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::StartsWith,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::EndsWith,
-                    ] }
-                } else if is_numeric {
-                    quote! { vec![
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::In,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThan,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::LessThanOrEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThan,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::GreaterThanOrEqual,
-                    ] }
-                } else {
-                    quote! { vec![
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::Equal,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::NotEqual,
-                        ::graphql_orm::graphql::orm::GraphqlSemanticFilterOperator::In,
-                    ] }
+            let filter_input = if field_meta.filter {
+                match field_meta.filterable.as_deref() {
+                    Some(kind) => {
+                        let helper = match kind {
+                            "string" => "StringFilter", "uuid" => "UuidFilter",
+                            "number" => "IntFilter", "decimal" => "DecimalFilter",
+                            "boolean" | "bool" => "BoolFilter", "bytes" => "BytesFilter",
+                            "date" => "DateFilter", "spatial" => "SpatialFilter",
+                            _ => return Err(syn::Error::new_spanned(field, "unsupported canonical filter type")),
+                        };
+                        let helper = syn::Ident::new(helper, field.span());
+                        quote! { Some(::graphql_orm::graphql::filters::#helper::graphql_semantic_filter_input()) }
+                    }
+                    None => quote! { None },
                 }
-            } else {
-                quote! { vec![] }
-            };
+            } else { quote! { None } };
             let groupable = !field_meta.is_json_field
                 && field_meta.spatial.is_none()
                 && !is_byte_vec_type(field_type);
@@ -3856,7 +3824,12 @@ fn generate_entity_impl(
                         &<#field_type as ::graphql_orm::async_graphql::OutputType>::qualified_type_name(),
                     ).expect("macro-generated public GraphQL field type must be valid"),
                     selectable: true,
-                    filter_operators: #filter_operators,
+                    filter_operators: {
+                        let input: Option<::graphql_orm::graphql::orm::GraphqlSemanticFilterInputMetadata> = #filter_input;
+                        input.iter().flat_map(|input| input.operators.iter().map(|op| op.operator))
+                            .collect::<::std::collections::BTreeSet<_>>().into_iter().collect()
+                    },
+                    filter_input: #filter_input,
                     sortable: #sortable,
                     groupable: #groupable,
                     aggregate_operators: #aggregate_operators,

@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.76.0 emits canonical typed filter contracts for the actual static
+filter implementations, including `notIn`, similarity, date structures and
+spatial predicates. Runtime metadata likewise describes its actual operator
+surface. Upgrade runtime and macros together with operation catalog 0.6.0;
+see the [wire-3 migration](../../MIGRATION.md#0750-to-0760-canonical-typed-filter-contracts).
+No resolver policy, GraphQL filter SDL or database format changes.
+
 Version 0.75.0 adds server-managed runtime timestamps (`RuntimeField::auto_timestamp`:
 `OnCreate`, `OnCreateAndUpdate`). See the
 [migration guide](../../MIGRATION.md#0740-to-0750-automatic-runtime-timestamps).
@@ -222,7 +229,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.2", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.76.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

@@ -10,6 +10,42 @@ supersedes: []
 
 # Migration Guide
 
+## 0.75.0 to 0.76.0: canonical typed filter contracts
+
+Upgrade ORM and macros together, with operation catalog 0.6.0, profiles 0.18.0,
+AI 0.115.0 and optional backup 0.12.0 from one reviewed workspace revision.
+Storage and router package identities are unchanged.
+
+`GraphqlSemanticFieldMetadata` struct literals must supply `filter_input`:
+`None` for unfilterable fields, otherwise an explicit
+`GraphqlSemanticFilterInputMetadata`. Its operator descriptors bind canonical
+semantic meanings to exact wire names and operand TypeRefs; its finite auxiliary
+objects describe only operator-owned structures. Static filter implementations
+expose `graphql_semantic_filter_input()` for generated metadata; runtime
+producers declare their actual operators, including `notIn`. Custom producers
+must declare truthful contracts; finished SDL verifies conformance and cannot
+supply missing authority. `NotIn`, `Similar` and distinct spatial meanings are
+new semantic operator variants.
+
+The semantic catalogue wire version is 3. Version 2 payloads and missing,
+noncanonical, stale or forged contracts fail validation. Regenerate catalogues,
+capabilities, provider definitions and fingerprint-bound plans from current
+producer metadata and the complete finished SDL. Do not repair a deserialized
+fingerprint or retain an old binding. The tool-manifest wire version is unchanged.
+
+This release also preserves public `CustomerId` filters beside a private
+`Customer` relation, exact input ownership, keyset primary-key ordering and
+validated runtime order inputs. Private/nonfilterable fields and unknown or
+conflicting custom/helper roles remain closed. See the
+[profiles migration](crates/graphql-orm-ai-tool-profiles/MIGRATION.md).
+
+No database or data migration is required. GraphQL filter SDL, resolver policies,
+AI schema-module version and backup formats remain unchanged. Structural spatial
+contract parity does not establish geometry planning support: profiles currently
+encode unknown scalar inputs as strings, while static spatial predicates accept
+JSON geometry. The JSON/spatial end-to-end codec gate remains outstanding;
+operator metadata does not resolve it or authorize provider execution.
+
 `graphql-orm` is distributed from GitHub only. Select one published immutable
 workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is

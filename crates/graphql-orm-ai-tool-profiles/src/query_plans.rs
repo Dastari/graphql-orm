@@ -560,6 +560,8 @@ impl AiGraphqlQueryCapability {
         fingerprint_plan: &Value,
         expected_kind: GraphqlOperationKind,
     ) -> Result<AiCompiledGraphqlQuery, AiError> {
+        self.semantic_catalog.validate()
+            .map_err(|_| configuration_error("query semantic catalogue is stale or invalid"))?;
         if self.operation.kind != expected_kind {
             return Err(configuration_error(
                 "semantic operation kind does not match the plan compiler",
@@ -3696,6 +3698,7 @@ fn restrict_input_fields(
     input_name: &str,
     fields: &BTreeMap<String, SchemaInput>,
 ) -> Result<BTreeMap<String, SchemaInput>, AiError> {
+    let operator_roles = validate_filter_roles(schema, catalog)?;
     // A generated type belongs to its exact entity, not the longest entity
     // name that happens to prefix it (e.g. Subscription vs SubscriptionWhere).
     let generated = catalog
@@ -3711,7 +3714,8 @@ fn restrict_input_fields(
             // A lexical prefix is not ownership: PageInput and StringFilterInput
             // may be shared by entities named Page and StringFilter. Resolve
             // helper usage and custom operation ownership from actual references.
-            let shared = shared_input_helper(schema, catalog, input_name);
+            let shared = operator_roles.contains_key(input_name)
+                || shared_input_helper(schema, catalog, input_name);
             let mut owners = catalog.entities.iter().filter(|entity| {
                 input_name.starts_with(&entity.entity_name)
                     && semantic_input_owner(schema, catalog, &entity.entity_name, input_name)
@@ -3871,6 +3875,7 @@ fn input_type_reaches(
     // Explore the finite finished input-type graph, not recursive values.
     // Sorted work/visited sets make this deterministic and cycle-safe without
     // weakening the ordinary value-schema recursion and depth checks.
+    let operator_roles = validate_filter_roles(schema, catalog).ok();
     let mut pending = BTreeSet::from([graphql_type.to_owned()]);
     let mut visited = BTreeSet::new();
     while let Some(ty) = pending.pop_first() {
@@ -3903,8 +3908,12 @@ fn input_type_reaches(
                     }) else {
                         continue;
                     };
-                    if scalar_filter_input(schema, entity, &semantic.field_name)
-                        .is_some_and(|helper| named_type(&field.ty).ok() == Some(helper))
+                    if semantic.filter_input.as_ref().is_some_and(|input| {
+                        render_type_ref(&input.type_ref) == field.ty
+                            && operator_roles.as_ref().is_some_and(|roles| {
+                                named_type(&field.ty).is_ok_and(|name| roles.contains_key(name))
+                            })
+                    })
                     {
                         continue;
                     }
@@ -3916,32 +3925,98 @@ fn input_type_reaches(
     false
 }
 
-fn scalar_filter_input<'a>(
-    schema: &'a FinishedSchema,
-    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
-    field_name: &str,
-) -> Option<&'a str> {
-    let field = entity
-        .fields
-        .iter()
-        .find(|field| field.field_name == field_name)?;
-    if field.relationship.is_some()
-        || field.filter_operators.is_empty()
-        || !matches!(
-            field.type_ref.leaf_kind(),
-            Some(graphql_orm_operation_catalog::GraphqlSemanticTypeKind::Scalar
-                | graphql_orm_operation_catalog::GraphqlSemanticTypeKind::Enum)
-        )
-    {
-        return None;
+fn validate_filter_roles(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+) -> Result<BTreeMap<String, Value>, AiError> {
+    let mut roles = BTreeMap::new();
+    for entity in &catalog.entities {
+        for field in &entity.fields {
+            if field.filter_operators.is_empty() { continue; }
+            let input = field.filter_input.as_ref()
+                .ok_or_else(|| configuration_error("query filter lacks a canonical input contract"))?;
+            input.validate().map_err(|_| configuration_error("query canonical filter contract is invalid"))?;
+            let meanings = input.operators.iter().map(|op| op.operator).collect::<BTreeSet<_>>()
+                .into_iter().collect::<Vec<_>>();
+            if meanings != field.filter_operators {
+                return Err(configuration_error("query filter meanings differ from canonical capabilities"));
+            }
+            let Some(SchemaType::InputObject(where_fields)) =
+                schema.types.get(&format!("{}WhereInput", entity.entity_name))
+            else { continue; };
+            if field.relationship.is_some() || field.export != GraphqlSemanticExport::Exportable
+                || field.classification == GraphqlSemanticClassification::Secret
+            { continue; }
+            let property = where_fields.get(&field.field_name)
+                .ok_or_else(|| configuration_error("query canonical Where field is missing"))?;
+            if property.ty != render_type_ref(&input.type_ref) || property.has_default {
+                return Err(configuration_error("query filter input type differs from canonical contract"));
+            }
+            let helper = named_type(&property.ty)?;
+            let Some(SchemaType::InputObject(fields)) = schema.types.get(helper) else {
+                return Err(configuration_error("query canonical filter helper is not an input object"));
+            };
+            if fields.len() != input.operators.len() || input.operators.iter().any(|op| {
+                fields.get(&op.graphql_name).is_none_or(|field| {
+                    field.has_default || field.ty != render_type_ref(&op.operand_type)
+                })
+            }) {
+                return Err(configuration_error("query filter helper differs from canonical operator contract"));
+            }
+            for op in &input.operators {
+                validate_filter_operand_type(schema, &op.operand_type, &input.input_objects)?;
+            }
+            let identity = json!({"value": input.value_type, "operators": input.operators});
+            if roles.insert(helper.to_owned(), identity.clone()).is_some_and(|old| old != identity) {
+                return Err(configuration_error("query filter helper roles are ambiguous"));
+            }
+            for object in &input.input_objects {
+                let Some(SchemaType::InputObject(fields)) = schema.types.get(&object.graphql_name) else {
+                    return Err(configuration_error("query filter operand object is missing"));
+                };
+                if fields.len() != object.fields.len() || object.fields.iter().any(|field| {
+                    fields.get(&field.graphql_name).is_none_or(|actual| {
+                        actual.has_default || actual.ty != render_type_ref(&field.type_ref)
+                    })
+                }) {
+                    return Err(configuration_error("query filter operand structure differs from canonical contract"));
+                }
+                for field in &object.fields {
+                    validate_filter_operand_type(schema, &field.type_ref, &input.input_objects)?;
+                }
+                let identity = json!({"fields": object.fields.iter()
+                    .map(|field| (&field.graphql_name, &field.type_ref)).collect::<Vec<_>>()});
+                if roles.insert(object.graphql_name.clone(), identity.clone()).is_some_and(|old| old != identity) {
+                    return Err(configuration_error("query filter operand roles are ambiguous"));
+                }
+            }
+        }
     }
-    let SchemaType::InputObject(fields) =
-        schema.types.get(&format!("{}WhereInput", entity.entity_name))?
-    else {
-        return None;
-    };
-    let helper = named_type(&fields.get(field_name)?.ty).ok()?;
-    matches!(schema.types.get(helper), Some(SchemaType::InputObject(_))).then_some(helper)
+    Ok(roles)
+}
+
+fn validate_filter_operand_type(
+    schema: &FinishedSchema,
+    ty: &graphql_orm_operation_catalog::GraphqlSemanticTypeRef,
+    objects: &[graphql_orm_operation_catalog::GraphqlSemanticFilterOperandObject],
+) -> Result<(), AiError> {
+    use graphql_orm_operation_catalog::{GraphqlSemanticTypeKind, GraphqlSemanticTypeRef};
+    match ty {
+        GraphqlSemanticTypeRef::List { item, .. } => validate_filter_operand_type(schema, item, objects),
+        GraphqlSemanticTypeRef::Named { name, kind, .. } => {
+            let valid = match (kind, schema.types.get(name)) {
+                (GraphqlSemanticTypeKind::Scalar, Some(SchemaType::Scalar)) => true,
+                (GraphqlSemanticTypeKind::Scalar, None) => matches!(name.as_str(), "String" | "Int" | "Float" | "Boolean" | "ID"),
+                (GraphqlSemanticTypeKind::Enum, Some(SchemaType::Enum(_))) => true,
+                (GraphqlSemanticTypeKind::Object, Some(SchemaType::InputObject(_))) =>
+                    objects.iter().any(|object| object.graphql_name == *name),
+                _ => false,
+            };
+            if valid { Ok(()) } else {
+                Err(configuration_error("query filter operand type differs from canonical kind"))
+            }
+        }
+    }
 }
 
 fn shared_input_helper(
@@ -3978,8 +4053,6 @@ fn shared_input_helper(
                 field.relationship.as_ref().is_some_and(|relationship| {
                     relationship.arguments.iter().any(page_argument)
                 })
-            }) || entity.fields.iter().any(|field| {
-                scalar_filter_input(schema, entity, &field.field_name) == Some(input_name)
             })
         })
 }
@@ -5042,6 +5115,7 @@ mod tests {
             type_ref: named("String", false),
             selectable: true,
             filter_operators: Vec::new(),
+            filter_input: None,
             sortable: false,
             groupable: false,
             aggregate_operators: Vec::new(),
@@ -5132,6 +5206,7 @@ mod tests {
                     ),
                     selectable: true,
                     filter_operators: Vec::new(),
+                    filter_input: None,
                     sortable: false,
                     groupable: false,
                     aggregate_operators: Vec::new(),
@@ -5628,6 +5703,7 @@ mod tests {
                         ),
                         selectable: true,
                         filter_operators: Vec::new(),
+                        filter_input: None,
                         sortable: false,
                         groupable: false,
                         aggregate_operators: Vec::new(),
@@ -5894,6 +5970,18 @@ mod tests {
         }
     }
 
+    fn collision_filter_input(pascal: bool) -> graphql_orm_operation_catalog::GraphqlSemanticFilterInputMetadata {
+        use graphql_orm_operation_catalog::{GraphqlSemanticFilterInputMetadata, GraphqlSemanticFilterInputOperator, GraphqlSemanticFilterOperator};
+        GraphqlSemanticFilterInputMetadata::new(
+            GraphqlSemanticTypeRef::named("StringFilterInput", GraphqlSemanticTypeKind::Object, true),
+            named("String", false),
+            vec![
+                GraphqlSemanticFilterInputOperator { graphql_name: input_collision_name("Eq", pascal), operator: GraphqlSemanticFilterOperator::Equal, operand_type: named("String", true) },
+                GraphqlSemanticFilterInputOperator { graphql_name: input_collision_name("IsNull", pascal), operator: GraphqlSemanticFilterOperator::IsNull, operand_type: named("Boolean", true) },
+            ], Vec::new(),
+        ).unwrap()
+    }
+
     // Finished SDL with the generated Where/OrderBy/Page/connection shapes.
     // No database, framework patch, or consumer-authored catalogue filtering.
     fn input_collision_fixture(pascal: bool) -> (String, GraphqlSemanticCatalog) {
@@ -5983,8 +6071,11 @@ mod tests {
                     GraphqlSemanticExport::Exportable
                 },
             );
-            field.filter_operators =
-                vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal];
+            if !matches!(name, "Name" | "PlanName") {
+                field.filter_input = Some(collision_filter_input(pascal));
+                field.filter_operators = vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal,
+                    graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::IsNull];
+            }
             field.sortable = true;
             fields.push(field);
         }
@@ -5998,6 +6089,7 @@ mod tests {
             ),
             selectable: true,
             filter_operators: Vec::new(),
+            filter_input: None,
             sortable: false,
             groupable: false,
             aggregate_operators: Vec::new(),
@@ -6075,8 +6167,9 @@ mod tests {
             GraphqlSemanticClassification::Internal,
             GraphqlSemanticExport::Exportable,
         );
-        customer_id.filter_operators =
-            vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal];
+        customer_id.filter_input = Some(collision_filter_input(pascal));
+        customer_id.filter_operators = vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal,
+            graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::IsNull];
         let semantics = GraphqlSemanticCatalog::compose_with_custom(
             [
                 entity("Subscription", fields),
@@ -6592,6 +6685,7 @@ mod tests {
                 ),
                 selectable: true,
                 filter_operators: Vec::new(),
+                filter_input: None,
                 sortable: false,
                 groupable: false,
                 aggregate_operators: Vec::new(),
@@ -6703,8 +6797,9 @@ mod tests {
                 GraphqlSemanticClassification::Internal,
                 GraphqlSemanticExport::Exportable,
             );
-            id.filter_operators =
-                vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal];
+            id.filter_input = Some(collision_filter_input(false));
+            id.filter_operators = vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal,
+                graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::IsNull];
             let mut private = id.clone();
             private.field_name = "privateId".to_owned();
             private.export = GraphqlSemanticExport::NeverExport;
@@ -6856,6 +6951,173 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn canonical_operator_contract_preserves_typed_auxiliary_byte_list_and_nullable_operands() {
+        use graphql_orm_operation_catalog::{GraphqlSemanticFilterInputMetadata as Input,
+            GraphqlSemanticFilterInputOperator as Operator, GraphqlSemanticFilterOperator::*,
+            GraphqlSemanticFilterOperandObject as Operand};
+        let sdl = r#"
+            schema { query: Query }
+            type Query { GetRecord(where: RecordWhereInput): Record! }
+            type Record { text: String!, date: String!, bytes: [Int!]! }
+            input RecordWhereInput { text: TextInput, date: DateInput, bytes: ByteInput }
+            input TextInput { eq: String, notIn: [String!], similar: SimilarityInput }
+            input SimilarityInput { value: String! }
+            input DateInput { between: DateRangeInput, gteRelative: RelativeDateInput }
+            input DateRangeInput { start: String!, end: String! }
+            input RelativeDateInput { days: Int! }
+            input ByteInput { eq: [Int!], inList: [[Int!]!] }
+        "#;
+        let object_type = |name| GraphqlSemanticTypeRef::named(name, GraphqlSemanticTypeKind::Object, true);
+        let operator = |name: &str, operator, operand_type| Operator {
+            graphql_name: name.into(), operator, operand_type,
+        };
+        let operand = |name: &str, fields: &[(&str, &str)]| Operand {
+            graphql_name: name.into(), fields: fields.iter().map(|(name, ty)| GraphqlSemanticArgumentDescriptor {
+                graphql_name: (*name).into(), description: "Typed filter operand.".into(),
+                type_ref: graphql_orm_operation_catalog::parse_graphql_type(ty).unwrap(),
+            }).collect(),
+        };
+        let bytes = GraphqlSemanticTypeRef::list(false, None, named("Int", false));
+        let inputs = [
+            ("text", named("String", false), Input::new(object_type("TextInput"), named("String", false),
+                vec![operator("eq", Equal, named("String", true)),
+                    operator("notIn", NotIn, GraphqlSemanticTypeRef::list(true, None, named("String", false))),
+                    operator("similar", Similar, object_type("SimilarityInput"))],
+                vec![operand("SimilarityInput", &[("value", "String!")])]).unwrap()),
+            ("date", named("String", false), Input::new(object_type("DateInput"), named("String", false),
+                vec![operator("between", Between, object_type("DateRangeInput")),
+                    operator("gteRelative", GteRelative, object_type("RelativeDateInput"))],
+                vec![operand("DateRangeInput", &[("start", "String!"), ("end", "String!")]),
+                    operand("RelativeDateInput", &[("days", "Int!")])]).unwrap()),
+            ("bytes", bytes.clone(), Input::new(object_type("ByteInput"), bytes.clone(),
+                vec![operator("eq", Equal, GraphqlSemanticTypeRef::list(true, None, named("Int", false))),
+                    operator("inList", In, GraphqlSemanticTypeRef::list(true, None, bytes))], Vec::new()).unwrap()),
+        ];
+        let fields = inputs.into_iter().map(|(name, ty, input)| {
+            let mut field = scalar_field(name, GraphqlSemanticClassification::Internal, GraphqlSemanticExport::Exportable);
+            field.type_ref = ty;
+            field.filter_operators = input.operators.iter().map(|op| op.operator).collect::<BTreeSet<_>>().into_iter().collect();
+            field.filter_input = Some(input);
+            field
+        }).collect::<Vec<_>>();
+        let operation = GraphqlSemanticOperationDescriptor::custom(GraphqlOperationKind::Query,
+            "GetRecord", "Read the public record.", vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "where".into(), description: "Typed public filters.".into(),
+                type_ref: object_type("RecordWhereInput"),
+            }], GraphqlSemanticTypeRef::named("Record", GraphqlSemanticTypeKind::Object, false), true).unwrap();
+        let semantics = GraphqlSemanticCatalog::compose_with_custom([GraphqlEntitySemanticMetadata {
+            entity_name: "Record".into(), description: "Public filter record.".into(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: fields.into_boxed_slice(), label_fields: Vec::new(),
+        }], &GraphqlOperationCatalog::compose(std::iter::empty()), [operation]).unwrap();
+        let catalog = input_collision_capabilities(sdl, &semantics);
+        let capability = catalog.capabilities().next().unwrap();
+        let arguments = json!({"where": {
+            "text": {"eq": null, "notIn": ["excluded"], "similar": {"value": "public"}},
+            "date": {"between": {"start": "2026-01-01", "end": "2026-12-31"}, "gteRelative": {"days": -7}},
+            "bytes": {"eq": [0, 255], "inList": [[1, 2], []]}
+        }});
+        let compact = capability.compile_compact(json!({"arguments": arguments, "selections": ["text"]})).unwrap();
+        let nested = capability.compile(json!({"arguments": arguments, "fields": {"text": true}, "relationships": {}})).unwrap();
+        assert_eq!(compact.variables(), &json!({"v0": arguments["where"]}));
+        assert_eq!(compact.variables(), nested.variables());
+        for plan in [&compact, &nested] {
+            assert_eq!(plan.descriptor().document, format!("query AiQuery_{}($v0: RecordWhereInput) {{ GetRecord(where: $v0) {{ text }} }}", &plan.plan_fingerprint()[..20]));
+        }
+        for invalid in [json!({"text": {"similar": {"value": "public", "privateId": "secret"}}}),
+            json!({"date": {"between": {"start": "2026-01-01"}}}),
+            json!({"bytes": {"eq": [null]}}), json!({"bytes": {"inList": [null]}})] {
+            assert!(capability.compile_compact(json!({"arguments": {"where": invalid}, "selections": ["text"]})).is_err());
+            assert!(capability.compile(json!({"arguments": {"where": invalid}, "fields": {"text": true}, "relationships": {}})).is_err());
+        }
+        for invalid_sdl in [sdl.replace("value: String!", "value: String! privateId: String"),
+            sdl.replace("days: Int!", "days: String!"), sdl.replace("inList: [[Int!]!]", "inList: [[Int]]")] {
+            assert!(AiGraphqlQueryCapabilityCatalog::compile("inventory", GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                &invalid_sdl, &semantics, AiGraphqlQueryCapabilityLimits::default()).is_err());
+        }
+    }
+
+    #[test]
+    fn canonical_operator_contract_rejects_p1_record_helpers_at_planning_and_final_validation() {
+        use graphql_orm_operation_catalog::{GraphqlSemanticFilterInputMetadata, GraphqlSemanticFilterInputOperator, GraphqlSemanticFilterOperator};
+        let sdl = r#"
+            schema { query: Query }
+            type Query { GetStringFilter(where: StringFilterWhereInput): StringFilter! }
+            type StringFilter { id: String!, privateId: String! }
+            input StringFilterWhereInput { id: StringFilterInput }
+            input StringFilterInput { eq: String }
+        "#;
+        let mut id = scalar_field("id", GraphqlSemanticClassification::Internal, GraphqlSemanticExport::Exportable);
+        id.filter_operators = vec![GraphqlSemanticFilterOperator::Equal];
+        id.filter_input = Some(GraphqlSemanticFilterInputMetadata::new(
+            GraphqlSemanticTypeRef::named("StringFilterInput", GraphqlSemanticTypeKind::Object, true), named("String", false),
+            vec![GraphqlSemanticFilterInputOperator { graphql_name: "eq".into(), operator: GraphqlSemanticFilterOperator::Equal, operand_type: named("String", true) }], Vec::new(),
+        ).unwrap());
+        let operation = GraphqlSemanticOperationDescriptor::custom(GraphqlOperationKind::Query,
+            "GetStringFilter", "Read the public record.", vec![GraphqlSemanticArgumentDescriptor {
+                graphql_name: "where".into(), description: "Typed public scalar filter.".into(),
+                type_ref: GraphqlSemanticTypeRef::named("StringFilterWhereInput", GraphqlSemanticTypeKind::Object, true),
+            }], GraphqlSemanticTypeRef::named("StringFilter", GraphqlSemanticTypeKind::Object, false), true).unwrap();
+        let semantics = GraphqlSemanticCatalog::compose_with_custom([GraphqlEntitySemanticMetadata {
+            entity_name: "StringFilter".into(), description: "Reviewed record.".into(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![id, scalar_field("privateId", GraphqlSemanticClassification::Internal, GraphqlSemanticExport::NeverExport)].into_boxed_slice(), label_fields: Vec::new(),
+        }], &GraphqlOperationCatalog::compose(std::iter::empty()), [operation]).unwrap();
+        let catalog = input_collision_capabilities(sdl, &semantics);
+        let capability = catalog.capabilities().next().unwrap();
+        let compact = json!({"arguments": {"where": {"id": {"eq": "public"}}}, "selections": ["id"]});
+        let nested = json!({"arguments": compact["arguments"], "fields": {"id": true}, "relationships": {}});
+        for plan in [capability.compile_compact(compact.clone()).unwrap(), capability.compile(nested.clone()).unwrap()] {
+            assert_eq!(plan.variables(), &json!({"v0": {"id": {"eq": "public"}}}));
+            assert_eq!(plan.descriptor().document, format!("query AiQuery_{}($v0: StringFilterWhereInput) {{ GetStringFilter(where: $v0) {{ id }} }}", &plan.plan_fingerprint()[..20]));
+        }
+        for (helper, fields, value) in [
+            ("StringFilterRecordInput", "privateId: String", json!({"privateId": "secret"})),
+            ("UnrelatedInput", "privateId: String", json!({"privateId": "secret"})),
+            ("StringFilterInput", "eq: WrongOperand", json!({"eq": {"privateId": "secret"}})),
+            ("StringFilterInput", "eq: String, privateId: String", json!({"eq": "public", "privateId": "secret"})),
+            ("StringFilterInput", "unknown: String", json!({"unknown": "secret"})),
+            ("StringFilterInput", "eq: String = \"implicit\"", json!({"eq": "public"})),
+        ] {
+            let malicious = sdl.replace("StringFilterInput", helper)
+                .replace(&format!("input {helper} {{ eq: String }}"), &format!("input {helper} {{ {fields} }}"))
+                + "\ninput WrongOperand { privateId: String }";
+            let mut changed = semantics.clone();
+            changed.entities[0].fields[0].filter_input.as_mut().unwrap().type_ref =
+                GraphqlSemanticTypeRef::named(helper, GraphqlSemanticTypeKind::Object, true);
+            let changed = input_collision_recompose(changed);
+            assert!(AiGraphqlQueryCapabilityCatalog::compile("inventory", GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                &malicious, &changed, AiGraphqlQueryCapabilityLimits::default()).is_err(), "{helper}/{fields}");
+            let mut staged = capability.clone();
+            staged.schema = FinishedSchema::parse(&malicious).unwrap();
+            staged.semantic_catalog = changed;
+            let supplied = json!({"where": {"id": value}}).as_object().unwrap().clone();
+            let mut context = CompileContext::new(&staged);
+            let root = staged.schema.operation_root_field(GraphqlOperationKind::Query, "GetStringFilter").unwrap();
+            assert!(context.compile_arguments(&root.arguments, &staged.operation.arguments, &supplied, None, false, false, "root").is_err());
+            let invalid_compact = json!({"arguments": supplied, "selections": ["id"]});
+            let invalid_nested = json!({"arguments": supplied, "fields": {"id": true}, "relationships": {}});
+            assert!(staged.compile_compact(invalid_compact).is_err());
+            assert!(staged.compile(invalid_nested).is_err());
+        }
+        // A truthful explicit enum operand also compiles; no object is treated
+        // as an enum just because its type name resembles an operator helper.
+        let enum_sdl = sdl.replace("id: String!", "id: FilterState!")
+            .replace("eq: String", "eq: FilterState") + "\nenum FilterState { OPEN CLOSED }";
+        let mut enums = semantics;
+        enums.entities[0].fields[0].type_ref = GraphqlSemanticTypeRef::named("FilterState", GraphqlSemanticTypeKind::Enum, false);
+        let contract = enums.entities[0].fields[0].filter_input.as_mut().unwrap();
+        contract.value_type = GraphqlSemanticTypeRef::named("FilterState", GraphqlSemanticTypeKind::Enum, false);
+        contract.operators[0].operand_type = GraphqlSemanticTypeRef::named("FilterState", GraphqlSemanticTypeKind::Enum, true);
+        let enums = input_collision_recompose(enums);
+        let enum_catalog = input_collision_capabilities(&enum_sdl, &enums);
+        let enum_capability = enum_catalog.capabilities().next().unwrap();
+        let args = json!({"where": {"id": {"eq": "OPEN"}}});
+        enum_capability.compile_compact(json!({"arguments": args, "selections": ["id"]})).unwrap();
+        enum_capability.compile(json!({"arguments": args, "fields": {"id": true}, "relationships": {}})).unwrap();
     }
 
     #[test]
@@ -7650,6 +7912,7 @@ mod tests {
                     type_ref: named("Int", false),
                     selectable: true,
                     filter_operators: Vec::new(),
+                    filter_input: None,
                     sortable: false,
                     groupable: false,
                     aggregate_operators: Vec::new(),
@@ -7678,6 +7941,7 @@ mod tests {
                     ),
                     selectable: true,
                     filter_operators: Vec::new(),
+                    filter_input: None,
                     sortable: false,
                     groupable: false,
                     aggregate_operators: Vec::new(),
@@ -7707,6 +7971,7 @@ mod tests {
                     type_ref: named("Int", false),
                     selectable: true,
                     filter_operators: Vec::new(),
+                    filter_input: None,
                     sortable: false,
                     groupable: false,
                     aggregate_operators: Vec::new(),
@@ -7722,6 +7987,7 @@ mod tests {
                     type_ref: named("Int", false),
                     selectable: true,
                     filter_operators: Vec::new(),
+                    filter_input: None,
                     sortable: false,
                     groupable: false,
                     aggregate_operators: Vec::new(),
@@ -7745,6 +8011,7 @@ mod tests {
                     ),
                     selectable: true,
                     filter_operators: Vec::new(),
+                    filter_input: None,
                     sortable: false,
                     groupable: false,
                     aggregate_operators: Vec::new(),

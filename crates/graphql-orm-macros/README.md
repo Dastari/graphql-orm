@@ -10,6 +10,13 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.76.0 emits canonical typed filter contracts for the actual static
+filter implementations, including `notIn`, similarity, date structures and
+spatial predicates. Runtime metadata likewise describes its actual operator
+surface. Upgrade runtime and macros together with operation catalog 0.6.0;
+see the [wire-3 migration](../../MIGRATION.md#0750-to-0760-canonical-typed-filter-contracts).
+No resolver policy, GraphQL filter SDL or database format changes.
+
 Version 0.75.0 is the companion of the runtime's automatic timestamps; the macros themselves
 are unchanged.
 

@@ -16,7 +16,20 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.75.0**.
+- Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
+  ORM/macros 0.76.0, profiles 0.18.0 and AI 0.115.0. Canonical operator meanings,
+  exact operand types and closed auxiliary objects must match finished SDL;
+  arbitrary record inputs, extra operators, wrong object operands and stale
+  metadata fail readiness. Include `NotIn`, `Similar` and distinct spatial
+  operators without deriving authority from SDL or helper names.
+- Preserve public scalar filters beside private relation prefixes, transitive
+  custom-input privacy, keyset primary keys and runtime order field restrictions.
+  Backup 0.12.0 adopts the optional ORM public type identity only. No data or
+  schema migration; regenerate semantic payloads and capability bindings. The
+  spatial/JSON planning codec gate remains outstanding; structural parity alone
+  is not geometry planning qualification.
+
+Companion runtime/macros version: **0.76.0**.
 
 - Add server-managed timestamps for runtime fields: `RuntimeField::auto_timestamp: Option<RuntimeAutoTimestamp>` with `OnCreate` and `OnCreateAndUpdate`, like Rails/Django `created_at`/`updated_at`. Valid only on non-key `DateTime` fields that are not generated and have no literal default (`InvalidAutoTimestamp` with a value-free `RuntimeAutoTimestampProblem` detail). See [automatic timestamps](docs/reference/graphql-orm/runtime-schema-ir.md#automatic-timestamps).
   - Every runtime insert sets the field from the database clock, with the same expression and encoding as `CurrentTimestamp`. Every runtime update of the row refreshes `OnCreateAndUpdate` fields in the same `UPDATE`, also when no stored value changes and for the dependent `SetNull` updates of an opted-in delete. A standalone many-to-many link mutation writes no row field and leaves them unchanged; link changes attached to a create or update ride on that row write.

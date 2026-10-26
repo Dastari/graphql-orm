@@ -10,7 +10,15 @@ supersedes: []
 
 # Migration Guide
 
-## 0.17.0 to 0.17.1: semantic input ownership
+## 0.17.0 to 0.18.0: typed filter authority and semantic input ownership
+
+The unpublished 0.17.1 corrections are included in 0.18.0. Adopt operation
+catalog 0.6.0 from the same workspace revision. Public field literals must add
+`filter_input`; every filterable scalar/enum needs a canonical typed contract,
+and unfilterable fields use `None`. Its sorted unique operator meanings must
+exactly equal `filter_operators`. Operator names, full operand wrappers and
+finite closed auxiliary objects must match the actual producer and SDL, with
+no defaults or extra properties. Missing authority cannot be inferred from SDL.
 
 Recompile capability catalogues from the complete finished SDL and canonical
 semantics, then replace affected capability/provider definitions and retained
@@ -43,10 +51,15 @@ nonfilterable Where fields stay absent.
 Unrelated custom inputs retain their finished-SDL contract.
 
 Private fields/relations, closed schemas, result disclosure and bounds, and
-ordinary resolver/current-principal authorization remain enforced. Public
-Rust types, manifest wire versions, GraphQL SDL and stored data are unchanged;
+ordinary resolver/current-principal authorization remain enforced. Public Rust
+catalogue types and semantic wire version change (2 to 3); old payloads are
+rejected. GraphQL SDL, tool-manifest wire version and stored data are unchanged;
 no database or schema migration is required. Do not retain an old capability
-fingerprint on a regenerated input schema.
+fingerprint on a regenerated input schema. Never repair forged/stale payloads.
+
+Static spatial predicates accept JSON geometry, but the current profiles codec
+maps unknown scalars to strings. This separate end-to-end gate remains open;
+structural contract parity does not qualify geometry planning.
 
 ## 0.16.2 to 0.17.0: operation catalog 0.5.0
 

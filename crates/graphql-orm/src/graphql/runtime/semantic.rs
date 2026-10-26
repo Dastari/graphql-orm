@@ -85,21 +85,37 @@ pub(super) fn compares(kind: RuntimeValueKind) -> bool {
     )
 }
 
-/// Semantic filter operators matching the runtime filter input of a kind.
-/// `notIn` has no semantic operator and is not advertised.
-fn filter_operators(kind: RuntimeValueKind) -> Vec<GraphqlSemanticFilterOperator> {
+/// Exact operator contract of the existing runtime filter input.
+fn filter_input(kind: RuntimeValueKind) -> GraphqlSemanticFilterInputMetadata {
     use GraphqlSemanticFilterOperator::*;
-    let mut operators = BTreeSet::from([IsNull]);
+    let value = GraphqlSemanticTypeRef::named(scalar::name(kind), GraphqlSemanticTypeKind::Scalar, false);
+    let optional = GraphqlSemanticTypeRef::named(scalar::name(kind), GraphqlSemanticTypeKind::Scalar, true);
+    let mut operators = vec![(IsNull, "isNull", GraphqlSemanticTypeRef::named("Boolean", GraphqlSemanticTypeKind::Scalar, true))];
     if kind != RuntimeValueKind::Json {
-        operators.extend([Equal, NotEqual, In]);
+        operators.extend([(Equal, "eq", optional.clone()), (NotEqual, "ne", optional.clone()),
+            (In, "in", GraphqlSemanticTypeRef::list(true, None, value.clone())),
+            (NotIn, "notIn", GraphqlSemanticTypeRef::list(true, None, value.clone()))]);
     }
     if compares(kind) {
-        operators.extend([LessThan, LessThanOrEqual, GreaterThan, GreaterThanOrEqual]);
+        operators.extend([(LessThan, "lt", optional.clone()), (LessThanOrEqual, "lte", optional.clone()),
+            (GreaterThan, "gt", optional.clone()), (GreaterThanOrEqual, "gte", optional.clone())]);
     }
     if kind == RuntimeValueKind::String {
-        operators.extend([Contains, StartsWith, EndsWith]);
+        operators.extend([(Contains, "contains", optional.clone()), (StartsWith, "startsWith", optional.clone()),
+            (EndsWith, "endsWith", optional)]);
     }
-    operators.into_iter().collect()
+    GraphqlSemanticFilterInputMetadata::new(
+        GraphqlSemanticTypeRef::named(super::schema::filter_name(kind), GraphqlSemanticTypeKind::Object, true),
+        value,
+        operators.into_iter().map(|(operator, name, operand_type)| GraphqlSemanticFilterInputOperator {
+            graphql_name: name.to_owned(), operator, operand_type,
+        }).collect(), Vec::new(),
+    ).expect("canonical runtime filter contract")
+}
+
+fn filter_operators(kind: RuntimeValueKind) -> Vec<GraphqlSemanticFilterOperator> {
+    filter_input(kind).operators.into_iter().map(|operator| operator.operator)
+        .collect::<BTreeSet<_>>().into_iter().collect()
 }
 
 fn argument(name: &str, ty: &str) -> GraphqlSemanticArgumentDescriptor {
@@ -199,6 +215,7 @@ impl RuntimeGraphqlModule {
                         } else {
                             Vec::new()
                         },
+                        filter_input: f.filterable.then(|| filter_input(f.value_kind)),
                         sortable: f.sortable,
                         groupable: false,
                         aggregate_operators: Vec::new(),
@@ -228,6 +245,7 @@ impl RuntimeGraphqlModule {
                         ),
                         selectable: true,
                         filter_operators: Vec::new(),
+                        filter_input: None,
                         sortable: false,
                         groupable: false,
                         aggregate_operators: Vec::new(),

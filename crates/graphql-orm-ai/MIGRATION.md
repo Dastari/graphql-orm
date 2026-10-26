@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## 0.114.0 to 0.115.0: canonical filter contract type identity
+
+Select AI 0.115.0 with ORM 0.76.0, catalog 0.6.0 and profiles 0.18.0 from one
+reviewed revision. Public APIs/reexports carry the new catalogue field types;
+update literals with `filter_input`, using `None` only for unfilterable fields.
+Regenerate semantic wire-3 payloads, capabilities and all fingerprint bindings.
+Old wire-2 or stale/forged payloads fail readiness; SDL is not fallback authority.
+See the [workspace migration](../../MIGRATION.md#0750-to-0760-canonical-typed-filter-contracts).
+No data migration required. `AI_SCHEMA_MODULE_VERSION` and provider, egress,
+authorization and backup behavior are unchanged. The spatial/JSON geometry
+codec gate remains outstanding. The mandatory baseline SemVer audit is a later
+native qualification gate, not source implementation evidence.
+
 `graphql-orm-ai` is Git-distributed and is not published to crates.io. This guide
 is mandatory so Git consumers and disposable test deployments can track schema
 and API changes without guessing.

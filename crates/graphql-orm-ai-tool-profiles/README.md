@@ -20,7 +20,17 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
-Version 0.17.1 resolves entity-owned input fields by their exact canonical
+Version 0.18.0 requires operation catalog 0.6.0 and validated wire-3 producer
+filter contracts. One proof checks exact canonical operator names, operand
+TypeRefs and closed auxiliary structures at Where admission, helper discovery,
+ownership traversal and final argument validation. Missing contracts, arbitrary
+record helpers (including renamed helpers), defaults, unknown/extra properties,
+wrong object operands and conflicting roles fail readiness. SDL supplies only
+mechanical conformance. Regenerate all affected definitions and bindings.
+Static spatial JSON geometry still has an outstanding scalar-codec gate;
+structural parity is not a geometry planning PASS.
+
+Version 0.18.0 resolves entity-owned input fields by their exact canonical
 semantic name. A private `Customer` relation does not hide an independently
 exportable, filterable `CustomerId` scalar. Unknown or private field and
 relation-derived inputs remain absent, and ambiguous entity input ownership
@@ -59,7 +69,7 @@ authorization policies. No downstream catalogue filtering is needed.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.17.1" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.18.0" }
 serde_json = "1"
 ```
 
