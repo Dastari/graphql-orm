@@ -3827,7 +3827,7 @@ fn semantic_input_owner(
             && operation
                 .arguments
                 .iter()
-                .any(|argument| argument_reaches_owned_input(schema, argument, input_name))
+                .any(|argument| argument_reaches_owned_input(schema, catalog, argument, input_name))
     }) || catalog.entities.iter().any(|entity| {
         entity.fields.iter().any(|field| {
             field.relationship.as_ref().is_some_and(|relationship| {
@@ -3835,7 +3835,9 @@ fn semantic_input_owner(
                     && relationship
                         .arguments
                         .iter()
-                        .any(|argument| argument_reaches_owned_input(schema, argument, input_name))
+                        .any(|argument| {
+                            argument_reaches_owned_input(schema, catalog, argument, input_name)
+                        })
             })
         })
     })
@@ -3843,6 +3845,7 @@ fn semantic_input_owner(
 
 fn argument_reaches_owned_input(
     schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
     argument: &graphql_orm_operation_catalog::GraphqlSemanticArgumentDescriptor,
     input_name: &str,
 ) -> bool {
@@ -3856,10 +3859,15 @@ fn argument_reaches_owned_input(
     {
         return false;
     }
-    input_type_reaches(schema, &ty, input_name)
+    input_type_reaches(schema, catalog, &ty, input_name)
 }
 
-fn input_type_reaches(schema: &FinishedSchema, graphql_type: &str, input_name: &str) -> bool {
+fn input_type_reaches(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    graphql_type: &str,
+    input_name: &str,
+) -> bool {
     // Explore the finite finished input-type graph, not recursive values.
     // Sorted work/visited sets make this deterministic and cycle-safe without
     // weakening the ordinary value-schema recursion and depth checks.
@@ -3876,10 +3884,64 @@ fn input_type_reaches(schema: &FinishedSchema, graphql_type: &str, input_name: &
             continue;
         }
         if let Some(SchemaType::InputObject(fields)) = schema.types.get(name) {
-            pending.extend(fields.values().map(|field| field.ty.clone()));
+            let where_entity = catalog
+                .entities
+                .iter()
+                .find(|entity| name == format!("{}WhereInput", entity.entity_name));
+            for (field_name, field) in fields {
+                if let Some(entity) = where_entity {
+                    // Match the generated Where field admission contract. Hidden,
+                    // unknown and non-filterable fields are not traversable input
+                    // paths; an admitted scalar's exact typed filter reference is
+                    // an operator boundary, not a nested entity-record input.
+                    let Some(semantic) = entity.fields.iter().find(|field| {
+                        field.field_name.as_str() == field_name.as_str()
+                            && field.relationship.is_none()
+                            && field.export == GraphqlSemanticExport::Exportable
+                            && field.classification != GraphqlSemanticClassification::Secret
+                            && !field.filter_operators.is_empty()
+                    }) else {
+                        continue;
+                    };
+                    if scalar_filter_input(schema, entity, &semantic.field_name)
+                        .is_some_and(|helper| named_type(&field.ty).ok() == Some(helper))
+                    {
+                        continue;
+                    }
+                }
+                pending.insert(field.ty.clone());
+            }
         }
     }
     false
+}
+
+fn scalar_filter_input<'a>(
+    schema: &'a FinishedSchema,
+    entity: &graphql_orm_operation_catalog::GraphqlEntitySemanticMetadata,
+    field_name: &str,
+) -> Option<&'a str> {
+    let field = entity
+        .fields
+        .iter()
+        .find(|field| field.field_name == field_name)?;
+    if field.relationship.is_some()
+        || field.filter_operators.is_empty()
+        || !matches!(
+            field.type_ref.leaf_kind(),
+            Some(graphql_orm_operation_catalog::GraphqlSemanticTypeKind::Scalar
+                | graphql_orm_operation_catalog::GraphqlSemanticTypeKind::Enum)
+        )
+    {
+        return None;
+    }
+    let SchemaType::InputObject(fields) =
+        schema.types.get(&format!("{}WhereInput", entity.entity_name))?
+    else {
+        return None;
+    };
+    let helper = named_type(&fields.get(field_name)?.ty).ok()?;
+    matches!(schema.types.get(helper), Some(SchemaType::InputObject(_))).then_some(helper)
 }
 
 fn shared_input_helper(
@@ -3916,16 +3978,9 @@ fn shared_input_helper(
                 field.relationship.as_ref().is_some_and(|relationship| {
                     relationship.arguments.iter().any(page_argument)
                 })
-            }) || match schema.types.get(&format!("{}WhereInput", entity.entity_name)) {
-                Some(SchemaType::InputObject(fields)) => entity.fields.iter().any(|field| {
-                    field.relationship.is_none()
-                        && !field.filter_operators.is_empty()
-                        && fields.get(&field.field_name).is_some_and(|input| {
-                            named_type(&input.ty).ok() == Some(input_name)
-                        })
-                }),
-                _ => false,
-            }
+            }) || entity.fields.iter().any(|field| {
+                scalar_filter_input(schema, entity, &field.field_name) == Some(input_name)
+            })
         })
 }
 
@@ -6579,9 +6634,15 @@ mod tests {
                     if message == "query input semantic ownership is ambiguous"
             ));
 
-            assert!(input_type_reaches(&schema, "[LookupInput!]!", "PageInput"));
-            assert!(!input_type_reaches(&schema, "CycleInput!", "PageInput"));
-            assert!(input_type_reaches(&schema, "[CycleReachInput!]!", "PageInput"));
+            assert!(input_type_reaches(
+                &schema, &semantics, "[LookupInput!]!", "PageInput"
+            ));
+            assert!(!input_type_reaches(
+                &schema, &semantics, "CycleInput!", "PageInput"
+            ));
+            assert!(input_type_reaches(
+                &schema, &semantics, "[CycleReachInput!]!", "PageInput"
+            ));
             assert!(matches!(
                 input_type_schema(
                     &schema,
@@ -6611,6 +6672,189 @@ mod tests {
                 Err(AiError::InvalidConfiguration(message))
                     if message == "query input nesting is too deep"
             ));
+        }
+    }
+
+    #[test]
+    fn semantic_input_ownership_preserves_canonical_scalar_filter_operator_boundaries() {
+        for wrapped in [false, true] {
+            let (argument_name, argument_type) = if wrapped {
+                ("input", "LookupFilterInput!")
+            } else {
+                ("where", "StringFilterWhereInput")
+            };
+            let sdl = format!(
+                r#"
+                schema {{ query: Query }}
+                type Query {{
+                    GetStringFilter({argument_name}: {argument_type}): StringFilter!
+                }}
+                type StringFilter {{ id: String!, privateId: String!, name: String! }}
+                input StringFilterWhereInput {{
+                    id: StringFilterInput, privateId: StringFilterInput
+                    name: StringFilterInput, unknown: StringFilterInput
+                }}
+                input StringFilterInput {{ eq: String, isNull: Boolean }}
+                input LookupFilterInput {{ criteria: [StringFilterWhereInput!]! }}
+                "#
+            );
+            let mut id = scalar_field(
+                "id",
+                GraphqlSemanticClassification::Internal,
+                GraphqlSemanticExport::Exportable,
+            );
+            id.filter_operators =
+                vec![graphql_orm_operation_catalog::GraphqlSemanticFilterOperator::Equal];
+            let mut private = id.clone();
+            private.field_name = "privateId".to_owned();
+            private.export = GraphqlSemanticExport::NeverExport;
+            let name = scalar_field(
+                "name",
+                GraphqlSemanticClassification::Internal,
+                GraphqlSemanticExport::Exportable,
+            );
+            let argument_type_ref = GraphqlSemanticTypeRef::named(
+                if wrapped {
+                    "LookupFilterInput"
+                } else {
+                    "StringFilterWhereInput"
+                },
+                GraphqlSemanticTypeKind::Object,
+                !wrapped,
+            );
+            let operation = GraphqlSemanticOperationDescriptor::custom(
+                GraphqlOperationKind::Query,
+                "GetStringFilter",
+                "Read one reviewed StringFilter entity.",
+                vec![GraphqlSemanticArgumentDescriptor {
+                    graphql_name: argument_name.to_owned(),
+                    description: "Typed public id filter.".to_owned(),
+                    type_ref: argument_type_ref,
+                }],
+                GraphqlSemanticTypeRef::named(
+                    "StringFilter",
+                    GraphqlSemanticTypeKind::Object,
+                    false,
+                ),
+                true,
+            )
+            .unwrap();
+            let semantics = GraphqlSemanticCatalog::compose_with_custom(
+                [GraphqlEntitySemanticMetadata {
+                    entity_name: "StringFilter".to_owned(),
+                    description: "Reviewed StringFilter record.".to_owned(),
+                    default_classification: GraphqlSemanticClassification::Internal,
+                    fields: vec![id, private, name].into_boxed_slice(),
+                    label_fields: Vec::new(),
+                }],
+                &GraphqlOperationCatalog::compose(std::iter::empty()),
+                [operation],
+            )
+            .unwrap();
+            let catalog = input_collision_capabilities(&sdl, &semantics);
+            let capability = catalog.capabilities().next().unwrap();
+            let argument_value = |filter: Value| {
+                if wrapped {
+                    json!({"criteria": [filter]})
+                } else {
+                    filter
+                }
+            };
+            let value = argument_value(json!({"id": {"eq": "public-id"}}));
+            let compact = json!({
+                "arguments": {(argument_name): value}, "selections": ["id"]
+            });
+            let nested = json!({
+                "arguments": compact["arguments"], "fields": {"id": true}, "relationships": {}
+            });
+            for compiled in [
+                capability.compile_compact(compact.clone()).unwrap(),
+                capability.compile(nested.clone()).unwrap(),
+            ] {
+                assert_eq!(compiled.variables(), &json!({"v0": value}));
+                assert_eq!(
+                    compiled.descriptor().document,
+                    format!(
+                        "query AiQuery_{}($v0: {argument_type}) {{ GetStringFilter({argument_name}: $v0) {{ id }} }}",
+                        &compiled.plan_fingerprint()[..20],
+                    )
+                );
+            }
+            // All three fields are declared with the same valid SDL helper;
+            // privacy, filterability and canonical identity must reject them.
+            for denied in ["privateId", "name", "unknown"] {
+                let invalid_value = argument_value(json!({(denied): {"eq": "public-id"}}));
+                let mut invalid_compact = compact.clone();
+                invalid_compact["arguments"][argument_name] = invalid_value.clone();
+                let mut invalid_nested = nested.clone();
+                invalid_nested["arguments"][argument_name] = invalid_value;
+                assert!(
+                    capability.compile_compact(invalid_compact).is_err(),
+                    "{denied}"
+                );
+                assert!(capability.compile(invalid_nested).is_err(), "{denied}");
+            }
+            let mut private_selection = compact.clone();
+            private_selection["selections"] = json!(["privateId"]);
+            assert!(capability.compile_compact(private_selection).is_err());
+            let mut public_selection = compact;
+            public_selection["selections"] = json!(["id", "name"]);
+            capability
+                .compile_compact(public_selection)
+                .expect("non-filterable public name remains selectable");
+
+            // Direct/custom nested uses of the same helper are still record
+            // ownership candidates, independently of the canonical filter edge.
+            for nested_custom in [false, true] {
+                let custom_type = if nested_custom {
+                    "CustomFilterLookupInput"
+                } else {
+                    "StringFilterInput"
+                };
+                let custom_sdl = sdl.replace(
+                    "type Query {",
+                    &format!(
+                        "type Query {{ LookupStringFilter(input: {custom_type}!): StringFilter!"
+                    ),
+                ) + "\ninput CustomFilterLookupInput { criteria: StringFilterInput }";
+                let mut custom = semantics.clone();
+                custom.operations.push(
+                    GraphqlSemanticOperationDescriptor::custom(
+                        GraphqlOperationKind::Query,
+                        "LookupStringFilter",
+                        "Read through an entity-owned custom input.",
+                        vec![GraphqlSemanticArgumentDescriptor {
+                            graphql_name: "input".to_owned(),
+                            description: "Custom record input, not a scalar operator edge."
+                                .to_owned(),
+                            type_ref: GraphqlSemanticTypeRef::named(
+                                custom_type,
+                                GraphqlSemanticTypeKind::Object,
+                                false,
+                            ),
+                        }],
+                        GraphqlSemanticTypeRef::named(
+                            "StringFilter",
+                            GraphqlSemanticTypeKind::Object,
+                            false,
+                        ),
+                        true,
+                    )
+                    .unwrap(),
+                );
+                let custom = input_collision_recompose(custom);
+                assert!(matches!(
+                    AiGraphqlQueryCapabilityCatalog::compile(
+                        "inventory",
+                        GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+                        &custom_sdl,
+                        &custom,
+                        AiGraphqlQueryCapabilityLimits::default(),
+                    ),
+                    Err(AiError::InvalidConfiguration(message))
+                        if message == "query input semantic ownership is ambiguous"
+                ));
+            }
         }
     }
 

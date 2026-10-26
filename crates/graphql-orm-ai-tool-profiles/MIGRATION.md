@@ -35,6 +35,11 @@ ownership also follows nested input references from operation and relationship
 arguments through list/non-null wrappers. Unknown owners or conflicting
 shared/custom roles, including transitive conflicts, fail closed. Type traversal
 is finite and cycle-safe; ordinary input recursion and depth limits still apply.
+Canonical generated Where scalar fields use exact typed operator helpers. These
+edges do not propagate entity-record ownership into the helper, including when
+the Where input is nested in a custom wrapper. The helper's independent direct
+or custom nested uses still require ownership assessment; private, unknown and
+nonfilterable Where fields stay absent.
 Unrelated custom inputs retain their finished-SDL contract.
 
 Private fields/relations, closed schemas, result disclosure and bounds, and

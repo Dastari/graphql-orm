@@ -34,6 +34,11 @@ by their typed usage, not an entity-name prefix. Custom ownership follows nested
 input references from canonical operation and relationship arguments, including
 list/non-null wrappers; conflicting shared/custom roles fail closed. The finite
 type traversal is cycle-safe and retains ordinary input depth/recursion failures.
+Exact admitted scalar filter references in generated `WhereInput` objects lead
+to operator helpers rather than nested entity-record inputs. Those helpers do
+not inherit the result entity's ownership through that edge; separate direct or
+custom nested uses still undergo ownership checks. Private, unknown and
+nonfilterable Where fields remain excluded.
 Runtime ordering preserves its validated `field`, `direction` and `nulls`
 structure and restricts the field enum to exact public, non-secret,
 sortable scalar identities.

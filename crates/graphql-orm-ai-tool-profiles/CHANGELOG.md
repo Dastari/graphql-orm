@@ -27,6 +27,9 @@ supersedes: []
 - Follow transitive nested input references from canonical operation and
   relationship arguments before admitting shared helpers; fail closed on
   nested custom/helper conflicts while retaining wrapper, cycle and depth rules.
+- Treat exact canonical scalar-filter references as operator-helper boundaries,
+  preserving public filters for an entity named StringFilter without weakening
+  private/nonfilterable fields or separate custom-input ownership checks.
 - Affected capability input schemas and fingerprints change; regenerate
   definitions and retained bindings. No public API or database migration.
 
