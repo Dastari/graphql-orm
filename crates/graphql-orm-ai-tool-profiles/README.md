@@ -27,8 +27,16 @@ ownership traversal and final argument validation. Missing contracts, arbitrary
 record helpers (including renamed helpers), defaults, unknown/extra properties,
 wrong object operands and conflicting roles fail readiness. SDL supplies only
 mechanical conformance. Regenerate all affected definitions and bindings.
-Static spatial JSON geometry still has an outstanding scalar-codec gate;
-structural parity is not a geometry planning PASS.
+Canonical static JSON operator operands preserve actual JSON values; RuntimeJson
+and unknown custom scalars retain their existing string codecs. Each JSON scalar
+is limited to 65,536 serialized UTF-8 bytes and 4,096 nodes (each container, null
+or scalar counts once; keys do not). Depth includes its root-argument ancestry;
+every array and object is bounded by `maximum_list_items`, and each key/string
+by UTF-8 `maximum_string_bytes`. Finite acyclic local schema definitions project
+the shape/depth/width; authoritative pre-clone runtime checks also enforce total
+nodes, serialized bytes and UTF-8 bytes that JSON Schema character counts cannot.
+Geometry validity and resolver/SQL authorization remain separate. The real
+producer planning and bounds regression sources await native qualification.
 
 Version 0.18.0 resolves entity-owned input fields by their exact canonical
 semantic name. A private `Customer` relation does not hide an independently

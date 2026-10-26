@@ -17,8 +17,12 @@ supersedes: []
 - Require canonical operator/operand/auxiliary contracts at all filter-helper
   boundaries. Reject private record helpers, renamed/wrong object operands,
   unknown operators, defaults, extra properties and ambiguous shared roles.
-- Add real producer parity and typed operand regressions; native verification
-  and the separate JSON/spatial geometry codec gate remain outstanding.
+- Add real producer parity, typed operand and actual derived spatial planning
+  regression sources. Canonical JSON scalars retain JSON wire values with private
+  64 KiB/4,096-node ceilings, bounded depth/width and UTF-8 keys/strings; pre-clone
+  runtime admission and finite local schemas share the canonical operator proof.
+  RuntimeJson text and unknown scalar string codecs are unchanged. All native
+  verification, including the geometry planning/bounds gate, remains outstanding.
 
 - Preserve independently exportable scalar filters and ordering beside a
   private relation with a shared name prefix (#236).

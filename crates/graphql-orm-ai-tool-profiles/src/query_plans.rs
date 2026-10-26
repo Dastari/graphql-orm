@@ -38,6 +38,9 @@ pub const AI_GRAPHQL_SUBSCRIPTION_CAPABILITY_VERSION: u16 = 1;
 const JSON_SCHEMA_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 const MAXIMUM_DESCRIPTION_BYTES: usize = 1_024;
 const MAXIMUM_PROVIDER_SCHEMA_BYTES: usize = 1024 * 1024;
+// Per opaque JSON scalar, including its root container/null/scalar node.
+const MAXIMUM_JSON_SCALAR_BYTES: usize = 65_536;
+const MAXIMUM_JSON_SCALAR_NODES: usize = 4_096;
 
 /// Immutable deployment ceilings for automatic GraphQL query capabilities.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -435,6 +438,7 @@ impl AiGraphqlQueryCapability {
     /// Returns a safe input error for unknown, hidden, cyclic, stale,
     /// excessive, malformed, or unbounded plan content.
     pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlQuery, AiError> {
+        prevalidate_json_plan(self, &plan)?;
         let validator = jsonschema::validator_for(&self.argument_schema)
             .map_err(|_| configuration_error("query capability schema is invalid"))?;
         if !validator.is_valid(&plan) {
@@ -455,6 +459,7 @@ impl AiGraphqlQueryCapability {
     /// Returns a safe input error for an unknown, hidden, stale, cyclic,
     /// over-depth, over-cardinality, or over-budget public selection.
     pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlQuery, AiError> {
+        prevalidate_json_plan(self, &plan)?;
         let validator = jsonschema::validator_for(&self.compact_argument_schema)
             .map_err(|_| configuration_error("compact query capability schema is invalid"))?;
         if !validator.is_valid(&plan) {
@@ -1310,6 +1315,7 @@ impl AiGraphqlMutationCapability {
     /// Returns a safe error for stale, malformed, hidden, prohibited,
     /// excessive, or unbounded plan content.
     pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlMutation, AiError> {
+        prevalidate_json_plan(&self.base, &plan)?;
         let validator = jsonschema::validator_for(self.argument_schema())
             .map_err(|_| configuration_error("mutation capability schema is invalid"))?;
         if !validator.is_valid(&plan) {
@@ -1341,6 +1347,7 @@ impl AiGraphqlMutationCapability {
     /// Returns a safe error for stale, malformed, hidden, excessive, or
     /// unbounded plan content.
     pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlMutation, AiError> {
+        prevalidate_json_plan(&self.base, &plan)?;
         let validator = jsonschema::validator_for(self.compact_argument_schema())
             .map_err(|_| configuration_error("compact mutation capability schema is invalid"))?;
         if !validator.is_valid(&plan) {
@@ -1671,6 +1678,7 @@ impl AiGraphqlSubscriptionCapability {
     /// Returns a safe error for a malformed, stale, hidden, excessive,
     /// unbounded, or semantically unsupported plan.
     pub fn compile(&self, plan: Value) -> Result<AiCompiledGraphqlSubscription, AiError> {
+        prevalidate_json_plan(&self.base, &plan)?;
         let validator = jsonschema::validator_for(self.argument_schema())
             .map_err(|_| configuration_error("subscription capability schema is invalid"))?;
         if !validator.is_valid(&plan) {
@@ -1717,6 +1725,7 @@ impl AiGraphqlSubscriptionCapability {
     /// Returns a safe error for an invalid condition, bound, public path, or
     /// stale/hidden/excessive selection.
     pub fn compile_compact(&self, plan: Value) -> Result<AiCompiledGraphqlSubscription, AiError> {
+        prevalidate_json_plan(&self.base, &plan)?;
         let validator = jsonschema::validator_for(self.compact_argument_schema())
             .map_err(|_| configuration_error("compact subscription schema is invalid"))?;
         if !validator.is_valid(&plan) {
@@ -2480,10 +2489,9 @@ fn compile_capability(
         limits,
         options,
     )?;
-    if serde_json::to_vec(&compact_argument_schema)
-        .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
-        .unwrap_or(true)
-    {
+    if [&argument_schema, &compact_argument_schema].iter().any(|schema| {
+        serde_json::to_vec(schema).map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES).unwrap_or(true)
+    }) {
         return Err(configuration_error(
             "compact query capability schema exceeds the provider contract",
         ));
@@ -2857,7 +2865,7 @@ fn build_plan_schema(
             required.push(Value::String("relationships".to_owned()));
         }
     }
-    Ok(json!({
+    finish_json_schema(json!({
         "$schema": JSON_SCHEMA_2020_12,
         "type": "object",
         "properties": properties,
@@ -3011,7 +3019,7 @@ fn build_compact_plan_schema(
         }
         QueryOutput::Entity { .. } | QueryOutput::Scalar { .. } => {}
     }
-    Ok(json!({
+    finish_json_schema(json!({
         "$schema": JSON_SCHEMA_2020_12,
         "type": "object",
         "properties": properties,
@@ -3686,7 +3694,13 @@ fn input_type_schema(
                 "query argument type is not a closed input",
             ));
         }
-        Some(SchemaType::Scalar) | None => scalar_input_schema(named, limits),
+        Some(SchemaType::Scalar) | None => {
+            if canonical_json_input(schema, catalog, named, ancestry)? {
+                bounded_json_schema(depth, limits)
+            } else {
+                scalar_input_schema(named, limits)
+            }
+        }
     };
     insert_description(&mut value, description)?;
     Ok(nullable_schema(value, !is_non_null(graphql_type)))
@@ -4202,6 +4216,12 @@ impl<'a> CompileContext<'a> {
             .iter()
             .map(|field| (field.graphql_name.as_str(), field))
             .collect::<BTreeMap<_, _>>();
+        for (name, value) in supplied {
+            if let Some(field) = schema_fields.get(name) {
+                prevalidate_input_json(&self.capability.schema, &self.capability.semantic_catalog,
+                    &field.ty, value, self.capability.limits, 0, &mut Vec::new())?;
+            }
+        }
         let mut values = supplied.clone();
         if let Some(maximum) = maximum_items.filter(|_| inject_bound) {
             inject_page_limit(&self.capability.schema, schema_fields, &mut values, maximum)?;
@@ -4221,7 +4241,7 @@ impl<'a> CompileContext<'a> {
                 .get(name.as_str())
                 .map(|field| field.description.as_str())
                 .or(schema.description.as_deref());
-            let input_schema = input_type_schema(
+            let input_schema = finish_json_schema(input_type_schema(
                 &self.capability.schema,
                 &self.capability.semantic_catalog,
                 &schema.ty,
@@ -4229,7 +4249,7 @@ impl<'a> CompileContext<'a> {
                 self.capability.limits,
                 0,
                 &mut Vec::new(),
-            )?;
+            )?)?;
             let validator = jsonschema::validator_for(&input_schema)
                 .map_err(|_| configuration_error("compiled variable schema is invalid"))?;
             if !validator.is_valid(&value) {
@@ -4825,6 +4845,222 @@ fn is_page_argument(name: &str, graphql_type: &str, schema: &FinishedSchema) -> 
         return false;
     };
     matches!(schema.types.get(named), Some(SchemaType::InputObject(_))) || named == "Int"
+}
+
+// A JSON spelling alone grants nothing: the current input ancestry must be an
+// exact operator helper whose complete contract has passed the shared proof.
+fn canonical_json_input(
+    schema: &FinishedSchema,
+    catalog: &GraphqlSemanticCatalog,
+    scalar: &str,
+    ancestry: &[String],
+) -> Result<bool, AiError> {
+    if scalar != "JSON" { return Ok(false); }
+    let Some(parent) = ancestry.last() else { return Ok(false); };
+    let roles = validate_filter_roles(schema, catalog)?;
+    if !roles.contains_key(parent) { return Ok(false); }
+    fn json_leaf(ty: &GraphqlSemanticTypeRef) -> bool {
+        match ty {
+            GraphqlSemanticTypeRef::Named { name, kind, .. } => name == "JSON"
+                && *kind == graphql_orm_operation_catalog::GraphqlSemanticTypeKind::Scalar,
+            GraphqlSemanticTypeRef::List { item, .. } => json_leaf(item),
+        }
+    }
+    Ok(catalog.entities.iter().flat_map(|entity| entity.fields.iter()).any(|field| {
+        field.filter_input.as_ref().is_some_and(|input| {
+            named_type(&render_type_ref(&input.type_ref)).ok() == Some(parent.as_str())
+                && input.operators.iter().any(|operator| json_leaf(&operator.operand_type))
+        })
+    }))
+}
+
+// Definitions grow linearly with remaining depth. Both array items and object
+// values refer only to the preceding level; no recursive/remote reference exists.
+fn bounded_json_schema(depth: u8, limits: AiGraphqlQueryCapabilityLimits) -> Value {
+    let remaining = limits.maximum_input_depth.saturating_sub(depth);
+    let mut definitions = Map::new();
+    for level in 0..=remaining {
+        let mut alternatives = vec![json!({"type": "null"}), json!({"type": "boolean"}),
+            json!({"type": "number"}), json!({"type": "string", "maxLength": limits.maximum_string_bytes})];
+        if level > 0 {
+            let child = format!("#/$defs/canonical_json_{}", level - 1);
+            alternatives.push(json!({"type": "array", "maxItems": limits.maximum_list_items,
+                "items": {"$ref": child}}));
+            alternatives.push(json!({"type": "object", "maxProperties": limits.maximum_list_items,
+                "propertyNames": {"maxLength": limits.maximum_string_bytes},
+                "additionalProperties": {"$ref": child}}));
+        } else {
+            // Empty containers consume one node but have no deeper children.
+            alternatives.push(json!({"type": "array", "maxItems": 0}));
+            alternatives.push(json!({"type": "object", "maxProperties": 0}));
+        }
+        definitions.insert(format!("canonical_json_{level}"), json!({"anyOf": alternatives}));
+    }
+    json!({"$ref": format!("#/$defs/canonical_json_{remaining}"), "$defs": definitions})
+}
+
+fn finish_json_schema(mut schema: Value) -> Result<Value, AiError> {
+    fn hoist(value: &mut Value, definitions: &mut Map<String, Value>) -> Result<(), AiError> {
+        match value {
+            Value::Object(object) => {
+                if let Some(local) = object.remove("$defs") {
+                    let Value::Object(local) = local else {
+                        return Err(configuration_error("local JSON definitions are invalid"));
+                    };
+                    for (name, definition) in local {
+                        if definitions.insert(name, definition.clone()).is_some_and(|old| old != definition) {
+                            return Err(configuration_error("local JSON definitions conflict"));
+                        }
+                    }
+                }
+                for child in object.values_mut() { hoist(child, definitions)?; }
+            }
+            Value::Array(values) => for child in values { hoist(child, definitions)?; },
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut definitions = Map::new();
+    hoist(&mut schema, &mut definitions)?;
+    if !definitions.is_empty() {
+        schema.as_object_mut().ok_or_else(|| configuration_error("JSON schema root is invalid"))?
+            .insert("$defs".into(), Value::Object(definitions));
+    }
+    Ok(schema)
+}
+
+fn validate_json_scalar(value: &Value, depth: u8, limits: AiGraphqlQueryCapabilityLimits) -> Result<(), AiError> {
+    fn visit(value: &Value, depth: u8, limits: AiGraphqlQueryCapabilityLimits, nodes: &mut usize) -> Result<(), AiError> {
+        *nodes = nodes.checked_add(1).ok_or_else(|| input_error("JSON scalar node budget exceeded"))?;
+        if *nodes > MAXIMUM_JSON_SCALAR_NODES || depth > limits.maximum_input_depth {
+            return Err(input_error("JSON scalar node or depth budget exceeded"));
+        }
+        let child_depth = depth.checked_add(1).ok_or_else(|| input_error("JSON scalar depth budget exceeded"))?;
+        match value {
+            Value::String(value) if value.len() > limits.maximum_string_bytes as usize =>
+                return Err(input_error("JSON scalar string byte budget exceeded")),
+            Value::Number(number) if number.as_f64().is_none_or(|number| !number.is_finite()) =>
+                return Err(input_error("JSON scalar number is not finite")),
+            Value::Array(values) => {
+                if values.len() > limits.maximum_list_items as usize {
+                    return Err(input_error("JSON scalar array width exceeded"));
+                }
+                for child in values { visit(child, child_depth, limits, nodes)?; }
+            }
+            Value::Object(values) => {
+                if values.len() > limits.maximum_list_items as usize {
+                    return Err(input_error("JSON scalar object width exceeded"));
+                }
+                for (key, child) in values {
+                    if key.len() > limits.maximum_string_bytes as usize {
+                        return Err(input_error("JSON scalar key byte budget exceeded"));
+                    }
+                    visit(child, child_depth, limits, nodes)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    // Count escaped serialized bytes through a writer; never clone/stringify a
+    // potentially enormous value just to measure it. An oversized chunk fails
+    // before being copied. Container/null/scalar each count as one node; keys do not.
+    struct ByteCounter(usize);
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.checked_add(bytes.len()).filter(|bytes| *bytes <= MAXIMUM_JSON_SCALAR_BYTES)
+                .ok_or_else(|| std::io::Error::other("JSON scalar serialized byte budget exceeded"))?;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    visit(value, depth, limits, &mut 0)?;
+    serde_json::to_writer(ByteCounter(0), value)
+        .map_err(|_| input_error("JSON scalar serialized byte budget exceeded"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prevalidate_input_json(
+    schema: &FinishedSchema, catalog: &GraphqlSemanticCatalog, ty: &str,
+    value: &Value, limits: AiGraphqlQueryCapabilityLimits, depth: u8, ancestry: &mut Vec<String>,
+) -> Result<(), AiError> {
+    if depth > limits.maximum_input_depth { return Err(input_error("query input nesting is too deep")); }
+    if let Some(item) = list_item_type(ty) {
+        if let Some(values) = value.as_array() {
+            if values.len() > limits.maximum_list_items as usize { return Err(input_error("query input list is too long")); }
+            for value in values { prevalidate_input_json(schema, catalog, item, value, limits, depth + 1, ancestry)?; }
+        }
+        return Ok(());
+    }
+    let name = named_type(ty)?;
+    if canonical_json_input(schema, catalog, name, ancestry)? {
+        return validate_json_scalar(value, depth, limits);
+    }
+    if let (Some(SchemaType::InputObject(fields)), Some(values)) = (schema.types.get(name), value.as_object()) {
+        let fields = restrict_input_fields(schema, catalog, name, fields)?;
+        ancestry.push(name.to_owned());
+        for (key, value) in values {
+            if let Some(field) = fields.get(key) {
+                prevalidate_input_json(schema, catalog, &field.ty, value, limits, depth + 1, ancestry)?;
+            }
+        }
+        ancestry.pop();
+    }
+    Ok(())
+}
+
+fn prevalidate_json_plan(capability: &AiGraphqlQueryCapability, plan: &Value) -> Result<(), AiError> {
+    fn arguments(capability: &AiGraphqlQueryCapability, fields: &BTreeMap<String, SchemaInput>, values: Option<&Value>) -> Result<(), AiError> {
+        if let Some(values) = values.and_then(Value::as_object) {
+            for (name, value) in values {
+                if let Some(field) = fields.get(name) {
+                    prevalidate_input_json(&capability.schema, &capability.semantic_catalog, &field.ty,
+                        value, capability.limits, 0, &mut Vec::new())?;
+                }
+            }
+        }
+        Ok(())
+    }
+    fn relationship<'a>(capability: &'a AiGraphqlQueryCapability, entity: &str, name: &str) -> Result<(&'a str, &'a SchemaField), AiError> {
+        let entity = semantic_entity(&capability.semantic_catalog, entity)?;
+        let relation = entity.fields.iter().find(|field| field.field_name == name)
+            .and_then(|field| field.relationship.as_ref())
+            .ok_or_else(|| input_error("query relationship is unknown"))?;
+        Ok((&relation.target, capability.schema.object_field(&entity.entity_name, name)?))
+    }
+    fn nested(capability: &AiGraphqlQueryCapability, entity: &str, value: &Value, depth: u8) -> Result<(), AiError> {
+        let Some(relations) = value.get("relationships").and_then(Value::as_object) else { return Ok(()); };
+        if depth >= capability.limits.maximum_depth && !relations.is_empty() {
+            return Err(input_error("query relationship depth exceeded"));
+        }
+        for (name, plan) in relations {
+            let (target, field) = relationship(capability, entity, name)?;
+            arguments(capability, &field.arguments, plan.get("arguments"))?;
+            nested(capability, target, plan, depth + 1)?;
+        }
+        Ok(())
+    }
+    capability.semantic_catalog.validate().map_err(|_| configuration_error("query semantic catalogue is stale or invalid"))?;
+    let root = capability.schema.operation_root_field(capability.operation.kind, &capability.operation.field_name)?;
+    arguments(capability, &root.arguments, plan.get("arguments"))?;
+    if let QueryOutput::Entity { entity, .. } = &capability.output {
+        nested(capability, entity, plan, 0)?;
+        if let Some(paths) = plan.get("relationshipArguments").and_then(Value::as_object) {
+            for (path, values) in paths {
+                let mut current = entity.as_str();
+                let components = path.split('.').collect::<Vec<_>>();
+                if components.len() > capability.limits.maximum_depth as usize {
+                    return Err(input_error("query relationship depth exceeded"));
+                }
+                for (index, name) in components.iter().enumerate() {
+                    let (target, field) = relationship(capability, current, name)?;
+                    if index + 1 == components.len() { arguments(capability, &field.arguments, Some(values))?; }
+                    current = target;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn scalar_input_schema(name: &str, limits: AiGraphqlQueryCapabilityLimits) -> Value {
@@ -6951,6 +7187,120 @@ mod tests {
                 ));
             }
         }
+    }
+
+    fn json_codec_capability(limits: AiGraphqlQueryCapabilityLimits) -> AiGraphqlQueryCapability {
+        use graphql_orm_operation_catalog::{GraphqlSemanticFilterInputMetadata, GraphqlSemanticFilterInputOperator,
+            GraphqlSemanticFilterOperator::*};
+        let names = [("equals", SpatialEquals), ("disjoint", SpatialDisjoint), ("intersects", SpatialIntersects),
+            ("touches", SpatialTouches), ("crosses", SpatialCrosses), ("within", SpatialWithin),
+            ("contains", SpatialContains), ("overlaps", SpatialOverlaps)];
+        let mut sdl = String::from("schema { query: Query } scalar JSON scalar RuntimeJson scalar Opaque \
+            type Query { GetSpatialRecord(where: SpatialRecordWhereInput, runtimeText: RuntimeJson, opaque: Opaque, unprovenJson: JSON): SpatialRecord! } \
+            type SpatialRecord { id: String!, location: JSON! } \
+            input SpatialRecordWhereInput { location: SpatialFilter } input SpatialFilter { isNull: Boolean ");
+        for (name, _) in names { sdl.push_str(&format!("{name}: JSON ")); }
+        sdl.push('}');
+        let mut operators = names.into_iter().map(|(name, operator)| GraphqlSemanticFilterInputOperator {
+            graphql_name: name.into(), operator, operand_type: named("JSON", true),
+        }).collect::<Vec<_>>();
+        operators.push(GraphqlSemanticFilterInputOperator { graphql_name: "isNull".into(), operator: IsNull, operand_type: named("Boolean", true) });
+        let input = GraphqlSemanticFilterInputMetadata::new(
+            GraphqlSemanticTypeRef::named("SpatialFilter", GraphqlSemanticTypeKind::Object, true),
+            named("JSON", false), operators, Vec::new(),
+        ).unwrap();
+        let mut location = scalar_field("location", GraphqlSemanticClassification::Internal, GraphqlSemanticExport::Exportable);
+        location.type_ref = named("JSON", false);
+        location.filter_operators = input.operators.iter().map(|op| op.operator).collect::<BTreeSet<_>>().into_iter().collect();
+        location.filter_input = Some(input);
+        let arguments = [("where", "SpatialRecordWhereInput", GraphqlSemanticTypeKind::Object),
+            ("runtimeText", "RuntimeJson", GraphqlSemanticTypeKind::Scalar), ("opaque", "Opaque", GraphqlSemanticTypeKind::Scalar),
+            ("unprovenJson", "JSON", GraphqlSemanticTypeKind::Scalar)].into_iter().map(|(name, ty, kind)| GraphqlSemanticArgumentDescriptor {
+                graphql_name: name.into(), description: "Explicit typed argument.".into(), type_ref: GraphqlSemanticTypeRef::named(ty, kind, true),
+            }).collect();
+        let operation = GraphqlSemanticOperationDescriptor::custom(GraphqlOperationKind::Query, "GetSpatialRecord",
+            "Read the public record.", arguments, GraphqlSemanticTypeRef::named("SpatialRecord", GraphqlSemanticTypeKind::Object, false), true).unwrap();
+        let semantics = GraphqlSemanticCatalog::compose_with_custom([GraphqlEntitySemanticMetadata {
+            entity_name: "SpatialRecord".into(), description: "Public spatial record.".into(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![scalar_field("id", GraphqlSemanticClassification::Internal, GraphqlSemanticExport::Exportable), location].into_boxed_slice(), label_fields: Vec::new(),
+        }], &GraphqlOperationCatalog::compose(std::iter::empty()), [operation]).unwrap();
+        AiGraphqlQueryCapabilityCatalog::compile("inventory", GraphqlExecutionTargetId::parse("inventory.graphql").unwrap(),
+            &sdl, &semantics, limits).unwrap().capabilities().next().unwrap().clone()
+    }
+
+    fn assert_json_codec_admission(capability: &AiGraphqlQueryCapability, value: &Value, accepted: bool) {
+        let arguments = json!({"where": {"location": {"intersects": value}}});
+        let compact = capability.compile_compact(json!({"arguments": arguments, "selections": ["id"]}));
+        let nested = capability.compile(json!({"arguments": arguments, "fields": {"id": true}, "relationships": {}}));
+        assert_eq!(compact.is_ok(), accepted);
+        assert_eq!(nested.is_ok(), accepted);
+        if accepted {
+            let compact = compact.unwrap(); let nested = nested.unwrap();
+            assert_eq!(compact.variables(), &json!({"v0": arguments["where"]}));
+            assert_eq!(compact.variables(), nested.variables());
+            assert_eq!(compact.descriptor().document, format!("query AiQuery_{}($v0: SpatialRecordWhereInput) {{ GetSpatialRecord(where: $v0) {{ id }} }}", &compact.plan_fingerprint()[..20]));
+        }
+        let root = capability.schema.operation_root_field(GraphqlOperationKind::Query, "GetSpatialRecord").unwrap();
+        let mut context = CompileContext::new(capability);
+        assert_eq!(context.compile_arguments(&root.arguments, &capability.operation.arguments,
+            arguments.as_object().unwrap(), None, false, false, "root").is_ok(), accepted);
+        if !accepted { assert!(context.variables.is_empty()); }
+    }
+
+    #[test]
+    fn canonical_json_scalar_bounds_apply_before_planning_and_final_variable_clones() {
+        let mut limits = AiGraphqlQueryCapabilityLimits::default();
+        limits.maximum_input_depth = 4; limits.maximum_list_items = 8; limits.maximum_string_bytes = 16;
+        let capability = json_codec_capability(limits);
+        for value in [json!(null), json!({}), json!([]), json!({"type": "Point", "coordinates": [0, 0]}),
+            json!([[null]]), Value::Array(vec![Value::Null; 8]), json!("é".repeat(8)), json!({"éééééééé": true})] {
+            assert_json_codec_admission(&capability, &value, true);
+        }
+        for value in [json!([[[null]]]), Value::Array(vec![Value::Null; 9]), json!("é".repeat(9)), json!({"ééééééééé": true})] {
+            assert_json_codec_admission(&capability, &value, false);
+        }
+        let at_width = (0..8).map(|i| (i.to_string(), Value::Null)).collect::<Map<_, _>>();
+        assert_json_codec_admission(&capability, &Value::Object(at_width.clone()), true);
+        let mut too_wide = at_width; too_wide.insert("extra".into(), Value::Null);
+        assert_json_codec_admission(&capability, &Value::Object(too_wide), false);
+        // Retained/provider schema is not runtime authority, including staged schemas.
+        let mut staged = capability.clone();
+        staged.argument_schema = json!({"type": "object"});
+        staged.compact_argument_schema = json!({"type": "object"});
+        assert_json_codec_admission(&staged, &json!([[[null]]]), false);
+        for (name, value, accepted) in [("runtimeText", json!("{\"a\":1}"), true),
+            ("runtimeText", json!({"a": 1}), false), ("opaque", json!("text"), true),
+            ("opaque", json!({"a": 1}), false), ("unprovenJson", json!("text"), true),
+            ("unprovenJson", json!({"a": 1}), false)] {
+            let arguments = Value::Object(Map::from_iter([(name.into(), value)]));
+            assert_eq!(capability.compile_compact(json!({"arguments": arguments, "selections": ["id"]})).is_ok(), accepted);
+            assert_eq!(capability.compile(json!({"arguments": arguments, "fields": {"id": true}, "relationships": {}})).is_ok(), accepted);
+        }
+        assert!(serde_json::from_str::<Value>("NaN").is_err());
+        assert!(serde_json::from_str::<Value>("1e9999").is_err());
+        assert!(serde_json::Number::from_f64(f64::INFINITY).is_none());
+        // Local definitions live at the actual plan root and remain small.
+        assert!(capability.argument_schema.get("$defs").is_some());
+        assert!(serde_json::to_vec(capability.argument_schema()).unwrap().len() < MAXIMUM_PROVIDER_SCHEMA_BYTES);
+    }
+
+    #[test]
+    fn canonical_json_scalar_node_and_escaped_serialization_boundaries_are_exact() {
+        let mut limits = AiGraphqlQueryCapabilityLimits::default();
+        limits.maximum_list_items = 10_000; limits.maximum_string_bytes = 1_048_576;
+        let capability = json_codec_capability(limits);
+        // Array root is one node: 4095 null children reaches exactly4096.
+        assert_json_codec_admission(&capability, &Value::Array(vec![Value::Null; MAXIMUM_JSON_SCALAR_NODES - 1]), true);
+        assert_json_codec_admission(&capability, &Value::Array(vec![Value::Null; MAXIMUM_JSON_SCALAR_NODES]), false);
+        // Quotes count as two serialized bytes. Include the two outer quotes.
+        assert_json_codec_admission(&capability, &json!("\"".repeat((MAXIMUM_JSON_SCALAR_BYTES - 2) / 2)), true);
+        assert_json_codec_admission(&capability, &json!("\"".repeat(MAXIMUM_JSON_SCALAR_BYTES / 2)), false);
+        assert_json_codec_admission(&capability, &json!("a".repeat(MAXIMUM_JSON_SCALAR_BYTES - 2)), true);
+        assert_json_codec_admission(&capability, &json!("a".repeat(MAXIMUM_JSON_SCALAR_BYTES - 1)), false);
+        let mut staged = capability;
+        staged.argument_schema = json!({"type": "object"}); staged.compact_argument_schema = json!({"type": "object"});
+        assert_json_codec_admission(&staged, &json!("a".repeat(MAXIMUM_JSON_SCALAR_BYTES)), false);
     }
 
     #[test]

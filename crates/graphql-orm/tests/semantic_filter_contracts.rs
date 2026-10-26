@@ -138,3 +138,59 @@ async fn all_runtime_value_kinds_match_actual_runtime_sdl() {
         assert_contract(&sdl, input);
     }
 }
+
+// Only schema construction/planning runs here; the resolver and geometry SQL
+// are never executed. These are the actual derive-produced Where/filter types.
+struct FilterPlanningQuery;
+#[Object]
+impl FilterPlanningQuery {
+    #[graphql(name = "GetSpatial")]
+    async fn get_spatial(&self, #[graphql(name = "where")] filter: Option<FilterContractRowWhereInput>) -> FilterContractRow {
+        let _ = filter;
+        unreachable!("planning-only schema; no resolver execution")
+    }
+}
+
+#[test]
+fn actual_derived_spatial_contract_compiles_exact_json_plans_for_all_predicates() {
+    use graphql_orm_ai_tool_profiles::{AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits, GraphqlExecutionTargetId};
+    use graphql_orm::serde_json::{Value, json};
+    let schema = Schema::build(FilterPlanningQuery, graphql_orm::async_graphql::EmptyMutation,
+        graphql_orm::async_graphql::EmptySubscription).finish();
+    let entity = FilterContractRow::graphql_semantic_metadata().unwrap();
+    let id = entity.fields.iter().find(|field| field.filter_input.as_ref().is_some_and(|input| {
+        matches!(&input.value_type, GraphqlSemanticTypeRef::Named { name, .. } if name == "UUID")
+    })).unwrap().field_name.clone();
+    let location = entity.fields.iter().find(|field| field.filter_operators.contains(&GraphqlSemanticFilterOperator::SpatialIntersects)).unwrap().clone();
+    let operation = GraphqlSemanticOperationDescriptor::custom(GraphqlOperationKind::Query, "GetSpatial", "Plan a public spatial filter.",
+        vec![GraphqlSemanticArgumentDescriptor { graphql_name: "where".into(), description: "Actual derived filters.".into(),
+            type_ref: GraphqlSemanticTypeRef::named("FilterContractRowWhereInput", GraphqlSemanticTypeKind::Object, true) }],
+        GraphqlSemanticTypeRef::named(entity.entity_name.clone(), GraphqlSemanticTypeKind::Object, false), true).unwrap();
+    let semantic = GraphqlSemanticCatalog::compose_with_custom([entity], &GraphqlOperationCatalog::compose(std::iter::empty()), [operation]).unwrap();
+    let catalog = AiGraphqlQueryCapabilityCatalog::compile("filter-contract", GraphqlExecutionTargetId::parse("filter-contract.graphql").unwrap(),
+        &schema.sdl(), &semantic, AiGraphqlQueryCapabilityLimits::default()).unwrap();
+    let capability = catalog.capabilities().next().unwrap();
+    let point = json!({"type": "Point", "coordinates": [0, 0]});
+    for operator in &location.filter_input.as_ref().unwrap().operators {
+        let value = if operator.operator == GraphqlSemanticFilterOperator::IsNull { json!(false) } else { point.clone() };
+        let filter = Value::Object(graphql_orm::serde_json::Map::from_iter([(location.field_name.clone(),
+            Value::Object(graphql_orm::serde_json::Map::from_iter([(operator.graphql_name.clone(), value)])))]));
+        let compact = capability.compile_compact(json!({"arguments": {"where": filter}, "selections": [id]})).unwrap();
+        let nested = capability.compile(json!({"arguments": {"where": filter}, "fields": {(id.clone()): true}, "relationships": {}})).unwrap();
+        assert_eq!(compact.variables(), &json!({"v0": filter}));
+        assert_eq!(compact.variables(), nested.variables());
+        for plan in [&compact, &nested] {
+            assert_eq!(plan.descriptor().document, format!("query AiQuery_{}($v0: FilterContractRowWhereInput) {{ GetSpatial(where: $v0) {{ {id} }} }}", &plan.plan_fingerprint()[..20]));
+        }
+    }
+    let intersects = location.filter_input.as_ref().unwrap().operators.iter()
+        .find(|operator| operator.operator == GraphqlSemanticFilterOperator::SpatialIntersects).unwrap();
+    // Json<Value> accepts these wire values structurally. Geometry validity and
+    // SQL/resolver admission remain authoritative and are not claimed here.
+    for value in [Value::Null, json!([1, null, {"opaque": true}]), json!({}), json!("opaque scalar string")] {
+        let filter = Value::Object(graphql_orm::serde_json::Map::from_iter([(location.field_name.clone(),
+            Value::Object(graphql_orm::serde_json::Map::from_iter([(intersects.graphql_name.clone(), value)])))]));
+        capability.compile_compact(json!({"arguments": {"where": filter}, "selections": [id]})).unwrap();
+        capability.compile(json!({"arguments": {"where": filter}, "fields": {(id.clone()): true}, "relationships": {}})).unwrap();
+    }
+}

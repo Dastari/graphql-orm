@@ -57,9 +57,18 @@ rejected. GraphQL SDL, tool-manifest wire version and stored data are unchanged;
 no database or schema migration is required. Do not retain an old capability
 fingerprint on a regenerated input schema. Never repair forged/stale payloads.
 
-Static spatial predicates accept JSON geometry, but the current profiles codec
-maps unknown scalars to strings. This separate end-to-end gate remains open;
-structural contract parity does not qualify geometry planning.
+Canonical static JSON operator operands now retain actual JSON wire values;
+RuntimeJson remains JSON text and unknown custom scalars remain strings. No
+stringification/coercion occurs. Private fixed ceilings are 65,536 serialized
+UTF-8 bytes and 4,096 nodes per scalar (containers/null/scalars count once, keys
+do not). JSON depth consumes the remaining root-argument input depth; arrays
+and objects both use `maximum_list_items` for width, and keys/strings use UTF-8
+`maximum_string_bytes`. Runtime checks before plan/value cloning enforce these
+bounds even with a retained/staged provider schema. The finite acyclic local
+JSON Schema projects depth/width/character limits; serialized-byte/node/UTF-8
+checks remain authoritative at runtime. No new public configuration or data
+migration. Real-derived geometry planning/bounds source tests remain UNRUN;
+geometry semantics and resolver/SQL authorization are separate gates.
 
 ## 0.16.2 to 0.17.0: operation catalog 0.5.0
 

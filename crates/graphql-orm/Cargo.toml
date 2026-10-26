@@ -87,6 +87,7 @@ tokio-util = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [dev-dependencies]
+graphql-orm-ai-tool-profiles = { workspace = true }
 axum = "0.8.9"
 graphql-orm-router-protocol = { workspace = true }
 time = "0.3"

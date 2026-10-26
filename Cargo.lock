@@ -3124,6 +3124,7 @@ dependencies = [
  "chrono",
  "convert_case 0.7.1",
  "futures",
+ "graphql-orm-ai-tool-profiles",
  "geo",
  "geo-types",
  "geojson",
