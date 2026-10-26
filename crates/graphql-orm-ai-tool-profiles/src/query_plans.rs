@@ -6651,8 +6651,8 @@ mod tests {
     }
 
     fn input_collision_plan(pascal: bool) -> Value {
-        let selections = ["Id", "Name", "CustomerId", "PlanName"]
-            .map(|name| input_collision_name(name, pascal));
+        let selections =
+            ["Id", "Name", "CustomerId", "PlanName"].map(|name| input_collision_name(name, pascal));
         json!({
             "arguments": {
                 (input_collision_name("Where", pascal)): {
