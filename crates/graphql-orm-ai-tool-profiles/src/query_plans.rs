@@ -7677,10 +7677,12 @@ mod tests {
 
     #[test]
     fn canonical_json_scalar_bounds_apply_before_planning_and_final_variable_clones() {
-        let mut limits = AiGraphqlQueryCapabilityLimits::default();
-        limits.maximum_input_depth = 4;
-        limits.maximum_list_items = 8;
-        limits.maximum_string_bytes = 16;
+        let limits = AiGraphqlQueryCapabilityLimits {
+            maximum_input_depth: 4,
+            maximum_list_items: 8,
+            maximum_string_bytes: 16,
+            ..Default::default()
+        };
         let capability = json_codec_capability(limits);
         for value in [
             json!(null),
@@ -7748,9 +7750,11 @@ mod tests {
 
     #[test]
     fn canonical_json_scalar_node_and_escaped_serialization_boundaries_are_exact() {
-        let mut limits = AiGraphqlQueryCapabilityLimits::default();
-        limits.maximum_list_items = 10_000;
-        limits.maximum_string_bytes = 1_048_576;
+        let limits = AiGraphqlQueryCapabilityLimits {
+            maximum_list_items: 10_000,
+            maximum_string_bytes: 1_048_576,
+            ..Default::default()
+        };
         let capability = json_codec_capability(limits);
         // Array root is one node: 4095 null children reaches exactly4096.
         assert_json_codec_admission(
