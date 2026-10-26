@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.75.0 is the companion of the runtime's automatic timestamps; the macros themselves
+are unchanged.
+
 Version 0.74.0 bounds generated index names to PostgreSQL's 63-byte identifier
 limit and refuses PostgreSQL plans that would truncate a declared name. See the
 [migration guide](../../MIGRATION.md#0730-to-0740-bounded-postgresql-identifiers).

@@ -54,6 +54,16 @@ pub(super) fn actions(module: &RuntimeGraphqlModule) -> Vec<(&'static str, Runti
     .filter_map(|(enabled, prefix, action)| enabled.then_some((prefix, action)))
     .collect()
 }
+/// Whether `create<Object>` takes an `input`: some field is client-writable.
+pub(super) fn has_create_input(c: &RuntimeCollection) -> bool {
+    c.fields.iter().any(|f| f.is_client_writable())
+}
+/// Whether `update<Object>` exists: some non-key field is client-writable.
+pub(super) fn has_update_input(c: &RuntimeCollection) -> bool {
+    c.fields
+        .iter()
+        .any(|f| f.is_client_writable() && !c.primary_key.contains(&f.id))
+}
 /// One generated mutation root of a collection.
 pub(super) struct Root<'a> {
     pub name: String,
@@ -63,10 +73,12 @@ pub(super) struct Root<'a> {
 }
 /// Generated mutation roots of one collection: enabled row actions, then one
 /// `update<Object><Relation>Links` per many-to-many relation when updates are enabled.
+/// A collection without client-writable non-key fields has no `update<Object>`.
 pub(super) fn roots<'a>(module: &RuntimeGraphqlModule, c: &'a RuntimeCollection) -> Vec<Root<'a>> {
     let object = module.object_name(c);
     let mut roots = actions(module)
         .into_iter()
+        .filter(|(_, action)| *action != RuntimeMutationAction::Update || has_update_input(c))
         .map(|(prefix, action)| Root {
             name: format!("{prefix}{object}"),
             action,
@@ -106,10 +118,10 @@ pub(super) fn type_names(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -
         return vec![];
     };
     let mut names = vec![format!("{name}MutationPayload")];
-    if options.create {
+    if options.create && has_create_input(c) {
         names.push(format!("Create{name}Input"));
     }
-    if options.update {
+    if options.update && has_update_input(c) {
         names.push(format!("Update{name}Input"));
     }
     if options.update || options.delete {
@@ -142,11 +154,12 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                 )
                 .into(),
         );
-        if options.create {
+        // Without client-writable fields `create<Object>` takes no input and
+        // `update<Object>` is omitted (GraphQL has no empty input objects).
+        if options.create && has_create_input(c) {
             let mut input = InputObject::new(format!("Create{name}Input"))
                 .description(format!("Values of a new {name} record"));
-            let mut count = 0;
-            for f in c.fields.iter().filter(|f| !f.generated) {
+            for f in c.fields.iter().filter(|f| f.is_client_writable()) {
                 let required =
                     !f.nullable && (f.default.is_none() || c.primary_key.contains(&f.id));
                 input = input.field(
@@ -160,22 +173,17 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                     )
                     .description(f.effective_description()),
                 );
-                count += 1;
-            }
-            if count == 0 {
-                return Err(RuntimeGraphqlError::new("unsupported_capability"));
             }
             types.push(input.into());
         }
-        if options.update {
+        if options.update && has_update_input(c) {
             let mut input = InputObject::new(format!("Update{name}Input")).description(format!(
                 "Changed values of one {name} record; omitted fields are unchanged"
             ));
-            let mut count = 0;
             for f in c
                 .fields
                 .iter()
-                .filter(|f| !f.generated && !c.primary_key.contains(&f.id))
+                .filter(|f| f.is_client_writable() && !c.primary_key.contains(&f.id))
             {
                 input = input.field(
                     InputValue::new(
@@ -184,10 +192,6 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                     )
                     .description(f.effective_description()),
                 );
-                count += 1;
-            }
-            if count == 0 {
-                return Err(RuntimeGraphqlError::new("unsupported_capability"));
             }
             types.push(input.into());
         }
@@ -344,7 +348,7 @@ fn fields<B: RuntimeMutationBackend>(
                     ),
                 ),
                 None => {
-                    super::semantic::mutation_arguments(action, &object, write_links(&module, c))
+                    super::semantic::mutation_arguments(action, &object, c, write_links(&module, c))
                 }
             };
             let field = arguments.into_iter().fold(field, |field, (name, ty)| {

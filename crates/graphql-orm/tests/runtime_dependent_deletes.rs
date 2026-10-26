@@ -43,6 +43,7 @@ fn field(collection: &str, name: &str, nullable: bool) -> RuntimeField {
         generated: false,
         default: None,
         format: None,
+        auto_timestamp: None,
     }
 }
 fn relation(

@@ -3,7 +3,7 @@ title: Schema-bound transactional runtime mutations
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-24
+last_reviewed: 2026-10-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -107,7 +107,11 @@ external notifications or open independent pool transactions for policy decision
 ## Values and bounds
 
 Omitted create fields use their declared defaults/generators, otherwise SQL NULL
-when nullable, otherwise `missing_required`. Omitted patches preserve the stored
+when nullable, otherwise `missing_required`. [Automatic timestamps](runtime-schema-ir.md#automatic-timestamps)
+are never input (`field_denied`, also for explicit `Null`). Every insert writes them,
+and every update writes `OnCreateAndUpdate` fields, from the database clock in the same
+statement. That includes the dependent `SetNull` updates below. Standalone link mutations
+write no row field and leave them unchanged. Omitted patches preserve the stored
 value. Explicit `RuntimeValue::Null` writes SQL NULL and never requests a default.
 `RuntimeValue::Json(JSON null)` remains distinct. Integers, bytes, UUIDs and canonical
 runtime DateTime values retain existing storage semantics; no epoch-unit conversion
@@ -134,7 +138,9 @@ target collection and be distinct across the request. At most `max_link_keys` ke
 supplied (default `RUNTIME_DEFAULT_MAX_LINK_KEYS` = 1000).
 
 The request is an `Update` of the source row that writes no fields, so the usual intent and
-locked-preimage checks apply; a hidden source row is `not_found`. `RuntimeWriteIntent::links()`
+locked-preimage checks apply; a hidden source row is `not_found`. No `UPDATE` of the source
+row is issued, so its `OnCreateAndUpdate` [automatic timestamps](runtime-schema-ir.md#automatic-timestamps)
+do not change. `RuntimeWriteIntent::links()`
 exposes the relation and change. The ORM then asks
 `RuntimeWriteAuthority::link_target_visibility` for a row predicate on the target collection (`None`
 means every target is visible). It locks and reads the row's links to *visible* targets only, at
@@ -283,7 +289,9 @@ transaction, after the requested row's intent and preimage checks, it:
    (deepest first, then key order), then the requested row. Each change gets an
    `authorize_result` check.
 
-A row nulled through several relations gets one `SetNull` update per relation. All
+A row nulled through several relations gets one `SetNull` update per relation. Each
+`SetNull` update refreshes the row's `OnCreateAndUpdate`
+[automatic timestamps](runtime-schema-ir.md#automatic-timestamps), because the row changed. All
 preimages are captured before any write, so the preimage of a later update still shows
 the key fields an earlier update of the same row cleared.
 

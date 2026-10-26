@@ -599,18 +599,27 @@ fn runtime_sql_type(backend: DatabaseBackend, kind: RuntimeValueKind) -> String 
     }
     .to_owned()
 }
+/// The database-clock expression of `CurrentTimestamp` for a runtime `DateTime`
+/// column: canonical runtime text on SQLite, `timestamptz` on PostgreSQL. Shared
+/// by column defaults and automatic-timestamp writes so both encode identically.
+pub(super) const fn runtime_datetime_now_sql(backend: DatabaseBackend) -> &'static str {
+    match backend {
+        DatabaseBackend::Sqlite => "strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')",
+        _ => "CURRENT_TIMESTAMP",
+    }
+}
+
 fn runtime_default(
     backend: DatabaseBackend,
     field: &RuntimeField,
 ) -> Result<Option<String>, RuntimeMigrationDiagnostics> {
-    match &field.default {
+    // An automatic timestamp's physical default backfills existing rows when the
+    // column is added and keeps inserts that bypass the runtime engine consistent.
+    match field.effective_default() {
         None => Ok(None),
         Some(RuntimeDefault::CurrentTimestamp) => match field.value_kind {
             RuntimeValueKind::Integer => Ok(Some(backend.current_epoch_expr().into())),
-            RuntimeValueKind::DateTime if backend == DatabaseBackend::Sqlite => {
-                Ok(Some("strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')".into()))
-            }
-            RuntimeValueKind::DateTime => Ok(Some("CURRENT_TIMESTAMP".into())),
+            RuntimeValueKind::DateTime => Ok(Some(runtime_datetime_now_sql(backend).into())),
             _ => Err(rejection(
                 RuntimeMigrationDiagnosticCode::UnsupportedDefault,
             )),

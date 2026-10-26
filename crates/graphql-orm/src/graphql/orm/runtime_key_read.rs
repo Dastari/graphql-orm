@@ -401,6 +401,7 @@ mod tests {
             generated: false,
             default: None,
             format: None,
+            auto_timestamp: None,
         };
         let schema = RuntimeSchema {
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,

@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-24
+last_reviewed: 2026-10-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -26,6 +26,8 @@ and `IndexId`.
   the database-evaluated `CurrentTimestamp`. See [typed literal defaults](#typed-literal-defaults).
 - `RuntimeField::format`: an optional owned semantic descriptor. See
   [semantic field formats](#semantic-field-formats).
+- `RuntimeField::auto_timestamp`: an optional server-managed creation or modification
+  timestamp. See [automatic timestamps](#automatic-timestamps).
 - `description`, `classification` and `export` on collections, fields and relations. See
   [descriptions, classification and export](#descriptions-classification-and-export).
 - `RuntimeCollection::label_fields`: ordered fields forming one human-readable record label.
@@ -201,6 +203,69 @@ projector-served member is not published, because dropping only that member woul
 the label's meaning. Readers older than 0.67.0 reject documents or catalogues that declare
 a label (`deny_unknown_fields`); format versions are unchanged. Static conversion
 leaves the member empty.
+## Automatic timestamps
+
+`RuntimeField::auto_timestamp: Option<RuntimeAutoTimestamp>` makes the database clock the
+only writer of a `DateTime` field, like Rails/Django `created_at`/`updated_at` or a
+PocketBase autodate field. Field names are the host's choice.
+
+| Kind | Insert | Runtime update of the row |
+| --- | --- | --- |
+| `OnCreate` | set from the database clock | never changed |
+| `OnCreateAndUpdate` | set from the database clock | refreshed in the same `UPDATE` statement |
+
+- **Input.** The field is never writable: `runtime_create_request` and
+  `runtime_update_request` refuse it with `field_denied` (no value is echoed), explicit
+  `Null` included. Runtime GraphQL omits it from `Create<T>Input` and `Update<T>Input`; a collection with no
+  other client-writable field gets an input-less `create<T>` and no `update<T>`. A
+  required (non-null) auto field is never `missing_required`. `RuntimeField::is_client_writable`
+  and `RuntimeFieldHandle::auto_timestamp` expose the rule to hosts.
+- **Clock.** Writes use exactly the `CurrentTimestamp` expression: on SQLite
+  `strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')`, canonical runtime text with millisecond
+  resolution; on PostgreSQL `CURRENT_TIMESTAMP` into `timestamptz`. PostgreSQL returns the
+  transaction start time, so every write in one transaction stores the same value. SQLite
+  reads the clock per statement. Both timestamps of one insert are always equal.
+- **Not a sync cursor.** On PostgreSQL a transaction that started earlier but commits later
+  stores an earlier `updatedAt` than rows already committed by a later-starting transaction.
+  `updatedAt` is therefore not monotonic in commit order and cannot serve as a change-feed
+  or synchronization cursor ("everything after T"). Use a journal or sequence for that. It
+  records when the writing transaction started, which is what Rails/Django also store.
+- **Updates.** Every runtime update request writes at least one field, so it always issues
+  an `UPDATE` and refreshes `OnCreateAndUpdate` fields, even when no stored value changes.
+  The dependent `SetNull` updates of an opted-in delete are row updates too and refresh the
+  nulled rows. A rolled-back update leaves the value unchanged. Mutation results and staged
+  effects are reread after the write, so they return the stored values. The staged image
+  (`RuntimeMutationEffect::staged`, and the preimage) always includes the collection's
+  automatic timestamps, even when the host's write grant does not project them, so
+  `before_commit` journal and realtime hooks see the stamped values. Client output is still
+  limited to the approved return projection.
+- **Link-only changes do not count.** A standalone many-to-many link mutation writes rows of
+  the link table, not the source row, so it does not touch the source row's timestamps.
+  The rule is "the row's own columns were written". Link changes attached to a create or
+  update (`RuntimeMutationRequest::with_link_change`) ride on a row write, because an update
+  request always writes at least one field, so that write sets or refreshes the timestamps.
+- **Physical shape.** The column's effective default is `CurrentTimestamp`
+  (`RuntimeField::effective_default`), whether `default` is `None` or `CurrentTimestamp`.
+  Writes do not depend on it, because the engine names the column explicitly, but it
+  backfills existing rows when the column is added and keeps rows that other writers
+  insert consistent. See [runtime migrations](runtime-migrations.md#automatic-timestamps-0750).
+- **Validation.** `InvalidAutoTimestamp` with the value-free detail
+  `RuntimeSchemaDiagnosticDetail::AutoTimestamp(RuntimeAutoTimestampProblem)` rejects a field
+  whose kind is not `datetime` (`not_date_time`), a `generated` field (`generated`), a
+  literal default (`literal_default`), and a primary-key member or a relation key on
+  either side (`key_field`). Nullable auto fields are valid. Their column accepts NULL,
+  but every runtime insert stores a value.
+
+Identity: the member is omitted from serialization when absent, and the field's canonical
+line gains `|auto_timestamp=on_create` or `|auto_timestamp=on_create_and_update` only when
+present. Schemas without it keep their exact serialized documents, `canonical_bytes()`,
+`fingerprint()` and `structural_fingerprint()`. The goldens in
+`tests/runtime_compat_goldens.rs` pin this. The flag describes write semantics, so it is
+part of both the ID-bearing and the structural forms; `format_fingerprint()` is
+unaffected. Readers older than 0.75.0 reject documents that declare it
+(`deny_unknown_fields`); the format version stays 1. Static conversion leaves it absent:
+derived `created_at`/`updated_at` behaviour is unchanged.
+
 ## Many-to-many relations
 
 A relation with `join: Some(RuntimeJoinTable)` links records through an ORM-owned link

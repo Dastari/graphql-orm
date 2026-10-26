@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.75.0 adds server-managed runtime timestamps (`RuntimeField::auto_timestamp`:
+`OnCreate`, `OnCreateAndUpdate`). See the
+[migration guide](../../MIGRATION.md#0740-to-0750-automatic-runtime-timestamps).
+
 Version 0.74.0 bounds generated index names to PostgreSQL's 63-byte identifier
 limit and refuses PostgreSQL plans that would truncate a declared name. See the
 [migration guide](../../MIGRATION.md#0730-to-0740-bounded-postgresql-identifiers).

@@ -61,6 +61,7 @@ fn definition(composite: bool) -> RuntimeSchema {
                 generated: false,
                 default: None,
                 format: None,
+                auto_timestamp: None,
             })
             .collect(),
             relations: vec![],

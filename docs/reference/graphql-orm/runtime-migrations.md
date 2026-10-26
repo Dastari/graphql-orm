@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-21
+last_reviewed: 2026-10-25
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -349,6 +349,39 @@ type, with `InvalidPhysicalContract` before any statement: a SQLite rebuild woul
 mantissas unchanged (`12.50` would read as `1.250` at scale 3), and a PostgreSQL type change
 rounds when the scale narrows. Certification of a changed definition fails. Add a new field and
 copy values explicitly.
+
+### Automatic timestamps (0.75.0)
+
+An [automatic timestamp](runtime-schema-ir.md#automatic-timestamps) column targets the
+same declared type and default as a `CurrentTimestamp` datetime field: `TEXT` with
+`strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')` on SQLite, `TIMESTAMPTZ` with
+`CURRENT_TIMESTAMP` on PostgreSQL. The default is present even when the field's `default`
+is `None`.
+
+- **Adding the column to a table with rows** backfills every existing row with the clock
+  value at apply time, also when it is `NOT NULL`. A backfilled `createdAt` is therefore the
+  migration time, not the row's real creation time; copy a known value explicitly if it
+  matters. PostgreSQL evaluates the default in
+  `ADD COLUMN`. SQLite refuses `ADD COLUMN` with a non-constant default, so owned SQLite
+  plans now apply such an `AddColumn` as the controlled table rebuild that column
+  alterations already use. The copy omits the new column, so its default fills it. This
+  rebuild runs with foreign keys suspended outside the migration transaction and checks
+  them afterwards (`PRAGMA foreign_key_check`), so rows that reference the rebuilt table are
+  kept and are not cascaded or nulled. This also fixes adding a plain `CurrentTimestamp`
+  datetime column, or any other non-constant default, to an existing SQLite table, which failed before with "Cannot add a
+  column with non-constant default". Constant defaults still use `ADD COLUMN`. A fresh
+  replan is a no-op and `runtime_mutation_environment` certifies the result on both
+  backends. The public single-step renderer `render_migration_step` cannot rebuild a table,
+  so for such a step on SQLite it emits a `-- sqlite requires table rebuild …` marker (as it
+  already does for column drops and alterations) instead of DDL SQLite would refuse.
+- **Switching the flag on an existing column** is a catalog-only identity change when the
+  column already has a `CurrentTimestamp` default (and the same type and nullability): the
+  plan is empty. Otherwise the plan contains the default change, an `AlterColumn` (`SET
+  DEFAULT` on PostgreSQL, a table rebuild on SQLite). Existing values are kept: switching the
+  flag on never backfills, so a nullable column keeps its old NULLs (an `OnCreate` column
+  keeps them for good; an `OnCreateAndUpdate` column until the row is next updated).
+  Backfill them explicitly if readers expect a value. Turning the flag
+  off removes the effective default unless `default: CurrentTimestamp` stays declared.
 
 ## Released repository capability compatibility
 

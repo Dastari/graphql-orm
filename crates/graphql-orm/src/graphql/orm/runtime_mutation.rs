@@ -670,7 +670,7 @@ impl ValidatedRuntimeSchema {
                 .iter()
                 .find(|f| &f.id == field.id())
                 .ok_or_else(|| err(RuntimeMutationErrorCode::InvalidInput))?;
-            if definition.generated
+            if !definition.is_client_writable()
                 || (action != RuntimeMutationAction::Create && c.primary_key.contains(field.id()))
             {
                 return Err(err(RuntimeMutationErrorCode::FieldDenied));
@@ -697,7 +697,7 @@ impl ValidatedRuntimeSchema {
             if action == RuntimeMutationAction::Create
                 && !seen.contains(&field.id)
                 && !field.generated
-                && field.default.is_none()
+                && field.effective_default().is_none()
                 && !field.nullable
             {
                 return Err(err(RuntimeMutationErrorCode::MissingRequired));
@@ -983,6 +983,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .map(|id| request.schema.resolve_field(&request.collection, id))
             .collect::<Result<Vec<_>, _>>()?;
         fields.extend(key_fields.clone());
+        // Automatic timestamps are always part of the staged image, so hooks see
+        // the stamped values even when the host's grant does not project them.
+        // Client output remains limited to the approved return projection.
+        for f in c.fields.iter().filter(|f| f.auto_timestamp.is_some()) {
+            fields.push(request.schema.resolve_field(&request.collection, &f.id)?);
+        }
         fields.extend(request.fields.iter().map(|(f, _)| f.clone()));
         if let Some(expected) = &request.expected {
             fields.extend(expected.referenced_fields().into_iter().cloned());
@@ -1096,17 +1102,28 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                         RuntimeValue::Uuid(uuid::Uuid::new_v4()),
                     ));
                 }
-                if entries.is_empty() {
+                // Automatic timestamps are written explicitly from the database clock,
+                // so the insert never depends on the column default.
+                let now = super::runtime_migration::runtime_datetime_now_sql(B::DIALECT);
+                let stamped = c
+                    .fields
+                    .iter()
+                    .filter(|f| f.auto_timestamp.is_some())
+                    .map(|f| B::DIALECT.quote_identifier(&f.physical_column))
+                    .collect::<Vec<_>>();
+                if entries.is_empty() && stamped.is_empty() {
                     format!("INSERT INTO {table} DEFAULT VALUES")
                 } else {
                     let names = entries
                         .iter()
                         .map(|(f, _)| B::DIALECT.quote_identifier(f.physical_column()))
+                        .chain(stamped.iter().cloned())
                         .collect::<Vec<_>>()
                         .join(", ");
                     let binds = entries
                         .iter()
                         .map(|(f, v)| bind_value(B::DIALECT, f, v, &mut values))
+                        .chain(stamped.iter().map(|_| now.to_owned()))
                         .collect::<Vec<_>>()
                         .join(", ");
                     format!("INSERT INTO {table} ({names}) VALUES ({binds})")
@@ -1123,6 +1140,20 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                             bind_value(B::DIALECT, f, v, &mut values)
                         )
                     })
+                    // Every row update refreshes OnCreateAndUpdate timestamps in the
+                    // same statement, including dependent SetNull updates.
+                    .chain(
+                        c.fields
+                            .iter()
+                            .filter(|f| f.auto_timestamp.is_some_and(|a| a.refreshes_on_update()))
+                            .map(|f| {
+                                format!(
+                                    "{} = {}",
+                                    B::DIALECT.quote_identifier(&f.physical_column),
+                                    super::runtime_migration::runtime_datetime_now_sql(B::DIALECT)
+                                )
+                            }),
+                    )
                     .collect::<Vec<_>>()
                     .join(", ");
                 let key = request.key.as_ref().ok_or_else(|| err(E::InvalidInput))?;

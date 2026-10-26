@@ -94,6 +94,63 @@ fn postgres_text_default_literal(default: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+mod sqlite_add_column_default_tests {
+    use super::*;
+
+    #[test]
+    fn only_constant_defaults_are_added_in_place() {
+        for constant in [
+            "'plain'", "'it''s'", "''", "X'00ff'", "7", "-1.5", "NULL", "TRUE",
+        ] {
+            assert!(sqlite_constant_default(constant), "{constant}");
+        }
+        for expression in [
+            "strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')",
+            "(strftime('%s', 'now'))",
+            "CURRENT_TIMESTAMP",
+            "current_timestamp",
+            "'a' || 'b'",
+            "(1 + 1)",
+        ] {
+            assert!(!sqlite_constant_default(expression), "{expression}");
+        }
+    }
+
+    #[test]
+    fn single_step_rendering_marks_non_constant_sqlite_add_column() {
+        let column = |default: &str| ColumnModel {
+            name: "stamped".into(),
+            sql_type: "TEXT".into(),
+            spatial: None,
+            nullable: false,
+            is_primary_key: false,
+            is_unique: false,
+            default: Some(default.into()),
+        };
+        let step = |default: &str| MigrationStep::AddColumn {
+            table_name: "notes".into(),
+            column: column(default),
+        };
+        let now = "strftime('%Y-%m-%dT%H:%M:%f000Z', 'now')";
+        assert_eq!(
+            render_migration_step(DatabaseBackend::Sqlite, &step(now)),
+            vec![
+                "-- sqlite requires table rebuild to add column stamped with a non-constant default to notes"
+                    .to_string()
+            ]
+        );
+        assert!(
+            render_migration_step(DatabaseBackend::Sqlite, &step("'x'"))[0]
+                .starts_with("ALTER TABLE notes ADD COLUMN")
+        );
+        assert!(
+            render_migration_step(DatabaseBackend::Postgres, &step("CURRENT_TIMESTAMP"))[0]
+                .starts_with("ALTER TABLE notes ADD COLUMN")
+        );
+    }
+}
+
+#[cfg(test)]
 mod postgres_text_default_tests {
     use super::*;
 
@@ -1299,14 +1356,42 @@ pub(super) fn migration_step_table_name<'a>(step: &StepRef<'a>) -> Option<&'a st
 }
 
 fn sqlite_requires_table_rebuild(step: &StepRef<'_>) -> bool {
-    matches!(
-        step,
-        StepRef::DropColumn { .. }
-            | StepRef::AlterColumn { .. }
-            | StepRef::AddForeignKey { .. }
-            | StepRef::DropForeignKey { .. }
-            | StepRef::SetCheckConstraints { .. }
-    )
+    match step {
+        // SQLite refuses `ADD COLUMN` with a non-constant default such as the
+        // runtime `CurrentTimestamp` expression. The rebuild omits the new column
+        // from its copy, so the default is evaluated for every existing row.
+        StepRef::AddColumn { column, .. } => column
+            .default
+            .as_deref()
+            .is_some_and(|default| !sqlite_constant_default(default)),
+        _ => matches!(
+            step,
+            StepRef::DropColumn { .. }
+                | StepRef::AlterColumn { .. }
+                | StepRef::AddForeignKey { .. }
+                | StepRef::DropForeignKey { .. }
+                | StepRef::SetCheckConstraints { .. }
+        ),
+    }
+}
+
+/// Whether SQLite accepts `default` in `ALTER TABLE ADD COLUMN`: a quoted string or
+/// blob literal, a signed number, `NULL`, `TRUE` or `FALSE`. `CURRENT_*` keywords and
+/// every function or parenthesized expression are not constant.
+fn sqlite_constant_default(default: &str) -> bool {
+    let value = super::dialect::canonicalize_column_default_expression(default);
+    let quoted = value
+        .strip_prefix(['x', 'X'])
+        .unwrap_or(&value)
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .is_some_and(|inner| !inner.replace("''", "").contains('\''));
+    quoted
+        || (!value.is_empty()
+            && !value.starts_with("CURRENT_")
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+')))
 }
 
 fn render_create_index_statement(
@@ -2102,6 +2187,13 @@ fn render_sqlite_table_rebuild_statements(
     statements
 }
 
+/// Render one step in isolation.
+///
+/// SQLite steps that need a table rebuild (dropping or altering a column, foreign-key
+/// changes, and adding a column with a non-constant default such as a timestamp
+/// expression) cannot be rebuilt from a single step. They render a
+/// `-- sqlite requires table rebuild …` marker instead of executable DDL. Use a migration
+/// plan, which renders the controlled rebuild.
 pub fn render_migration_step(backend: DatabaseBackend, step: &MigrationStep) -> Vec<String> {
     render_migration_step_view(backend, &StepRef::from(step))
 }
@@ -2147,6 +2239,16 @@ pub(super) fn render_migration_step_view(
         }
         StepRef::DropTable { table_name } => {
             vec![format!("DROP TABLE {}", table_name)]
+        }
+        // Like the other rebuild-only SQLite steps, a single step cannot rebuild
+        // its table; owned plans render the rebuild instead of this marker.
+        StepRef::AddColumn { table_name, column }
+            if backend == DatabaseBackend::Sqlite && sqlite_requires_table_rebuild(step) =>
+        {
+            vec![format!(
+                "-- sqlite requires table rebuild to add column {} with a non-constant default to {}",
+                column.name, table_name
+            )]
         }
         StepRef::AddColumn { table_name, column } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",
