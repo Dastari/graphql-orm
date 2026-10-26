@@ -15,6 +15,10 @@ The current workspace selects published Auth release tag `v0.23.0`
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.116.0` adds `AnthropicProvider::with_endpoint` for an exact
+policy-checked Messages endpoint whose egress manifests must name it. See
+[Anthropic](docs/anthropic.md) and [MIGRATION.md](MIGRATION.md).
+
 Version `0.115.0` adds a Chat Completions-compatible adapter for local and
 self-hosted model servers and makes the provider-kind enums
 `#[non_exhaustive]` (a Rust break for exhaustive matches). Apply schema module

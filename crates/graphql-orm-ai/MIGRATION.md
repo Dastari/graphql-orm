@@ -19,6 +19,17 @@ they describe. For the current workspace baseline and active delivery gates,
 use [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## 0.115.0 to 0.116.0: policy-checked Anthropic endpoint
+
+No action is required; `AnthropicProvider::new` is unchanged. To route through
+an approved gateway or to test against a local server, call
+`AnthropicProvider::with_endpoint`, approve the exact normalized endpoint for
+`AiProviderKindInput::Anthropic` in `AiProviderEndpointPolicy`, and make every
+Anthropic egress manifest for those requests name that endpoint as its
+destination; a manifest for the default destination is refused. The only
+visible change for `new` is that `Debug` prints `<official>` instead of the
+endpoint URL. No schema-module, GraphQL SDL or data migration.
+
 ## 0.114.0 to 0.115.0: Chat Completions adapter, schema module 0.75.0
 
 Breaking for Rust consumers that match exhaustively: `ProviderKind`,
@@ -66,14 +77,21 @@ No schema-module, GraphQL SDL or data migration.
 
 ## 0.112.0 to 0.113.0: deployment budget provisioning, schema module 0.74.0
 
-Apply AI schema module `0.74.0` before runtime admission. It adds a nullable
-`provisioned_by` column to `graphql_orm_ai_budget_policies`. Existing rows
-keep `NULL` (interactive provenance); no data migration is required. The
-policy `id` is now supplied by the engine instead of the ORM. That changes the
-module and backup metadata fingerprints but no DDL: on SQLite and PostgreSQL
-the upgrade plan is exactly
-`ALTER TABLE graphql_orm_ai_budget_policies ADD COLUMN provisioned_by TEXT`,
-and the upgraded table re-plans empty (ordinary and strict owned).
+Apply AI schema module `0.74.0` before runtime admission. It makes two
+additive physical changes, the same on SQLite and PostgreSQL:
+
+- a nullable `provisioned_by` column on `graphql_orm_ai_budget_policies`
+  (`ALTER TABLE graphql_orm_ai_budget_policies ADD COLUMN provisioned_by TEXT`).
+  Existing rows keep `NULL` (interactive provenance); no data migration is
+  required;
+- an index `idx_graphql_orm_ai_audit_events_action` on
+  `graphql_orm_ai_audit_events (action)`, because the audit `action` field
+  became filterable.
+
+Hosts that declare their own module revision must include both. The policy
+`id` is now supplied by the engine instead of the ORM. That changes the module
+and backup metadata fingerprints but no further DDL, and the upgraded tables
+re-plan empty (ordinary and strict owned).
 
 No public Rust API or GraphQL SDL change, so no source change is required.
 `AiBudgetPolicyView` does not expose provenance.
