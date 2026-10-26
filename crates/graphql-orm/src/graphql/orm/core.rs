@@ -3035,9 +3035,15 @@ pub enum ColumnBackupPolicy {
     Redact,
 }
 
+/// Logical type of a backed-up column: how the backup codec reads, encodes, validates and
+/// binds its values.
+///
+/// Non-exhaustive: later releases may add kinds, so matches outside this crate need a wildcard
+/// arm.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, async_graphql::Enum,
 )]
+#[non_exhaustive]
 pub enum BackupValueKind {
     Null,
     Bool,
@@ -3048,6 +3054,11 @@ pub enum BackupValueKind {
     Uuid,
     Json,
     Bytes,
+    /// A runtime `DateTime` column (`TEXT` on SQLite, `TIMESTAMPTZ` on PostgreSQL). Values are
+    /// [`BackupValue::String`](super::BackupValue::String) holding the canonical
+    /// [`RuntimeDateTime`](super::RuntimeDateTime) text, `YYYY-MM-DDTHH:MM:SS.ffffffZ`, on every
+    /// backend. Static derived date fields keep [`BackupValueKind::String`].
+    DateTime,
 }
 
 /// Relative importance for a field inside a denormalized search document.
@@ -4463,6 +4474,7 @@ impl BackupValueKind {
             BackupValueKind::Uuid => "uuid",
             BackupValueKind::Json => "json",
             BackupValueKind::Bytes => "bytes",
+            BackupValueKind::DateTime => "date_time",
         }
     }
 }

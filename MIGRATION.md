@@ -15,6 +15,25 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.75.0 to 0.76.0: date-time backups and self-reference cycles
+
+Upgrade runtime/macros together. Breaking only at Rust compile time and for GraphQL schemas that
+expose `BackupValueKind`:
+
+- **Rust:** `BackupValueKind` is `#[non_exhaustive]` and gains `DateTime`. Add a wildcard arm to
+  matches on it outside graphql-orm. Struct literals and constructors are unchanged.
+- **GraphQL:** a schema that exposes `BackupValueKind` gains `DATE_TIME`. Regenerate SDL and
+  clients.
+
+Nothing changes for existing descriptors, schema hashes or snapshots: static derived date fields
+keep `BackupValueKind::String`. To back up runtime `DateTime` columns, describe them with
+`BackupValueKind::DateTime`. That changes the schema hash of descriptors that previously could not
+include those columns.
+
+Restores of self-referencing rows that form cycles now succeed instead of failing. A non-null
+`UNIQUE` self-reference cycle, or a cycle in an append-only table, is refused with
+`BackupSelfReferenceCycle`, and that table's import transaction rolls back.
+
 ## 0.75.0 to 0.76.0: delimited reserved-word identifiers
 
 Upgrade runtime/macros together. No action is needed for schemas whose table, column, index and constraint names are plain identifiers that are not reserved words: their statements, plan hashes, migration history and schema hashes are byte-identical.

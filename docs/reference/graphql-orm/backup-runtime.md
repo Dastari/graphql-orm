@@ -3,7 +3,7 @@ title: "Backup Runtime API"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-27
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -47,6 +47,22 @@ column descriptor and value. SQLite scaled integers and PostgreSQL native numeri
 round-trip through one canonical representation; restore rejects changed definitions, rounding,
 range loss, and value-kind mismatches.
 
+Runtime `DateTime` columns (`TEXT` on SQLite, `TIMESTAMPTZ` on PostgreSQL) use
+`BackupValueKind::DateTime`. Their values are `BackupValue::String` holding the canonical
+`RuntimeDateTime` text, UTC with exactly six fractional digits (`2026-10-27T01:02:03.000004Z`), on
+every backend:
+
+- export reads SQLite text through the record engine's parse and canonicalizes it, and reads
+  PostgreSQL `TIMESTAMPTZ` typed, independent of the session `TimeZone`;
+- a value without a portable form fails the export: unreadable SQLite text, PostgreSQL
+  `±infinity`, or an instant outside years 0001–9999;
+- restore accepts only canonical text (other text or another value kind is refused before any
+  write) and binds PostgreSQL values through `CAST(? AS TIMESTAMPTZ)`;
+- restore writes the stored values; no default, clock or automatic timestamp applies.
+
+Static derived date fields keep `BackupValueKind::String`, so their descriptors and schema hashes
+are unchanged. `BackupValueKind` is `#[non_exhaustive]`.
+
 Sensitive columns use `#[backup(redact)]` or `#[backup(exclude)]`.
 
 ## Full Export And Restore
@@ -73,6 +89,20 @@ database
 ```
 
 Restore validates schema compatibility, table names, row shapes, row counts, and row hashes.
+
+A single-key table whose dependency targets its own key restores parent-first. Rows that
+parent-first order cannot place (rows on a self-reference cycle, and the rows below them) are
+inserted after the others with placeholder self-reference values: `NULL` in a nullable column, the
+row's own key in a non-null one (a row that references itself satisfies its foreign key at the end
+of the statement). Each row is then updated to its stored values, in the table's import
+transaction, before count and hash validation. `NULL` placeholders never collide on a `UNIQUE`
+column. A non-null `UNIQUE` self-reference cycle cannot be staged that way, and an append-only
+table refuses the update; the table's transaction rolls back and the error carries
+`BackupSelfReferenceCycle` (read it with `BackupSelfReferenceCycle::from_error`).
+
+Before restoring into a database named by configuration, compare `Database::database_identity()`
+(PostgreSQL `current_database()` and its OID; the SQLite main file path) with the operator's
+expectation.
 
 ## Change Journal
 
