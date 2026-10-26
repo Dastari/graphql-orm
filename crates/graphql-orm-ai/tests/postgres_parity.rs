@@ -18,15 +18,15 @@ use graphql_orm_ai::*;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 use base64::Engine;
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 use base64::engine::general_purpose::STANDARD;
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 use hmac::{Hmac, Mac};
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 use secrecy::SecretString;
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 use sha2::Sha256;
 
 const LOCAL_DOCKER_SOCKET: &str = "unix:///var/run/docker.sock";
@@ -480,10 +480,10 @@ impl AiRuleHierarchyResolver for ExactRuleHierarchy {
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 struct PostgresWebhookSecrets(SecretRef, String);
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 #[async_trait]
 impl AiSecretStore for PostgresWebhookSecrets {
     async fn resolve(&self, reference: &SecretRef) -> Result<SecretString, SecretError> {
@@ -507,7 +507,7 @@ impl AiSecretStore for PostgresWebhookSecrets {
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 async fn verify_webhook_receipt_parity(database: &Database<PostgresBackend>, now: OffsetDateTime) {
     let reference = SecretRef::parse("openai/postgres-webhook-parity")
         .expect("webhook secret reference should validate");
@@ -983,7 +983,7 @@ async fn owned_postgres_runs_generated_migration_sessions_skills_rules_and_fenci
     let now = OffsetDateTime::from_unix_timestamp(OffsetDateTime::now_utc().unix_timestamp())
         .expect("current whole-second test time should validate");
     let principal = principal(now);
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     verify_webhook_receipt_parity(&database, now).await;
     let session = sessions
         .create_session(

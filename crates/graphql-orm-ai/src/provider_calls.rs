@@ -1525,7 +1525,7 @@ impl AiProviderCallPlan {
 
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
+        feature = "provider-openai-core"
     ))]
     pub(crate) fn provider_kind_ref(&self) -> &ProviderKind {
         &self.provider_kind
@@ -1533,7 +1533,7 @@ impl AiProviderCallPlan {
 
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
+        feature = "provider-openai-core"
     ))]
     pub(crate) fn request_ref(&self) -> &ModelRequest {
         &self.request
@@ -1541,7 +1541,7 @@ impl AiProviderCallPlan {
 
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
+        feature = "provider-openai-core"
     ))]
     pub(crate) fn budget_request(&self) -> &AiBudgetReservationRequest {
         &self.budget
@@ -1549,7 +1549,7 @@ impl AiProviderCallPlan {
 
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
+        feature = "provider-openai-core"
     ))]
     pub(crate) fn transfers(&self) -> &[AiEgressManifest] {
         &self.transfers
@@ -2208,7 +2208,7 @@ pub struct AiProviderUsageObservation {
 impl AiProviderUsageObservation {
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
+        feature = "provider-openai-core"
     ))]
     pub(crate) fn for_background_response(
         scope: AiScope,
@@ -5691,7 +5691,7 @@ mod tests {
     };
 
     use super::*;
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     use agql_auth::FixedClock;
     use agql_auth::{
         AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, ResolvedPrincipal,
@@ -5700,7 +5700,7 @@ mod tests {
     use async_trait::async_trait;
     use graphql_orm::graphql::errors::{OrmErrorCode, OrmPublicError};
     use graphql_orm::graphql::filters::UuidFilter;
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     use graphql_orm::graphql::orm::Entity;
     use graphql_orm::graphql::orm::{
         AiMutationExecutionPolicy, ApplyOptions, ConditionalUpdateOutcome,
@@ -5713,7 +5713,7 @@ mod tests {
     };
     use graphql_orm::graphql::pagination::KeysetConnectionInput;
     use graphql_orm::prelude::{Database, SqliteBackend};
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     use graphql_orm::prelude::{GraphQLEntity, GraphQLOperations};
     use serde_json::json;
     use sha2::Digest;
@@ -5726,11 +5726,11 @@ mod tests {
     };
     use crate::orm_tools::AutomaticMutationTestFault;
     use crate::persistence::*;
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     use crate::providers::MockBackgroundRetrievalFailure;
     use crate::*;
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[derive(
         GraphQLEntity,
         GraphQLOperations,
@@ -5875,10 +5875,10 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     struct RevocableAccess(Arc<AtomicBool>);
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[async_trait]
     impl AiAccessPolicy for RevocableAccess {
         async fn can_access_scope(
@@ -6222,13 +6222,13 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     struct RevokeAccessAfterAudit {
         audit: Arc<OrmAiEgressDecisionAudit>,
         access_allowed: Arc<AtomicBool>,
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[async_trait]
     impl AiEgressDecisionAudit for RevokeAccessAfterAudit {
         async fn record(
@@ -8059,7 +8059,7 @@ mod tests {
         .expect("test provider plan should validate")
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     fn background_plan(fixture: &Fixture) -> AiProviderCallPlan {
         let request = ModelRequest {
             model: "mock-model".to_owned(),
@@ -8133,7 +8133,7 @@ mod tests {
         .expect("background provider plan should validate")
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     struct BackgroundReconciliationFixture {
         fixture: Fixture,
         accepted: AiOpenAiBackgroundSubmission,
@@ -8141,7 +8141,7 @@ mod tests {
         service: OrmAiOpenAiBackgroundReconciliationService,
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn background_reconciliation_fixture(
         windows: AiOpenAiBackgroundReconciliationWindows,
         limits: AiOpenAiBackgroundReconciliationLimits,
@@ -8149,7 +8149,7 @@ mod tests {
         background_reconciliation_fixture_with_access(windows, limits, Arc::new(AllowAccess)).await
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn background_reconciliation_fixture_with_access(
         windows: AiOpenAiBackgroundReconciliationWindows,
         limits: AiOpenAiBackgroundReconciliationLimits,
@@ -8165,7 +8165,7 @@ mod tests {
         .await
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn background_reconciliation_fixture_with_observation(
         windows: AiOpenAiBackgroundReconciliationWindows,
         limits: AiOpenAiBackgroundReconciliationLimits,
@@ -8192,7 +8192,7 @@ mod tests {
         background_reconciliation_fixture_with_mock(windows, limits, access_policy, mock).await
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn background_reconciliation_fixture_with_retrieval_failure(
         windows: AiOpenAiBackgroundReconciliationWindows,
         limits: AiOpenAiBackgroundReconciliationLimits,
@@ -8219,7 +8219,7 @@ mod tests {
             .await
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn background_reconciliation_fixture_with_mock(
         windows: AiOpenAiBackgroundReconciliationWindows,
         limits: AiOpenAiBackgroundReconciliationLimits,
@@ -8266,7 +8266,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn insert_background_receipt(
         test: &BackgroundReconciliationFixture,
         provider_profile_id: &str,
@@ -8319,7 +8319,7 @@ mod tests {
         key
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_submission_binds_one_call_and_parks_run_without_a_lease() {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -8473,7 +8473,7 @@ mod tests {
         assert_eq!(fixture.mock.request_count(), 1);
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[test]
     fn background_reconciliation_worker_limits_are_strictly_bounded() {
         assert_eq!(
@@ -8559,7 +8559,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[test]
     fn background_retrieval_route_and_limits_are_strictly_bounded() {
         assert_eq!(
@@ -8608,7 +8608,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn concurrent_reconcilers_receive_one_exact_fenced_claim() {
         let test = background_reconciliation_fixture(
@@ -8671,7 +8671,7 @@ mod tests {
         assert!(!debug.contains(&test.fixture.lease.run_id().0.to_string()));
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn reconciliation_claim_matches_only_the_exact_verified_receipt() {
         let test = background_reconciliation_fixture(
@@ -8729,7 +8729,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn reclaim_retains_one_match_and_leaves_duplicate_receipts_pending() {
         let test = background_reconciliation_fixture(
@@ -8786,7 +8786,7 @@ mod tests {
         assert!(duplicate.attempt_id.is_none());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_retrieval_binds_current_egress_before_provider_io_and_reclaims_after_expiry()
      {
@@ -8889,7 +8889,7 @@ mod tests {
         assert!(!format!("{observation:?}").contains("resp_background_reconciliation_1"));
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn nonterminal_retrieval_releases_with_bounded_backoff() {
         let test = background_reconciliation_fixture(
@@ -8973,7 +8973,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn retryable_retrieval_failure_releases_exact_generation_with_backoff() {
         let test = background_reconciliation_fixture_with_retrieval_failure(
@@ -9042,7 +9042,7 @@ mod tests {
         assert_eq!(budget.state, "uncertain");
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn nonretryable_retrieval_failure_closes_for_recovery() {
         let test = background_reconciliation_fixture_with_retrieval_failure(
@@ -9116,7 +9116,7 @@ mod tests {
         assert_eq!(budget.state, "uncertain");
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn retrieval_failure_classification_covers_rate_limit_and_rejection() {
         for (provider_failure, expected_code, retryable) in [
@@ -9167,7 +9167,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn terminal_completion_commits_one_protected_exactly_once_graph() {
         let usage = ProviderBackgroundUsage::new(12, 5, 3);
@@ -9341,7 +9341,7 @@ mod tests {
         assert_eq!(test.fixture.mock.request_count(), 2);
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn conflicting_matched_terminal_receipt_closes_without_budget_release() {
         let test = background_reconciliation_fixture_with_observation(
@@ -9435,7 +9435,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn failed_incomplete_and_cancelled_responses_commit_without_output() {
         for (status, receipt_kind, expected_submission_state, expected_error) in [
@@ -9548,7 +9548,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_retrieval_rejects_route_swap_without_provider_io() {
         let test = background_reconciliation_fixture(
@@ -9590,7 +9590,7 @@ mod tests {
         assert!(submission.retrieval_egress_decision_id.is_none());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_retrieval_rechecks_access_after_egress_audit_before_provider_io() {
         let access_allowed = Arc::new(AtomicBool::new(true));
@@ -9637,7 +9637,7 @@ mod tests {
         assert!(submission.retrieval_egress_decision_id.is_none());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn expired_reconciliation_claim_is_reclaimed_with_a_new_generation() {
         let test = background_reconciliation_fixture(
@@ -9676,7 +9676,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn heartbeat_rotates_claim_and_only_current_claim_can_release() {
         let test = background_reconciliation_fixture(
@@ -9754,7 +9754,7 @@ mod tests {
         assert_eq!(replacement.retry_count(), 1);
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn release_closes_retry_exhaustion_and_the_response_deadline() {
         let no_retry_limits = AiOpenAiBackgroundReconciliationLimits::new(
@@ -9840,7 +9840,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn expired_deadline_closure_is_atomic_and_idempotent() {
         let test = background_reconciliation_fixture(
@@ -9943,7 +9943,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn migrated_row_without_a_deadline_remains_unclaimable() {
         let test = background_reconciliation_fixture(
@@ -9990,7 +9990,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn extended_response_deadline_fails_closed_before_claiming() {
         let test = background_reconciliation_fixture(
@@ -10040,7 +10040,7 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn malformed_supporting_graph_fails_closed_before_claiming() {
         let test = background_reconciliation_fixture(
@@ -10094,7 +10094,7 @@ mod tests {
         assert!(submission.reconciliation_owner.is_none());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_submission_releases_budget_when_egress_audit_fails() {
         let mock = MockProvider::new(Vec::new())
@@ -10138,7 +10138,7 @@ mod tests {
         assert!(submissions.is_empty());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_submission_releases_budget_when_prepare_fence_is_stale() {
         let mock = MockProvider::new(Vec::new())
@@ -10187,7 +10187,7 @@ mod tests {
         assert!(submissions.is_empty());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_submission_requires_an_explicit_output_ceiling() {
         let mock = MockProvider::new(Vec::new())
@@ -10230,7 +10230,7 @@ mod tests {
         assert!(reservations.is_empty());
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn background_submission_heartbeats_while_waiting_for_acknowledgement() {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -10276,7 +10276,7 @@ mod tests {
         assert!(after.row_version >= before.row_version + 3);
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[test]
     fn background_reconciliation_windows_are_strictly_bounded() {
         assert_eq!(
@@ -10311,7 +10311,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn future_provider_timestamp_cannot_extend_reconciliation_window() {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -10357,7 +10357,7 @@ mod tests {
         assert_eq!(submission.reconciliation_deadline, Some(submitted_at + 30));
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn prior_background_schema_migrates_to_reconciliation_claim_fields() {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
@@ -10402,7 +10402,7 @@ mod tests {
             .expect("background submission table should migrate without row rewrites");
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn malformed_background_acknowledgement_closes_run_for_manual_recovery() {
         let mock = MockProvider::new(Vec::new())
@@ -10502,7 +10502,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     #[tokio::test]
     async fn swapped_background_acknowledgement_binding_requires_manual_recovery() {
         let mock = MockProvider::new(Vec::new())

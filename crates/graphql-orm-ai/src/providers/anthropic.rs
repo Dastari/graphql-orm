@@ -97,7 +97,7 @@ impl AnthropicProvider {
                 "Anthropic timeout must be between one millisecond and ten minutes".to_owned(),
             ));
         }
-        let client = reqwest::Client::builder()
+        let client = super::http::client_builder()?
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()

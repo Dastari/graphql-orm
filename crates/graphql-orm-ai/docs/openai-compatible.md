@@ -129,6 +129,23 @@ retention and must be reflected both in GraphQL configuration and the egress
 decision. The adapter does not infer or verify a provider's legal promises;
 the deployment owns that review.
 
+## Stateless tool continuation
+
+A profile with custom tools and without provider-retained continuation reports
+`stateless_continuation`; stateless requests to any other profile are refused. A host opts in per run by sending
+`ModelContinuationMode::StatelessReplay`: every turn is sent with
+`store: false`, never `previous_response_id`, and replays the bounded
+conversation as Responses input items (user text, assistant text,
+`function_call` and `function_call_output`). The adapter surfaces no provider
+response ID in this mode, so nothing can later continue from provider-retained
+state. A retaining profile refuses stateless requests.
+
+Hidden reasoning is never replayed. A reasoning model therefore reasons again
+from the replayed conversation on every turn, which costs more input and
+reasoning tokens than retained continuation. The same mode is available on the
+native OpenAI adapter when `store_responses` is `false`; xAI does not support
+it.
+
 Legacy compatible profiles with an empty data-policy object remain readable
 after the schema-module upgrade, but the adapter cannot be built from them.
 An authorized administrator must re-save each one with an explicit minimal

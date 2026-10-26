@@ -443,6 +443,7 @@ mod tests {
         assert!(!capabilities.web_search);
         assert!(!capabilities.code_execution);
         assert!(!capabilities.provider_retained_continuation);
+        assert!(!capabilities.stateless_continuation);
 
         let reference = SecretRef::parse("xai/test").expect("secret reference should parse");
         let mut incompatible = XAiProviderConfig::new(reference.clone());
@@ -453,6 +454,25 @@ mod tests {
                 Arc::new(TestSecrets(reference, "synthetic-xai-key".to_owned()))
             ),
             Err(ProviderError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stateless_replay_is_refused_on_xai() {
+        let reference = SecretRef::parse("xai/test").expect("secret reference should parse");
+        let provider = XAiProvider::for_loopback_test(
+            XAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "synthetic-xai-key".to_owned())),
+            "http://127.0.0.1:1/v1/responses".to_owned(),
+        )
+        .expect("loopback xAI provider should build");
+        let mut stateless = request();
+        stateless.continuation_mode = crate::ModelContinuationMode::StatelessReplay;
+        assert!(matches!(
+            provider
+                .stream(stateless.clone(), context(&stateless))
+                .await,
+            Err(ProviderError::Unsupported)
         ));
     }
 

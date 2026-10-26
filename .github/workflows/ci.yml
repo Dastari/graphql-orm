@@ -248,6 +248,15 @@ jobs:
       - run: cargo clippy -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings -D missing_docs" cargo doc -p graphql-orm-ai -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles --features graphql-orm-ai/provider-openai,graphql-orm-ai/provider-anthropic,graphql-orm-ai/provider-xai,graphql-orm-ai/provider-ollama,graphql-orm-ai/provider-openai-compatible,graphql-orm-ai/local-harness --no-deps
 
+  ai-provider-tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Ring build excludes aws-lc; each TLS stack compiles; guard refuses zero or two stacks
+        run: scripts/check-ai-provider-tls.sh all
+
   router:
     runs-on: ubuntu-latest
     timeout-minutes: 20

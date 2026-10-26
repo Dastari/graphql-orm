@@ -706,7 +706,7 @@ struct CounterPlan {
 /// graph and current authorization. This helper owns the existing counter
 /// arithmetic, usage insertion, and reservation CAS so those budget semantics
 /// cannot diverge from ordinary provider reconciliation.
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 pub(crate) async fn commit_uncertain_background_budget(
     tx: &mut graphql_orm::graphql::orm::MutationContext<'_, DefaultWriteBackend>,
     record: &AiBudgetReservationRecord,
@@ -977,7 +977,7 @@ pub(crate) async fn commit_stranded_reservation(
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn background_usage_identity(reservation_id: Uuid) -> Uuid {
     use sha2::{Digest, Sha256};
 

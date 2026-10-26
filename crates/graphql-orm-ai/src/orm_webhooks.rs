@@ -2,7 +2,7 @@
 
 #![cfg(all(
     any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai"
+    feature = "provider-openai-core"
 ))]
 
 use graphql_orm::db::Database;

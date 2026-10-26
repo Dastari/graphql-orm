@@ -45,7 +45,7 @@ mod orm_approvals;
 mod orm_attachments;
 #[cfg(all(
     any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai"
+    feature = "provider-openai-core"
 ))]
 mod orm_background;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -114,7 +114,7 @@ mod orm_ui_intents;
 mod orm_usage;
 #[cfg(all(
     any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai"
+    feature = "provider-openai-core"
 ))]
 mod orm_webhooks;
 mod persistence;
@@ -175,7 +175,7 @@ pub use orm_approvals::*;
 pub use orm_attachments::*;
 #[cfg(all(
     any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai"
+    feature = "provider-openai-core"
 ))]
 pub use orm_background::*;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -247,7 +247,7 @@ pub use orm_ui_intents::*;
 pub use orm_usage::*;
 #[cfg(all(
     any(feature = "sqlite", feature = "postgres"),
-    feature = "provider-openai"
+    feature = "provider-openai-core"
 ))]
 pub use orm_webhooks::*;
 pub use persistence::{
@@ -357,7 +357,7 @@ pub mod prelude {
     };
     #[cfg(all(
         any(feature = "sqlite", feature = "postgres"),
-        feature = "provider-openai"
+        feature = "provider-openai-core"
     ))]
     pub use crate::{
         AiOpenAiBackgroundReconciliationClaim, AiOpenAiBackgroundReconciliationLimits,
@@ -370,7 +370,7 @@ pub mod prelude {
         OrmAiOpenAiBackgroundTerminalService, OrmAiProviderWebhookReceiptService,
         ProviderBackgroundStatus, ProviderBackgroundUsage,
     };
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     pub use crate::{
         OpenAiVerifiedWebhookEvent, OpenAiWebhookEventKind, OpenAiWebhookHeaders,
         OpenAiWebhookVerifier, OpenAiWebhookVerifierLimits,

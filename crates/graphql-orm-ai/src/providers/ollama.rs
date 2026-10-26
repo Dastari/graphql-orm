@@ -117,7 +117,7 @@ impl OllamaProvider {
         let endpoint = base_url.join("api/chat").map_err(|_| {
             ProviderError::InvalidConfiguration("invalid Ollama endpoint".to_owned())
         })?;
-        let client = reqwest::Client::builder()
+        let client = super::http::client_builder()?
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()

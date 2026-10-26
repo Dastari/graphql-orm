@@ -132,7 +132,7 @@ pub struct OrmAiProviderOutputService {
     limits: AiProviderOutputLimits,
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 pub(crate) struct BackgroundProviderOutputPreparation {
     pub message_id: Uuid,
     pub event_id: Uuid,
@@ -149,7 +149,7 @@ pub(crate) struct BackgroundProviderOutputPreparation {
     pub scope: AiScope,
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 pub(crate) async fn prepare_background_provider_output(
     protector: &dyn AiContentProtector,
     policy: &crate::AiContentProtectionPolicy,
@@ -266,7 +266,7 @@ pub(crate) async fn prepare_background_provider_output(
     })
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 async fn protect_value(
     protector: &dyn AiContentProtector,
     policy: &crate::AiContentProtectionPolicy,
@@ -284,7 +284,7 @@ async fn protect_value(
     serde_json::to_value(envelope).map_err(|_| AiError::PersistenceFailed)
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn background_output_block_identity(message_id: Uuid, index: usize) -> Result<Uuid, AiError> {
     use sha2::{Digest, Sha256};
 
@@ -824,7 +824,7 @@ mod normalized_block_tests {
     }
 }
 
-#[cfg(all(test, feature = "provider-openai"))]
+#[cfg(all(test, feature = "provider-openai-core"))]
 mod tests {
     use super::*;
     use crate::{AiContentProtectionMode, AiContentProtectionPolicy, AiRunId};

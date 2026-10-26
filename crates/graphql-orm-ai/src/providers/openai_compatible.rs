@@ -58,6 +58,8 @@ impl OpenAiCompatibleCapabilities {
             parallel_tool_calls: self.parallel_tool_calls,
             structured_output: self.structured_output,
             provider_retained_continuation: self.provider_retained_continuation,
+            // Standard Responses input replay; never combined with retention.
+            stateless_continuation: self.custom_tools && !self.provider_retained_continuation,
             ..ProviderCapabilities::default()
         }
     }
@@ -389,17 +391,20 @@ mod tests {
         }
     }
 
-    fn context(request: &ModelRequest, destination: &str) -> ProviderRequestContext {
-        let session_id = AiSessionId::new();
-        let run_id = AiRunId::new();
-        let attempt_id = uuid::Uuid::new_v4();
-        let manifest = AiEgressManifest {
+    fn manifest(
+        request: &ModelRequest,
+        destination: &str,
+        session_id: AiSessionId,
+        run_id: AiRunId,
+        capability: AiEgressCapability,
+    ) -> AiEgressManifest {
+        AiEgressManifest {
             provider_profile_id: "compatible-profile".to_owned(),
             provider_kind: ProviderKind::OpenAiCompatible.as_str().to_owned(),
             model: request.model.clone(),
             destination: destination.to_owned(),
             destination_trust: AiDestinationTrust::ExternalProcessor,
-            capability: AiEgressCapability::ModelInference,
+            capability,
             scope: AiScope::new("project", "compatible-test"),
             session_id: Some(session_id),
             run_id: Some(run_id),
@@ -417,9 +422,30 @@ mod tests {
             residency: None,
             policy_version: "test".to_owned(),
             consent_reference: None,
-        };
-        let proof = AiEgressDecision::allow(&manifest, "test", "test-user")
-            .authorize(&manifest)
+        }
+    }
+
+    fn context(request: &ModelRequest, destination: &str) -> ProviderRequestContext {
+        context_with_tool_results(request, destination, 0)
+    }
+
+    fn context_with_tool_results(
+        request: &ModelRequest,
+        destination: &str,
+        tool_results: usize,
+    ) -> ProviderRequestContext {
+        let session_id = AiSessionId::new();
+        let run_id = AiRunId::new();
+        let attempt_id = uuid::Uuid::new_v4();
+        let inference = manifest(
+            request,
+            destination,
+            session_id,
+            run_id,
+            AiEgressCapability::ModelInference,
+        );
+        let proof = AiEgressDecision::allow(&inference, "test", "test-user")
+            .authorize(&inference)
             .expect("manifest should authorize");
         let budget = AiBudgetReservation::new_reserved(
             AiBudgetReservationId::new(),
@@ -449,8 +475,32 @@ mod tests {
             time::OffsetDateTime::now_utc(),
         )
         .expect("budget should authorize");
-        ProviderRequestContext::new(session_id, run_id, "test", budget, manifest, proof)
-            .expect("context should validate")
+        let mut context =
+            ProviderRequestContext::new(session_id, run_id, "test", budget, inference, proof)
+                .expect("context should validate");
+        for index in 0..tool_results {
+            let mut tool_manifest = manifest(
+                request,
+                destination,
+                session_id,
+                run_id,
+                AiEgressCapability::ToolResult,
+            );
+            tool_manifest.sources = vec![AiDataSourceRef {
+                kind: "application_tool_result".to_owned(),
+                reference: uuid::Uuid::new_v4().to_string(),
+                classification: DataClassification::Internal,
+                trust: AiSourceTrust::ResolverResult,
+            }];
+            tool_manifest.purpose = format!("test-tool-result-{index}");
+            let tool_proof = AiEgressDecision::allow(&tool_manifest, "test", "test-user")
+                .authorize(&tool_manifest)
+                .expect("tool manifest should authorize");
+            context = context
+                .with_authorized_transfer(tool_manifest, tool_proof)
+                .expect("tool transfer should bind");
+        }
+        context
     }
 
     async fn mock_server() -> (
@@ -559,6 +609,262 @@ mod tests {
                 )
                 .await,
             Err(ProviderError::EgressDenied)
+        ));
+    }
+
+    async fn sse_server(
+        body: &'static str,
+    ) -> (
+        String,
+        oneshot::Receiver<Vec<u8>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("loopback listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let endpoint = format!("http://{address}/v1/responses");
+        let (request_tx, request_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("request should connect");
+            let mut request = Vec::new();
+            let mut buffer = vec![0_u8; 64 * 1024];
+            // Read the full request: headers plus the declared body length.
+            loop {
+                let count = socket.read(&mut buffer).await.expect("request should read");
+                request.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(split) = text.find("\r\n\r\n") {
+                    let length = text[..split]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= split + 4 + length || count == 0 {
+                        break;
+                    }
+                }
+            }
+            let _ = request_tx.send(request);
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("headers should write");
+            socket
+                .write_all(body.as_bytes())
+                .await
+                .expect("body should write");
+        });
+        (endpoint, request_rx, task)
+    }
+
+    fn request_json(raw: Vec<u8>) -> serde_json::Value {
+        let raw = String::from_utf8(raw).expect("request should be UTF-8");
+        let (_, body) = raw
+            .split_once("\r\n\r\n")
+            .expect("request should have a body");
+        serde_json::from_str(body).expect("request body should be JSON")
+    }
+
+    fn stateless_provider(endpoint: &str) -> OpenAiCompatibleProvider {
+        let reference = SecretRef::parse("compatible/test").expect("reference should parse");
+        let mut config = OpenAiCompatibleProviderConfig::new(
+            "compatible-profile",
+            endpoint.to_owned(),
+            reference.clone(),
+            "deployment-reviewed",
+        );
+        config.capabilities.custom_tools = true;
+        OpenAiCompatibleProvider::new(
+            config,
+            Arc::new(TestEndpointPolicy(endpoint.to_owned(), true)),
+            Arc::new(TestSecrets(reference)),
+        )
+        .expect("compatible provider should build")
+    }
+
+    fn read_tool() -> crate::ModelToolDefinition {
+        crate::ModelToolDefinition {
+            tool_id: "records.read".to_owned(),
+            provider_name: "records_read".to_owned(),
+            fingerprint: "reviewed-fingerprint".to_owned(),
+            description: "Read one reviewed record.".to_owned(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            strict: true,
+            defer_loading: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn stateless_tool_continuation_replays_without_provider_retention() {
+        // Turn 1: the model calls one tool; no response reference is surfaced.
+        let (endpoint, request_rx, server) = sse_server(concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"model\":\"compatible-test\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc-1\",\"call_id\":\"call-1\",\"name\":\"records_read\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc-1\",\"delta\":\"{\\\"id\\\":\\\"7\\\"}\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc-1\",\"arguments\":\"{\\\"id\\\":\\\"7\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"model\":\"compatible-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}\n\n"
+        ))
+        .await;
+        let provider = stateless_provider(&endpoint);
+        assert!(provider.capabilities().stateless_continuation);
+        assert!(!provider.capabilities().provider_retained_continuation);
+        let mut first = request();
+        first.continuation_mode = ModelContinuationMode::StatelessReplay;
+        first.tools = vec![read_tool()];
+        let events = provider
+            .stream(first.clone(), context(&first, &endpoint))
+            .await
+            .expect("stateless stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stateless stream should normalize");
+        assert!(matches!(
+            events.first(),
+            Some(ProviderEvent::ResponseStarted { response_id: None })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::ResponseCompleted { response_id: None })
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolCallCompleted { call_id, .. } if call_id == "call-1"
+        )));
+        let body = request_json(request_rx.await.expect("request should be captured"));
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+        server.await.expect("mock server should finish");
+
+        // Turn 2: the bounded conversation and the tool result are replayed.
+        let (endpoint2, request_rx, server) = sse_server(concat!(
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-2\",\"model\":\"compatible-test\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-2\",\"model\":\"compatible-test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":9,\"output_tokens\":1}}}\n\n"
+        ))
+        .await;
+        let provider = stateless_provider(&endpoint2);
+        let mut second = request();
+        second.instructions = Vec::new();
+        second.continuation_mode = ModelContinuationMode::StatelessReplay;
+        second.tools = vec![read_tool()];
+        second.continuation = Some(crate::ModelContinuation::StatelessConversation {
+            instructions: vec!["Return a synthetic greeting.".to_owned()],
+            messages: vec![
+                crate::ModelConversationMessage::User {
+                    content: vec![ModelInputBlock::Text {
+                        text: "hello".to_owned(),
+                    }],
+                },
+                crate::ModelConversationMessage::Assistant {
+                    content: String::new(),
+                    tool_calls: vec![crate::ModelConversationToolCall {
+                        call_id: "call-1".to_owned(),
+                        tool_id: "records.read".to_owned(),
+                        provider_name: "records_read".to_owned(),
+                        tool_fingerprint: "reviewed-fingerprint".to_owned(),
+                        arguments: serde_json::json!({"id": "7"}),
+                    }],
+                },
+            ],
+        });
+        second.input = vec![ModelInputBlock::ToolResult {
+            call_id: "call-1".to_owned(),
+            tool_id: "records.read".to_owned(),
+            output: serde_json::json!({"record": 7}),
+        }];
+        let events = provider
+            .stream(
+                second.clone(),
+                context_with_tool_results(&second, &endpoint2, 1),
+            )
+            .await
+            .expect("stateless continuation should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stateless continuation should normalize");
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            ProviderEvent::ResponseStarted {
+                response_id: Some(_)
+            } | ProviderEvent::ResponseCompleted {
+                response_id: Some(_)
+            }
+        )));
+        let body = request_json(request_rx.await.expect("request should be captured"));
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["instructions"], "Return a synthetic greeting.");
+        assert_eq!(
+            body["input"],
+            serde_json::json!([
+                {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {"type": "function_call", "call_id": "call-1", "name": "records_read", "arguments": "{\"id\":\"7\"}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "{\"record\":7}"}
+            ])
+        );
+        server.await.expect("mock server should finish");
+    }
+
+    #[tokio::test]
+    async fn stateless_replay_is_refused_with_provider_retention() {
+        let reference = SecretRef::parse("compatible/test").expect("reference should parse");
+        let endpoint = "http://127.0.0.1:1/v1/responses".to_owned();
+        let mut config = OpenAiCompatibleProviderConfig::new(
+            "compatible-profile",
+            endpoint.clone(),
+            reference.clone(),
+            "deployment-reviewed",
+        );
+        config.capabilities.custom_tools = true;
+        config.capabilities.provider_retained_continuation = true;
+        let provider = OpenAiCompatibleProvider::new(
+            config,
+            Arc::new(TestEndpointPolicy(endpoint.clone(), true)),
+            Arc::new(TestSecrets(reference)),
+        )
+        .expect("compatible provider should build");
+        assert!(!provider.capabilities().stateless_continuation);
+        let mut stateless = request();
+        stateless.continuation_mode = ModelContinuationMode::StatelessReplay;
+        assert!(matches!(
+            provider
+                .stream(stateless.clone(), context(&stateless, &endpoint))
+                .await,
+            Err(ProviderError::Unsupported)
+        ));
+
+        // A profile without custom tools does not declare stateless replay.
+        let reference = SecretRef::parse("compatible/test").expect("reference should parse");
+        let text_only = OpenAiCompatibleProvider::new(
+            OpenAiCompatibleProviderConfig::new(
+                "compatible-profile",
+                endpoint.clone(),
+                reference.clone(),
+                "deployment-reviewed",
+            ),
+            Arc::new(TestEndpointPolicy(endpoint.clone(), true)),
+            Arc::new(TestSecrets(reference)),
+        )
+        .expect("text-only provider should build");
+        assert!(!text_only.capabilities().stateless_continuation);
+        assert!(matches!(
+            text_only
+                .stream(stateless.clone(), context(&stateless, &endpoint))
+                .await,
+            Err(ProviderError::Unsupported)
         ));
     }
 

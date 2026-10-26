@@ -11,7 +11,7 @@ use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 use crate::{
     AiError, AiProviderFileDeletionRequest, AiProviderFileDeletionService,
     ProviderBackgroundBinding, ProviderBackgroundObservation, ProviderBackgroundRetrievalBinding,
@@ -26,20 +26,20 @@ use crate::{
     SecretRef,
 };
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 const OPENAI_FILES_ENDPOINT: &str = "https://api.openai.com/v1/files";
-#[cfg(feature = "provider-xai")]
+#[cfg(feature = "provider-xai-core")]
 const XAI_RESPONSES_ENDPOINT: &str = "https://api.x.ai/v1/responses";
 const MAXIMUM_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_RESPONSES_STREAM_EVENTS: usize = 65_536;
 const MAXIMUM_RESPONSES_TOOL_CALLS: usize = 64;
 const MAXIMUM_RESPONSES_VISIBLE_BYTES: usize = 64 * 1024 * 1024;
 const MAXIMUM_RESPONSES_TOOL_ARGUMENT_BYTES: usize = 16 * 1024 * 1024;
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 const MAXIMUM_BACKGROUND_ACKNOWLEDGEMENT_BYTES: usize = 1024 * 1024;
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 const MAXIMUM_FILE_DELETE_RESPONSE_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,7 +49,7 @@ enum ResponsesFlavor {
     Compatible,
 }
 
-#[cfg(feature = "provider-openai-compatible")]
+#[cfg(feature = "provider-openai-compatible-core")]
 #[derive(Clone, Debug)]
 pub(super) struct CompatibleRouteBinding {
     pub(super) profile_id: String,
@@ -84,7 +84,7 @@ pub struct OpenAiProviderConfig {
 
 impl OpenAiProviderConfig {
     /// Creates secure defaults for the native Responses endpoint.
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     pub fn new(credential: SecretRef) -> Self {
         Self {
             credential,
@@ -104,7 +104,7 @@ impl OpenAiProviderConfig {
     /// Returns [`ProviderError::InvalidConfiguration`] for duplicate exact
     /// model declarations. Individual profiles are already validated by
     /// [`ModelReasoningEffortProfile::new`].
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     pub fn with_reasoning_effort_profiles(
         mut self,
         profiles: Vec<ModelReasoningEffortProfile>,
@@ -123,7 +123,7 @@ impl OpenAiProviderConfig {
     /// # Errors
     ///
     /// Rejects an empty, oversized, duplicate, or control-bearing model set.
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     pub fn with_native_tool_search_models(
         mut self,
         models: impl IntoIterator<Item = String>,
@@ -156,7 +156,7 @@ pub struct OpenAiProvider {
     provider_kind: ProviderKind,
     require_xai_zero_data_retention: bool,
     capabilities: ProviderCapabilities,
-    #[cfg(feature = "provider-openai-compatible")]
+    #[cfg(feature = "provider-openai-compatible-core")]
     compatible_binding: Option<CompatibleRouteBinding>,
 }
 
@@ -167,7 +167,7 @@ pub struct OpenAiProvider {
 /// retrieve file content. Each call resolves credentials just in time, sends
 /// an exact fixed-endpoint delete, validates the exact deletion response, and
 /// then requires authoritative retrieval to report the same file as absent.
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 pub struct OpenAiFileDeletionService {
     provider_profile_id: String,
     config: OpenAiProviderConfig,
@@ -176,7 +176,7 @@ pub struct OpenAiFileDeletionService {
     files_endpoint: String,
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 impl std::fmt::Debug for OpenAiFileDeletionService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -192,7 +192,7 @@ impl std::fmt::Debug for OpenAiFileDeletionService {
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 impl OpenAiFileDeletionService {
     /// Builds a deletion service fixed to OpenAI's official Files endpoint
     /// with redirects disabled.
@@ -236,7 +236,7 @@ impl OpenAiFileDeletionService {
                 "OpenAI file-deletion profile or timeout is invalid".to_owned(),
             ));
         }
-        let client = reqwest::Client::builder()
+        let client = super::http::client_builder()?
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()
@@ -254,7 +254,7 @@ impl OpenAiFileDeletionService {
         })
     }
 
-    #[cfg(all(test, feature = "provider-openai"))]
+    #[cfg(all(test, feature = "provider-openai-core"))]
     fn for_loopback_test(
         provider_profile_id: impl Into<String>,
         config: OpenAiProviderConfig,
@@ -308,7 +308,7 @@ impl OpenAiFileDeletionService {
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 #[async_trait]
 impl AiProviderFileDeletionService for OpenAiFileDeletionService {
     async fn delete_and_confirm_absent(
@@ -365,7 +365,7 @@ impl OpenAiProvider {
     ///
     /// Returns [`ProviderError::InvalidConfiguration`] for invalid safe header
     /// metadata or an HTTP client construction failure.
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     pub fn new(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -377,7 +377,7 @@ impl OpenAiProvider {
             ResponsesFlavor::OpenAi,
             false,
             None,
-            #[cfg(feature = "provider-openai-compatible")]
+            #[cfg(feature = "provider-openai-compatible-core")]
             None,
         )
     }
@@ -389,7 +389,7 @@ impl OpenAiProvider {
         flavor: ResponsesFlavor,
         require_xai_zero_data_retention: bool,
         compatible_capabilities: Option<ProviderCapabilities>,
-        #[cfg(feature = "provider-openai-compatible")] compatible_binding: Option<
+        #[cfg(feature = "provider-openai-compatible-core")] compatible_binding: Option<
             CompatibleRouteBinding,
         >,
     ) -> Result<Self, ProviderError> {
@@ -411,7 +411,7 @@ impl OpenAiProvider {
                 "OpenAI-compatible profile is incomplete".to_owned(),
             ));
         }
-        #[cfg(feature = "provider-openai-compatible")]
+        #[cfg(feature = "provider-openai-compatible-core")]
         if flavor == ResponsesFlavor::Compatible && compatible_binding.is_none() {
             return Err(ProviderError::InvalidConfiguration(
                 "OpenAI-compatible route binding is incomplete".to_owned(),
@@ -441,7 +441,7 @@ impl OpenAiProvider {
                 "OpenAI native tool-search models are invalid".to_owned(),
             ));
         }
-        let client = reqwest::Client::builder()
+        let client = super::http::client_builder()?
             .redirect(reqwest::redirect::Policy::none())
             .timeout(config.timeout)
             .build()
@@ -481,6 +481,8 @@ impl OpenAiProvider {
                 parallel_tool_calls: flavor == ResponsesFlavor::XAi,
                 structured_output: true,
                 provider_retained_continuation: config.store_responses,
+                stateless_continuation: flavor == ResponsesFlavor::OpenAi
+                    && !config.store_responses,
                 reasoning_effort_profiles: if flavor == ResponsesFlavor::OpenAi {
                     config.reasoning_effort_profiles.clone()
                 } else {
@@ -517,12 +519,12 @@ impl OpenAiProvider {
             provider_kind,
             require_xai_zero_data_retention,
             capabilities,
-            #[cfg(feature = "provider-openai-compatible")]
+            #[cfg(feature = "provider-openai-compatible-core")]
             compatible_binding,
         })
     }
 
-    #[cfg(feature = "provider-xai")]
+    #[cfg(feature = "provider-xai-core")]
     pub(super) fn new_xai(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -535,12 +537,12 @@ impl OpenAiProvider {
             ResponsesFlavor::XAi,
             require_zero_data_retention,
             None,
-            #[cfg(feature = "provider-openai-compatible")]
+            #[cfg(feature = "provider-openai-compatible-core")]
             None,
         )
     }
 
-    #[cfg(feature = "provider-openai-compatible")]
+    #[cfg(feature = "provider-openai-compatible-core")]
     pub(super) fn new_compatible(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -559,7 +561,7 @@ impl OpenAiProvider {
         )
     }
 
-    #[cfg(all(test, feature = "provider-openai"))]
+    #[cfg(all(test, feature = "provider-openai-core"))]
     fn for_loopback_test(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -577,12 +579,12 @@ impl OpenAiProvider {
             ResponsesFlavor::OpenAi,
             false,
             None,
-            #[cfg(feature = "provider-openai-compatible")]
+            #[cfg(feature = "provider-openai-compatible-core")]
             None,
         )
     }
 
-    #[cfg(all(test, feature = "provider-xai"))]
+    #[cfg(all(test, feature = "provider-xai-core"))]
     pub(super) fn for_xai_loopback_test(
         config: OpenAiProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
@@ -601,7 +603,7 @@ impl OpenAiProvider {
             ResponsesFlavor::XAi,
             require_zero_data_retention,
             None,
-            #[cfg(feature = "provider-openai-compatible")]
+            #[cfg(feature = "provider-openai-compatible-core")]
             None,
         )
     }
@@ -631,7 +633,11 @@ impl OpenAiProvider {
     ) -> Result<Value, ProviderError> {
         self.capabilities
             .validate_reasoning_effort(&request.model, request.reasoning_effort)?;
-        if request.continuation_mode != crate::ModelContinuationMode::ProviderRetained {
+        // Stateless replay is available only where the declared capability
+        // admits it: never with stored responses, on xAI, or for a compatible
+        // profile without custom tools.
+        let stateless = request.continuation_mode == crate::ModelContinuationMode::StatelessReplay;
+        if stateless && !self.capabilities.stateless_continuation {
             return Err(ProviderError::Unsupported);
         }
         if request.reasoning_summary.maximum_bytes().is_some()
@@ -766,6 +772,25 @@ impl OpenAiProvider {
         }
 
         let mut input = Vec::with_capacity(usize::from(!content.is_empty()) + tool_outputs.len());
+        let mut instructions = &request.instructions;
+        if let Some(ModelContinuation::StatelessConversation {
+            instructions: replayed,
+            messages,
+        }) = &request.continuation
+        {
+            if !stateless {
+                return Err(ProviderError::InvalidRequest);
+            }
+            let definitions = request
+                .tools
+                .iter()
+                .map(|tool| (tool.tool_id.as_str(), tool))
+                .collect::<BTreeMap<_, _>>();
+            for message in messages {
+                stateless_input_items(message, &definitions, &mut input)?;
+            }
+            instructions = replayed;
+        }
         if !content.is_empty() {
             input.push(json!({"role": "user", "content": content}));
         }
@@ -779,13 +804,13 @@ impl OpenAiProvider {
             "parallel_tool_calls": self.capabilities.parallel_tool_calls
         });
         if let Some(ModelContinuation::ProviderResponse { response_id }) = &request.continuation {
-            if !self.config.store_responses {
+            if !self.config.store_responses || stateless {
                 return Err(ProviderError::Unsupported);
             }
             body["previous_response_id"] = Value::String(response_id.clone());
         }
-        if !request.instructions.is_empty() {
-            body["instructions"] = Value::String(request.instructions.join("\n\n"));
+        if !instructions.is_empty() {
+            body["instructions"] = Value::String(instructions.join("\n\n"));
         }
         if let Some(maximum_output_tokens) = request.maximum_output_tokens {
             body["max_output_tokens"] = Value::from(maximum_output_tokens);
@@ -836,7 +861,7 @@ impl AiProvider for OpenAiProvider {
         context: &ProviderRequestContext,
     ) -> Result<(), ProviderError> {
         context.validate_request(&self.provider_kind, request)?;
-        #[cfg(feature = "provider-openai-compatible")]
+        #[cfg(feature = "provider-openai-compatible-core")]
         if let Some(binding) = &self.compatible_binding
             && !context.permits_profile_destination_retention(
                 &self.provider_kind,
@@ -862,7 +887,7 @@ impl AiProvider for OpenAiProvider {
         Ok(())
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn submit_background(
         &self,
         request: ModelRequest,
@@ -980,7 +1005,7 @@ impl AiProvider for OpenAiProvider {
         ))
     }
 
-    #[cfg(feature = "provider-openai")]
+    #[cfg(feature = "provider-openai-core")]
     async fn retrieve_background(
         &self,
         binding: ProviderBackgroundRetrievalBinding,
@@ -1030,7 +1055,7 @@ impl AiProvider for OpenAiProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&self.provider_kind, &request)?;
-        #[cfg(feature = "provider-openai-compatible")]
+        #[cfg(feature = "provider-openai-compatible-core")]
         if let Some(binding) = &self.compatible_binding
             && !context.permits_profile_destination_retention(
                 &self.provider_kind,
@@ -1109,6 +1134,10 @@ impl AiProvider for OpenAiProvider {
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
         let maximum_reasoning_summary_bytes = request.reasoning_summary.maximum_bytes();
+        // A stateless turn never surfaces a provider response reference, so no
+        // later turn can continue from provider-retained state.
+        let surface_response_id =
+            request.continuation_mode != crate::ModelContinuationMode::StatelessReplay;
         let output = async_stream::try_stream! {
             let mut decoder = SseDecoder::default();
             let mut normalizer = OpenAiEventNormalizer::new(
@@ -1123,7 +1152,13 @@ impl AiProvider for OpenAiProvider {
                 for payload in decoder.push(&chunk)? {
                     let value: Value = serde_json::from_str(&payload)
                         .map_err(|_| ProviderError::Rejected)?;
-                    for event in normalizer.normalize(&value)? {
+                    for mut event in normalizer.normalize(&value)? {
+                        if !surface_response_id
+                            && let ProviderEvent::ResponseStarted { response_id }
+                            | ProviderEvent::ResponseCompleted { response_id } = &mut event
+                        {
+                            *response_id = None;
+                        }
                         yield event;
                     }
                 }
@@ -1133,6 +1168,83 @@ impl AiProvider for OpenAiProvider {
         };
         Ok(Box::pin(output))
     }
+}
+
+/// Appends one stateless conversation message as Responses input items.
+///
+/// Assistant tool calls and tool results must match the exact reviewed
+/// definitions offered in this request. Hidden reasoning is never replayed.
+fn stateless_input_items(
+    message: &crate::ModelConversationMessage,
+    definitions: &BTreeMap<&str, &crate::ModelToolDefinition>,
+    input: &mut Vec<Value>,
+) -> Result<(), ProviderError> {
+    match message {
+        crate::ModelConversationMessage::User { content } => {
+            let content = content
+                .iter()
+                .map(|block| match block {
+                    ModelInputBlock::Text { text } => {
+                        Ok(json!({"type": "input_text", "text": text}))
+                    }
+                    ModelInputBlock::Json { value } => {
+                        Ok(json!({"type": "input_text", "text": value.to_string()}))
+                    }
+                    ModelInputBlock::Attachment { .. } | ModelInputBlock::ToolResult { .. } => {
+                        Err(ProviderError::InvalidRequest)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            input.push(json!({"role": "user", "content": content}));
+        }
+        crate::ModelConversationMessage::Assistant {
+            content,
+            tool_calls,
+        } => {
+            if !content.is_empty() {
+                input.push(json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": content}]
+                }));
+            }
+            for call in tool_calls {
+                let definition = definitions
+                    .get(call.tool_id.as_str())
+                    .ok_or(ProviderError::InvalidRequest)?;
+                if definition.provider_name != call.provider_name
+                    || definition.fingerprint != call.tool_fingerprint
+                {
+                    return Err(ProviderError::InvalidRequest);
+                }
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": call.call_id,
+                    "name": call.provider_name,
+                    "arguments": call.arguments.to_string()
+                }));
+            }
+        }
+        crate::ModelConversationMessage::Tool {
+            call_id,
+            tool_id,
+            provider_name,
+            output,
+        } => {
+            let definition = definitions
+                .get(tool_id.as_str())
+                .ok_or(ProviderError::InvalidRequest)?;
+            if definition.provider_name != *provider_name {
+                return Err(ProviderError::InvalidRequest);
+            }
+            input.push(json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": output.to_string()
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn openai_http_error(status: reqwest::StatusCode) -> Option<ProviderError> {
@@ -1149,7 +1261,7 @@ fn openai_http_error(status: reqwest::StatusCode) -> Option<ProviderError> {
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn openai_background_retrieval_http_error(status: reqwest::StatusCode) -> Option<ProviderError> {
     if status.is_success() {
         None
@@ -1169,7 +1281,7 @@ fn openai_background_retrieval_http_error(status: reqwest::StatusCode) -> Option
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 async fn bounded_provider_json(
     response: reqwest::Response,
     maximum_bytes: usize,
@@ -1186,7 +1298,7 @@ async fn bounded_provider_json(
     serde_json::from_slice(&body).map_err(|_| ProviderError::Rejected)
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn normalize_background_response(
     response: &Value,
     binding: &ProviderBackgroundRetrievalBinding,
@@ -1268,7 +1380,7 @@ fn normalize_background_response(
     ProviderBackgroundObservation::new(status, events, usage)
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn normalize_background_usage(
     response: &Value,
     binding: &ProviderBackgroundRetrievalBinding,
@@ -1311,7 +1423,7 @@ fn normalize_background_usage(
     ))
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn normalize_background_output(
     output: &[Value],
     status: ProviderBackgroundStatus,
@@ -1408,7 +1520,7 @@ fn normalize_background_output(
     Ok(events)
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 #[allow(clippy::too_many_arguments)]
 fn normalize_background_content_item(
     item: &Value,
@@ -1488,7 +1600,7 @@ fn normalize_background_content_item(
     }
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn record_background_visible_bytes(
     total: &mut usize,
     additional: usize,
@@ -1501,7 +1613,7 @@ fn record_background_visible_bytes(
     Ok(())
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn valid_provider_identifier(value: &str, prefix: &str) -> bool {
     value.starts_with(prefix)
         && (prefix.len() + 1..=200).contains(&value.len())
@@ -1510,7 +1622,7 @@ fn valid_provider_identifier(value: &str, prefix: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 fn valid_openai_file_id(value: &str) -> bool {
     value.starts_with("file-")
         && (6..=200).contains(&value.len())
@@ -1519,7 +1631,7 @@ fn valid_openai_file_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-#[cfg(feature = "provider-openai")]
+#[cfg(feature = "provider-openai-core")]
 async fn bounded_json(response: reqwest::Response) -> Result<Value, AiError> {
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();
@@ -2163,7 +2275,7 @@ fn model_builtin_kind(tool: &ModelBuiltinTool) -> &'static str {
     }
 }
 
-#[cfg(all(test, feature = "provider-openai"))]
+#[cfg(all(test, feature = "provider-openai-core"))]
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -3146,6 +3258,107 @@ mod tests {
     }
 
     #[test]
+    fn stateless_replay_maps_the_conversation_without_storage() {
+        let reference =
+            SecretRef::parse("openai/stateless-test").expect("test secret reference should parse");
+        let secrets: Arc<dyn AiSecretStore> =
+            Arc::new(TestSecrets(reference.clone(), "not-a-real-key".to_owned()));
+        let tool = crate::ModelToolDefinition {
+            tool_id: "records.read".to_owned(),
+            provider_name: "records_read".to_owned(),
+            fingerprint: "reviewed-fingerprint".to_owned(),
+            description: "Read one reviewed record.".to_owned(),
+            parameters: json!({
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+                "additionalProperties": false
+            }),
+            strict: true,
+            defer_loading: false,
+        };
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: Vec::new(),
+            input: vec![ModelInputBlock::ToolResult {
+                call_id: "call-1".to_owned(),
+                tool_id: "records.read".to_owned(),
+                output: json!({"record": 54}),
+            }],
+            continuation: Some(ModelContinuation::StatelessConversation {
+                instructions: vec!["Answer from the record.".to_owned()],
+                messages: vec![
+                    crate::ModelConversationMessage::User {
+                        content: vec![ModelInputBlock::Text {
+                            text: "Read record 54".to_owned(),
+                        }],
+                    },
+                    crate::ModelConversationMessage::Assistant {
+                        content: "Reading it.".to_owned(),
+                        tool_calls: vec![crate::ModelConversationToolCall {
+                            call_id: "call-1".to_owned(),
+                            tool_id: "records.read".to_owned(),
+                            provider_name: "records_read".to_owned(),
+                            tool_fingerprint: "reviewed-fingerprint".to_owned(),
+                            arguments: json!({"id": "54"}),
+                        }],
+                    },
+                ],
+            }),
+            continuation_mode: crate::ModelContinuationMode::StatelessReplay,
+            tools: vec![tool],
+            builtin_tools: Vec::new(),
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(64),
+        };
+        let provider_context = context("test-model", 1_000);
+
+        let provider = OpenAiProvider::new(
+            OpenAiProviderConfig::new(reference.clone()),
+            secrets.clone(),
+        )
+        .expect("default provider should build");
+        assert!(provider.capabilities().stateless_continuation);
+        let body = provider
+            .request_body(&request, &provider_context)
+            .expect("stateless replay should map");
+        assert_eq!(body["store"], false);
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["instructions"], "Answer from the record.");
+        assert_eq!(
+            body["input"],
+            json!([
+                {"role": "user", "content": [{"type": "input_text", "text": "Read record 54"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Reading it."}]},
+                {"type": "function_call", "call_id": "call-1", "name": "records_read", "arguments": "{\"id\":\"54\"}"},
+                {"type": "function_call_output", "call_id": "call-1", "output": "{\"record\":54}"}
+            ])
+        );
+
+        // A changed tool definition cannot be replayed as the reviewed call.
+        let mut drifted = request.clone();
+        drifted.tools[0].fingerprint = "other-fingerprint".to_owned();
+        assert!(matches!(
+            provider.request_body(&drifted, &provider_context),
+            Err(ProviderError::InvalidRequest)
+        ));
+
+        // Stored responses keep provider retention, so stateless replay is refused.
+        let mut config = OpenAiProviderConfig::new(reference);
+        config.store_responses = true;
+        let retained =
+            OpenAiProvider::new(config, secrets).expect("retained-response provider should build");
+        assert!(!retained.capabilities().stateless_continuation);
+        assert!(matches!(
+            retained.request_body(&request, &provider_context),
+            Err(ProviderError::Unsupported)
+        ));
+    }
+
+    #[test]
     fn builtin_call_ceiling_maps_to_the_openai_wire_contract() {
         let reference = SecretRef::parse("openai/builtin-limit-test")
             .expect("test secret reference should parse");
@@ -3766,6 +3979,59 @@ mod tests {
                 .await,
             Err(ProviderError::EgressDenied)
         ));
+    }
+
+    #[tokio::test]
+    async fn stateless_turns_surface_no_provider_response_id() {
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"model\":\"test-model\"}}\n\n",
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"model\":\"test-model\",\"status\":\"completed\",\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\n"
+        );
+        let (endpoint, server) = mock_server(sse).await;
+        let reference = SecretRef::parse("openai/test").expect("reference should parse");
+        let provider = OpenAiProvider::for_loopback_test(
+            OpenAiProviderConfig::new(reference.clone()),
+            Arc::new(TestSecrets(reference, "not-a-real-key".to_owned())),
+            endpoint,
+        )
+        .expect("provider should build");
+        let request = ModelRequest {
+            model: "test-model".to_owned(),
+            instructions: vec!["Respond briefly.".to_owned()],
+            input: vec![ModelInputBlock::Text {
+                text: "synthetic hello".to_owned(),
+            }],
+            continuation: None,
+            continuation_mode: crate::ModelContinuationMode::StatelessReplay,
+            tools: vec![],
+            builtin_tools: vec![],
+            maximum_builtin_tool_calls: None,
+            reasoning_summary: ModelReasoningSummaryRequest::Disabled,
+            reasoning_effort: crate::ModelReasoningEffort::Unspecified,
+            output_schema: None,
+            maximum_output_tokens: Some(32),
+        };
+        let estimated_bytes = request.conservative_egress_bytes();
+        let events = provider
+            .stream(request, context("test-model", estimated_bytes))
+            .await
+            .expect("stream should start")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("stream should normalize");
+        server.await.expect("server task should finish");
+        assert_eq!(
+            events.first(),
+            Some(&ProviderEvent::ResponseStarted { response_id: None })
+        );
+        assert_eq!(
+            events.last(),
+            Some(&ProviderEvent::ResponseCompleted { response_id: None })
+        );
     }
 
     #[tokio::test]

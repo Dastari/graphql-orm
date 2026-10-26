@@ -18,6 +18,35 @@ checkpoint facts. For the current workspace baseline and active gates, use the
 [implementation status](docs/implementation-status.md) and the central
 [AI production-readiness plan](../../docs/plans/active/ai-production-readiness/README.md).
 
+## Unreleased - 0.114.0
+
+- Hosts can choose the provider TLS stack. New adapter-only features
+  `provider-openai-core`, `provider-anthropic-core`, `provider-xai-core`,
+  `provider-ollama-core` and `provider-openai-compatible-core` combine with
+  exactly one of `provider-tls-aws-lc`, `provider-tls-ring` or
+  `provider-tls-native`. Each existing `provider-*` feature is its `-core`
+  feature plus `provider-tls-aws-lc`, so current consumers keep the same stack
+  and dependency graph. `provider-tls-ring` builds every provider client from an
+  explicit `ring` crypto provider and the platform verifier, without reading or
+  installing the process-wide default rustls provider, and pulls in no
+  `aws-lc-rs`, `aws-lc-sys` or `quinn`. Zero or several TLS features with an
+  adapter fail at compile time. New `scripts/check-ai-provider-tls.sh` and CI
+  job `ai-provider-tls` verify all of this, including `jni`, for the Linux,
+  Windows and macOS targets. The ring stack needs the system CA store (on
+  Linux, for example `ca-certificates`); another dependency enabling rustls's
+  default `aws_lc_rs` feature still brings aws-lc into a host's build.
+- Responses tool calls without provider retention. The OpenAI adapter (when
+  `store_responses` is false) and OpenAI-compatible profiles with custom tools
+  and no provider-retained continuation now report `stateless_continuation` and
+  accept `ModelContinuationMode::StatelessReplay`. Such turns are sent with
+  `store: false` and no `previous_response_id`, replay the bounded conversation
+  as Responses input items, and surface no provider response ID. Reasoning is
+  not replayed, so reasoning models re-reason on each turn. Retained mode and
+  xAI are unchanged; stateless requests to a retaining configuration are
+  refused.
+- No breaking change: additive features and behaviour only; no public type,
+  GraphQL SDL or persistence change. Schema module unchanged.
+
 ## Unreleased - 0.113.0
 
 - Add `OrmAiBudgetPolicyProvisioner`, a trusted host-only (Rust, not GraphQL)
