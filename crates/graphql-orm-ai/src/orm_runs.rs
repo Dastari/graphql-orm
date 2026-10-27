@@ -6095,7 +6095,13 @@ fn valid_provider_reference(value: &str) -> bool {
 fn valid_provider_kind(value: &str) -> bool {
     matches!(
         value,
-        "openai" | "anthropic" | "xai" | "ollama" | "openai_compatible" | "local_harness"
+        "openai"
+            | "anthropic"
+            | "xai"
+            | "ollama"
+            | "openai_compatible"
+            | "local_harness"
+            | "chat_completions"
     )
 }
 
@@ -6140,7 +6146,7 @@ pub(crate) fn coordinator_checkpoint_hash(
     let provider_kind_hash_value = match provider_kind {
         "openai" => "open_ai",
         "openai_compatible" => "open_ai_compatible",
-        "anthropic" | "xai" | "ollama" | "local_harness" => provider_kind,
+        "anthropic" | "xai" | "ollama" | "local_harness" | "chat_completions" => provider_kind,
         _ => return Err(AiError::PersistenceFailed),
     };
     let protected_state_hash = hex::encode(Sha256::digest(

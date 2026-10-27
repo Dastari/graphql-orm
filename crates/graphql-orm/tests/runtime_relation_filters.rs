@@ -808,18 +808,21 @@ async fn mutation_payloads_select_to_one_relations_through_nested_read_authority
         "{deleted}"
     );
 
-    // To-many payload relations remain unsupported.
+    // To-many payload relations read a page of the committed children.
     let many = f
         .run(
             &api,
             Authority::new(),
             Default::default(),
-            "mutation($schema: String!) { updateParent(expectedSchema: $schema, key: {id: \"1\"}, input: {label: \"q\"}) { record { children { edges { node { id } } } } } }",
+            "mutation($schema: String!) { updateParent(expectedSchema: $schema, key: {id: \"1\"}, input: {label: \"q\"}) { record { children(first: 50) { edges { node { id } } } } } }",
             json!({}),
         )
         .await;
+    assert!(many.get("errors").is_none(), "{many}");
     assert!(
-        many.to_string().contains("unsupported_capability"),
+        many["data"]["updateParent"]["record"]["children"]["edges"]
+            .as_array()
+            .is_some_and(|edges| !edges.is_empty()),
         "{many}"
     );
     f.finish().await;

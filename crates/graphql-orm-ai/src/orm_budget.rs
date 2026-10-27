@@ -1670,6 +1670,7 @@ fn parse_provider_kind(value: &str) -> Result<ProviderKind, AiError> {
         "ollama" => Ok(ProviderKind::Ollama),
         "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
         "local_harness" => Ok(ProviderKind::LocalHarness),
+        "chat_completions" => Ok(ProviderKind::ChatCompletions),
         _ => Err(AiError::PersistenceFailed),
     }
 }

@@ -17,7 +17,7 @@ for historical context.
 ## Unreleased
 
 - Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
-  ORM/macros 0.76.0, profiles 0.18.0 and AI 0.115.0. Canonical operator meanings,
+  ORM/macros 0.79.0, profiles 0.18.0 and AI 0.117.0. Canonical operator meanings,
   exact operand types and closed auxiliary objects must match finished SDL;
   arbitrary record inputs, extra operators, wrong object operands and stale
   metadata fail readiness. Include `NotIn`, `Similar` and distinct spatial
@@ -29,7 +29,40 @@ for historical context.
   spatial/JSON planning codec gate remains outstanding; structural parity alone
   is not geometry planning qualification.
 
+Companion runtime/macros version: **0.79.0**.
+
+## 0.78.0 (unreleased)
+
+Companion runtime/macros version: **0.78.0**.
+
+- Runtime GraphQL mutation payloads may select the record's to-many and many-to-many (join) relations as `…Connection` pages with `first`/`last`, `after`/`before`, `where`, `orderBy`, `pageInfo` and `totalCount`, as queries do. Before, such a selection failed with `unsupported_capability`; to-one relations were already supported. Each page is planned, bounded and authorized like a query relation layer before the write (`RuntimeReadAuthority::authorize` with the relation), and read after commit through the batched relation executor, so a create or update with attached link changes, or a link mutation, shows the committed links. Rows hidden by the layer's grant are omitted from the page and its count; a layer denied outright refuses the mutation before the write; a failure while reading the page after commit is the existing committed, non-retryable `mutation_payload_failed`. The payload's record layer also loads the relation's source key fields (the join's source fields), which the host's read and output checks see.
+- SDL is unchanged: the payload `record` type already declared these connection fields. Clients that read links back with a second request can select them in the mutation instead.
+
+## 0.77.0 (unreleased)
+
+Companion runtime/macros version: **0.77.0**.
+
+- Back up runtime `DateTime` columns: `BackupValueKind::DateTime` (schema string `date_time`). Values are `BackupValue::String` holding canonical `RuntimeDateTime` text (UTC, six fractional digits) on both backends. SQLite text is canonicalized through the record engine's parse; PostgreSQL `TIMESTAMPTZ` is read typed, independent of the session `TimeZone`, and bound through `CAST(? AS TIMESTAMPTZ)`. Export refuses values without a portable form (unreadable SQLite text, PostgreSQL `±infinity`, UTC years outside 0001–9999, including after offset normalization or rounding, and leap-second text). Restore refuses non-canonical or out-of-range text before any write, including in `DryRun`, and writes stored values; no default, clock or automatic timestamp applies. Opt-in: only descriptors that declare the kind use it. Static derived date fields keep `BackupValueKind::String`, so their descriptors and schema hashes are unchanged. See [backup runtime](docs/reference/graphql-orm/backup-runtime.md#logical-rows).
+- Fix: restore of a single-key table whose rows form a self-reference cycle (A → B → A) no longer fails with "contain a self-reference cycle". Rows parent-first order cannot place are inserted last with placeholder self-reference values (`NULL` when nullable, the row's own key otherwise) and then updated to their stored values in the table's import transaction. A `UNIQUE` nullable self-reference (one-to-one) cycle restores without a transient collision. Acyclic restores are unchanged.
+- Add `BackupSelfReferenceCycle` (`from_error`): the named refusal when a staged cycle cannot take its stored values, for a non-null `UNIQUE` self-reference cycle or an append-only table's update trigger. The table's import transaction rolls back. Constraint violations and explicit trigger refusals retain the original SQLx/database cause in the standard error source chain; operational errors such as PostgreSQL cancellation/deadlock propagate unchanged.
+- Restore now preflights every table's row shapes and value kinds before importing any table. Late invalid DateTime, type or shape input leaves all target tables untouched; runtime database failures retain per-table transaction boundaries.
+- Add `Database::database_identity()` returning `DatabaseIdentity` (PostgreSQL `current_database()` and its OID; SQLite main file path), for hosts to check a restore target before writing to it.
+- **Breaking (Rust):** `BackupValueKind` gains `DateTime` and is now `#[non_exhaustive]`. Matches outside the crate need a wildcard arm; later kinds will not break them again.
+- **Breaking (GraphQL):** any schema that exposes `BackupValueKind` gains the `DATE_TIME` enum value.
+
+## 0.76.0 (unreleased)
+
 Companion runtime/macros version: **0.76.0**.
+
+- Fix: generated SQL delimits identifiers that need it, so a table, column, index or constraint named with an SQL reserved word (`order`, `join`, `select`, `user`, `group`, …) or containing other characters works on SQLite, PostgreSQL and MSSQL. This covers create-table column definitions, primary-key, unique and foreign-key lists and referenced tables, add/drop/alter column, SQLite rebuild copies, append-only triggers, constraint comments, RLS statements, SQLite introspection `PRAGMA`s, the repository and loader select/count/delete DML, primary-key ordering, and the derive-generated insert, update, delete, filter, sort, check-constraint and relation SQL. Before, SQLite refused `CREATE TABLE … (join TEXT …)` with `near "join": syntax error`.
+  - A plain identifier that is not reserved on the backend is still written bare and byte-identical, so statement text, plan hashes, migration history, schema hashes, the 0.50.2 compatibility goldens and PostgreSQL case folding are unchanged for every name that worked before. Reserved words are the ones each engine rejects as bare names, measured against SQLite 3.46 and PostgreSQL 17 (`pg_get_keywords()` categories `R` and `T`), plus the documented T-SQL reserved keywords. Introspection already read delimited names, so identities do not change.
+  - New `DatabaseBackend::render_identifier` and `render_identifier_path` expose the rule for hosts that compose SQL fragments.
+  - Mutation preimage predicates and pool-based insert rereads render physical primary-key names too; auto-generated key inserts use the declared physical column instead of assuming `id`. Qualified names split only at unquoted dots, preserving quoted segments and escaped closing delimiters in both runtime and derive SQL.
+- **Breaking (plan text):** seven SQLite keywords were accepted bare in some positions and are now always delimited: `cast`, `constraint`, `current_date`, `current_time`, `current_timestamp`, `if` and `raise`. A new plan that names such a table or column has different statement text and plan hash than 0.75.0 would render; the objects' identities are unchanged. MSSQL derive DML now brackets the table name, as `TABLE_NAME` already did. No other previously accepted name renders differently.
+
+## 0.75.0 (unreleased)
+
+Companion runtime/macros version: **0.75.0**.
 
 - Add server-managed timestamps for runtime fields: `RuntimeField::auto_timestamp: Option<RuntimeAutoTimestamp>` with `OnCreate` and `OnCreateAndUpdate`, like Rails/Django `created_at`/`updated_at`. Valid only on non-key `DateTime` fields that are not generated and have no literal default (`InvalidAutoTimestamp` with a value-free `RuntimeAutoTimestampProblem` detail). See [automatic timestamps](docs/reference/graphql-orm/runtime-schema-ir.md#automatic-timestamps).
   - Every runtime insert sets the field from the database clock, with the same expression and encoding as `CurrentTimestamp`. Every runtime update of the row refreshes `OnCreateAndUpdate` fields in the same `UPDATE`, also when no stored value changes and for the dependent `SetNull` updates of an opted-in delete. A standalone many-to-many link mutation writes no row field and leaves them unchanged; link changes attached to a create or update ride on that row write.

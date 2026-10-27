@@ -1158,6 +1158,7 @@ fn parse_provider_kind(value: &str) -> Option<ProviderKind> {
         "ollama" => Some(ProviderKind::Ollama),
         "openai_compatible" => Some(ProviderKind::OpenAiCompatible),
         "local_harness" => Some(ProviderKind::LocalHarness),
+        "chat_completions" => Some(ProviderKind::ChatCompletions),
         _ => None,
     }
 }

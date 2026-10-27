@@ -3113,7 +3113,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.76.0"
+version = "0.79.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3124,10 +3124,10 @@ dependencies = [
  "chrono",
  "convert_case 0.7.1",
  "futures",
- "graphql-orm-ai-tool-profiles",
  "geo",
  "geo-types",
  "geojson",
+ "graphql-orm-ai-tool-profiles",
  "graphql-orm-macros",
  "graphql-orm-operation-catalog",
  "graphql-orm-router-protocol",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.115.0"
+version = "0.117.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3221,7 +3221,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.76.0"
+version = "0.79.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -3242,12 +3242,13 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "agql-auth",
  "arc-swap",
  "base64",
  "cynic-parser",
+ "datadog-opentelemetry",
  "futures",
  "getrandom 0.3.4",
  "graphql-composition",

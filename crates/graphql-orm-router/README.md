@@ -15,6 +15,15 @@ The current workspace selects published Auth release tag `v0.23.0`
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
 
+Version `0.6.7` keeps preparation-test listener addresses owned across schema
+and protocol fetches. Invalid candidates still require their exact typed admission
+errors before binding; a valid-candidate control prepares while the address is
+occupied. It also constrains Datadog OpenTelemetry to `=0.5.2` with default
+features disabled: pinned Hive `0.2.19` exchanges OpenTelemetry SDK `0.32` types,
+whereas Datadog `0.5.3` selects SDK `0.33`. This constraint applies to fresh
+consumers without relying on the workspace lockfile. Public features and behavior
+are unchanged; no executable is distributed.
+
 Version `0.6.6` records the documentation-only Auth `v0.23.0` selection
 note added since the immutable `0.6.5` package tag. Rust code, routing and
 authorization are unchanged. No router executable is distributed by this change.
@@ -58,7 +67,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.6" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.7" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql
@@ -92,6 +101,20 @@ Laboratory generation and ignoring Laboratory seed configuration.
 
 The in-tree federation wire tests forward spawned router-child stderr to the
 test runner, preserving startup diagnostics when a child exits early.
+
+`bash scripts/check-router-fresh-consumer.sh` builds rustdoc from a new standalone
+consumer with no input lockfile, then verifies Datadog `0.5.2` and a single SDK
+`0.32` dependency family. Its fresh manifest, resolved lock and graph metadata
+remain available at the printed fixture path. Set `TMPDIR` for fixture placement
+and `ROUTER_CONSUMER_CARGO` when a serialized Cargo runner is required.
+
+The semver gate retains historical Rust source, package version and feature
+definitions. `scripts/prepare-router-semver-baseline.py` adds only the same
+Datadog constraint to a historical baseline pinned to Hive `=0.2.19`, which
+otherwise admits the incompatible `0.5.3` patch. Both CI and the local semver
+runner report this dependency-only adjustment explicitly and still compare the
+historical default-feature API. Neither path copies a workspace lockfile into
+consumer resolution or changes third-party source.
 
 ## Minimal programmatic start
 

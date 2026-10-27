@@ -906,6 +906,7 @@ impl OwnedPlannedMigration {
     pub(super) fn rebuilt_sqlite_tables(&self) -> impl Iterator<Item = &str> {
         self.ownership.tables().filter(|table| {
             let temporary = format!("__graphql_orm_{table}_new");
+            let temporary = DatabaseBackend::Sqlite.render_identifier_path(&temporary);
             self.statements
                 .iter()
                 .any(|sql| sql.starts_with(&format!("CREATE TABLE {temporary} ")))

@@ -11,9 +11,10 @@ use secrecy::ExposeSecret;
 use serde_json::{Value, json};
 
 use crate::{
-    AiProvider, AiSecretStore, ModelContinuation, ModelContinuationMode, ModelConversationMessage,
-    ModelInputBlock, ModelRequest, ProviderCapabilities, ProviderError, ProviderEvent,
-    ProviderEventStream, ProviderKind, ProviderRequestContext, SecretRef,
+    AiProvider, AiProviderEndpointPolicy, AiProviderKindInput, AiSecretStore, ModelContinuation,
+    ModelContinuationMode, ModelConversationMessage, ModelInputBlock, ModelRequest,
+    ProviderCapabilities, ProviderError, ProviderEvent, ProviderEventStream, ProviderKind,
+    ProviderRequestContext, SecretRef,
 };
 
 const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
@@ -60,6 +61,8 @@ pub struct AnthropicProvider {
     secrets: Arc<dyn AiSecretStore>,
     client: reqwest::Client,
     endpoint: String,
+    /// Set for a policy-checked endpoint; every egress manifest must name it.
+    bound_destination: Option<String>,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -67,7 +70,14 @@ impl std::fmt::Debug for AnthropicProvider {
         formatter
             .debug_struct("AnthropicProvider")
             .field("config", &self.config)
-            .field("endpoint", &self.endpoint)
+            .field(
+                "endpoint",
+                &if self.bound_destination.is_some() {
+                    "<deployment-authorized>"
+                } else {
+                    "<official>"
+                },
+            )
             .finish_non_exhaustive()
     }
 }
@@ -84,13 +94,50 @@ impl AnthropicProvider {
         config: AnthropicProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
     ) -> Result<Self, ProviderError> {
-        Self::build(config, secrets, ANTHROPIC_MESSAGES_ENDPOINT.to_owned())
+        Self::build(
+            config,
+            secrets,
+            ANTHROPIC_MESSAGES_ENDPOINT.to_owned(),
+            None,
+        )
+    }
+
+    /// Builds a provider for an exact deployment-approved Messages endpoint,
+    /// such as an approved gateway, a regional endpoint or a local fake server.
+    ///
+    /// The endpoint must be `http` or `https` with a host, no user
+    /// information, query or fragment, and a non-root path, and the deployment
+    /// policy must approve its normalized form for
+    /// [`AiProviderKindInput::Anthropic`]. Redirects stay disabled and the
+    /// request shape and version header are unchanged. Every egress manifest
+    /// for a request must name the normalized endpoint as its destination.
+    /// The endpoint is never taken from GraphQL or model input.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::InvalidConfiguration`] for an unsafe or denied
+    /// endpoint, an invalid timeout or HTTP-client construction failure.
+    pub fn with_endpoint(
+        config: AnthropicProviderConfig,
+        endpoint_policy: Arc<dyn AiProviderEndpointPolicy>,
+        secrets: Arc<dyn AiSecretStore>,
+        endpoint: &str,
+    ) -> Result<Self, ProviderError> {
+        let endpoint = super::endpoint::normalized_provider_endpoint(endpoint)?;
+        if !endpoint_policy.authorize_endpoint(AiProviderKindInput::Anthropic, endpoint.as_str()) {
+            return Err(ProviderError::InvalidConfiguration(
+                "Anthropic endpoint was not authorized".to_owned(),
+            ));
+        }
+        let endpoint = endpoint.as_str().to_owned();
+        Self::build(config, secrets, endpoint.clone(), Some(endpoint))
     }
 
     fn build(
         config: AnthropicProviderConfig,
         secrets: Arc<dyn AiSecretStore>,
         endpoint: String,
+        bound_destination: Option<String>,
     ) -> Result<Self, ProviderError> {
         if config.timeout.is_zero() || config.timeout > Duration::from_secs(600) {
             return Err(ProviderError::InvalidConfiguration(
@@ -111,21 +158,8 @@ impl AnthropicProvider {
             secrets,
             client,
             endpoint,
+            bound_destination,
         })
-    }
-
-    #[cfg(test)]
-    fn for_loopback_test(
-        config: AnthropicProviderConfig,
-        secrets: Arc<dyn AiSecretStore>,
-        endpoint: String,
-    ) -> Result<Self, ProviderError> {
-        if !endpoint.starts_with("http://127.0.0.1:") {
-            return Err(ProviderError::InvalidConfiguration(
-                "test endpoint must use IPv4 loopback".to_owned(),
-            ));
-        }
-        Self::build(config, secrets, endpoint)
     }
 
     fn request_body(&self, request: &ModelRequest) -> Result<Value, ProviderError> {
@@ -253,6 +287,11 @@ impl AiProvider for AnthropicProvider {
         context: ProviderRequestContext,
     ) -> Result<ProviderEventStream, ProviderError> {
         context.validate_request(&ProviderKind::Anthropic, &request)?;
+        if let Some(destination) = &self.bound_destination
+            && !context.permits_destination(&ProviderKind::Anthropic, &request, destination)
+        {
+            return Err(ProviderError::EgressDenied);
+        }
         if request.reasoning_summary.maximum_bytes().is_some() {
             return Err(ProviderError::Unsupported);
         }
@@ -947,11 +986,20 @@ mod tests {
         }
     }
 
-    fn test_provider(endpoint: String) -> AnthropicProvider {
+    struct LoopbackPolicy(String);
+
+    impl AiProviderEndpointPolicy for LoopbackPolicy {
+        fn authorize_endpoint(&self, kind: AiProviderKindInput, normalized_url: &str) -> bool {
+            kind == AiProviderKindInput::Anthropic && normalized_url == self.0
+        }
+    }
+
+    fn test_provider(endpoint: &str) -> AnthropicProvider {
         let reference =
             SecretRef::parse("anthropic/test").expect("test secret reference should parse");
-        AnthropicProvider::for_loopback_test(
+        AnthropicProvider::with_endpoint(
             AnthropicProviderConfig::new(reference.clone()),
+            Arc::new(LoopbackPolicy(endpoint.to_owned())),
             Arc::new(TestSecrets(reference, "synthetic-anthropic-key".to_owned())),
             endpoint,
         )
@@ -994,7 +1042,7 @@ mod tests {
         }
     }
 
-    fn context(request: &ModelRequest) -> ProviderRequestContext {
+    fn context(request: &ModelRequest, destination: &str) -> ProviderRequestContext {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();
         let attempt_id = uuid::Uuid::new_v4();
@@ -1002,7 +1050,7 @@ mod tests {
             provider_profile_id: "anthropic-profile".to_owned(),
             provider_kind: ProviderKind::Anthropic.as_str().to_owned(),
             model: request.model.clone(),
-            destination: "anthropic".to_owned(),
+            destination: destination.to_owned(),
             destination_trust: AiDestinationTrust::ManagedProvider,
             capability: AiEgressCapability::ModelInference,
             scope: AiScope::new("project", "anthropic-test"),
@@ -1101,7 +1149,7 @@ mod tests {
 
     #[test]
     fn stateless_history_tools_and_structured_output_map_exactly() {
-        let provider = test_provider("http://127.0.0.1:1/v1/messages".to_owned());
+        let provider = test_provider("http://127.0.0.1:1/v1/messages");
         let tool = definition();
         let first = ModelConversationToolCall {
             call_id: "toolu-first".to_owned(),
@@ -1250,10 +1298,10 @@ mod tests {
         )
         .to_owned();
         let (endpoint, request_rx, server) = mock_server("200 OK", "text/event-stream", body).await;
-        let provider = test_provider(endpoint);
+        let provider = test_provider(&endpoint);
         let request = initial_request();
         let events = provider
-            .stream(request.clone(), context(&request))
+            .stream(request.clone(), context(&request, &endpoint))
             .await
             .expect("Anthropic stream should start")
             .try_collect::<Vec<_>>()
@@ -1296,22 +1344,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn custom_endpoints_are_policy_checked_and_bind_the_egress_destination() {
+        let reference = SecretRef::parse("anthropic/test").expect("reference should parse");
+        let secrets: Arc<dyn AiSecretStore> = Arc::new(TestSecrets(
+            reference.clone(),
+            "synthetic-anthropic-key".to_owned(),
+        ));
+        let gateway = "https://gateway.example/anthropic/v1/messages";
+        assert!(matches!(
+            AnthropicProvider::with_endpoint(
+                AnthropicProviderConfig::new(reference.clone()),
+                Arc::new(LoopbackPolicy(
+                    "https://other.example/v1/messages".to_owned()
+                )),
+                secrets.clone(),
+                gateway,
+            ),
+            Err(ProviderError::InvalidConfiguration(_))
+        ));
+        for unsafe_endpoint in [
+            "ftp://gateway.example/v1/messages",
+            "https://user:pass@gateway.example/v1/messages",
+            "https://gateway.example/v1/messages?key=1",
+            "https://gateway.example/v1/messages#fragment",
+            "https://gateway.example/",
+            "https:///v1/messages",
+        ] {
+            assert!(
+                AnthropicProvider::with_endpoint(
+                    AnthropicProviderConfig::new(reference.clone()),
+                    Arc::new(LoopbackPolicy(unsafe_endpoint.to_owned())),
+                    secrets.clone(),
+                    unsafe_endpoint,
+                )
+                .is_err(),
+                "{unsafe_endpoint}"
+            );
+        }
+        let provider = AnthropicProvider::with_endpoint(
+            AnthropicProviderConfig::new(reference.clone()),
+            Arc::new(LoopbackPolicy(gateway.to_owned())),
+            secrets.clone(),
+            gateway,
+        )
+        .expect("approved gateway should build");
+        assert!(format!("{provider:?}").contains("<deployment-authorized>"));
+        assert!(!format!("{provider:?}").contains("gateway.example"));
+        // A manifest approved for the default destination cannot reach a gateway.
+        let request = initial_request();
+        assert!(matches!(
+            provider
+                .stream(request.clone(), context(&request, "anthropic"))
+                .await,
+            Err(ProviderError::EgressDenied)
+        ));
+
+        // The default constructor keeps the fixed official endpoint and checks.
+        let official = AnthropicProvider::new(AnthropicProviderConfig::new(reference), secrets)
+            .expect("default provider should build");
+        assert_eq!(official.endpoint, ANTHROPIC_MESSAGES_ENDPOINT);
+        assert!(official.bound_destination.is_none());
+        assert!(format!("{official:?}").contains("<official>"));
+    }
+
+    #[tokio::test]
     async fn http_and_stream_failures_are_safely_classified() {
         let request = initial_request();
         let (endpoint, _request_rx, server) =
             mock_server("401 Unauthorized", "application/json", "{}".to_owned()).await;
-        let provider = test_provider(endpoint);
+        let provider = test_provider(&endpoint);
         assert!(matches!(
-            provider.stream(request.clone(), context(&request)).await,
+            provider
+                .stream(request.clone(), context(&request, &endpoint))
+                .await,
             Err(ProviderError::CredentialUnavailable)
         ));
         server.await.expect("401 server should finish");
 
         let (endpoint, _request_rx, server) =
             mock_server("529 Overloaded", "application/json", "{}".to_owned()).await;
-        let provider = test_provider(endpoint);
+        let provider = test_provider(&endpoint);
         assert!(matches!(
-            provider.stream(request.clone(), context(&request)).await,
+            provider
+                .stream(request.clone(), context(&request, &endpoint))
+                .await,
             Err(ProviderError::Unavailable)
         ));
         server.await.expect("529 server should finish");

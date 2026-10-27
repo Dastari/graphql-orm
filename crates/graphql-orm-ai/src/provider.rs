@@ -29,8 +29,11 @@ use crate::{
 pub const AI_EGRESS_RETENTION_PROVIDER_RESPONSE: &str = "provider_response";
 
 /// Supported provider family.
+///
+/// Non-exhaustive: new provider families may be added in minor releases.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ProviderKind {
     /// OpenAI native API.
     OpenAi,
@@ -44,6 +47,8 @@ pub enum ProviderKind {
     OpenAiCompatible,
     /// Deployment-registered installed local harness.
     LocalHarness,
+    /// Explicitly configured OpenAI Chat Completions-compatible endpoint.
+    ChatCompletions,
 }
 
 impl ProviderKind {
@@ -56,6 +61,7 @@ impl ProviderKind {
             Self::Ollama => "ollama",
             Self::OpenAiCompatible => "openai_compatible",
             Self::LocalHarness => "local_harness",
+            Self::ChatCompletions => "chat_completions",
         }
     }
 }
@@ -1990,7 +1996,34 @@ impl ProviderRequestContext {
             })
     }
 
-    #[cfg(feature = "provider-openai-compatible-core")]
+    /// Whether every model/tool transfer for this provider and model names
+    /// `destination`, with at least one model-inference transfer.
+    #[cfg(feature = "provider-anthropic-core")]
+    pub(crate) fn permits_destination(
+        &self,
+        provider_kind: &ProviderKind,
+        request: &ModelRequest,
+        destination: &str,
+    ) -> bool {
+        let mut inference_matched = false;
+        for transfer in &self.transfers {
+            if transfer.manifest.provider_kind == provider_kind.as_str()
+                && transfer.manifest.model == request.model
+            {
+                if transfer.manifest.destination != destination {
+                    return false;
+                }
+                inference_matched |=
+                    transfer.manifest.capability == AiEgressCapability::ModelInference;
+            }
+        }
+        inference_matched
+    }
+
+    #[cfg(any(
+        feature = "provider-openai-compatible-core",
+        feature = "provider-chat-completions-core"
+    ))]
     pub(crate) fn permits_profile_destination_retention(
         &self,
         provider_kind: &ProviderKind,

@@ -10,8 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version `0.115.0` adopts profiles 0.18.0, operation catalog 0.6.0 and ORM
-0.76.0 as one public type universe. Filter capabilities require canonical typed
+Version `0.117.0` adopts profiles 0.18.0, operation catalog 0.6.0 and ORM
+0.79.0 as one public type universe. Filter capabilities require canonical typed
 operator contracts and semantic wire 3. Rebuild definitions and bindings from
 producer metadata and finished SDL; see [MIGRATION.md](MIGRATION.md). No AI
 schema-module, persistence, provider or authorization behavior changes. The
@@ -21,6 +21,16 @@ The current workspace selects published Auth release tag `v0.23.0`
 (commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`). Direct Auth consumers
 must select the same tag and refresh their locks to one source;
 see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
+
+Version `0.116.0` adds `AnthropicProvider::with_endpoint` for an exact
+policy-checked Messages endpoint whose egress manifests must name it. See
+[Anthropic](docs/anthropic.md) and [MIGRATION.md](MIGRATION.md).
+
+Version `0.115.0` adds a Chat Completions-compatible adapter for local and
+self-hosted model servers and makes the provider-kind enums
+`#[non_exhaustive]` (a Rust break for exhaustive matches). Apply schema module
+`0.75.0`. See [Chat Completions endpoints](docs/chat-completions.md) and
+[MIGRATION.md](MIGRATION.md).
 
 Version `0.114.0` lets hosts choose the provider TLS stack (`provider-*-core`
 plus one `provider-tls-*` feature) and runs Responses tool calls without

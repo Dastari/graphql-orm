@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-27
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -12,9 +12,17 @@ supersedes: []
 
 ## 0.12.0 (unreleased)
 
-- Align the optional adapter's concrete ORM public types with ORM 0.76.0 and
+- Align the optional adapter's concrete ORM public types with ORM 0.79.0 and
   canonical operation catalog 0.6.0. No backup/restore, storage, persistence or
   manifest-format changes; no data migration required.
+
+## 0.11.1 (unreleased)
+
+- Repair the package release identity after the snapshot-format reference gained
+  ORM DateTime row-value documentation following the immutable 0.11.0 tag.
+- Align the package manifest, workspace requirement, lockfile, installation
+  example and generated inventory. No new breaking changes: Rust API, SDL,
+  snapshot format, persistence, runtime behavior and feature defaults are unchanged.
 
 ## 0.11.0 (unreleased)
 

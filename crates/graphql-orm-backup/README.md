@@ -3,7 +3,7 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-10-27
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -43,6 +43,10 @@ The default `local` feature provides `LocalBackupRepository`. To supply only a
 custom repository, disable defaults. The optional `orm-sqlite` or
 `orm-postgres` features select one ready-made ORM adapter lane; do not enable
 both.
+
+Version 0.11.1 aligns the package identity with the snapshot-format documentation
+added after the immutable 0.11.0 package tag. It introduces no new breaking
+changes or runtime behavior; see the [migration guide](MIGRATION.md).
 
 ## Shortest valid integration
 

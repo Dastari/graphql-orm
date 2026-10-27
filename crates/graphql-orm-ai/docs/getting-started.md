@@ -68,10 +68,11 @@ Enable exactly the provider adapter you intend to use:
 | Feature | Guide | Important boundary |
 | --- | --- | --- |
 | `provider-openai` | [OpenAI](openai-background.md) | Exact egress/budget proof; webhook and background paths are separate. |
-| `provider-anthropic` | [Anthropic](anthropic.md) | Fixed official endpoint and secret-store reference. |
+| `provider-anthropic` | [Anthropic](anthropic.md) | Official endpoint, or an exact policy-checked endpoint; secret-store reference. |
 | `provider-xai` | [xAI](xai.md) | ZDR verification is on by default. |
 | `provider-ollama` | [Ollama](ollama.md) | Explicit endpoint policy even for loopback. |
 | `provider-openai-compatible` | [OpenAI-compatible](openai-compatible.md) | Exact managed profile, capability, retention label, and deployment URL. |
+| `provider-chat-completions` | [Chat Completions](chat-completions.md) | Exact managed profile and deployment URL; stateless replay; optional credential. |
 
 Provider features compile adapters; they do not enable a provider, authorize
 egress, disclose content, or grant credentials. Configure a secret-store

@@ -2490,13 +2490,11 @@ fn compile_capability(
         limits,
         options,
     )?;
-    if [&argument_schema, &compact_argument_schema]
-        .iter()
-        .any(|schema| {
-            serde_json::to_vec(schema)
-                .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
-                .unwrap_or(true)
-        })
+    // Only the compact projection is sent as the provider contract. The closed
+    // execution schema can be larger for a wide, finitely bounded graph.
+    if serde_json::to_vec(&compact_argument_schema)
+        .map(|encoded| encoded.len() > MAXIMUM_PROVIDER_SCHEMA_BYTES)
+        .unwrap_or(true)
     {
         return Err(configuration_error(
             "compact query capability schema exceeds the provider contract",
@@ -6179,6 +6177,12 @@ mod tests {
         let capability = capabilities.capabilities().next().expect("capability");
         let compact = serde_json::to_vec(capability.compact_argument_schema()).expect("schema");
         assert!(compact.len() < MAXIMUM_PROVIDER_SCHEMA_BYTES);
+        assert!(
+            serde_json::to_vec(capability.argument_schema())
+                .expect("execution schema")
+                .len()
+                > MAXIMUM_PROVIDER_SCHEMA_BYTES
+        );
         let paths = capability
             .compact_argument_schema()
             .pointer("/properties/selections/items/enum")

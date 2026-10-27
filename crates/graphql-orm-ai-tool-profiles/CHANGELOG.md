@@ -12,6 +12,7 @@ supersedes: []
 
 ## 0.18.0 (unreleased)
 
+- Keep the provider size ceiling on the compact projection; a wide closed execution schema may be larger.
 - Consolidate the unpublished 0.17.1 input-ownership fixes below into this
   breaking minor adopting operation catalog 0.6.0 and semantic wire 3.
 - Require canonical operator/operand/auxiliary contracts at all filter-helper

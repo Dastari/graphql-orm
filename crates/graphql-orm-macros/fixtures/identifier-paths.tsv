@@ -1,0 +1,16 @@
+# Shared runtime/derive rendering cases: backend, input, expected (tab separated).
+sqlite	"a.b"	"a.b"
+sqlite	app."a.b"	app."a.b"
+sqlite	"a"".b".join	"a"".b"."join"
+sqlite	"a.b"."c""d.e"	"a.b"."c""d.e"
+sqlite	[a.b]	[a.b]
+sqlite	`a.b`	`a.b`
+postgres	"a.b"	"a.b"
+postgres	app."a.b"	app."a.b"
+postgres	"a"".b".join	"a"".b"."join"
+postgres	"a.b"."c""d.e"	"a.b"."c""d.e"
+mssql	[a.b]	[a.b]
+mssql	[app].[a]].b]	[app].[a]].b]
+mssql	[a]].b].[c.d]	[a]].b].[c.d]
+mssql	"a"".b"	"a"".b"
+mssql	[app]."a.b"	[app]."a.b"

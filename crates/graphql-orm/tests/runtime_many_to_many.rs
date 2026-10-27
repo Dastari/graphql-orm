@@ -2006,6 +2006,29 @@ mod graphql {
     use graphql_orm::graphql::runtime::*;
     use serde_json::{Value, json};
 
+    /// Relation layers are denied outright; root layers are allowed.
+    struct DenyRelationLayers;
+    impl RuntimeReadAuthority for DenyRelationLayers {
+        fn authorize_mutation_result<'a>(
+            &'a self,
+            _check: RuntimeMutationOutputCheck<'a>,
+        ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn authorize<'a>(
+            &'a self,
+            check: RuntimeReadCheck<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+            Box::pin(async move {
+                if check.relation.is_some() {
+                    Err(RuntimeGraphqlError::denied())
+                } else {
+                    Ok(RuntimeReadGrant::new(None))
+                }
+            })
+        }
+    }
+
     /// Every layer hides the `secret` label.
     struct Read;
     impl RuntimeReadAuthority for Read {
@@ -2061,6 +2084,16 @@ mod graphql {
         run_as(f, api, query, f.authority(true)).await
     }
     async fn run_as(f: &Fixture, api: &Schema, query: &str, authority: Authority) -> Value {
+        run_with(f, api, query, authority, Arc::new(Read), Default::default()).await
+    }
+    async fn run_with(
+        f: &Fixture,
+        api: &Schema,
+        query: &str,
+        authority: Authority,
+        read: Arc<dyn RuntimeReadAuthority>,
+        budget: RuntimeGraphqlLimits,
+    ) -> Value {
         let schema = f.schema();
         let response = api
             .execute(
@@ -2071,9 +2104,9 @@ mod graphql {
                     .data(
                         RuntimeGraphqlRequest::<Backend>::new(
                             schema.fingerprint(),
-                            Arc::new(Read),
+                            read,
                             None,
-                            Default::default(),
+                            budget,
                         )
                         .with_mutation_environment(f.environment.clone())
                         .with_write_authority(Arc::new(authority)),
@@ -2294,6 +2327,178 @@ mod graphql {
             "{denied}"
         );
         assert!(f.links("mm_post_tags").await.is_empty());
+        f.finish().await;
+    }
+
+    fn links_api(f: &Fixture) -> Schema {
+        let mut options = RuntimeGraphqlMutationOptions::default();
+        options.links_in_writes = true;
+        let module = RuntimeGraphqlModule::compile(
+            f.schema().clone(),
+            RuntimeGraphqlOptions::default()
+                .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+                .with_mutations(options),
+        )
+        .unwrap();
+        RuntimeGraphqlComposer::new(f.db.clone(), "Query", Default::default())
+            .unwrap()
+            .mutation_root("Mutation")
+            .unwrap()
+            .install(module)
+            .unwrap()
+            .finish()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn graphql_write_payloads_select_join_relation_pages() {
+        let f = Fixture::new().await;
+        let api = links_api(&f);
+        const PAGE: &str =
+            "tags(orderBy: [{field: id}], first: 10) { totalCount edges { node { id label } } }";
+
+        // A create with attached links reads the committed links after commit.
+        let created = run(
+            &f,
+            &api,
+            &format!(r#"mutation($schema: String!) {{ createPost(expectedSchema: $schema, input: {{id: "5", label: "five"}}, links: {{tags: {{set: [{{id: "10"}}, {{id: "12"}}]}}}}) {{ record {{ id {PAGE} }} }} }}"#),
+        )
+        .await;
+        assert!(created.get("errors").is_none(), "{created}");
+        assert_eq!(
+            created["data"]["createPost"]["record"]["tags"],
+            json!({"totalCount": "2", "edges": [
+                {"node": {"id": "10", "label": "red"}},
+                {"node": {"id": "12", "label": "blue"}}
+            ]})
+        );
+
+        // An update with a link delta reads the page after the delta; filters,
+        // ordering and page bounds apply as in queries.
+        let updated = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePost(expectedSchema: $schema, key: {id: "5"}, input: {label: "5"}, links: {tags: {add: [{id: "11"}], remove: [{id: "10"}]}}) { record { label tags(orderBy: [{field: label, direction: DESC}], first: 1, where: {label: {ne: "zzz"}}) { totalCount edges { node { label } } pageInfo { hasNextPage } } } } }"#,
+        )
+        .await;
+        assert!(updated.get("errors").is_none(), "{updated}");
+        assert_eq!(
+            updated["data"]["updatePost"]["record"]["tags"],
+            json!({"totalCount": "2", "edges": [{"node": {"label": "green"}}], "pageInfo": {"hasNextPage": true}})
+        );
+
+        // A cursor returned by the payload continues the same authorized page.
+        let first = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updatePost(expectedSchema: $schema, key: {id: "5"}, input: {label: "5"}) { record { tags(orderBy: [{field: id}], first: 1) { edges { cursor node { id } } pageInfo { hasNextPage } } } } }"#,
+        )
+        .await;
+        assert!(first.get("errors").is_none(), "{first}");
+        let page = &first["data"]["updatePost"]["record"]["tags"];
+        assert_eq!(page["edges"][0]["node"]["id"], "11");
+        assert_eq!(page["pageInfo"]["hasNextPage"], true);
+        let cursor = serde_json::to_string(&page["edges"][0]["cursor"]).unwrap();
+        let next = run(
+            &f,
+            &api,
+            &format!(r#"mutation($schema: String!) {{ updatePost(expectedSchema: $schema, key: {{id: "5"}}, input: {{label: "5"}}) {{ record {{ tags(orderBy: [{{field: id}}], first: 1, after: {cursor}) {{ totalCount edges {{ node {{ id }} }} pageInfo {{ hasNextPage }} }} }} }} }}"#),
+        )
+        .await;
+        assert!(next.get("errors").is_none(), "{next}");
+        assert_eq!(
+            next["data"]["updatePost"]["record"]["tags"],
+            json!({"totalCount": "2", "edges": [{"node": {"id": "12"}}], "pageInfo": {"hasNextPage": false}})
+        );
+
+        // A link mutation's record, and a target hidden by the read authority is
+        // excluded from the page and its count.
+        graphql_orm::sqlx::query("INSERT INTO mm_post_tags (post_id, tag_id) VALUES (2, 13)")
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        let linked = run(
+            &f,
+            &api,
+            &format!(r#"mutation($schema: String!) {{ updatePostTagsLinks(expectedSchema: $schema, key: {{id: "2"}}, add: [{{id: "10"}}]) {{ record {{ id {PAGE} }} }} }}"#),
+        )
+        .await;
+        assert!(linked.get("errors").is_none(), "{linked}");
+        assert_eq!(
+            linked["data"]["updatePostTagsLinks"]["record"]["tags"],
+            json!({"totalCount": "1", "edges": [{"node": {"id": "10", "label": "red"}}]})
+        );
+
+        // The inverse side of the join.
+        let inverse = run(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { updateTag(expectedSchema: $schema, key: {id: "12"}, input: {label: "navy"}) { record { label posts(orderBy: [{field: id}]) { edges { node { id label } } } } } }"#,
+        )
+        .await;
+        assert!(inverse.get("errors").is_none(), "{inverse}");
+        assert_eq!(
+            inverse["data"]["updateTag"]["record"],
+            json!({"label": "navy", "posts": {"edges": [{"node": {"id": "5", "label": "5"}}]}})
+        );
+        f.finish().await;
+    }
+
+    #[tokio::test]
+    async fn graphql_write_payload_pages_follow_the_payload_failure_rules() {
+        let f = Fixture::new().await;
+        let api = links_api(&f);
+        // A relation layer denied outright is refused before the write, as for
+        // to-one relations.
+        let denied = run_with(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { createPost(expectedSchema: $schema, input: {id: "6", label: "six"}, links: {tags: {set: [{id: "10"}]}}) { record { id tags { edges { node { id } } } } } }"#,
+            f.authority(true),
+            Arc::new(DenyRelationLayers),
+            Default::default(),
+        )
+        .await;
+        assert_eq!(
+            denied["errors"][0]["extensions"]["code"], "authorization_denied",
+            "{denied}"
+        );
+        assert!(f.links("mm_post_tags").await.is_empty());
+        let absent: i64 =
+            graphql_orm::sqlx::query_scalar("SELECT COUNT(*) FROM mm_post WHERE id = 6")
+                .fetch_one(f.db.pool())
+                .await
+                .unwrap();
+        assert_eq!(absent, 0, "denied payload must prevent the parent write");
+
+        // A nested read that fails after commit keeps the write and its links and
+        // reports a committed, non-retryable payload failure.
+        let mut budget = RuntimeGraphqlLimits::default();
+        budget.relation.max_page_size = 1;
+        let committed = run_with(
+            &f,
+            &api,
+            r#"mutation($schema: String!) { createPost(expectedSchema: $schema, input: {id: "7", label: "seven"}, links: {tags: {set: [{id: "10"}, {id: "11"}]}}) { record { id tags(first: 5) { edges { node { id } } } } } }"#,
+            f.authority(true),
+            Arc::new(Read),
+            budget,
+        )
+        .await;
+        let error = &committed["errors"][0]["extensions"];
+        assert_eq!(error["code"], "mutation_payload_failed", "{committed}");
+        assert_eq!(error["outcome"], "committed", "{committed}");
+        assert_eq!(error["retryable"], false, "{committed}");
+        assert_eq!(f.links("mm_post_tags").await, [(7, 10), (7, 11)]);
+        let persisted: i64 = graphql_orm::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mm_post WHERE id = 7 AND label = 'seven'",
+        )
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            persisted, 1,
+            "payload failure must retain one committed parent"
+        );
         f.finish().await;
     }
 }

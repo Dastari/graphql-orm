@@ -304,7 +304,10 @@ where
     let mut query = EntityQuery::<T, B>::new();
     for (column, value) in T::PRIMARY_KEYS.iter().zip(keys) {
         // PRIMARY_KEYS are trusted backend-rendered column identities.
-        query = query.where_clause(&format!("{column} = ?"), value.clone());
+        query = query.where_clause(
+            &format!("{} = ?", B::DIALECT.render_identifier_path(column)),
+            value.clone(),
+        );
     }
     if let Some((clause, values)) = link {
         query = query.where_values(&clause, values);
@@ -470,7 +473,12 @@ where
         }
         let mut predicates = T::PRIMARY_KEYS
             .iter()
-            .map(|column| format!("__gom_propagation_target.{column} = ?"))
+            .map(|column| {
+                format!(
+                    "__gom_propagation_target.{} = ?",
+                    B::DIALECT.render_identifier_path(column)
+                )
+            })
             .collect::<Vec<_>>();
         let mut source_fields = Vec::new();
         let mut target_fields = Vec::new();

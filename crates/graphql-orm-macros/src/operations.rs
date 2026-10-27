@@ -1,7 +1,7 @@
 use super::*;
 use crate::backend::{
-    BackendKind, backend_marker_tokens, backend_pool_type_tokens, backend_quote_identifier_path,
-    resolve_backend,
+    BackendKind, backend_dialect_tokens, backend_marker_tokens, backend_pool_type_tokens,
+    backend_render_identifier_path, resolve_backend,
 };
 use crate::entity::{
     FieldMetadata, decimal_definition_tokens, is_bool_type, is_byte_vec_type, is_option_type,
@@ -1457,6 +1457,10 @@ fn generate_graphql_operations_unfiltered(
     let graphql_rename_fields = entity_meta.graphql_rename_fields.as_deref();
     let serde_rename_all = entity_meta.serde_rename_all.as_deref();
     let table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
+    // Generated DML names the table with the backend's rendered identifier;
+    // `table_name` itself stays the raw identity used by hooks and descriptors.
+    let sql_table_name = backend_render_identifier_path(backend, table_name);
+    let sql_dialect = backend_dialect_tokens(backend);
     let plural_name = entity_meta
         .plural_name
         .clone()
@@ -1589,6 +1593,11 @@ fn generate_graphql_operations_unfiltered(
         .first()
         .expect("primary key collection includes fallback id");
     let pk_field = first_primary_key.field_name.clone();
+    let pk_column = first_primary_key
+        .meta
+        .db_column
+        .as_deref()
+        .unwrap_or(&first_primary_key.rust_name);
     let pk_type_ty: syn::Type = first_primary_key.field_type.clone();
     let pk_type = quote! { #pk_type_ty };
     let auto_generated_pk = first_primary_key
@@ -2386,6 +2395,7 @@ fn generate_graphql_operations_unfiltered(
         let graphql_name =
             graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
         let db_col = meta.db_column.clone().unwrap_or_else(|| rust_name.clone());
+        let db_col_sql = backend_render_identifier_path(backend, &db_col);
         let is_json_like_field = meta.is_json_field || meta.spatial.is_some();
 
         // Track string-filterable fields for fuzzy search
@@ -2970,7 +2980,7 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_graphql.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            set_clauses.push(format!("{} = {}", #db_col_sql, #spatial_value_expr));
                             match val {
                                 Some(value) => values.push(
                                     #struct_name::__gom_spatial_sql_value::<::graphql_orm::async_graphql::Error>(
@@ -2985,7 +2995,7 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_repo.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            set_clauses.push(format!("{} = {}", #db_col_sql, #spatial_value_expr));
                             match val {
                                 Some(value) => values.push(
                                     #struct_name::__gom_spatial_sql_value::<::graphql_orm::sqlx::Error>(
@@ -3001,7 +3011,7 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_graphql.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            set_clauses.push(format!("{} = {}", #db_col_sql, #spatial_value_expr));
                             values.push(
                                 #struct_name::__gom_spatial_sql_value::<::graphql_orm::async_graphql::Error>(
                                     val,
@@ -3013,7 +3023,7 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_repo.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = {}", #db_col, #spatial_value_expr));
+                            set_clauses.push(format!("{} = {}", #db_col_sql, #spatial_value_expr));
                             values.push(
                                 #struct_name::__gom_spatial_sql_value::<::graphql_orm::sqlx::Error>(
                                     val,
@@ -3029,7 +3039,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match val {
                                 Some(b) => values.push(#struct_name::__gom_bool_sql_value(*b)),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::BoolNull),
@@ -3043,7 +3053,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(#struct_name::__gom_bool_sql_value(*val));
                         }
                     };
@@ -3057,7 +3067,7 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_graphql.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match val {
                                 Some(value) => values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::async_graphql::Error>(value)?),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
@@ -3067,7 +3077,7 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_repo.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match val {
                                 Some(value) => values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::sqlx::Error>(value)?),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::JsonNull),
@@ -3078,14 +3088,14 @@ fn generate_graphql_operations_unfiltered(
                     update_field_checks_graphql.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::async_graphql::Error>(val)?);
                         }
                     });
                     update_field_checks_repo.push(quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(::graphql_orm::graphql::orm::json_sql_value::<_, ::graphql_orm::sqlx::Error>(val)?);
                         }
                     });
@@ -3095,7 +3105,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match val {
                                 Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(*v)),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::UuidNull),
@@ -3108,7 +3118,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(*val));
                         }
                     };
@@ -3121,7 +3131,7 @@ fn generate_graphql_operations_unfiltered(
                     quote! {
                         if let Some(ref value) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match value {
                                 Some(value) => values.push(
                                     ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::async_graphql::Error>(*value, #definition)?
@@ -3134,7 +3144,7 @@ fn generate_graphql_operations_unfiltered(
                     quote! {
                         if let Some(value) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(
                                 ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::async_graphql::Error>(value, #definition)?
                             );
@@ -3145,7 +3155,7 @@ fn generate_graphql_operations_unfiltered(
                     quote! {
                         if let Some(ref value) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match value {
                                 Some(value) => values.push(
                                     ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::sqlx::Error>(*value, #definition)?
@@ -3158,7 +3168,7 @@ fn generate_graphql_operations_unfiltered(
                     quote! {
                         if let Some(value) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(
                                 ::graphql_orm::graphql::orm::decimal_sql_value::<::graphql_orm::sqlx::Error>(value, #definition)?
                             );
@@ -3188,7 +3198,7 @@ fn generate_graphql_operations_unfiltered(
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
-                        set_clauses.push(format!("{} = ?", #db_col));
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
                         match val {
                             Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Int((*v) as i64)),
                             None => values.push(::graphql_orm::graphql::orm::SqlValue::IntNull),
@@ -3205,7 +3215,7 @@ fn generate_graphql_operations_unfiltered(
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
-                        set_clauses.push(format!("{} = ?", #db_col));
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
                         match val {
                             Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Float((*v).into())),
                             None => values.push(::graphql_orm::graphql::orm::SqlValue::FloatNull),
@@ -3220,7 +3230,7 @@ fn generate_graphql_operations_unfiltered(
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
-                        set_clauses.push(format!("{} = ?", #db_col));
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
                         match val {
                             Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(v.clone())),
                             None => values.push(::graphql_orm::graphql::orm::SqlValue::BytesNull),
@@ -3237,7 +3247,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match val {
                                 Some(v) => {
                                     let __transformed = #value_expr;
@@ -3253,7 +3263,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             match val {
                                 Some(v) => values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr)),
                                 None => values.push(::graphql_orm::graphql::orm::SqlValue::StringNull),
@@ -3272,7 +3282,7 @@ fn generate_graphql_operations_unfiltered(
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
-                        set_clauses.push(format!("{} = ?", #db_col));
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
                         values.push(::graphql_orm::graphql::orm::SqlValue::Int((*val) as i64));
                     }
                 };
@@ -3284,7 +3294,7 @@ fn generate_graphql_operations_unfiltered(
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
-                        set_clauses.push(format!("{} = ?", #db_col));
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
                         values.push(::graphql_orm::graphql::orm::SqlValue::Float((*val).into()));
                     }
                 };
@@ -3294,7 +3304,7 @@ fn generate_graphql_operations_unfiltered(
                 let update_tokens = quote! {
                     if let Some(ref val) = input.#field_name {
                         changed_fields.push(#db_col);
-                        set_clauses.push(format!("{} = ?", #db_col));
+                        set_clauses.push(format!("{} = ?", #db_col_sql));
                         values.push(::graphql_orm::graphql::orm::SqlValue::Bytes(val.clone()));
                     }
                 };
@@ -3308,7 +3318,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             let __transformed = #value_expr;
                             values.push(::graphql_orm::graphql::orm::SqlValue::String(__transformed));
                         }
@@ -3319,7 +3329,7 @@ fn generate_graphql_operations_unfiltered(
                     let update_tokens = quote! {
                         if let Some(ref val) = input.#field_name {
                             changed_fields.push(#db_col);
-                            set_clauses.push(format!("{} = ?", #db_col));
+                            set_clauses.push(format!("{} = ?", #db_col_sql));
                             values.push(::graphql_orm::graphql::orm::SqlValue::String(#value_expr));
                         }
                     };
@@ -3350,7 +3360,7 @@ fn generate_graphql_operations_unfiltered(
 
     // Build INSERT SQL template
     let insert_sql = if auto_generated_pk {
-        let mut columns = vec!["id".to_string()];
+        let mut columns = vec![pk_column.to_string()];
         columns.extend(insert_default_columns.iter().cloned());
         columns.extend(insert_columns.iter().cloned());
         let mut placeholders = vec!["?".to_string()];
@@ -3358,8 +3368,12 @@ fn generate_graphql_operations_unfiltered(
         placeholders.extend(insert_value_exprs.iter().cloned());
         format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            table_name,
-            columns.join(", "),
+            sql_table_name,
+            columns
+                .iter()
+                .map(|column| backend_render_identifier_path(backend, column))
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         )
     } else {
@@ -3369,13 +3383,17 @@ fn generate_graphql_operations_unfiltered(
         placeholders.extend(insert_value_exprs.iter().cloned());
         format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            table_name,
-            columns.join(", "),
+            sql_table_name,
+            columns
+                .iter()
+                .map(|column| backend_render_identifier_path(backend, column))
+                .collect::<Vec<_>>()
+                .join(", "),
             placeholders.join(", ")
         )
     };
     let create_mutation_fields = if auto_generated_pk {
-        let mut fields = vec!["id".to_string()];
+        let mut fields = vec![pk_column.to_string()];
         fields.extend(insert_columns.iter().cloned());
         fields
     } else {
@@ -3413,11 +3431,16 @@ fn generate_graphql_operations_unfiltered(
         .collect();
     let upsert_update_column_literals: Vec<syn::LitStr> = upsert_update_columns
         .iter()
-        .map(|field| syn::LitStr::new(field, struct_name.span()))
+        .map(|field| {
+            syn::LitStr::new(
+                &backend_render_identifier_path(backend, field),
+                struct_name.span(),
+            )
+        })
         .collect();
     let (upsert_insert_columns, upsert_insert_values): (Vec<String>, Vec<String>) =
         if auto_generated_pk {
-            let mut columns = vec!["id".to_string()];
+            let mut columns = vec![pk_column.to_string()];
             columns.extend(insert_default_columns.iter().cloned());
             columns.extend(insert_columns.iter().cloned());
             let mut values = vec!["?".to_string()];
@@ -3433,7 +3456,12 @@ fn generate_graphql_operations_unfiltered(
         };
     let upsert_insert_column_literals: Vec<syn::LitStr> = upsert_insert_columns
         .iter()
-        .map(|field| syn::LitStr::new(field, struct_name.span()))
+        .map(|field| {
+            syn::LitStr::new(
+                &backend_render_identifier_path(backend, field),
+                struct_name.span(),
+            )
+        })
         .collect();
     let upsert_insert_value_literals: Vec<syn::LitStr> = upsert_insert_values
         .iter()
@@ -3780,7 +3808,7 @@ fn generate_graphql_operations_unfiltered(
                     &format!(
                         "SELECT {} FROM {}{} WHERE {}{}",
                         <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
-                        #table_name,
+                        #sql_table_name,
                         #upsert_read_lock_hint,
                         where_clause,
                         #write_read_lock_suffix
@@ -4447,7 +4475,7 @@ fn generate_graphql_operations_unfiltered(
             let rust_name = ident.to_string();
             let graphql_name =
                 graphql_field_name(&meta, &rust_name, graphql_rename_fields, serde_rename_all);
-            let column = backend_quote_identifier_path(
+            let column = backend_render_identifier_path(
                 backend,
                 meta.db_column.as_deref().unwrap_or(&rust_name),
             );
@@ -4482,7 +4510,7 @@ fn generate_graphql_operations_unfiltered(
         let mut cursor_field_metadata = Vec::new();
         let mut fingerprint_parts = Vec::new();
         for (field, ty, column, ascending, nulls_first) in parts {
-            let quoted_column = backend_quote_identifier_path(backend, column);
+            let quoted_column = backend_render_identifier_path(backend, column);
             let source = fields
                 .iter()
                 .find(|candidate| candidate.ident.as_ref() == Some(field))
@@ -5502,9 +5530,9 @@ fn generate_graphql_operations_unfiltered(
                     let sql = Self::__gom_rebind_sql(&format!(
                         "SELECT {} FROM {}{} WHERE {} = ?{}",
                         Self::column_names().join(", "),
-                        #table_name,
+                        #sql_table_name,
                         #upsert_read_lock_hint,
-                        Self::PRIMARY_KEY,
+                        #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
                         #write_read_lock_suffix,
                     ), 1);
                     let rows = hook_ctx.fetch_rows(&sql, &[#pk_bind_value_ref]).await?;
@@ -7927,7 +7955,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let current_entity = EntityQuery::<#struct_name, #backend_marker>::new()
                     .where_clause(
-                        &format!("{} = {}", #struct_name::PRIMARY_KEY, #struct_name::__gom_placeholder(1)),
+                        &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
                         #pk_bind_value
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
@@ -7994,9 +8022,9 @@ fn generate_graphql_operations_unfiltered(
 
                 let sql = #struct_name::__gom_rebind_sql(&format!(
                     "UPDATE {} SET {} WHERE {} = ?",
-                    #table_name,
+                    #sql_table_name,
                     set_clauses.join(", "),
-                    #struct_name::PRIMARY_KEY
+                    #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY)
                 ), 1);
 
                 // Add the ID to the values for the WHERE clause
@@ -8089,7 +8117,7 @@ fn generate_graphql_operations_unfiltered(
                 // Fetch entity before deletion for notification purposes
                 let entity = EntityQuery::<#struct_name, #backend_marker>::new()
                     .where_clause(
-                        &format!("{} = {}", #struct_name::PRIMARY_KEY, #struct_name::__gom_placeholder(1)),
+                        &format!("{} = {}", #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY), #struct_name::__gom_placeholder(1)),
                         #pk_bind_value
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
@@ -8125,7 +8153,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
 
                 let sql = #struct_name::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #table_name, #struct_name::PRIMARY_KEY),
+                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY)),
                     1
                 );
                 let values = [#pk_bind_value];
@@ -8350,9 +8378,9 @@ fn generate_graphql_operations_unfiltered(
                     &format!(
                         "SELECT {} FROM {}{} WHERE {} = ?{}",
                         <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
-                        #table_name,
+                        #sql_table_name,
                         #upsert_read_lock_hint,
-                        Self::PRIMARY_KEY,
+                        #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
                         #write_read_lock_suffix,
                     ),
                     1,
@@ -8514,7 +8542,7 @@ fn generate_graphql_operations_unfiltered(
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("UPDATE {} SET {} WHERE {} = ?", #table_name, set_clauses.join(", "), Self::PRIMARY_KEY),
+                    &format!("UPDATE {} SET {} WHERE {} = ?", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 values.push(#pk_bind_value_ref);
@@ -8641,9 +8669,9 @@ fn generate_graphql_operations_unfiltered(
 
                 let sql = Self::__gom_rebind_sql(&format!(
                     "UPDATE {} SET {} WHERE {} = ?",
-                    #table_name,
+                    #sql_table_name,
                     set_clauses.join(", "),
-                    Self::PRIMARY_KEY,
+                    #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
                 ), 1);
                 let mut affected = 0_i64;
                 for entity in &matched_entities {
@@ -8725,7 +8753,7 @@ fn generate_graphql_operations_unfiltered(
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let values = [#pk_bind_value_ref];
@@ -8811,7 +8839,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let mut deleted = 0_i64;
@@ -8892,7 +8920,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::execute_with_binds::<#backend_marker>(&sql, &bind_values, pool).await?;
                     EntityQuery::<Self, #backend_marker>::new()
                         .where_clause(
-                            &format!("{} = {}", <Self as DatabaseEntity>::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                            &format!("{} = {}", #sql_dialect.render_identifier_path(<Self as DatabaseEntity>::PRIMARY_KEY), Self::__gom_placeholder(1)),
                             #created_pk_value,
                         )
                         .fetch_one(pool)
@@ -8990,7 +9018,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let current_entity = EntityQuery::<Self, #backend_marker>::new()
                     .where_clause(
-                        &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                        &format!("{} = {}", #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_placeholder(1)),
                         #pk_bind_value_ref
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
@@ -9055,7 +9083,7 @@ fn generate_graphql_operations_unfiltered(
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("UPDATE {} SET {} WHERE {} = ?", #table_name, set_clauses.join(", "), Self::PRIMARY_KEY),
+                    &format!("UPDATE {} SET {} WHERE {} = ?", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 values.push(#pk_bind_value_ref);
@@ -9227,9 +9255,9 @@ fn generate_graphql_operations_unfiltered(
 
                 let sql = Self::__gom_rebind_sql(&format!(
                     "UPDATE {} SET {} WHERE {} = ?",
-                    #table_name,
+                    #sql_table_name,
                     set_clauses.join(", "),
-                    Self::PRIMARY_KEY,
+                    #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
                 ), 1);
                 let mut affected = 0_i64;
                 for entity in &matched_entities {
@@ -9294,7 +9322,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
                 let entity = EntityQuery::<Self, #backend_marker>::new()
                     .where_clause(
-                        &format!("{} = {}", Self::PRIMARY_KEY, Self::__gom_placeholder(1)),
+                        &format!("{} = {}", #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_placeholder(1)),
                         #pk_bind_value_ref
                     )
                     .fetch_one_for_write_in_transaction(&mut hook_ctx)
@@ -9329,7 +9357,7 @@ fn generate_graphql_operations_unfiltered(
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let values = [#pk_bind_value_ref];
@@ -9446,7 +9474,7 @@ fn generate_graphql_operations_unfiltered(
 
                 if !existing_entities.is_empty() {
                     let sql = Self::__gom_rebind_sql(
-                        &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                        &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                         1,
                     );
                     for entity in &existing_entities {
@@ -9572,7 +9600,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #table_name, Self::PRIMARY_KEY),
+                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
                     1,
                 );
                 let mut deleted = 0_i64;

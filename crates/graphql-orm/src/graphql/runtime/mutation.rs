@@ -593,12 +593,14 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                             if selected.name.node == "__typename" {
                                 continue;
                             }
-                            // To-one relations are read after commit through the same
-                            // nested layer authorization and batching as queries.
-                            if let Some(r) = c.relations.iter().find(|r| {
-                                r.api_name == selected.name.node.as_str()
-                                    && r.cardinality == RelationCardinality::One
-                            }) {
+                            // Relations are read after commit through the same nested
+                            // layer authorization, batching and bounds as queries: a
+                            // to-one object, or a to-many or join relation's page.
+                            if let Some(r) = c
+                                .relations
+                                .iter()
+                                .find(|r| r.api_name == selected.name.node.as_str())
+                            {
                                 let relation = module
                                     .schema
                                     .resolve_relation(&collection, &r.id)
@@ -610,16 +612,18 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     .iter()
                                     .find(|t| t.id == r.target)
                                     .ok_or_else(invalid)?;
-                                // Parent identity and source keys anchor the related read.
-                                for id in c
-                                    .primary_key
-                                    .iter()
-                                    .chain(r.key_pairs.iter().map(|pair| &pair.source))
-                                {
+                                // Parent identity and source keys (key-pair sources, or
+                                // the join's source fields) anchor the related read.
+                                for id in &c.primary_key {
                                     let handle = module
                                         .schema
                                         .resolve_field(&collection, id)
                                         .map_err(record_error)?;
+                                    if !fields.contains(&handle) {
+                                        fields.push(handle);
+                                    }
+                                }
+                                for handle in relation.source_key_fields() {
                                     if !fields.contains(&handle) {
                                         fields.push(handle);
                                     }

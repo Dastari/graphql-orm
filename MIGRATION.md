@@ -10,10 +10,10 @@ supersedes: []
 
 # Migration Guide
 
-## 0.75.0 to 0.76.0: canonical typed filter contracts
+## 0.78.0 to 0.79.0: canonical typed filter contracts
 
 Upgrade ORM and macros together, with operation catalog 0.6.0, profiles 0.18.0,
-AI 0.115.0 and optional backup 0.12.0 from one reviewed workspace revision.
+AI 0.117.0 and optional backup 0.12.0 from one reviewed workspace revision.
 Storage and router package identities are unchanged.
 
 `GraphqlSemanticFieldMetadata` struct literals must supply `filter_input`:
@@ -50,6 +50,51 @@ operator metadata does not resolve it or authorize provider execution.
 workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
+
+## 0.77.0 to 0.78.0: to-many relations in mutation payloads
+
+Upgrade runtime/macros together. No action is required and nothing breaks: the SDL is unchanged, and a mutation payload selection of a to-many or many-to-many relation that failed with `unsupported_capability` now returns the relation's page. Read authorities see one more relation layer per selected page (before the write, like query layers), and the record layer's projection also contains that relation's source key fields. Clients may drop a follow-up read of the links and select the page in the mutation.
+
+## 0.76.0 to 0.77.0: date-time backups and self-reference cycles
+
+Upgrade runtime/macros together. Breaking only at Rust compile time and for GraphQL schemas that
+expose `BackupValueKind`:
+
+- **Rust:** `BackupValueKind` is `#[non_exhaustive]` and gains `DateTime`. Add a wildcard arm to
+  matches on it outside graphql-orm. Struct literals and constructors are unchanged.
+- **GraphQL:** a schema that exposes `BackupValueKind` gains `DATE_TIME`. Regenerate SDL and
+  clients.
+
+Nothing changes for existing descriptors, schema hashes or snapshots: static derived date fields
+keep `BackupValueKind::String`. To back up runtime `DateTime` columns, describe them with
+`BackupValueKind::DateTime`. That changes the schema hash of descriptors that previously could not
+include those columns. Export and restore (including `DryRun`) refuse UTC instants outside
+0001–9999 on both backends, including when offset normalization or microsecond rounding crosses
+the boundary, and leap-second text (`SS = 60`). PostgreSQL normalizes a stored leap-second
+literal to a real instant; export preserves that stored instant, while snapshot input containing
+`SS = 60` is refused. Existing `String` descriptors keep their previous behavior.
+
+Restore preflights row shapes and value kinds for every table before importing any table, so a
+late invalid snapshot row shape or value leaves all target tables untouched in applying restore and `DryRun`.
+Runtime database failures still have per-table rollback, not cross-table transactionality.
+
+Restores of self-referencing rows that form cycles now succeed instead of failing. A non-null
+`UNIQUE` self-reference cycle, or a cycle in an append-only table, is refused with
+`BackupSelfReferenceCycle`, and that table's import transaction rolls back. Read it with
+`BackupSelfReferenceCycle::from_error`; its enclosing error's standard source chain retains the
+original SQLx/database cause. Only constraint violations and explicit trigger refusals are
+classified this way. Operational failures such as PostgreSQL `57014` (cancellation) and `40P01`
+(deadlock) retain their original SQLx error and SQLSTATE.
+
+## 0.75.0 to 0.76.0: delimited reserved-word identifiers
+
+Upgrade runtime/macros together. No action is needed for schemas whose table, column, index and constraint names are plain identifiers that are not reserved words: their statements, plan hashes, migration history and schema hashes are byte-identical.
+
+- Reserved-word or irregular names (for example a column named `join`, `order` or `select`) now work in generated DDL and DML on every backend. Hosts that renamed such a column only to avoid the failure may keep or revert the rename; reverting is an ordinary rename migration.
+- **Plan text for seven SQLite words:** `cast`, `constraint`, `current_date`, `current_time`, `current_timestamp`, `if` and `raise` were accepted bare in some positions (a column definition, for example) and are now delimited everywhere. Identities are unchanged, but a plan that names such an object has a different statement text and plan hash. Re-review and re-pin any stored plan hash for such a schema.
+- MSSQL: derive-generated select, update and delete statements now bracket the table name.
+- Hosts that compose SQL fragments (`FilterExpression::trusted_fragment`, custom predicates) can use `DatabaseBackend::render_identifier` or `render_identifier_path` to apply the same rule.
+- Already quoted path segments retain embedded dots and escaped closing delimiters. Reserved physical primary-key names work in repository and GraphQL CRUD, including preimage reads; their metadata identities remain raw.
 
 ## 0.74.0 to 0.75.0: automatic runtime timestamps
 

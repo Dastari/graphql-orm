@@ -1,7 +1,8 @@
 use super::*;
 use crate::backend::{
-    BackendKind, backend_current_epoch_expr, backend_helper_import_tokens, backend_marker_tokens,
-    backend_quote_identifier_path, backend_row_type_tokens, resolve_backend,
+    BackendKind, backend_current_epoch_expr, backend_dialect_tokens, backend_helper_import_tokens,
+    backend_marker_tokens, backend_quote_identifier_path, backend_render_identifier_path,
+    backend_row_type_tokens, resolve_backend,
 };
 use crate::naming::{graphql_field_name, selected_field_case_rule};
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -3659,6 +3660,7 @@ fn generate_entity_impl(
                     }
                     let target_type = syn::Ident::new(&target_type, field.span());
                     let relation_alias = "__graphql_orm_order_relation";
+                    let dialect = backend_dialect_tokens(backend);
                     let predicates = source_columns
                         .iter()
                         .zip(target_columns.iter())
@@ -3676,9 +3678,10 @@ fn generate_entity_impl(
                             let source_physical =
                                 source.meta.db_column.as_deref().unwrap_or(source_column);
                             format!(
-                                "{relation_alias}.{} = {table_name}.{}",
-                                backend_quote_identifier_path(backend, target_column),
-                                backend_quote_identifier_path(backend, source_physical),
+                                "{relation_alias}.{} = {}.{}",
+                                backend_render_identifier_path(backend, target_column),
+                                backend_render_identifier_path(backend, raw_table_name),
+                                backend_render_identifier_path(backend, source_physical),
                             )
                         })
                         .collect::<Vec<_>>()
@@ -3690,7 +3693,9 @@ fn generate_entity_impl(
                         if let Some(dir) = &self.#order_field_name {
                             parts.push(format!(
                                 #expression_format,
-                                <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                                #dialect.render_identifier_path(
+                                    <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                                ),
                                 dir.to_sql(),
                             ));
                         }
@@ -3958,7 +3963,8 @@ fn generate_entity_impl(
             .db_column
             .clone()
             .unwrap_or_else(|| rust_name.clone());
-        let db_col_sql = backend_quote_identifier_path(backend, &db_col);
+        let db_col_sql = backend_render_identifier_path(backend, &db_col);
+        let db_col_identity = backend_quote_identifier_path(backend, &db_col);
         let constraint_type = option_inner_type(field_type).unwrap_or(field_type);
         let constraint_type_name = quote! { #constraint_type }.to_string().replace(' ', "");
         let numeric_constraint_type = matches!(
@@ -4189,7 +4195,7 @@ fn generate_entity_impl(
                 .db_column
                 .clone()
                 .unwrap_or_else(|| other_rust_field.clone());
-            let other_column = backend_quote_identifier_path(backend, &other_column);
+            let other_column = backend_render_identifier_path(backend, &other_column);
             push_constraint(
                 constraint_name,
                 format!("{db_col_sql} {operator} {other_column}"),
@@ -4436,7 +4442,7 @@ fn generate_entity_impl(
         });
 
         if field_meta.is_primary_key {
-            primary_key_cols.push(db_col_sql.clone());
+            primary_key_cols.push(db_col_identity.clone());
         }
 
         // Generate WhereInput field for filterable fields
@@ -5621,7 +5627,7 @@ fn generate_projection_definitions(
                     .db_column
                     .clone()
                     .unwrap_or_else(|| ident.to_string());
-                let quoted = backend_quote_identifier_path(backend, &db_column);
+                let quoted = backend_render_identifier_path(backend, &db_column);
                 if selected.meta.mssql_money {
                     format!("CAST({quoted} AS DECIMAL(19,4)) AS {quoted}")
                 } else {

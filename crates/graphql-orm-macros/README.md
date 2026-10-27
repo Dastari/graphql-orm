@@ -10,12 +10,21 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.76.0 emits canonical typed filter contracts for the actual static
+Version 0.79.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and
 spatial predicates. Runtime metadata likewise describes its actual operator
 surface. Upgrade runtime and macros together with operation catalog 0.6.0;
-see the [wire-3 migration](../../MIGRATION.md#0750-to-0760-canonical-typed-filter-contracts).
+see the [wire-3 migration](../../MIGRATION.md#0780-to-0790-canonical-typed-filter-contracts).
 No resolver policy, GraphQL filter SDL or database format changes.
+
+Version 0.78.0 is the companion of runtime mutation payload relation pages; the macros
+themselves are unchanged.
+
+Version 0.77.0 is the companion of the runtime's date-time backups; the macros themselves are
+unchanged.
+
+Version 0.76.0 delimits reserved-word and irregular column and table names in generated
+DML. See the [migration guide](../../MIGRATION.md#0750-to-0760-delimited-reserved-word-identifiers).
 
 Version 0.75.0 is the companion of the runtime's automatic timestamps; the macros themselves
 are unchanged.

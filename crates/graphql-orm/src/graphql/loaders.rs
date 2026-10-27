@@ -469,7 +469,9 @@ where
             .iter()
             .any(|clause| crate::graphql::orm::sort_clause_mentions_column(clause, column))
         {
-            query.order_clauses.push(format!("{column} ASC"));
+            query
+                .order_clauses
+                .push(format!("{} ASC", B::DIALECT.render_identifier_path(column)));
         }
     }
     let offset = page.offset.max(0);
@@ -692,7 +694,10 @@ where
             if !sorts.iter().any(|sort| {
                 crate::graphql::orm::sort_clause_mentions_column(&sort.clause, primary_key)
             }) {
-                sorts.push(SortExpression::unbound(format!("{primary_key} ASC")));
+                sorts.push(SortExpression::unbound(format!(
+                    "{} ASC",
+                    B::DIALECT.render_identifier_path(primary_key)
+                )));
             }
         }
         let sort_sql = sorts
@@ -772,8 +777,11 @@ where
                     "COUNT(*) AS __gom_relation_total_count".to_string(),
                 ))
                 .collect::<Vec<_>>();
-            let mut count_sql =
-                format!("SELECT {} FROM {}", count_columns.join(", "), T::TABLE_NAME);
+            let mut count_sql = format!(
+                "SELECT {} FROM {}",
+                count_columns.join(", "),
+                B::DIALECT.render_identifier_path(T::TABLE_NAME)
+            );
             if !where_sql.is_empty() {
                 count_sql.push_str(" WHERE ");
                 count_sql.push_str(&where_sql);
@@ -979,7 +987,7 @@ where
             let sql = format!(
                 "SELECT {} FROM {} WHERE {} IN ({})",
                 T::column_names().join(", "),
-                T::TABLE_NAME,
+                backend.render_identifier_path(T::TABLE_NAME),
                 batch_column,
                 params
             );

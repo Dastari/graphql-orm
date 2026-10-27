@@ -10,12 +10,24 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.76.0 emits canonical typed filter contracts for the actual static
+Version 0.79.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and
 spatial predicates. Runtime metadata likewise describes its actual operator
 surface. Upgrade runtime and macros together with operation catalog 0.6.0;
-see the [wire-3 migration](../../MIGRATION.md#0750-to-0760-canonical-typed-filter-contracts).
+see the [wire-3 migration](../../MIGRATION.md#0780-to-0790-canonical-typed-filter-contracts).
 No resolver policy, GraphQL filter SDL or database format changes.
+
+Version 0.78.0 lets runtime GraphQL mutation payloads select to-many and many-to-many
+relation pages. See the
+[migration guide](../../MIGRATION.md#0770-to-0780-to-many-relations-in-mutation-payloads).
+
+Version 0.77.0 backs up runtime `DateTime` columns (`BackupValueKind::DateTime`, now
+`#[non_exhaustive]`), restores self-reference cycles, and adds `Database::database_identity()`. See
+the [migration guide](../../MIGRATION.md#0760-to-0770-date-time-backups-and-self-reference-cycles).
+
+Version 0.76.0 delimits reserved-word and irregular identifiers in generated SQL, so a
+table or column named `order`, `join` or `select` works. See the
+[migration guide](../../MIGRATION.md#0750-to-0760-delimited-reserved-word-identifiers).
 
 Version 0.75.0 adds server-managed runtime timestamps (`RuntimeField::auto_timestamp`:
 `OnCreate`, `OnCreateAndUpdate`). See the

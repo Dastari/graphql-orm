@@ -7,9 +7,25 @@ mod mock;
     feature = "provider-anthropic-core",
     feature = "provider-xai-core",
     feature = "provider-ollama-core",
-    feature = "provider-openai-compatible-core"
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
 ))]
 mod http;
+
+#[cfg(any(
+    feature = "provider-openai-core",
+    feature = "provider-xai-core",
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core"
+))]
+mod sse;
+
+#[cfg(any(
+    feature = "provider-openai-compatible-core",
+    feature = "provider-chat-completions-core",
+    feature = "provider-anthropic-core"
+))]
+mod endpoint;
 
 #[cfg(feature = "provider-anthropic-core")]
 mod anthropic;
@@ -33,6 +49,9 @@ mod xai;
 #[cfg(feature = "provider-ollama-core")]
 mod ollama;
 
+#[cfg(feature = "provider-chat-completions-core")]
+mod chat_completions;
+
 #[cfg(feature = "provider-codex-app-server")]
 mod codex_app_server;
 
@@ -45,6 +64,11 @@ pub use mock::MockProvider;
 
 #[cfg(feature = "provider-anthropic-core")]
 pub use anthropic::{AnthropicProvider, AnthropicProviderConfig};
+
+#[cfg(feature = "provider-chat-completions-core")]
+pub use chat_completions::{
+    ChatCompletionsCapabilities, ChatCompletionsProvider, ChatCompletionsProviderConfig,
+};
 
 #[cfg(feature = "provider-openai-core")]
 pub use openai::{OpenAiFileDeletionService, OpenAiProvider, OpenAiProviderConfig};

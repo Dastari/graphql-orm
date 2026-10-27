@@ -29,6 +29,7 @@ cleanup() {
 }
 trap cleanup EXIT
 git -C "${repository_root}" worktree add --detach "${baseline_root}" "${base}" >/dev/null
+python3 "${repository_root}/scripts/prepare-router-semver-baseline.py" "${baseline_root}"
 
 packages=(
   graphql-orm

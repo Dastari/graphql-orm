@@ -3,21 +3,30 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-27
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## 0.11.0 to 0.12.0: optional ORM public type identity
+## 0.11.1 to 0.12.0: optional ORM public type identity
 
 Upgrade optional ORM adapters and any direct ORM consumer together to ORM
-0.76.0/catalog 0.6.0 from one reviewed workspace revision. Concrete public
+0.79.0/catalog 0.6.0 from one reviewed workspace revision. Concrete public
 `Database`, entity metadata and `ColumnBackupPolicy` types must share one source
 universe. Storage stays on its existing version. No backup/restore logic,
 schema, snapshot manifest or repository-format change; no data migration is
 required. This identity alignment does not authorize a backup or restore run.
+
+## 0.11.0 to 0.11.1: package release identity
+
+Update the backup requirement to 0.11.1 and refresh the consumer lockfile when
+adopting the reviewed workspace revision. This patch gives the snapshot-format
+documentation added after the immutable 0.11.0 tag its own package identity.
+There are no new breaking changes, API/SDL changes, data migrations or runtime
+changes in this patch. ORM/macros remain at 0.78.0; their existing migration
+requirements still apply when adopting the complete workspace revision.
 
 ## 0.10.0 to 0.11.0: composite-key tables
 

@@ -12,6 +12,7 @@ use crate::{AiError, AiProviderSessionDescriptor, AiScope, ModelReasoningEffort,
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "graphql-case-pascal", graphql(rename_items = "PascalCase"))]
+#[non_exhaustive]
 pub enum AiSessionProviderKind {
     /// OpenAI API.
     OpenAi,
@@ -25,6 +26,8 @@ pub enum AiSessionProviderKind {
     OpenAiCompatible,
     /// Deployment-registered installed harness.
     LocalHarness,
+    /// Explicit Chat Completions-compatible endpoint.
+    ChatCompletions,
 }
 
 impl From<ProviderKind> for AiSessionProviderKind {
@@ -36,6 +39,7 @@ impl From<ProviderKind> for AiSessionProviderKind {
             ProviderKind::Ollama => Self::Ollama,
             ProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
             ProviderKind::LocalHarness => Self::LocalHarness,
+            ProviderKind::ChatCompletions => Self::ChatCompletions,
         }
     }
 }
@@ -49,6 +53,7 @@ impl From<AiSessionProviderKind> for ProviderKind {
             AiSessionProviderKind::Ollama => Self::Ollama,
             AiSessionProviderKind::OpenAiCompatible => Self::OpenAiCompatible,
             AiSessionProviderKind::LocalHarness => Self::LocalHarness,
+            AiSessionProviderKind::ChatCompletions => Self::ChatCompletions,
         }
     }
 }

@@ -1560,7 +1560,19 @@ fn provider_data_policy(
     compatible: Option<AiOpenAiCompatibleProfileInput>,
 ) -> Result<serde_json::Value, AiError> {
     match (provider_kind, compatible) {
-        (AiProviderKindInput::OpenAiCompatible, Some(profile)) => {
+        (
+            kind @ (AiProviderKindInput::OpenAiCompatible | AiProviderKindInput::ChatCompletions),
+            Some(profile),
+        ) => {
+            // Chat Completions has no provider-retained continuation; every
+            // turn is a stateless replay.
+            if kind == AiProviderKindInput::ChatCompletions
+                && profile.provider_retained_continuation
+            {
+                return Err(AiError::InvalidInput(
+                    "Chat Completions profiles cannot retain provider responses".to_owned(),
+                ));
+            }
             validate_compatible_profile(
                 &profile.retention,
                 profile.custom_tools,
@@ -1579,10 +1591,12 @@ fn provider_data_policy(
             })
             .map_err(|_| AiError::PersistenceFailed)
         }
-        (AiProviderKindInput::OpenAiCompatible, None) => Err(AiError::InvalidInput(
-            "OpenAI-compatible profiles require a reviewed capability and retention contract"
-                .to_owned(),
-        )),
+        (AiProviderKindInput::OpenAiCompatible | AiProviderKindInput::ChatCompletions, None) => {
+            Err(AiError::InvalidInput(
+                "OpenAI-compatible profiles require a reviewed capability and retention contract"
+                    .to_owned(),
+            ))
+        }
         (_, Some(_)) => Err(AiError::InvalidInput(
             "OpenAI-compatible configuration is invalid for this provider kind".to_owned(),
         )),
@@ -1591,56 +1605,58 @@ fn provider_data_policy(
 }
 
 fn provider_view(record: &AiProviderProfileRecord) -> Result<AiProviderProfileView, AiError> {
-    let openai_compatible =
-        if record.provider_kind == AiProviderKindInput::OpenAiCompatible.as_str() {
-            if record
-                .data_policy
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty)
-            {
-                // Profiles created before the typed contract was introduced remain
-                // visible but cannot construct the compatible transport adapter.
-                None
-            } else {
-                let stored: StoredProviderDataPolicy =
-                    serde_json::from_value(record.data_policy.clone()).map_err(|_| {
-                        AiError::InvalidConfiguration(
-                            "invalid OpenAI-compatible provider data policy".to_owned(),
-                        )
-                    })?;
-                if stored.openai_compatible.version != OPENAI_COMPATIBLE_DATA_POLICY_VERSION {
-                    return Err(AiError::InvalidConfiguration(
-                        "unsupported OpenAI-compatible provider data-policy version".to_owned(),
-                    ));
-                }
-                validate_compatible_profile(
-                    &stored.openai_compatible.retention,
-                    stored.openai_compatible.custom_tools,
-                    stored.openai_compatible.parallel_tool_calls,
-                )
-                .map_err(AiError::InvalidConfiguration)?;
-                Some(AiOpenAiCompatibleProfileView {
-                    retention: stored.openai_compatible.retention,
-                    custom_tools: stored.openai_compatible.custom_tools,
-                    parallel_tool_calls: stored.openai_compatible.parallel_tool_calls,
-                    structured_output: stored.openai_compatible.structured_output,
-                    provider_retained_continuation: stored
-                        .openai_compatible
-                        .provider_retained_continuation,
-                })
-            }
+    let openai_compatible = if record.provider_kind
+        == AiProviderKindInput::OpenAiCompatible.as_str()
+        || record.provider_kind == AiProviderKindInput::ChatCompletions.as_str()
+    {
+        if record
+            .data_policy
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            // Profiles created before the typed contract was introduced remain
+            // visible but cannot construct the compatible transport adapter.
+            None
         } else {
-            if !record
-                .data_policy
-                .as_object()
-                .is_some_and(serde_json::Map::is_empty)
-            {
+            let stored: StoredProviderDataPolicy =
+                serde_json::from_value(record.data_policy.clone()).map_err(|_| {
+                    AiError::InvalidConfiguration(
+                        "invalid OpenAI-compatible provider data policy".to_owned(),
+                    )
+                })?;
+            if stored.openai_compatible.version != OPENAI_COMPATIBLE_DATA_POLICY_VERSION {
                 return Err(AiError::InvalidConfiguration(
-                    "unexpected provider data policy".to_owned(),
+                    "unsupported OpenAI-compatible provider data-policy version".to_owned(),
                 ));
             }
-            None
-        };
+            validate_compatible_profile(
+                &stored.openai_compatible.retention,
+                stored.openai_compatible.custom_tools,
+                stored.openai_compatible.parallel_tool_calls,
+            )
+            .map_err(AiError::InvalidConfiguration)?;
+            Some(AiOpenAiCompatibleProfileView {
+                retention: stored.openai_compatible.retention,
+                custom_tools: stored.openai_compatible.custom_tools,
+                parallel_tool_calls: stored.openai_compatible.parallel_tool_calls,
+                structured_output: stored.openai_compatible.structured_output,
+                provider_retained_continuation: stored
+                    .openai_compatible
+                    .provider_retained_continuation,
+            })
+        }
+    } else {
+        if !record
+            .data_policy
+            .as_object()
+            .is_some_and(serde_json::Map::is_empty)
+        {
+            return Err(AiError::InvalidConfiguration(
+                "unexpected provider data policy".to_owned(),
+            ));
+        }
+        None
+    };
     Ok(AiProviderProfileView {
         id: record.id,
         scope_kind: record.scope_kind.clone(),
@@ -1930,7 +1946,9 @@ fn normalize_endpoint(
 ) -> Result<Option<String>, AiError> {
     let configurable = matches!(
         kind,
-        AiProviderKindInput::Ollama | AiProviderKindInput::OpenAiCompatible
+        AiProviderKindInput::Ollama
+            | AiProviderKindInput::OpenAiCompatible
+            | AiProviderKindInput::ChatCompletions
     );
     if !configurable {
         return if base_url.is_none() {
