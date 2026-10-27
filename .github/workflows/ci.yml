@@ -271,6 +271,7 @@ jobs:
       - run: cargo test -p graphql-orm-router --locked --features auth-agql
       - name: Validate a fresh standalone router consumer without an input lockfile
         run: bash scripts/check-router-fresh-consumer.sh
+      - run: python3 scripts/test-router-semver-baseline.py
       - run: cargo clippy -p graphql-orm-router-protocol --all-targets --locked -- -D warnings
       - run: cargo clippy -p graphql-orm-router --all-targets --locked -- -D warnings
       - run: cargo clippy -p graphql-orm-router --all-targets --locked --features auth-agql -- -D warnings
