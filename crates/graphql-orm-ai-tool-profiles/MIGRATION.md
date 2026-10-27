@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.17.0 to 0.18.0: explicit GraphQL features
+
+Profiles uses base parser/errors and contributes no UUID feature. Public profile APIs, capability manifests and fingerprints are unchanged.
+
+This intentional pre-1.0 feature/default break removes incidental upstream
+email/UI/tempfile defaults. Follow the
+[workspace host opt-in examples](../../MIGRATION.md#0780-to-0790-explicit-graphql-features),
+including `UploadValue.content` byte-backed versus file-backed behavior and
+the canonical Auth 0.24 full revision when integrating AI. Features remain
+additive; do not add a default-on legacy umbrella. No data migration is required.
+
 ## 0.16.2 to 0.17.0: operation catalog 0.5.0
 
 Adopt profiles 0.17.0 with operation catalog 0.5.0 from the same workspace

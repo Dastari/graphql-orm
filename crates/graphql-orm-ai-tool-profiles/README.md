@@ -20,6 +20,10 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version 0.18.0 uses async-graphql base parser/errors without adding UUID or
+upstream defaults. See the [feature contract](../../docs/reference/graphql-features.md)
+and [migration guide](MIGRATION.md) for explicit host feature opt-ins.
+
 Version 0.17.0 adopts operation catalog 0.5.0 (semantic label fields). It is a
 breaking minor only because public APIs take catalogue types; capabilities are
 unchanged.
@@ -36,7 +40,7 @@ authorization policies. No downstream catalogue filtering is needed.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.16.2" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.18.0" }
 serde_json = "1"
 ```
 
