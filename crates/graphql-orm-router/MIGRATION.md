@@ -10,11 +10,18 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
-## 0.6.6 to 0.6.7: preparation test ownership
+## 0.6.6 to 0.6.7: preparation ownership and fresh consumer dependencies
 
 No breaking changes or application, protocol, configuration or data migration
 are required. The patch records a private wire-test ownership correction and a
 valid-candidate control; production preparation and listener binding are unchanged.
+Fresh consumers now resolve Datadog OpenTelemetry `=0.5.2` with default features
+disabled, matching pinned Hive `0.2.19` and its OpenTelemetry SDK `0.32` types.
+Consumers that explicitly selected Datadog `0.5.3` must align that dependency;
+its SDK `0.33` types cannot be exchanged with this Hive version. No public router
+feature or behavior changes. Semver baseline generation applies this same narrow
+constraint to historical Hive `=0.2.19` manifests, preserving historical source,
+version and feature definitions; fresh consumer validation uses no input lockfile.
 No executable is distributed or activated by this source change.
 
 ## 0.6.5 to 0.6.6: documentation package identity

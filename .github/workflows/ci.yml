@@ -269,6 +269,8 @@ jobs:
       - run: cargo test -p graphql-orm-router-protocol --locked
       - run: cargo test -p graphql-orm-router --locked
       - run: cargo test -p graphql-orm-router --locked --features auth-agql
+      - name: Validate a fresh standalone router consumer without an input lockfile
+        run: bash scripts/check-router-fresh-consumer.sh
       - run: cargo clippy -p graphql-orm-router-protocol --all-targets --locked -- -D warnings
       - run: cargo clippy -p graphql-orm-router --all-targets --locked -- -D warnings
       - run: cargo clippy -p graphql-orm-router --all-targets --locked --features auth-agql -- -D warnings
@@ -329,6 +331,8 @@ jobs:
           fetch-depth: 0
       - name: Create baseline worktree
         run: git worktree add ../graphql-orm-baseline "${{ github.event.pull_request.base.sha }}"
+      - name: Constrain the historical Hive telemetry dependency without changing its source or features
+        run: python3 scripts/prepare-router-semver-baseline.py ../graphql-orm-baseline
       - id: companion-baseline
         name: Detect consolidated packages in the baseline
         run: |

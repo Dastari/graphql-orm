@@ -16,6 +16,11 @@ supersedes: []
   the invalid-candidate and stale-authorization-metadata wire tests. This removes
   their released-port rebind race without weakening the exact typed admission
   errors. Add a valid-candidate control that prepares with the address occupied.
+- Constrain Datadog OpenTelemetry to `=0.5.2` without default features so fresh
+  consumers of pinned Hive `0.2.19` retain its SDK `0.32` types. Datadog `0.5.3`
+  instead selects SDK `0.33`, breaking Hive compilation. Add fresh-consumer
+  rustdoc/graph verification and an explicit dependency-only historical semver
+  baseline adjustment; keep historical source, version and features unchanged.
 - No breaking changes: public Rust APIs, routing, authorization, SDL, configuration
   and persisted data are unchanged. No executable or release tag is created.
 
