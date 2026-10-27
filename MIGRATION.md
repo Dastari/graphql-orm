@@ -28,7 +28,9 @@ expose `BackupValueKind`:
 Nothing changes for existing descriptors, schema hashes or snapshots: static derived date fields
 keep `BackupValueKind::String`. To back up runtime `DateTime` columns, describe them with
 `BackupValueKind::DateTime`. That changes the schema hash of descriptors that previously could not
-include those columns.
+include those columns. Export and restore (including `DryRun`) refuse UTC instants outside
+0001–9999 on both backends, including when offset normalization or microsecond rounding crosses
+the boundary. Existing `String` descriptors keep their previous behavior.
 
 Restores of self-referencing rows that form cycles now succeed instead of failing. A non-null
 `UNIQUE` self-reference cycle, or a cycle in an append-only table, is refused with

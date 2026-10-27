@@ -55,9 +55,11 @@ every backend:
 - export reads SQLite text through the record engine's parse and canonicalizes it, and reads
   PostgreSQL `TIMESTAMPTZ` typed, independent of the session `TimeZone`;
 - a value without a portable form fails the export: unreadable SQLite text, PostgreSQL
-  `±infinity`, or an instant outside years 0001–9999;
-- restore accepts only canonical text (other text or another value kind is refused before any
-  write) and binds PostgreSQL values through `CAST(? AS TIMESTAMPTZ)`;
+  `±infinity`, or a UTC instant outside years 0001–9999 (including when offset normalization or
+  microsecond rounding crosses that boundary);
+- restore accepts only canonical text within that range (other text or another value kind is
+  refused before any write, including in `DryRun`) and binds PostgreSQL values through
+  `CAST(? AS TIMESTAMPTZ)`;
 - restore writes the stored values; no default, clock or automatic timestamp applies.
 
 Static derived date fields keep `BackupValueKind::String`, so their descriptors and schema hashes

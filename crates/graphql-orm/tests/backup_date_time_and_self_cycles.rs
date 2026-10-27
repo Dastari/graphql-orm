@@ -148,10 +148,20 @@ async fn restore(
     rows: &BTreeMap<String, Vec<BackupRow>>,
 ) -> graphql_orm::Result<Vec<ImportReport>> {
     let snapshot = snapshot(entities);
-    db.restore_backup_rows(&snapshot, &snapshot, rows, &RestoreContext::empty_database())
-        .await
+    db.restore_backup_rows(
+        &snapshot,
+        &snapshot,
+        rows,
+        &RestoreContext::empty_database(),
+    )
+    .await
 }
-fn value<'a>(rows: &'a BTreeMap<String, Vec<BackupRow>>, table: &str, id: &str, column: &str) -> &'a BackupValue {
+fn value<'a>(
+    rows: &'a BTreeMap<String, Vec<BackupRow>>,
+    table: &str,
+    id: &str,
+    column: &str,
+) -> &'a BackupValue {
     &rows[table]
         .iter()
         .find(|row| row.primary_key == id)
@@ -203,7 +213,10 @@ async fn date_times_round_trip_exactly_and_independently_of_the_session_time_zon
         value(&rows, "dt_events", "1", "updated_at"),
         &text("1999-12-31T23:59:59.999999Z")
     );
-    assert_eq!(value(&rows, "dt_events", "2", "updated_at"), &BackupValue::Null);
+    assert_eq!(
+        value(&rows, "dt_events", "2", "updated_at"),
+        &BackupValue::Null
+    );
     assert_eq!(
         value(&rows, "dt_events", "3", "created_at"),
         &text("2001-02-03T04:05:06.123456Z")
@@ -238,11 +251,12 @@ async fn date_times_round_trip_exactly_and_independently_of_the_session_time_zon
         .await
         .unwrap();
         use graphql_orm::sqlx::Row;
-        let rendered: String = Backend::fetch_rows(target.db.pool(), "SELECT rendered FROM tz_probe", &[])
-            .await
-            .unwrap()[0]
-            .try_get(0)
-            .unwrap();
+        let rendered: String =
+            Backend::fetch_rows(target.db.pool(), "SELECT rendered FROM tz_probe", &[])
+                .await
+                .unwrap()[0]
+                .try_get(0)
+                .unwrap();
         assert!(rendered.ends_with("+05:45"), "{rendered}");
         exec(&target.db, "DROP TABLE tz_probe").await.unwrap();
         target
@@ -263,8 +277,8 @@ async fn date_times_round_trip_exactly_and_independently_of_the_session_time_zon
         )
         .await
         .unwrap()[0]
-        .try_get(0)
-        .unwrap();
+            .try_get(0)
+            .unwrap();
         assert_eq!(stored, "2001-02-03T04:05:06.123456Z");
     }
 }
@@ -274,17 +288,32 @@ async fn unportable_stored_date_times_fail_the_export() {
     let ddl = events_ddl();
     let source = open("dt-unportable", &[&ddl]).await;
     #[cfg(feature = "sqlite")]
-    let bad = "'not a date'";
-    // PostgreSQL infinity has no RFC 3339 form; it must fail cleanly, not overflow the decode.
+    let bad_values = [
+        "'not a date'",
+        "'0000-01-01T00:00:00Z'",
+        "'0001-01-01T00:00:00+01:00'",
+        "'9999-12-31T23:59:59-01:00'",
+        "'9999-12-31T23:59:59.9999995Z'",
+    ];
+    // PostgreSQL infinities and years outside the portable range must fail cleanly, before
+    // chrono's binary decode can overflow. PostgreSQL's 1 BC is astronomical year zero.
     #[cfg(feature = "postgres")]
-    let bad = "'infinity'";
-    exec(
-        &source.db,
-        &format!("INSERT INTO dt_events (id, created_at, label) VALUES (1, {bad}, 'a')"),
-    )
-    .await
-    .unwrap();
-    assert!(export(&source.db, &events()).await.is_err());
+    let bad_values = [
+        "'infinity'",
+        "'-infinity'",
+        "'0001-01-01 00:00:00 BC'",
+        "'10000-01-01 00:00:00+00'",
+    ];
+    for bad in bad_values {
+        exec(
+            &source.db,
+            &format!("INSERT INTO dt_events (id, created_at, label) VALUES (1, {bad}, 'a')"),
+        )
+        .await
+        .unwrap();
+        assert!(export(&source.db, &events()).await.is_err(), "{bad}");
+        exec(&source.db, "DELETE FROM dt_events").await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -303,16 +332,26 @@ async fn non_canonical_or_mistyped_snapshot_date_times_are_refused_before_any_wr
     for replacement in [
         BackupValue::String("2001-02-03T04:05:06Z".into()),
         BackupValue::String("2001-02-03T14:05:06.123456+10:00".into()),
+        BackupValue::String("0000-01-01T00:00:00.000000Z".into()),
+        BackupValue::String("+10000-01-01T00:00:00.000000Z".into()),
         BackupValue::Integer(981_173_106),
     ] {
         let mut tampered = rows.clone();
         tampered.get_mut("dt_events").unwrap()[1]
             .values
             .insert("created_at".into(), replacement.clone());
-        assert!(
-            restore(&target.db, &entities, &tampered).await.is_err(),
-            "{replacement:?}"
-        );
+        let snapshot = snapshot(&entities);
+        for context in [RestoreContext::dry_run(), RestoreContext::empty_database()] {
+            assert!(
+                target
+                    .db
+                    .restore_backup_rows(&snapshot, &snapshot, &tampered, &context)
+                    .await
+                    .is_err(),
+                "{replacement:?} in {:?}",
+                context.mode
+            );
+        }
         assert_eq!(count(&target.db, "dt_events").await, 0);
     }
 }
@@ -372,9 +411,12 @@ async fn self_reference_trees_loops_and_cycles_round_trip_with_foreign_keys_enfo
     let target = open("sr-target", &ddl).await;
     // The target enforces foreign keys, so the own-key placeholders below are really checked.
     assert!(
-        exec(&target.db, "INSERT INTO sr_ring (id, next_id) VALUES (100, 999)")
-            .await
-            .is_err()
+        exec(
+            &target.db,
+            "INSERT INTO sr_ring (id, next_id) VALUES (100, 999)"
+        )
+        .await
+        .is_err()
     );
     assert_eq!(count(&target.db, "sr_ring").await, 0);
 

@@ -359,7 +359,9 @@ async fn database_identity(pool: &DbPool) -> crate::Result<DatabaseIdentity> {
         .fetch_one(pool)
         .await?;
     Ok(DatabaseIdentity {
-        name: row.try_get::<Option<String>, _>("file")?.unwrap_or_default(),
+        name: row
+            .try_get::<Option<String>, _>("file")?
+            .unwrap_or_default(),
         object_id: None,
     })
 }
@@ -808,6 +810,22 @@ fn validate_import_rows(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> 
     Ok(())
 }
 
+/// Parse through the record engine and keep the UTC result inside the range both backup
+/// backends can store. Offsets and microsecond rounding can move an otherwise four-digit input
+/// outside this range, so check the canonical output rather than the input's year.
+fn parse_backup_date_time(text: &str) -> crate::Result<super::RuntimeDateTime> {
+    let canonical = super::RuntimeDateTime::parse(text)
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    // Canonical UTC text has exactly 27 bytes for a four-digit year. Chrono can also represent
+    // year zero and signed extended years, which PostgreSQL's portable range excludes.
+    if canonical.as_str().len() != 27 || canonical.as_str().starts_with("0000-") {
+        return Err(sqlx::Error::Protocol(
+            "backup date-time is outside the portable range 0001-9999".to_owned(),
+        ));
+    }
+    Ok(canonical)
+}
+
 fn validate_backup_value(
     descriptor: &super::ColumnBackupDescriptor,
     value: &BackupValue,
@@ -832,7 +850,7 @@ fn validate_backup_value(
     {
         // Only the canonical form the export writes: a hand-edited or foreign representation
         // would restore a different stored text than the one the snapshot's row hash describes.
-        if super::RuntimeDateTime::parse(text).is_ok_and(|canonical| canonical.as_str() == text) {
+        if parse_backup_date_time(text).is_ok_and(|canonical| canonical.as_str() == text) {
             return Ok(());
         }
         return Err(sqlx::Error::Protocol(format!(
@@ -1318,9 +1336,8 @@ fn decode_backup_value(
         BackupValueKind::DateTime => row.try_get::<Option<String>, _>(column).and_then(|value| {
             value
                 .map(|value| {
-                    super::RuntimeDateTime::parse(&value)
+                    parse_backup_date_time(&value)
                         .map(|value| BackupValue::String(value.as_str().to_owned()))
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))
                 })
                 .unwrap_or(Ok(BackupValue::Null))
         }),
@@ -1860,12 +1877,25 @@ mod tests {
             text("2026-10-27T11:02:03.000004+10:00"),
             text("2026-10-27 01:02:03.000004"),
             text("2026-10-27T01:02:03.0000041Z"),
+            text("0000-01-01T00:00:00.000000Z"),
+            text("+10000-01-01T00:00:00.000000Z"),
             BackupValue::Integer(1),
         ] {
             assert!(
                 validate_backup_value(&descriptor, &refused).is_err(),
                 "{refused:?}"
             );
+        }
+        for accepted in ["0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z"] {
+            assert!(validate_backup_value(&descriptor, &text(accepted)).is_ok());
+        }
+        for outside in [
+            "0000-01-01T00:00:00Z",
+            "0001-01-01T00:00:00+01:00",
+            "9999-12-31T23:59:59-01:00",
+            "9999-12-31T23:59:59.9999995Z",
+        ] {
+            assert!(parse_backup_date_time(outside).is_err(), "{outside}");
         }
         assert_eq!(BackupValueKind::DateTime.as_schema_str(), "date_time");
         assert!(matches!(
