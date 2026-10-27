@@ -16,11 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 struct FilterContractRow {
     #[primary_key]
     #[filterable(type = "uuid")]
+    #[sortable]
     id: graphql_orm::uuid::Uuid,
     #[filterable(type = "string")]
     text: String,
     #[filterable(type = "number")]
-    count: i32,
+    quantity: i32,
     #[graphql_orm(decimal(precision = 12, scale = 2))]
     #[filterable(type = "decimal")]
     amount: graphql_orm::rust_decimal::Decimal,
@@ -66,7 +67,7 @@ fn input_fields(sdl: &str, name: &str) -> BTreeMap<String, String> {
             }
             Some((
                 name.to_owned(),
-                ty.trim().split_whitespace().next().unwrap().to_owned(),
+                ty.split_whitespace().next().unwrap().to_owned(),
             ))
         })
         .collect()
@@ -295,9 +296,11 @@ impl FilterPlanningQuery {
     async fn get_spatial(
         &self,
         #[graphql(name = "where")] filter: Option<FilterContractRowWhereInput>,
-    ) -> FilterContractRow {
+    ) -> graphql_orm::async_graphql::Result<FilterContractRow> {
         let _ = filter;
-        unreachable!("planning-only schema; no resolver execution")
+        Err(graphql_orm::async_graphql::Error::new(
+            "planning-only schema; no resolver execution",
+        ))
     }
 }
 
@@ -357,7 +360,7 @@ fn actual_derived_spatial_contract_compiles_exact_json_plans_for_all_predicates(
     )
     .unwrap();
     let semantic = GraphqlSemanticCatalog::compose_with_custom(
-        [entity],
+        [entity.clone()],
         &GraphqlOperationCatalog::compose(std::iter::empty()),
         [operation],
     )
