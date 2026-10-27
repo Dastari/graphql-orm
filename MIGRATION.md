@@ -15,6 +15,16 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.75.0 to 0.76.0: delimited reserved-word identifiers
+
+Upgrade runtime/macros together. No action is needed for schemas whose table, column, index and constraint names are plain identifiers that are not reserved words: their statements, plan hashes, migration history and schema hashes are byte-identical.
+
+- Reserved-word or irregular names (for example a column named `join`, `order` or `select`) now work in generated DDL and DML on every backend. Hosts that renamed such a column only to avoid the failure may keep or revert the rename; reverting is an ordinary rename migration.
+- **Plan text for seven SQLite words:** `cast`, `constraint`, `current_date`, `current_time`, `current_timestamp`, `if` and `raise` were accepted bare in some positions (a column definition, for example) and are now delimited everywhere. Identities are unchanged, but a plan that names such an object has a different statement text and plan hash. Re-review and re-pin any stored plan hash for such a schema.
+- MSSQL: derive-generated select, update and delete statements now bracket the table name.
+- Hosts that compose SQL fragments (`FilterExpression::trusted_fragment`, custom predicates) can use `DatabaseBackend::render_identifier` or `render_identifier_path` to apply the same rule.
+- Already quoted path segments retain embedded dots and escaped closing delimiters. Reserved physical primary-key names work in repository and GraphQL CRUD, including preimage reads; their metadata identities remain raw.
+
 ## 0.74.0 to 0.75.0: automatic runtime timestamps
 
 Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:

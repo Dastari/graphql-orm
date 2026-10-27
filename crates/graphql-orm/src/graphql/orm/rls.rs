@@ -56,15 +56,10 @@ pub fn build_rls_policy_plan(
 /// SECURITY`, and create-or-replace policy statements for operations with a
 /// configured predicate.
 pub fn render_postgres_entity_rls_sql(entity: &RlsEntityMetadata) -> Vec<String> {
-    let mut statements = vec![format!(
-        "ALTER TABLE {} ENABLE ROW LEVEL SECURITY",
-        entity.table_name
-    )];
+    let table = DatabaseBackend::Postgres.render_identifier_path(entity.table_name);
+    let mut statements = vec![format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")];
     if entity.force {
-        statements.push(format!(
-            "ALTER TABLE {} FORCE ROW LEVEL SECURITY",
-            entity.table_name
-        ));
+        statements.push(format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY"));
     }
 
     for policy in sorted_policies(entity) {
@@ -75,11 +70,11 @@ pub fn render_postgres_entity_rls_sql(entity: &RlsEntityMetadata) -> Vec<String>
             .quote_identifier(&policy_name(entity.table_name, policy.operation));
         statements.push(format!(
             "DROP POLICY IF EXISTS {} ON {}",
-            policy_name, entity.table_name
+            policy_name, table
         ));
         statements.push(render_create_policy_statement(
             &policy_name,
-            entity.table_name,
+            &table,
             policy.operation,
             &predicate,
         ));

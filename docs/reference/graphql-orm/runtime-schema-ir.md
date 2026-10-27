@@ -53,6 +53,12 @@ behavior, set-null over non-nullable keys, foreign keys whose referenced target 
 provably unique (primary key, unique field, unique index, or composite-unique group), and
 defaults that do not fit their field's value kind. Invalid runtime definitions never panic.
 
+SQL reserved words are valid physical names: a table `order` or a column `join` or `select` is
+accepted. Generated DDL and DML delimit such names (`DatabaseBackend::render_identifier`) and
+write every other name bare, so plans for non-reserved names are byte-identical across releases.
+Quoted path segments preserve embedded dots and escaped closing delimiters. Physical primary-key
+names use the same rendering in mutation preimage reads and repository insert rereads.
+
 Stable IDs are validated at construction, revalidated during `validate`, and enforced during
 deserialization (`TryFrom`-backed Serde), so serialized catalog data cannot bypass them. All IR
 structs reject unknown serialized properties (`deny_unknown_fields`); a durable catalog format

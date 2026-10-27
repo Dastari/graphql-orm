@@ -748,9 +748,12 @@ mod aggregate_tests {
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn repository_runtime_keyset_order_keeps_plain_input_and_repository_methods() {
         let mut input = entity(false);
-        input
-            .attrs
-            .push(parse_quote!(#[repository_entity(keyset = "amount asc, id asc")]));
+        let syn::Meta::List(metadata) = &mut input.attrs[0].meta else {
+            panic!("repository fixture has a surface attribute list");
+        };
+        metadata
+            .tokens
+            .extend(quote!(, keyset = "amount asc, id asc"));
         let generated = crate::operations::generate_graphql_operations(&input)
             .expect("generate runtime order operations");
         let plain = strip_operations_graphql_surface(&input, generated)

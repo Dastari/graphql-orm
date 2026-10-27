@@ -785,9 +785,9 @@ where
              CROSS JOIN {}('{}', ?) q(query) \
              WHERE s.document_vector @@ q.query",
             projection,
-            T::TABLE_NAME,
+            B::DIALECT.render_identifier_path(T::TABLE_NAME),
             search_table,
-            T::PRIMARY_KEY,
+            B::DIALECT.render_identifier(T::PRIMARY_KEY),
             function,
             index.language.replace('\'', "''")
         );
@@ -801,7 +801,10 @@ where
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(", {column} ASC"));
+                    sql.push_str(&format!(
+                        ", {} ASC",
+                        B::DIALECT.render_identifier_path(column)
+                    ));
                 }
             }
             let page = self
@@ -836,10 +839,10 @@ where
              JOIN {} ON {}.entity_pk = CAST({} AS TEXT) \
              WHERE {} MATCH ?",
             projection,
-            T::TABLE_NAME,
+            B::DIALECT.render_identifier_path(T::TABLE_NAME),
             fts_table,
             fts_table,
-            T::PRIMARY_KEY,
+            B::DIALECT.render_identifier(T::PRIMARY_KEY),
             fts_table,
         );
         let mut values = vec![SqlValue::String(sqlite_fts_query(
@@ -855,7 +858,10 @@ where
             }
             for column in T::PRIMARY_KEYS {
                 if !crate::graphql::orm::sort_clause_mentions_column(T::DEFAULT_SORT, column) {
-                    sql.push_str(&format!(", {column} ASC"));
+                    sql.push_str(&format!(
+                        ", {} ASC",
+                        B::DIALECT.render_identifier_path(column)
+                    ));
                 }
             }
             let page = self

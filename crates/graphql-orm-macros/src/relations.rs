@@ -1,6 +1,7 @@
 use super::*;
 use crate::backend::{
-    backend_marker_tokens, backend_pool_type_tokens, backend_quote_identifier_path, resolve_backend,
+    backend_marker_tokens, backend_pool_type_tokens, backend_render_identifier_path,
+    resolve_backend,
 };
 use crate::entity::{
     RelationConditionMetadata, RelationConditionValue, collect_parsed_fields, has_graphql_complex,
@@ -494,7 +495,7 @@ pub(crate) fn generate_graphql_relations(
         let fk_columns_sql = r
             .fk_columns
             .iter()
-            .map(|column| backend_quote_identifier_path(backend, column))
+            .map(|column| backend_render_identifier_path(backend, column))
             .collect::<Vec<_>>();
         let source_supports_dataloader = r.source_supports_dataloader;
         let source_fields = &r.source_field_idents;
@@ -582,7 +583,7 @@ pub(crate) fn generate_graphql_relations(
         let (target_condition_filter, fallback_target_predicate, fallback_target_value) =
             if let Some(condition) = &r.target_condition {
                 let target_column_sql =
-                    backend_quote_identifier_path(backend, &condition.member);
+                    backend_render_identifier_path(backend, &condition.member);
                 let target_value = condition_sql_value_tokens(&condition.value);
                 let placeholder_index = r.fk_columns.len() + 1;
                 (
@@ -993,7 +994,7 @@ pub(crate) fn generate_graphql_relations(
                 source_condition_tokens(r.source_condition.as_ref(), quote! { entity });
             let (bulk_target_column, bulk_target_value) = if let Some(condition) = &r.target_condition
             {
-                let column = backend_quote_identifier_path(backend, &condition.member);
+                let column = backend_render_identifier_path(backend, &condition.member);
                 let value = condition_sql_value_tokens(&condition.value);
                 (
                     quote! { Some::<&str>(#column) },
@@ -1008,7 +1009,7 @@ pub(crate) fn generate_graphql_relations(
             let fk_columns_sql = r
                 .fk_columns
                 .iter()
-                .map(|column| backend_quote_identifier_path(backend, column))
+                .map(|column| backend_render_identifier_path(backend, column))
                 .collect::<Vec<_>>();
             let first_fk_column_sql = fk_columns_sql
                 .first()
@@ -1258,7 +1259,9 @@ pub(crate) fn generate_graphql_relations(
                             "SELECT {}, {} FROM {} WHERE {}",
                             <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::column_names().join(", "),
                             relation_key_projections,
-                            <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                            <#backend_marker as ::graphql_orm::OrmBackend>::DIALECT.render_identifier_path(
+                                <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                            ),
                             relation_predicate,
                         );
 

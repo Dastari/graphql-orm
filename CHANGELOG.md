@@ -16,6 +16,16 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.76.0**.
+
+- Fix: generated SQL delimits identifiers that need it, so a table, column, index or constraint named with an SQL reserved word (`order`, `join`, `select`, `user`, `group`, …) or containing other characters works on SQLite, PostgreSQL and MSSQL. This covers create-table column definitions, primary-key, unique and foreign-key lists and referenced tables, add/drop/alter column, SQLite rebuild copies, append-only triggers, constraint comments, RLS statements, SQLite introspection `PRAGMA`s, the repository and loader select/count/delete DML, primary-key ordering, and the derive-generated insert, update, delete, filter, sort, check-constraint and relation SQL. Before, SQLite refused `CREATE TABLE … (join TEXT …)` with `near "join": syntax error`.
+  - A plain identifier that is not reserved on the backend is still written bare and byte-identical, so statement text, plan hashes, migration history, schema hashes, the 0.50.2 compatibility goldens and PostgreSQL case folding are unchanged for every name that worked before. Reserved words are the ones each engine rejects as bare names, measured against SQLite 3.46 and PostgreSQL 17 (`pg_get_keywords()` categories `R` and `T`), plus the documented T-SQL reserved keywords. Introspection already read delimited names, so identities do not change.
+  - New `DatabaseBackend::render_identifier` and `render_identifier_path` expose the rule for hosts that compose SQL fragments.
+  - Mutation preimage predicates and pool-based insert rereads render physical primary-key names too; auto-generated key inserts use the declared physical column instead of assuming `id`. Qualified names split only at unquoted dots, preserving quoted segments and escaped closing delimiters in both runtime and derive SQL.
+- **Breaking (plan text):** seven SQLite keywords were accepted bare in some positions and are now always delimited: `cast`, `constraint`, `current_date`, `current_time`, `current_timestamp`, `if` and `raise`. A new plan that names such a table or column has different statement text and plan hash than 0.75.0 would render; the objects' identities are unchanged. MSSQL derive DML now brackets the table name, as `TABLE_NAME` already did. No other previously accepted name renders differently.
+
+## 0.75.0 (unreleased)
+
 Companion runtime/macros version: **0.75.0**.
 
 - Add server-managed timestamps for runtime fields: `RuntimeField::auto_timestamp: Option<RuntimeAutoTimestamp>` with `OnCreate` and `OnCreateAndUpdate`, like Rails/Django `created_at`/`updated_at`. Valid only on non-key `DateTime` fields that are not generated and have no literal default (`InvalidAutoTimestamp` with a value-free `RuntimeAutoTimestampProblem` detail). See [automatic timestamps](docs/reference/graphql-orm/runtime-schema-ir.md#automatic-timestamps).

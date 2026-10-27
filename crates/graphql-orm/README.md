@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.76.0 delimits reserved-word and irregular identifiers in generated SQL, so a
+table or column named `order`, `join` or `select` works. See the
+[migration guide](../../MIGRATION.md#0750-to-0760-delimited-reserved-word-identifiers).
+
 Version 0.75.0 adds server-managed runtime timestamps (`RuntimeField::auto_timestamp`:
 `OnCreate`, `OnCreateAndUpdate`). See the
 [migration guide](../../MIGRATION.md#0740-to-0750-automatic-runtime-timestamps).

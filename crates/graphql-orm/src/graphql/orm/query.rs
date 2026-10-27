@@ -1797,10 +1797,11 @@ fn render_select_query_inner(
     } else {
         query.columns.join(", ")
     };
+    let table = dialect.render_identifier_path(query.table);
     let table = if write_decision && dialect == DatabaseBackend::Mssql {
-        format!("{} WITH (UPDLOCK, HOLDLOCK)", query.table)
+        format!("{table} WITH (UPDLOCK, HOLDLOCK)")
     } else {
-        query.table.to_string()
+        table.into_owned()
     };
     let mut sql = format!("SELECT {} FROM {}", projection, table);
     let mut values = Vec::new();
@@ -1865,7 +1866,11 @@ pub fn render_aggregate_query(dialect: DatabaseBackend, query: &AggregateQuery) 
         query.function.as_sql(),
         argument
     );
-    let mut sql = format!("SELECT {} FROM {}", projection, query.table);
+    let mut sql = format!(
+        "SELECT {} FROM {}",
+        projection,
+        dialect.render_identifier_path(query.table)
+    );
     let mut values = Vec::new();
     let mut next_index = 1usize;
 
@@ -2003,7 +2008,11 @@ fn render_grouped_aggregate_query_page(
         aggregate_metric_projection(dialect, expression, &format!("__gom_metric_{index:03}"))
     }));
 
-    let mut sql = format!("SELECT {} FROM {}", projections.join(", "), query.table);
+    let mut sql = format!(
+        "SELECT {} FROM {}",
+        projections.join(", "),
+        dialect.render_identifier_path(query.table)
+    );
     let mut values = Vec::new();
     let mut next_index = 1usize;
     if let Some(filter) = &query.filter {
@@ -2791,7 +2800,10 @@ fn decode_aggregate_row<B: OrmBackend>(
 }
 
 pub fn render_delete_query(dialect: DatabaseBackend, query: &DeleteQuery) -> RenderedQuery {
-    let mut sql = format!("DELETE FROM {}", query.table);
+    let mut sql = format!(
+        "DELETE FROM {}",
+        dialect.render_identifier_path(query.table)
+    );
     let mut values = Vec::new();
     let mut next_index = 1usize;
 
@@ -3107,7 +3119,7 @@ where
                 .any(|sort| sort_clause_mentions_column(&sort.clause, primary_key))
             {
                 sorts.push(SortExpression {
-                    clause: format!("{primary_key} ASC"),
+                    clause: format!("{} ASC", B::DIALECT.render_identifier_path(primary_key)),
                     values: Vec::new(),
                 });
             }
@@ -3579,7 +3591,10 @@ where
                 .iter()
                 .any(|sort| sort_clause_mentions_column(&sort.clause, primary_key))
             {
-                sorts.push(SortExpression::unbound(format!("{primary_key} ASC")));
+                sorts.push(SortExpression::unbound(format!(
+                    "{} ASC",
+                    B::DIALECT.render_identifier_path(primary_key)
+                )));
             }
         }
         Ok(SelectQuery {
