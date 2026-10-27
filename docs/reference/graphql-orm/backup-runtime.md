@@ -56,7 +56,8 @@ every backend:
   PostgreSQL `TIMESTAMPTZ` typed, independent of the session `TimeZone`;
 - a value without a portable form fails the export: unreadable SQLite text, PostgreSQL
   `±infinity`, or a UTC instant outside years 0001–9999 (including when offset normalization or
-  microsecond rounding crosses that boundary), or leap-second text (`SS = 60`);
+  microsecond rounding crosses that boundary), or leap-second text (`SS = 60`, checked before
+  rounding can carry it into the next minute);
 - restore accepts only canonical text within that range (other text or another value kind is
   refused before any write, including in `DryRun`) and binds PostgreSQL values through
   `CAST(? AS TIMESTAMPTZ)`;

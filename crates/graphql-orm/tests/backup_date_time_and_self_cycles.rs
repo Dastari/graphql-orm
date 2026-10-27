@@ -320,6 +320,90 @@ async fn unportable_stored_date_times_fail_the_export() {
     }
 }
 
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_export_refuses_leap_seconds_before_microsecond_rounding() {
+    let ddl = events_ddl();
+    let source = open("dt-leap-rounding", &[&ddl]).await;
+    // This is the ordinary record engine's existing rounding contract. Backup must inspect
+    // the original parsed value: the canonical result has already lost the leap second.
+    assert_eq!(
+        RuntimeDateTime::parse("2016-12-31T23:59:60.9999995Z")
+            .unwrap()
+            .as_str(),
+        "2017-01-01T00:00:00.000000Z"
+    );
+    for leap in [
+        "2016-12-31T23:59:60.9999995Z",
+        "2016-12-31T23:59:60.9999994Z",
+        "2016-12-31T23:59:60.9999999Z",
+        "2017-01-01T05:44:60.9999995+05:45",
+        "9999-12-31T23:59:60.9999995Z",
+    ] {
+        exec(
+            &source.db,
+            &format!("INSERT INTO dt_events (id, created_at, label) VALUES (1, '{leap}', 'a')"),
+        )
+        .await
+        .unwrap();
+        let result = export(&source.db, &events()).await;
+        assert!(result.is_err(), "export accepted {leap}: {result:?}");
+        assert!(
+            result.unwrap_err().to_string().contains("leap second"),
+            "{leap}"
+        );
+        exec(&source.db, "DELETE FROM dt_events").await.unwrap();
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_export_preserves_non_leap_rounding_and_portable_boundaries() {
+    let ddl = events_ddl();
+    let source = open("dt-normal-rounding", &[&ddl]).await;
+    let entities = events();
+    for (raw, canonical) in [
+        (
+            "2016-12-31T23:59:59.9999994Z",
+            "2016-12-31T23:59:59.999999Z",
+        ),
+        (
+            "2016-12-31T23:59:59.9999995Z",
+            "2017-01-01T00:00:00.000000Z",
+        ),
+        (
+            "2001-02-03T09:50:06.1234564+05:45",
+            "2001-02-03T04:05:06.123456Z",
+        ),
+        (
+            "2001-02-03T09:50:06.1234565+05:45",
+            "2001-02-03T04:05:06.123457Z",
+        ),
+        ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000Z"),
+        (
+            "9999-12-31T23:59:59.9999994Z",
+            "9999-12-31T23:59:59.999999Z",
+        ),
+    ] {
+        exec(
+            &source.db,
+            &format!("INSERT INTO dt_events (id, created_at, label) VALUES (1, '{raw}', 'a')"),
+        )
+        .await
+        .unwrap();
+        let rows = export(&source.db, &entities).await.unwrap();
+        assert_eq!(
+            value(&rows, "dt_events", "1", "created_at"),
+            &BackupValue::String(canonical.into()),
+            "{raw}"
+        );
+        let target = open("dt-normal-rounding-target", &[&ddl]).await;
+        restore(&target.db, &entities, &rows).await.unwrap();
+        assert_eq!(export(&target.db, &entities).await.unwrap(), rows);
+        exec(&source.db, "DELETE FROM dt_events").await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn non_canonical_or_mistyped_snapshot_date_times_are_refused_before_any_write() {
     let ddl = events_ddl();
