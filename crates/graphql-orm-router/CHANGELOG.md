@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## 0.6.7 (unreleased)
+
+- Retain test-owned public listener guards across asynchronous preparation in
+  the invalid-candidate and stale-authorization-metadata wire tests. This removes
+  their released-port rebind race without weakening the exact typed admission
+  errors. Add a valid-candidate control that prepares with the address occupied.
+- No breaking changes: public Rust APIs, routing, authorization, SDL, configuration
+  and persisted data are unchanged. No executable or release tag is created.
+
 ## 0.6.6 (unreleased)
 
 - Allocate a new immutable package identity for the README Auth `v0.23.0`

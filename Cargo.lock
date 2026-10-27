@@ -3241,7 +3241,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.6.6"
+version = "0.6.7"
 dependencies = [
  "agql-auth",
  "arc-swap",

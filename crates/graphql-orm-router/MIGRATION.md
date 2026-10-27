@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.6.6 to 0.6.7: preparation test ownership
+
+No breaking changes or application, protocol, configuration or data migration
+are required. The patch records a private wire-test ownership correction and a
+valid-candidate control; production preparation and listener binding are unchanged.
+No executable is distributed or activated by this source change.
+
 ## 0.6.5 to 0.6.6: documentation package identity
 
 No API, configuration, SDL or data migration is required. This package bump
