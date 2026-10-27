@@ -56,11 +56,14 @@ every backend:
   PostgreSQL `TIMESTAMPTZ` typed, independent of the session `TimeZone`;
 - a value without a portable form fails the export: unreadable SQLite text, PostgreSQL
   `±infinity`, or a UTC instant outside years 0001–9999 (including when offset normalization or
-  microsecond rounding crosses that boundary);
+  microsecond rounding crosses that boundary), or leap-second text (`SS = 60`);
 - restore accepts only canonical text within that range (other text or another value kind is
   refused before any write, including in `DryRun`) and binds PostgreSQL values through
   `CAST(? AS TIMESTAMPTZ)`;
 - restore writes the stored values; no default, clock or automatic timestamp applies.
+
+PostgreSQL normalizes a leap-second literal when storing it. Export preserves that normalized
+instant; it cannot recover the original literal. Snapshot input containing `SS = 60` is refused.
 
 Static derived date fields keep `BackupValueKind::String`, so their descriptors and schema hashes
 are unchanged. `BackupValueKind` is `#[non_exhaustive]`.
@@ -90,7 +93,14 @@ database
     .await?;
 ```
 
-Restore validates schema compatibility, table names, row shapes, row counts, and row hashes.
+Before importing any table, restore checks schema compatibility, table names, every table's row
+shapes and value kinds (including canonical portable DateTime text), in-snapshot references, and
+in `EmptyDatabase` mode the emptiness of all target tables. `DryRun` performs the input checks
+without importing rows. A late invalid row shape or value therefore leaves every target table untouched.
+
+Imports use one transaction per table, with row-count checks and post-commit re-export/hash
+verification. A later database failure or verification failure can leave earlier tables committed;
+restore does not promise a transaction across all tables.
 
 A single-key table whose dependency targets its own key restores parent-first. Rows that
 parent-first order cannot place (rows on a self-reference cycle, and the rows below them) are
@@ -100,7 +110,12 @@ of the statement). Each row is then updated to its stored values, in the table's
 transaction, before count and hash validation. `NULL` placeholders never collide on a `UNIQUE`
 column. A non-null `UNIQUE` self-reference cycle cannot be staged that way, and an append-only
 table refuses the update; the table's transaction rolls back and the error carries
-`BackupSelfReferenceCycle` (read it with `BackupSelfReferenceCycle::from_error`).
+`BackupSelfReferenceCycle` (read it with `BackupSelfReferenceCycle::from_error`). Constraint
+violations and explicit trigger refusals (SQLite `SQLITE_CONSTRAINT_TRIGGER`; PostgreSQL
+`raise_exception`, `triggered_action_exception`, or `triggered_data_change_violation`) receive this
+classification. The error's standard `source()` chain retains the original SQLx/database cause.
+Other failures, including PostgreSQL statement cancellation (`57014`) and deadlock (`40P01`),
+propagate unchanged and also roll back the current table.
 
 Before restoring into a database named by configuration, compare `Database::database_identity()`
 (PostgreSQL `current_database()` and its OID; the SQLite main file path) with the operator's

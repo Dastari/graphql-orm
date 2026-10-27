@@ -56,7 +56,8 @@ The table export payload is JSON Lines compressed with zstd. Each decompressed
 line is one serialized backup row and ends with `\n`.
 
 Row values are adapter-defined. With the `graphql-orm` adapter, a `DateTime` column's value is a
-string holding canonical UTC RFC 3339 text with six fractional digits on every backend; see the
+string holding canonical UTC RFC 3339 text with six fractional digits, UTC years 0001–9999 and
+seconds 00–59 on every backend; see the
 [backup runtime reference](../../../docs/reference/graphql-orm/backup-runtime.md#logical-rows).
 
 The repository key uses the compressed filename:

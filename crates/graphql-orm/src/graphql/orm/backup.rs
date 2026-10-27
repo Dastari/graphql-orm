@@ -324,9 +324,17 @@ pub async fn restore_backup_rows(
         }
     }
 
-    // Refuse before any write: every reference must resolve inside the backup, and an
-    // empty-database restore must find every table empty. A later failure can then only be a
-    // database error, never a partial restore of a backup that was invalid from the start.
+    // Preflight every table before starting any import transaction. Per-table validation alone
+    // would let earlier tables commit before a later row's invalid value or shape is discovered.
+    for entity in &current_snapshot.entities {
+        let rows = rows_by_table
+            .get(&entity.table_name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        validate_import_rows(entity, rows)?;
+    }
+    // These checks also precede every write. Runtime database failures retain per-table
+    // transaction boundaries; the restore does not promise cross-table transactionality.
     validate_backup_references(&current_snapshot.entities, rows_by_table)?;
     if context.mode == RestoreMode::EmptyDatabase {
         let mut tx = database.pool().begin().await?;
@@ -713,14 +721,17 @@ async fn import_table_rows(
                 .collect::<Result<Vec<_>, _>>()?;
             values.push(stored(row, key_column)?);
             match execute_import_statement(&mut tx, &update_sql, &values).await {
-                Err(sqlx::Error::Database(_)) => {
-                    return Err(sqlx::Error::Decode(Box::new(BackupSelfReferenceCycle {
-                        table_name: entity.table_name.clone(),
-                        primary_key: row.primary_key.clone(),
-                        columns: self_columns
-                            .iter()
-                            .map(|column| column.column_name.clone())
-                            .collect(),
+                Err(error) if is_staged_cycle_refusal(&error) => {
+                    return Err(sqlx::Error::Decode(Box::new(BackupCycleFailure {
+                        cycle: BackupSelfReferenceCycle {
+                            table_name: entity.table_name.clone(),
+                            primary_key: row.primary_key.clone(),
+                            columns: self_columns
+                                .iter()
+                                .map(|column| column.column_name.clone())
+                                .collect(),
+                        },
+                        source: error,
                     })));
                 }
                 result => result?,
@@ -823,6 +834,13 @@ fn parse_backup_date_time(text: &str) -> crate::Result<super::RuntimeDateTime> {
             "backup date-time is outside the portable range 0001-9999".to_owned(),
         ));
     }
+    // Align with the runtime query engine's portable DateTime restriction. Chrono preserves
+    // leap seconds, but PostgreSQL normalizes them and cannot reproduce their canonical text.
+    if canonical.as_str().get(17..19) == Some("60") {
+        return Err(sqlx::Error::Protocol(
+            "backup date-time cannot contain a leap second".to_owned(),
+        ));
+    }
     Ok(canonical)
 }
 
@@ -913,7 +931,9 @@ impl BackupOrphanReference {
 /// self-reference column cannot be staged without a temporary value (each row's own-key
 /// placeholder is another row's stored value), and an append-only table refuses updates. The
 /// table's import transaction rolls back. Read it from the error with
-/// [`BackupSelfReferenceCycle::from_error`].
+/// [`BackupSelfReferenceCycle::from_error`]. The enclosing SQLx error's standard source chain
+/// retains the original database error. Operational failures such as cancellation and deadlock
+/// propagate unchanged instead of receiving this classification.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct BackupSelfReferenceCycle {
@@ -940,9 +960,62 @@ impl BackupSelfReferenceCycle {
     /// The self-reference cycle that refused a restore, if `error` is one.
     pub fn from_error(error: &crate::Error) -> Option<&Self> {
         match error {
-            sqlx::Error::Decode(source) => source.downcast_ref(),
+            sqlx::Error::Decode(source) => source.downcast_ref().or_else(|| {
+                source
+                    .downcast_ref::<BackupCycleFailure>()
+                    .map(|failure| &failure.cycle)
+            }),
             _ => None,
         }
+    }
+}
+
+// Keep the public, cloneable diagnostic intact; attach the non-cloneable SQLx cause privately.
+#[derive(Debug)]
+struct BackupCycleFailure {
+    cycle: BackupSelfReferenceCycle,
+    source: sqlx::Error,
+}
+impl std::fmt::Display for BackupCycleFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cycle.fmt(f)
+    }
+}
+impl std::error::Error for BackupCycleFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn is_staged_cycle_refusal(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    if database.is_unique_violation()
+        || database.is_foreign_key_violation()
+        || matches!(database.kind(), sqlx::error::ErrorKind::NotNullViolation)
+        || database.is_check_violation()
+    {
+        return true;
+    }
+    // Use structured backend codes, never message matching. Triggers can also raise operational
+    // SQLSTATEs; those must preserve their original category, e.g. 57014 and 40P01 on PostgreSQL.
+    #[cfg(feature = "sqlite")]
+    {
+        database
+            .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+            .is_some()
+            && database.code().as_deref() == Some("1811") // SQLITE_CONSTRAINT_TRIGGER
+    }
+    #[cfg(feature = "postgres")]
+    {
+        database
+            .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+            .is_some()
+            && database.code().is_some_and(|code| {
+                // Class 23 includes exclusion constraints, which SQLx's helpers do not cover.
+                code.starts_with("23") || matches!(code.as_ref(), "P0001" | "09000" | "27000")
+            })
     }
 }
 
@@ -1879,6 +1952,8 @@ mod tests {
             text("2026-10-27T01:02:03.0000041Z"),
             text("0000-01-01T00:00:00.000000Z"),
             text("+10000-01-01T00:00:00.000000Z"),
+            text("2016-12-31T23:59:60.000000Z"),
+            text("9999-12-31T23:59:60.000000Z"),
             BackupValue::Integer(1),
         ] {
             assert!(
@@ -1890,6 +1965,8 @@ mod tests {
             assert!(validate_backup_value(&descriptor, &text(accepted)).is_ok());
         }
         for outside in [
+            "2016-12-31T23:59:60.000000Z",
+            "9999-12-31T23:59:60.000000Z",
             "0000-01-01T00:00:00Z",
             "0001-01-01T00:00:00+01:00",
             "9999-12-31T23:59:59-01:00",
