@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.78.0 is the companion of runtime mutation payload relation pages; the macros
+themselves are unchanged.
+
 Version 0.77.0 is the companion of the runtime's date-time backups; the macros themselves are
 unchanged.
 

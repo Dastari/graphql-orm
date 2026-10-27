@@ -306,18 +306,25 @@ omitted. Before 0.75.0 such a module failed to compile with `unsupported_capabil
 Link roots and deletes are unaffected. Generated fields and
 [automatic timestamps](runtime-schema-ir.md#automatic-timestamps) are excluded from both
 input types, keys are required on create and absent from update. Defaults stay omitted in GraphQL
-SDL so omission and explicit null remain distinct. Payloads may select to-one
-relations of the record, including nested selections under them. The payload
-layer then also loads the record's primary key and the relation's source key
-fields, and the host's read and output checks see them. Each relation is planned
+SDL so omission and explicit null remain distinct. Payloads may select the record's
+relations, including nested selections under them: a to-one relation as an object, and
+a to-many or many-to-many (join) relation as its `…Connection` page with `first`/`last`,
+`after`/`before`, `where`, `orderBy`, `pageInfo` and `totalCount`, as in queries
+(0.78.0; before, to-many selections failed with `unsupported_capability`). For a
+create or update with attached link changes, or a link mutation, the page shows the
+committed links. The payload layer then also loads the record's primary key and the
+relation's source key fields (the join's source fields for a join relation), and the
+host's read and output checks see them. Each relation is planned
 and authorized like a query layer before the write. After commit and
 `authorize_mutation_result`, it is read through the relation batch executor. A
-related row hidden by its grant is `null`. A nested layer denied outright fails the
-mutation before the write. Payload relation reads share the request's crypto and
+related row hidden by its grant is `null`, or absent from the page and its count. A
+nested layer denied outright fails the mutation before the write. Payload relation reads share the request's crypto and
 projection call budgets with every other mutation field. A failure while reading the
 payload after commit (`mutation_payload_failed`, with `extensions.outcome = "committed"`)
-means the write committed; clients must not retry it blindly. To-many payload relations
-and nested/bulk writes are unsupported.
+means the write committed; clients must not retry it blindly. A page bound exceeded only
+when the relation batch is built after commit (for example a per-request
+`RuntimeRelationLimits::max_page_size` below the requested `first`) is such a failure.
+Nested and bulk writes are unsupported.
 
 Generated deletes refuse `unsupported_cascade` when the collection has incoming
 `Cascade` or `SetNull` foreign keys, unless
@@ -332,7 +339,7 @@ enabled. It returns the source's `…MutationPayload` and requires the host writ
 `authorize_links` and `link_target_visibility`. `RuntimeGraphqlMutationOptions::max_link_keys`
 bounds the supplied keys and the visible links read; `max_delete_links` bounds the links a
 generated delete may remove. A denied link write returns the code `denied`, as does naming a hidden or missing target. Join relations read as `…Connection` fields like other
-to-many relations. They do not accept relation filters, and payloads cannot select them.
+to-many relations. They do not accept relation filters; mutation payloads may select them.
 
 Attach a certified environment, pinned write authority and optional journal hook
 using `with_mutation_environment`, `with_write_authority` and

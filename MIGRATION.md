@@ -15,6 +15,10 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.77.0 to 0.78.0: to-many relations in mutation payloads
+
+Upgrade runtime/macros together. No action is required and nothing breaks: the SDL is unchanged, and a mutation payload selection of a to-many or many-to-many relation that failed with `unsupported_capability` now returns the relation's page. Read authorities see one more relation layer per selected page (before the write, like query layers), and the record layer's projection also contains that relation's source key fields. Clients may drop a follow-up read of the links and select the page in the mutation.
+
 ## 0.76.0 to 0.77.0: date-time backups and self-reference cycles
 
 Upgrade runtime/macros together. Breaking only at Rust compile time and for GraphQL schemas that

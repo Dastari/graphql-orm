@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.78.0 lets runtime GraphQL mutation payloads select to-many and many-to-many
+relation pages. See the
+[migration guide](../../MIGRATION.md#0770-to-0780-to-many-relations-in-mutation-payloads).
+
 Version 0.77.0 backs up runtime `DateTime` columns (`BackupValueKind::DateTime`, now
 `#[non_exhaustive]`), restores self-reference cycles, and adds `Database::database_identity()`. See
 the [migration guide](../../MIGRATION.md#0760-to-0770-date-time-backups-and-self-reference-cycles).

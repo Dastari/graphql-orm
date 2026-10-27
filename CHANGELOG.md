@@ -16,6 +16,13 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.78.0**.
+
+- Runtime GraphQL mutation payloads may select the record's to-many and many-to-many (join) relations as `…Connection` pages with `first`/`last`, `after`/`before`, `where`, `orderBy`, `pageInfo` and `totalCount`, as queries do. Before, such a selection failed with `unsupported_capability`; to-one relations were already supported. Each page is planned, bounded and authorized like a query relation layer before the write (`RuntimeReadAuthority::authorize` with the relation), and read after commit through the batched relation executor, so a create or update with attached link changes, or a link mutation, shows the committed links. Rows hidden by the layer's grant are omitted from the page and its count; a layer denied outright refuses the mutation before the write; a failure while reading the page after commit is the existing committed, non-retryable `mutation_payload_failed`. The payload's record layer also loads the relation's source key fields (the join's source fields), which the host's read and output checks see.
+- SDL is unchanged: the payload `record` type already declared these connection fields. Clients that read links back with a second request can select them in the mutation instead.
+
+## 0.77.0 (unreleased)
+
 Companion runtime/macros version: **0.77.0**.
 
 - Back up runtime `DateTime` columns: `BackupValueKind::DateTime` (schema string `date_time`). Values are `BackupValue::String` holding canonical `RuntimeDateTime` text (UTC, six fractional digits) on both backends. SQLite text is canonicalized through the record engine's parse; PostgreSQL `TIMESTAMPTZ` is read typed, independent of the session `TimeZone`, and bound through `CAST(? AS TIMESTAMPTZ)`. Export refuses values without a portable form (unreadable SQLite text, PostgreSQL `±infinity`, UTC years outside 0001–9999, including after offset normalization or rounding, and leap-second text). Restore refuses non-canonical or out-of-range text before any write, including in `DryRun`, and writes stored values; no default, clock or automatic timestamp applies. Opt-in: only descriptors that declare the kind use it. Static derived date fields keep `BackupValueKind::String`, so their descriptors and schema hashes are unchanged. See [backup runtime](docs/reference/graphql-orm/backup-runtime.md#logical-rows).
