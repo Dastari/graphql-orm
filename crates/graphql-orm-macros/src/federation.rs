@@ -14,7 +14,7 @@
 //! participates in `_entities` without changing the operation catalogue or the
 //! router protocol descriptor.
 
-use crate::backend::{BackendKind, backend_quote_identifier_path};
+use crate::backend::{BackendKind, backend_render_identifier_path};
 use crate::entity::{EntityMetadata, FieldMetadata, parse_field_metadata};
 use crate::naming::graphql_field_name;
 use crate::relations::{
@@ -228,7 +228,7 @@ pub(crate) fn resolve_federation_keys(
                 rust_name: candidate.rust_name.clone(),
                 argument_ident: quote::format_ident!("__gom_federation_key_{index}_{position}"),
                 rust_type: candidate.ty.clone(),
-                quoted_column: backend_quote_identifier_path(backend, &candidate.column),
+                quoted_column: backend_render_identifier_path(backend, &candidate.column),
                 kind,
                 is_primary_key: candidate.meta.is_primary_key
                     || primary_key_rust_names.contains(&candidate.rust_name),

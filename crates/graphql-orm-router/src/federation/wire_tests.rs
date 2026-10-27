@@ -1864,16 +1864,69 @@ fn websocket_upgrade_status(address: SocketAddr, path: &str) -> u16 {
         .expect("router WebSocket response status")
 }
 
+// Keep the address owned across asynchronous schema/protocol requests. A
+// released ephemeral port can be claimed by another parallel test before the
+// assertion. Occupying it also makes a premature public bind fail, so the
+// admission tests must still return their exact composition/authorization error.
+fn preparation_listener() -> TcpListener {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("owned preparation listener");
+    assert_preparation_listener_owned(&listener);
+    listener
+}
+
+fn assert_preparation_listener_owned(listener: &TcpListener) {
+    let address = listener.local_addr().expect("owned public address");
+    let error = TcpListener::bind(address).expect_err("fixture must retain the public address");
+    assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+}
+
+#[test]
+fn public_preparation_accepts_a_valid_complete_candidate_without_binding() {
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let public_listener = preparation_listener();
+    let public_address = public_listener.local_addr().expect("owned public address");
+    let prepared = ntex::rt::System::build()
+        .name("graphql-orm-router-valid-static-candidate")
+        .build(ntex::rt::DefaultRuntime)
+        .block_on(async move {
+            RouterConfig::new(public_address)
+                .allow_anonymous_development(true)
+                .with_subgraph(
+                    StaticSubgraph::new(
+                        "products",
+                        "http://127.0.0.1:1/graphql",
+                        products_sdl.endpoint(),
+                    )
+                    .with_schema_header("authorization", "Bearer schema-secret"),
+                )
+                .with_subgraph(
+                    StaticSubgraph::new(
+                        "reviews",
+                        "http://127.0.0.1:2/graphql",
+                        reviews_sdl.endpoint(),
+                    )
+                    .with_schema_header("authorization", "Bearer schema-secret"),
+                )
+                .prepare()
+                .await
+                .expect("valid preparation must succeed even while the public address is occupied")
+        });
+    assert!(prepared.is_ready());
+    assert_preparation_listener_owned(&public_listener);
+}
+
 #[test]
 fn public_preparation_rejects_an_invalid_complete_candidate_without_binding() {
     let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
     let conflicting_sdl = LoopbackSdl::start(CONFLICTING_REVIEWS);
-    let unused_port = reserve_port();
+    let public_listener = preparation_listener();
+    let public_address = public_listener.local_addr().expect("owned public address");
     let result = ntex::rt::System::build()
         .name("graphql-orm-router-invalid-static-candidate")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
-            RouterConfig::new(SocketAddr::from(([127, 0, 0, 1], unused_port)))
+            RouterConfig::new(public_address)
                 .allow_anonymous_development(true)
                 .with_subgraph(
                     StaticSubgraph::new(
@@ -1899,10 +1952,7 @@ fn public_preparation_rejects_an_invalid_complete_candidate_without_binding() {
         Err(error) => error,
     };
     assert_eq!(error.kind(), RouterErrorKind::Composition);
-    assert!(
-        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], unused_port))).is_ok(),
-        "failed preparation must not open the public listener"
-    );
+    assert_preparation_listener_owned(&public_listener);
 }
 
 #[test]
@@ -1930,12 +1980,13 @@ fn authenticated_preparation_rejects_stale_policy_metadata_without_binding() {
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let unused_port = reserve_port();
+    let public_listener = preparation_listener();
+    let public_address = public_listener.local_addr().expect("owned public address");
     let result = ntex::rt::System::build()
         .name("graphql-orm-router-invalid-auth-metadata")
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
-            RouterConfig::new(SocketAddr::from(([127, 0, 0, 1], unused_port)))
+            RouterConfig::new(public_address)
                 .with_authentication_provider(Arc::new(TestAuthenticationProvider))
                 .with_subgraph(
                     StaticSubgraph::new(
@@ -1963,10 +2014,7 @@ fn authenticated_preparation_rejects_stale_policy_metadata_without_binding() {
         Err(error) => error,
     };
     assert_eq!(error.kind(), RouterErrorKind::AuthorizationMetadata);
-    assert!(
-        TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], unused_port))).is_ok(),
-        "failed authorization admission must not open the public listener"
-    );
+    assert_preparation_listener_owned(&public_listener);
 }
 
 #[test]

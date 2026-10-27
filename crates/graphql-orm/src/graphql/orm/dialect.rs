@@ -478,6 +478,664 @@ mod postgres_statement_tests {
     }
 }
 
+/// Words that cannot appear as a bare table or column name in a statement the
+/// ORM generates on SQLite 3.46: CREATE/ALTER/DROP TABLE, column definitions,
+/// key and unique lists, foreign keys, indexes, partial-index predicates,
+/// CHECK expressions and DML. Measured against the engine, not copied from its
+/// keyword list: most SQLite keywords are accepted as identifiers.
+const SQLITE_RESERVED_IDENTIFIERS: &[&str] = &[
+    "add",
+    "all",
+    "alter",
+    "and",
+    "as",
+    "autoincrement",
+    "between",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "commit",
+    "constraint",
+    "create",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "default",
+    "deferrable",
+    "delete",
+    "distinct",
+    "drop",
+    "else",
+    "escape",
+    "except",
+    "exists",
+    "foreign",
+    "from",
+    "group",
+    "having",
+    "if",
+    "in",
+    "index",
+    "insert",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "limit",
+    "not",
+    "nothing",
+    "notnull",
+    "null",
+    "on",
+    "or",
+    "order",
+    "primary",
+    "raise",
+    "references",
+    "returning",
+    "select",
+    "set",
+    "table",
+    "then",
+    "to",
+    "transaction",
+    "union",
+    "unique",
+    "update",
+    "using",
+    "values",
+    "when",
+    "where",
+];
+
+/// PostgreSQL 17 reserved keywords and keywords reserved as names but allowed
+/// as functions or types (`pg_get_keywords()` categories `R` and `T`). They are
+/// exactly the keywords the statements described above reject as bare names;
+/// unreserved and column-name keywords are accepted.
+const POSTGRES_RESERVED_IDENTIFIERS: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "binary",
+    "both",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "collation",
+    "column",
+    "concurrently",
+    "constraint",
+    "create",
+    "cross",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "default",
+    "deferrable",
+    "desc",
+    "distinct",
+    "do",
+    "else",
+    "end",
+    "except",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "initially",
+    "inner",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "natural",
+    "not",
+    "notnull",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "overlaps",
+    "placing",
+    "primary",
+    "references",
+    "returning",
+    "right",
+    "select",
+    "session_user",
+    "similar",
+    "some",
+    "symmetric",
+    "system_user",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "user",
+    "using",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+];
+
+/// Transact-SQL reserved keywords (SQL Server documentation).
+const MSSQL_RESERVED_IDENTIFIERS: &[&str] = &[
+    "add",
+    "all",
+    "alter",
+    "and",
+    "any",
+    "as",
+    "asc",
+    "authorization",
+    "backup",
+    "begin",
+    "between",
+    "break",
+    "browse",
+    "bulk",
+    "by",
+    "cascade",
+    "case",
+    "check",
+    "checkpoint",
+    "close",
+    "clustered",
+    "coalesce",
+    "collate",
+    "column",
+    "commit",
+    "compute",
+    "constraint",
+    "contains",
+    "containstable",
+    "continue",
+    "convert",
+    "create",
+    "cross",
+    "current",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "cursor",
+    "database",
+    "dbcc",
+    "deallocate",
+    "declare",
+    "default",
+    "delete",
+    "deny",
+    "desc",
+    "disk",
+    "distinct",
+    "distributed",
+    "double",
+    "drop",
+    "dump",
+    "else",
+    "end",
+    "errlvl",
+    "escape",
+    "except",
+    "exec",
+    "execute",
+    "exists",
+    "exit",
+    "external",
+    "fetch",
+    "file",
+    "fillfactor",
+    "for",
+    "foreign",
+    "freetext",
+    "freetexttable",
+    "from",
+    "full",
+    "function",
+    "goto",
+    "grant",
+    "group",
+    "having",
+    "holdlock",
+    "identity",
+    "identity_insert",
+    "identitycol",
+    "if",
+    "in",
+    "index",
+    "inner",
+    "insert",
+    "intersect",
+    "into",
+    "is",
+    "join",
+    "key",
+    "kill",
+    "left",
+    "like",
+    "lineno",
+    "load",
+    "merge",
+    "national",
+    "nocheck",
+    "nonclustered",
+    "not",
+    "null",
+    "nullif",
+    "of",
+    "off",
+    "offsets",
+    "on",
+    "open",
+    "opendatasource",
+    "openquery",
+    "openrowset",
+    "openxml",
+    "option",
+    "or",
+    "order",
+    "outer",
+    "over",
+    "percent",
+    "pivot",
+    "plan",
+    "precision",
+    "primary",
+    "print",
+    "proc",
+    "procedure",
+    "public",
+    "raiserror",
+    "read",
+    "readtext",
+    "reconfigure",
+    "references",
+    "replication",
+    "restore",
+    "restrict",
+    "return",
+    "revert",
+    "revoke",
+    "right",
+    "rollback",
+    "rowcount",
+    "rowguidcol",
+    "rule",
+    "save",
+    "schema",
+    "securityaudit",
+    "select",
+    "semantickeyphrasetable",
+    "semanticsimilaritydetailstable",
+    "semanticsimilaritytable",
+    "session_user",
+    "set",
+    "setuser",
+    "shutdown",
+    "some",
+    "statistics",
+    "system_user",
+    "table",
+    "tablesample",
+    "textsize",
+    "then",
+    "to",
+    "top",
+    "tran",
+    "transaction",
+    "trigger",
+    "truncate",
+    "try_convert",
+    "tsequal",
+    "union",
+    "unique",
+    "unpivot",
+    "update",
+    "updatetext",
+    "use",
+    "user",
+    "values",
+    "varying",
+    "view",
+    "waitfor",
+    "when",
+    "where",
+    "while",
+    "with",
+    "within",
+    "writetext",
+];
+
+// SQL identifier delimiters may contain dots and doubled closing delimiters.
+// Slice only at unquoted dots; byte offsets are safe because delimiters are ASCII.
+fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
+    let bytes = identifier.as_bytes();
+    let mut start = 0;
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        let mut closing = None;
+        while offset < bytes.len() {
+            let character = bytes[offset];
+            offset += 1;
+            match closing {
+                Some(delimiter) if character == delimiter => {
+                    if bytes.get(offset) == Some(&delimiter) {
+                        offset += 1;
+                    } else {
+                        closing = None;
+                    }
+                }
+                None => match character {
+                    b'"' | b'`' if offset - 1 == start => closing = Some(character),
+                    b'[' if offset - 1 == start => closing = Some(b']'),
+                    b'.' => {
+                        let part = &identifier[start..offset - 1];
+                        start = offset;
+                        return Some(part);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        if start <= bytes.len() {
+            let part = &identifier[start..];
+            start = bytes.len() + 1;
+            Some(part)
+        } else {
+            None
+        }
+    })
+}
+
+impl DatabaseBackend {
+    fn reserved_identifiers(self) -> &'static [&'static str] {
+        match self {
+            Self::Sqlite => SQLITE_RESERVED_IDENTIFIERS,
+            Self::Postgres => POSTGRES_RESERVED_IDENTIFIERS,
+            Self::Mssql => MSSQL_RESERVED_IDENTIFIERS,
+            Self::Mysql => &[],
+        }
+    }
+
+    fn identifier_needs_quoting(self, identifier: &str) -> bool {
+        if self == Self::Mysql || self.quote_identifier(identifier) == identifier {
+            // MySQL identifiers are rendered verbatim, and an identifier that is
+            // already delimited is passed through unchanged.
+            return false;
+        }
+        let mut characters = identifier.chars();
+        let Some(first) = characters.next() else {
+            return true;
+        };
+        // Non-ASCII characters are identifier characters on every backend and stay
+        // bare, so their case folding is unchanged. MSSQL `#`/`@` prefixes keep
+        // their temporary-table and variable meaning.
+        let plain_start = |character: char| {
+            character.is_ascii_alphabetic()
+                || character == '_'
+                || !character.is_ascii()
+                || (self == Self::Mssql && matches!(character, '#' | '@'))
+        };
+        let plain_rest = |character: char| {
+            plain_start(character) || character.is_ascii_digit() || character == '$'
+        };
+        if !plain_start(first) || !characters.all(plain_rest) {
+            return true;
+        }
+        let lowercase = identifier.to_ascii_lowercase();
+        self.reserved_identifiers()
+            .binary_search(&lowercase.as_str())
+            .is_ok()
+    }
+
+    /// One identifier as generated DDL and DML write it.
+    ///
+    /// A plain identifier (an ASCII letter, `_` or non-ASCII character, then
+    /// those, digits or `$`) that is not a reserved word on this backend is
+    /// written bare, exactly as earlier releases wrote it, so statement text,
+    /// plan hashes and PostgreSQL case folding are unchanged for every name
+    /// that was already accepted. Reserved words such as `order`, `join` or
+    /// `select`, and names with other characters, are delimited with
+    /// [`SqlDialect::quote_identifier`]; already delimited input is returned
+    /// unchanged. MySQL identifiers are returned unchanged.
+    ///
+    /// ```
+    /// use graphql_orm::graphql::orm::DatabaseBackend;
+    ///
+    /// assert_eq!(DatabaseBackend::Sqlite.render_identifier("link_table"), "link_table");
+    /// assert_eq!(DatabaseBackend::Sqlite.render_identifier("join"), "\"join\"");
+    /// assert_eq!(DatabaseBackend::Postgres.render_identifier_path("app.order"), "app.\"order\"");
+    /// ```
+    pub fn render_identifier(self, identifier: &str) -> std::borrow::Cow<'_, str> {
+        if self.identifier_needs_quoting(identifier) {
+            std::borrow::Cow::Owned(self.quote_identifier(identifier))
+        } else {
+            std::borrow::Cow::Borrowed(identifier)
+        }
+    }
+
+    /// [`Self::render_identifier`] for each part of a qualified name.
+    ///
+    /// Dots inside quoted identifiers and doubled closing delimiters are preserved.
+    pub fn render_identifier_path(self, identifier: &str) -> std::borrow::Cow<'_, str> {
+        if !identifier_path_parts(identifier)
+            .any(|part| !part.is_empty() && self.identifier_needs_quoting(part))
+        {
+            return std::borrow::Cow::Borrowed(identifier);
+        }
+        std::borrow::Cow::Owned(
+            identifier_path_parts(identifier)
+                .filter(|part| !part.is_empty())
+                .map(|part| self.render_identifier(part))
+                .collect::<Vec<_>>()
+                .join("."),
+        )
+    }
+
+    /// [`Self::render_identifier`] for each column of a list, joined by `, `.
+    pub(crate) fn render_identifier_list<'a>(
+        self,
+        identifiers: impl IntoIterator<Item = &'a str>,
+    ) -> String {
+        identifiers
+            .into_iter()
+            .map(|identifier| self.render_identifier(identifier))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+#[cfg(test)]
+mod identifier_rendering_tests {
+    use super::*;
+
+    #[test]
+    fn reserved_word_lists_are_sorted_lowercase_and_unique() {
+        for list in [
+            SQLITE_RESERVED_IDENTIFIERS,
+            POSTGRES_RESERVED_IDENTIFIERS,
+            MSSQL_RESERVED_IDENTIFIERS,
+        ] {
+            assert!(list.windows(2).all(|pair| pair[0] < pair[1]), "{list:?}");
+            assert!(list.iter().all(|word| *word == word.to_ascii_lowercase()));
+        }
+        assert_eq!(SQLITE_RESERVED_IDENTIFIERS.len(), 64);
+        assert_eq!(POSTGRES_RESERVED_IDENTIFIERS.len(), 101);
+    }
+
+    #[test]
+    fn accepted_identifiers_render_byte_identically() {
+        for backend in [
+            DatabaseBackend::Sqlite,
+            DatabaseBackend::Postgres,
+            DatabaseBackend::Mssql,
+            DatabaseBackend::Mysql,
+        ] {
+            for identifier in [
+                "users",
+                "link_table",
+                "createdAt",
+                "_private",
+                "col$1",
+                "名前",
+            ] {
+                assert_eq!(backend.render_identifier(identifier), identifier);
+            }
+            assert_eq!(backend.render_identifier_path("app.users"), "app.users");
+        }
+        // Keywords each engine accepts as names stay bare.
+        assert_eq!(DatabaseBackend::Sqlite.render_identifier("key"), "key");
+        assert_eq!(
+            DatabaseBackend::Sqlite.render_identifier("action"),
+            "action"
+        );
+        assert_eq!(DatabaseBackend::Postgres.render_identifier("key"), "key");
+        assert_eq!(
+            DatabaseBackend::Postgres.render_identifier("position"),
+            "position"
+        );
+        assert_eq!(
+            DatabaseBackend::Mssql.render_identifier("#scratch"),
+            "#scratch"
+        );
+    }
+
+    #[test]
+    fn reserved_and_irregular_identifiers_are_delimited() {
+        let sqlite = DatabaseBackend::Sqlite;
+        let postgres = DatabaseBackend::Postgres;
+        let mssql = DatabaseBackend::Mssql;
+        assert_eq!(sqlite.render_identifier("join"), "\"join\"");
+        assert_eq!(sqlite.render_identifier("ORDER"), "\"ORDER\"");
+        assert_eq!(postgres.render_identifier("select"), "\"select\"");
+        assert_eq!(postgres.render_identifier("user"), "\"user\"");
+        assert_eq!(mssql.render_identifier("key"), "[key]");
+        assert_eq!(
+            mssql.render_identifier_path("public.users"),
+            "[public].users"
+        );
+        assert_eq!(sqlite.render_identifier("1st"), "\"1st\"");
+        assert_eq!(sqlite.render_identifier("two words"), "\"two words\"");
+        assert_eq!(sqlite.render_identifier("a\"b"), "\"a\"\"b\"");
+        assert_eq!(sqlite.render_identifier(""), "\"\"");
+        assert_eq!(
+            postgres.render_identifier_path("app.order"),
+            "app.\"order\""
+        );
+        assert_eq!(
+            sqlite.render_identifier_list(["id", "join", "select"]),
+            "id, \"join\", \"select\""
+        );
+        // Already delimited input is not delimited twice.
+        assert_eq!(sqlite.render_identifier("\"join\""), "\"join\"");
+        assert_eq!(mssql.render_identifier("[key]"), "[key]");
+        assert_eq!(DatabaseBackend::Mysql.render_identifier("order"), "order");
+    }
+
+    #[test]
+    fn macro_reserved_identifier_lists_match_the_runtime() {
+        // The derive crate cannot depend on this crate, so it carries copies of
+        // the lists. Compare them when the workspace sources are present.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../graphql-orm-macros/src/backend.rs"
+        );
+        let Ok(source) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let words = |name: &str| -> Vec<String> {
+            let start = source
+                .find(&format!("const {name}: &[&str] = &["))
+                .expect("list should exist in the derive crate");
+            let body = &source[start..];
+            let body = &body[body.find("&[").unwrap() + 2..body.find("];").unwrap()];
+            body.split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        assert_eq!(
+            words("SQLITE_RESERVED_IDENTIFIERS"),
+            SQLITE_RESERVED_IDENTIFIERS
+        );
+        assert_eq!(
+            words("POSTGRES_RESERVED_IDENTIFIERS"),
+            POSTGRES_RESERVED_IDENTIFIERS
+        );
+    }
+
+    #[test]
+    fn quoted_identifier_paths_match_the_macro_cases() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../graphql-orm-macros/fixtures/identifier-paths.tsv"
+        );
+        let Ok(cases) = std::fs::read_to_string(path) else {
+            return;
+        };
+        for line in cases.lines() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let mut columns = line.split('\t');
+            let backend = match columns.next().expect("backend") {
+                "sqlite" => DatabaseBackend::Sqlite,
+                "postgres" => DatabaseBackend::Postgres,
+                "mssql" => DatabaseBackend::Mssql,
+                other => panic!("unknown backend {other}"),
+            };
+            let input = columns.next().expect("input");
+            let expected = columns.next().expect("expected");
+            assert_eq!(backend.render_identifier_path(input), expected, "{line}");
+            let quoted = backend.quote_identifier_path(input);
+            assert_eq!(backend.quote_identifier_path(&quoted), quoted, "{line}");
+        }
+    }
+}
+
 pub trait SqlDialect {
     fn backend(&self) -> DatabaseBackend;
     fn quote_identifier(&self, identifier: &str) -> String;
@@ -515,7 +1173,9 @@ impl SqlDialect for DatabaseBackend {
     fn quote_identifier(&self, identifier: &str) -> String {
         match self {
             DatabaseBackend::Mssql => {
-                if identifier.starts_with('[') && identifier.ends_with(']') {
+                if (identifier.starts_with('[') && identifier.ends_with(']'))
+                    || (identifier.starts_with('"') && identifier.ends_with('"'))
+                {
                     identifier.to_string()
                 } else {
                     format!("[{}]", identifier.replace(']', "]]"))
@@ -529,7 +1189,10 @@ impl SqlDialect for DatabaseBackend {
                 }
             }
             DatabaseBackend::Sqlite => {
-                if identifier.starts_with('"') && identifier.ends_with('"') {
+                if (identifier.starts_with('"') && identifier.ends_with('"'))
+                    || (identifier.starts_with('[') && identifier.ends_with(']'))
+                    || (identifier.starts_with('`') && identifier.ends_with('`'))
+                {
                     identifier.to_string()
                 } else {
                     format!("\"{}\"", identifier.replace('"', "\"\""))
@@ -547,8 +1210,7 @@ impl SqlDialect for DatabaseBackend {
             return identifier.to_string();
         }
 
-        identifier
-            .split('.')
+        identifier_path_parts(identifier)
             .filter(|part| !part.is_empty())
             .map(|part| self.quote_identifier(part))
             .collect::<Vec<_>>()

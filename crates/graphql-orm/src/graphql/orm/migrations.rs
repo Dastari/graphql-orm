@@ -592,7 +592,11 @@ fn render_column_definition(
     column: &ColumnModel,
     inline_primary_key: bool,
 ) -> String {
-    let mut parts = vec![format!("{} {}", column.name, column.sql_type)];
+    let mut parts = vec![format!(
+        "{} {}",
+        backend.render_identifier(&column.name),
+        column.sql_type
+    )];
     if !column.nullable {
         parts.push("NOT NULL".to_string());
     }
@@ -627,24 +631,27 @@ fn render_create_table_statement_for_name(
         .map(|column| render_column_definition(backend, column, !has_composite_primary_key))
         .collect::<Vec<_>>();
     if has_composite_primary_key {
-        parts.push(format!("PRIMARY KEY ({})", table.primary_keys().join(", ")));
+        parts.push(format!(
+            "PRIMARY KEY ({})",
+            backend.render_identifier_list(table.primary_keys().iter().map(String::as_str))
+        ));
     }
-    parts.extend(
-        table
-            .composite_unique_indexes
-            .iter()
-            .map(|columns| format!("UNIQUE ({})", columns.join(", "))),
-    );
+    parts.extend(table.composite_unique_indexes.iter().map(|columns| {
+        format!(
+            "UNIQUE ({})",
+            backend.render_identifier_list(columns.iter().map(String::as_str))
+        )
+    }));
     parts.extend(table.foreign_keys.iter().map(|foreign_key| {
         let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
         let constraint_name = backend.quote_identifier(&constraint_name);
-        let source_columns = foreign_key.source_columns().collect::<Vec<_>>().join(", ");
-        let target_columns = foreign_key.target_columns().collect::<Vec<_>>().join(", ");
+        let source_columns = backend.render_identifier_list(foreign_key.source_columns());
+        let target_columns = backend.render_identifier_list(foreign_key.target_columns());
         format!(
             "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
             constraint_name,
             source_columns,
-            foreign_key.target_table,
+            backend.render_identifier_path(&foreign_key.target_table),
             target_columns,
             foreign_key.on_delete.as_sql(),
         )
@@ -656,7 +663,11 @@ fn render_create_table_statement_for_name(
             constraint.expression
         )
     }));
-    format!("CREATE TABLE {} ({})", table_name, parts.join(", "))
+    format!(
+        "CREATE TABLE {} ({})",
+        backend.render_identifier_path(table_name),
+        parts.join(", ")
+    )
 }
 
 pub(super) fn append_only_name(table_name: &str) -> String {
@@ -690,6 +701,8 @@ fn render_append_only_statements(
 ) -> Vec<String> {
     let name = append_only_name(table_name);
     let table_literal = table_name.replace('\'', "''");
+    let table = backend.render_identifier_path(table_name);
+    let table_regclass = table.replace('\'', "''");
     match (backend, enabled) {
         (DatabaseBackend::Sqlite, true) => {
             let mut statements = Vec::new();
@@ -704,15 +717,15 @@ fn render_append_only_statements(
                 format!("DROP TRIGGER IF EXISTS {name}_update"),
                 format!("DROP TRIGGER IF EXISTS {name}_delete"),
                 format!(
-                    "CREATE TRIGGER {name}_update BEFORE UPDATE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+                    "CREATE TRIGGER {name}_update BEFORE UPDATE ON {table} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
                 ),
                 if retention_purge {
                     format!(
-                        "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table_name} WHEN NOT EXISTS (SELECT 1 FROM __graphql_orm_retention_context WHERE table_name = '{table_literal}') BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+                        "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table} WHEN NOT EXISTS (SELECT 1 FROM __graphql_orm_retention_context WHERE table_name = '{table_literal}') BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
                     )
                 } else {
                     format!(
-                        "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table_name} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
+                        "CREATE TRIGGER {name}_delete BEFORE DELETE ON {table} BEGIN SELECT RAISE(ABORT, 'append-only entity'); END"
                     )
                 },
             ]);
@@ -723,7 +736,7 @@ fn render_append_only_statements(
             format!("DROP TRIGGER IF EXISTS {name}_delete"),
         ],
         (DatabaseBackend::Postgres, true) => vec![
-            format!("DROP TRIGGER IF EXISTS {name} ON {table_name}"),
+            format!("DROP TRIGGER IF EXISTS {name} ON {table}"),
             format!("DROP FUNCTION IF EXISTS {name}()"),
             if retention_purge {
                 format!(
@@ -736,14 +749,14 @@ fn render_append_only_statements(
             },
             format!("REVOKE ALL ON FUNCTION {name}() FROM PUBLIC"),
             format!(
-                "CREATE TRIGGER {name} BEFORE UPDATE OR DELETE ON {table_name} FOR EACH ROW EXECUTE FUNCTION {name}()"
+                "CREATE TRIGGER {name} BEFORE UPDATE OR DELETE ON {table} FOR EACH ROW EXECUTE FUNCTION {name}()"
             ),
             format!(
-                "DO $graphql_orm$ DECLARE target_owner name; BEGIN SELECT pg_get_userbyid(relowner) INTO target_owner FROM pg_class WHERE oid = '{table_name}'::regclass; EXECUTE format('ALTER FUNCTION {name}() OWNER TO %I', target_owner); END $graphql_orm$"
+                "DO $graphql_orm$ DECLARE target_owner name; BEGIN SELECT pg_get_userbyid(relowner) INTO target_owner FROM pg_class WHERE oid = '{table_regclass}'::regclass; EXECUTE format('ALTER FUNCTION {name}() OWNER TO %I', target_owner); END $graphql_orm$"
             ),
         ],
         (DatabaseBackend::Postgres, false) => vec![
-            format!("DROP TRIGGER IF EXISTS {name} ON {table_name}"),
+            format!("DROP TRIGGER IF EXISTS {name} ON {table}"),
             format!("DROP FUNCTION IF EXISTS {name}()"),
         ],
         (DatabaseBackend::Mysql | DatabaseBackend::Mssql, _) => vec![format!(
@@ -785,8 +798,8 @@ fn render_constraint_comments(backend: DatabaseBackend, table: &TableRef<'_>) ->
         .map(|constraint| {
             format!(
                 "COMMENT ON CONSTRAINT {} ON {} IS '{}'",
-                constraint.name,
-                table.table_name,
+                backend.render_identifier(&constraint.name),
+                backend.render_identifier_path(table.table_name),
                 constraint_comment(&constraint.expression)
             )
         })
@@ -1715,7 +1728,8 @@ fn sqlite_retention_delete_trigger_matches(
     expected_table: &str,
 ) -> bool {
     let expected = format!(
-        "CREATE TRIGGER {expected_name} BEFORE DELETE ON {expected_table} WHEN NOT EXISTS (SELECT 1 FROM __graphql_orm_retention_context WHERE table_name = '{}') BEGIN SELECT RAISE(ABORT, 'append-only entity'); END",
+        "CREATE TRIGGER {expected_name} BEFORE DELETE ON {} WHEN NOT EXISTS (SELECT 1 FROM __graphql_orm_retention_context WHERE table_name = '{}') BEGIN SELECT RAISE(ABORT, 'append-only entity'); END",
+        DatabaseBackend::Sqlite.render_identifier_path(expected_table),
         expected_table.replace('\'', "''"),
     );
     matches!(
@@ -1911,7 +1925,7 @@ fn render_create_search_index_statement(
             ));
             statements.push(format!(
                 "CREATE INDEX {} ON {table} USING GIN (document_vector)",
-                index.name
+                backend.render_identifier(&index.name)
             ));
         }
         DatabaseBackend::Sqlite => match index.strategy {
@@ -1955,7 +1969,10 @@ fn render_drop_search_index_statement(
     let metadata_table = super::search_metadata_table_name();
     match backend {
         DatabaseBackend::Postgres => vec![
-            format!("DROP INDEX IF EXISTS {index_name}"),
+            format!(
+                "DROP INDEX IF EXISTS {}",
+                backend.render_identifier(index_name)
+            ),
             format!("DROP TABLE IF EXISTS {table}"),
             format!(
                 "DELETE FROM {metadata_table} WHERE table_name = {}",
@@ -2160,18 +2177,22 @@ fn render_sqlite_table_rebuild_statements(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
 
+    let backend = DatabaseBackend::Sqlite;
+    let temp_table = backend.render_identifier_path(&temp_table_name);
+    let current_table_name = backend.render_identifier_path(current_table.table_name);
     let mut statements = vec![target_table_sql];
     if !common_columns.is_empty() {
-        let columns = common_columns.join(", ");
+        let columns = backend.render_identifier_list(common_columns.iter().map(String::as_str));
         statements.push(format!(
             "INSERT INTO {} ({}) SELECT {} FROM {}",
-            temp_table_name, columns, columns, current_table.table_name
+            temp_table, columns, columns, current_table_name
         ));
     }
-    statements.push(format!("DROP TABLE {}", current_table.table_name));
+    statements.push(format!("DROP TABLE {}", current_table_name));
     statements.push(format!(
         "ALTER TABLE {} RENAME TO {}",
-        temp_table_name, target_table.table_name
+        temp_table,
+        backend.render_identifier_path(target_table.table_name)
     ));
     statements.extend(target_table.indexes.iter().map(|index| {
         render_create_index_statement(DatabaseBackend::Sqlite, target_table.table_name, index)
@@ -2203,7 +2224,10 @@ pub(super) fn render_migration_step_view(
 ) -> Vec<String> {
     match step {
         StepRef::EnableExtension { name } => match backend {
-            DatabaseBackend::Postgres => vec![format!("CREATE EXTENSION IF NOT EXISTS {name}")],
+            DatabaseBackend::Postgres => vec![format!(
+                "CREATE EXTENSION IF NOT EXISTS {}",
+                backend.render_identifier(name)
+            )],
             DatabaseBackend::Sqlite | DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
                 vec![format!(
                     "-- extension {} is not supported on {}",
@@ -2238,7 +2262,10 @@ pub(super) fn render_migration_step_view(
             statements
         }
         StepRef::DropTable { table_name } => {
-            vec![format!("DROP TABLE {}", table_name)]
+            vec![format!(
+                "DROP TABLE {}",
+                backend.render_identifier_path(table_name)
+            )]
         }
         // Like the other rebuild-only SQLite steps, a single step cannot rebuild
         // its table; owned plans render the rebuild instead of this marker.
@@ -2252,7 +2279,7 @@ pub(super) fn render_migration_step_view(
         }
         StepRef::AddColumn { table_name, column } => vec![format!(
             "ALTER TABLE {} ADD COLUMN {}",
-            table_name,
+            backend.render_identifier_path(table_name),
             render_column_definition(backend, column, true)
         )],
         StepRef::DropColumn {
@@ -2261,7 +2288,8 @@ pub(super) fn render_migration_step_view(
         } => match backend {
             DatabaseBackend::Postgres => vec![format!(
                 "ALTER TABLE {} DROP COLUMN {}",
-                table_name, column_name
+                backend.render_identifier_path(table_name),
+                backend.render_identifier(column_name)
             )],
             DatabaseBackend::Sqlite => vec![format!(
                 "-- sqlite requires table rebuild to drop column {} from {}",
@@ -2269,7 +2297,8 @@ pub(super) fn render_migration_step_view(
             )],
             DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
                 "ALTER TABLE {} DROP COLUMN {}",
-                table_name, column_name
+                backend.render_identifier_path(table_name),
+                backend.render_identifier(column_name)
             )],
         },
         StepRef::AlterColumn {
@@ -2278,6 +2307,9 @@ pub(super) fn render_migration_step_view(
             after,
         } => match backend {
             DatabaseBackend::Postgres => {
+                let table = backend.render_identifier_path(table_name);
+                let before_column = backend.render_identifier(&before.name);
+                let after_column = backend.render_identifier(&after.name);
                 let type_changed = !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
                     && !(postgres_timestamptz_alias(&before.sql_type)
                         && postgres_timestamptz_alias(&after.sql_type));
@@ -2293,20 +2325,20 @@ pub(super) fn render_migration_step_view(
                 if type_changed && before.default.is_some() {
                     statements.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-                        table_name, before.name
+                        table, before_column
                     ));
                 }
                 if type_changed {
                     statements.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} TYPE {}",
-                        table_name, after.name, after.sql_type
+                        table, after_column, after.sql_type
                     ));
                 }
                 if before.nullable != after.nullable {
                     statements.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} {} NOT NULL",
-                        table_name,
-                        after.name,
+                        table,
+                        after_column,
                         if after.nullable { "DROP" } else { "SET" }
                     ));
                 }
@@ -2314,14 +2346,14 @@ pub(super) fn render_migration_step_view(
                     if let Some(default) = &after.default {
                         statements.push(format!(
                             "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {}",
-                            table_name,
-                            after.name,
+                            table,
+                            after_column,
                             render_default_clause(backend, default)
                         ));
                     } else if before.default.is_some() && !type_changed {
                         statements.push(format!(
                             "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
-                            table_name, after.name
+                            table, after_column
                         ));
                     }
                 }
@@ -2333,7 +2365,9 @@ pub(super) fn render_migration_step_view(
             )],
             DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
                 "ALTER TABLE {} ALTER COLUMN {} {}",
-                table_name, after.name, after.sql_type
+                backend.render_identifier_path(table_name),
+                backend.render_identifier(&after.name),
+                after.sql_type
             )],
         },
         StepRef::CreateIndex { table_name, index } => {
@@ -2390,15 +2424,17 @@ pub(super) fn render_migration_step_view(
         } => {
             let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
             let quoted_constraint_name = backend.quote_identifier(&constraint_name);
-            let source_columns = foreign_key.source_columns().collect::<Vec<_>>().join(", ");
-            let target_columns = foreign_key.target_columns().collect::<Vec<_>>().join(", ");
+            let table = backend.render_identifier_path(table_name);
+            let source_columns = backend.render_identifier_list(foreign_key.source_columns());
+            let target_columns = backend.render_identifier_list(foreign_key.target_columns());
+            let target_table = backend.render_identifier_path(&foreign_key.target_table);
             match backend {
                 DatabaseBackend::Postgres => vec![format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
-                    table_name,
+                    table,
                     quoted_constraint_name,
                     source_columns,
-                    foreign_key.target_table,
+                    target_table,
                     target_columns,
                     foreign_key.on_delete.as_sql()
                 )],
@@ -2408,10 +2444,10 @@ pub(super) fn render_migration_step_view(
                 )],
                 DatabaseBackend::Mysql | DatabaseBackend::Mssql => vec![format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {}",
-                    table_name,
+                    table,
                     quoted_constraint_name,
                     source_columns,
-                    foreign_key.target_table,
+                    target_table,
                     target_columns,
                     foreign_key.on_delete.as_sql()
                 )],
@@ -2423,10 +2459,11 @@ pub(super) fn render_migration_step_view(
         } => {
             let constraint_name = foreign_key_constraint_name(table_name, foreign_key);
             let quoted_constraint_name = backend.quote_identifier(&constraint_name);
+            let table = backend.render_identifier_path(table_name);
             match backend {
                 DatabaseBackend::Postgres => vec![format!(
                     "ALTER TABLE {} DROP CONSTRAINT {}",
-                    table_name, quoted_constraint_name
+                    table, quoted_constraint_name
                 )],
                 DatabaseBackend::Sqlite => vec![format!(
                     "-- sqlite requires table rebuild to drop foreign key {} on {}",
@@ -2434,11 +2471,11 @@ pub(super) fn render_migration_step_view(
                 )],
                 DatabaseBackend::Mysql => vec![format!(
                     "ALTER TABLE {} DROP FOREIGN KEY {}",
-                    table_name, quoted_constraint_name
+                    table, quoted_constraint_name
                 )],
                 DatabaseBackend::Mssql => vec![format!(
                     "ALTER TABLE {} DROP CONSTRAINT {}",
-                    table_name, quoted_constraint_name
+                    table, quoted_constraint_name
                 )],
             }
         }
@@ -2453,18 +2490,19 @@ pub(super) fn render_migration_step_view(
             after,
         } => match backend {
             DatabaseBackend::Postgres => {
+                let table = backend.render_identifier_path(table_name);
                 let mut statements = before
                     .iter()
                     .map(|constraint| {
                         format!(
-                            "ALTER TABLE {table_name} DROP CONSTRAINT IF EXISTS {}",
+                            "ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {}",
                             backend.quote_identifier(&constraint.name)
                         )
                     })
                     .collect::<Vec<_>>();
                 statements.extend(after.iter().map(|constraint| {
                     format!(
-                        "ALTER TABLE {table_name} ADD CONSTRAINT {} CHECK ({})",
+                        "ALTER TABLE {table} ADD CONSTRAINT {} CHECK ({})",
                         backend.quote_identifier(&constraint.name),
                         constraint.expression
                     )
@@ -2473,7 +2511,7 @@ pub(super) fn render_migration_step_view(
                     format!(
                         "COMMENT ON CONSTRAINT {} ON {} IS '{}'",
                         backend.quote_identifier(&constraint.name),
-                        table_name,
+                        table,
                         constraint_comment(&constraint.expression)
                     )
                 }));
@@ -2823,7 +2861,10 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
             continue;
         }
 
-        let pragma_table_info = format!("PRAGMA table_info({})", table_name);
+        let pragma_table_info = format!(
+            "PRAGMA table_info({})",
+            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+        );
         let column_rows = sqlx::query(&pragma_table_info)
             .fetch_all(&mut *connection)
             .await?;
@@ -2869,7 +2910,10 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
             .cloned()
             .unwrap_or_else(|| "id".to_string());
 
-        let pragma_index_list = format!("PRAGMA index_list({})", table_name);
+        let pragma_index_list = format!(
+            "PRAGMA index_list({})",
+            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+        );
         let index_rows = sqlx::query(&pragma_index_list)
             .fetch_all(&mut *connection)
             .await?;
@@ -2884,7 +2928,10 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 .try_get::<String, _>("origin")
                 .unwrap_or_else(|_| "c".to_string());
 
-            let pragma_index_info = format!("PRAGMA index_xinfo({})", index_name);
+            let pragma_index_info = format!(
+                "PRAGMA index_xinfo({})",
+                DatabaseBackend::Sqlite.quote_identifier(&index_name)
+            );
             let index_info_rows = sqlx::query(&pragma_index_info)
                 .fetch_all(&mut *connection)
                 .await?;
@@ -2970,7 +3017,10 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
             });
         }
 
-        let pragma_fk_list = format!("PRAGMA foreign_key_list({})", table_name);
+        let pragma_fk_list = format!(
+            "PRAGMA foreign_key_list({})",
+            DatabaseBackend::Sqlite.quote_identifier(&table_name)
+        );
         let foreign_key_rows = sqlx::query(&pragma_fk_list)
             .fetch_all(&mut *connection)
             .await?;
