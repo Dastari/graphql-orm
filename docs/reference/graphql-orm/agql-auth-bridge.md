@@ -3,7 +3,7 @@ title: "agql-auth Bridge Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-17
+last_reviewed: 2026-10-28
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,15 +15,15 @@ supersedes: []
 
 ## Accepted request and current authority
 
-Enable `auth-agql` and use the same `agql-auth` selector as the workspace:
-`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.22.0", version = "0.22.0"`.
-The published tag peels to reviewed commit
-`997707e060bcf5fabf879a5f98146dc2732b1c99`; the lockfile must select that commit.
-Matching only the commit is not
-enough: Cargo treats a revision and a tag as different sources, which can split
-principal types. Refresh the host lockfile and verify one Auth source across
-the selected graph. Both projects are Git-distributed; the release manifest
-retains the full locked revision and Auth tag.
+Enable `auth-agql` and use the same reviewed `agql-auth` selector as the workspace:
+`git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0"`.
+This is reviewed merged Git source, not a published Auth 0.24 release claim.
+The host lockfile must select that exact revision. Matching only the commit is
+not enough: Cargo treats a revision, tag and path as different sources, which
+can split principal types. Refresh the host lockfile and verify one Auth source
+across ORM, AI, router and host. Git release metadata retains the full locked
+revision; `tag` is present only for an actually selected published tag. See the
+[feature and Auth migration](../../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
 
 Authenticate the credential before constructing a bundle. Signature/secret,
 issuer, audience and transport proof validation belong to the trusted host
@@ -171,7 +171,7 @@ missing, or inconsistent assurance is omitted rather than repaired.
 
 ## Migrating from 0.7
 
-Update any direct `agql-auth` dependency to the same published tag selector in the workspace manifest. `AuthSubject` and
+Update any direct `agql-auth` dependency to the same canonical selector in the workspace manifest. `AuthSubject` and
 `DbAuthContext` gained organization, correlation, and assurance fields; applications constructing
 either with struct literals must add the fields or use their builders/`Default` update syntax.
 The bridge preserves valid 0.8+ session assurance, active scope, correlation,
@@ -180,7 +180,7 @@ of retaining only the older role/scope/tenant subset.
 
 ## Migrating from an Earlier Bridge Release
 
-Update any direct `agql-auth` dependency to the same published tag selector in the workspace manifest at
+Update any direct `agql-auth` dependency to the same canonical selector in the workspace manifest at
 the same time as `graphql-orm`. This prevents Cargo from resolving separate
 package/type universes. Version 0.22.0 keeps the identity, role, scope, tenant,
 organization, actor, correlation, token-reference, and policy-version mappings,
