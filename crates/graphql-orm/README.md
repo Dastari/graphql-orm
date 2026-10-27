@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.76.0 backs up runtime `DateTime` columns (`BackupValueKind::DateTime`, now
+Version 0.77.0 backs up runtime `DateTime` columns (`BackupValueKind::DateTime`, now
 `#[non_exhaustive]`), restores self-reference cycles, and adds `Database::database_identity()`. See
-the [migration guide](../../MIGRATION.md#0750-to-0760-date-time-backups-and-self-reference-cycles).
+the [migration guide](../../MIGRATION.md#0760-to-0770-date-time-backups-and-self-reference-cycles).
 
 Version 0.76.0 delimits reserved-word and irregular identifiers in generated SQL, so a
 table or column named `order`, `join` or `select` works. See the

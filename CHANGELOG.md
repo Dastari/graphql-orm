@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.76.0**.
+Companion runtime/macros version: **0.77.0**.
 
 - Back up runtime `DateTime` columns: `BackupValueKind::DateTime` (schema string `date_time`). Values are `BackupValue::String` holding canonical `RuntimeDateTime` text (UTC, six fractional digits) on both backends. SQLite text is canonicalized through the record engine's parse; PostgreSQL `TIMESTAMPTZ` is read typed, independent of the session `TimeZone`, and bound through `CAST(? AS TIMESTAMPTZ)`. Export refuses values without a portable form (unreadable SQLite text, PostgreSQL `±infinity`, UTC years outside 0001–9999, including after offset normalization or rounding, and leap-second text). Restore refuses non-canonical or out-of-range text before any write, including in `DryRun`, and writes stored values; no default, clock or automatic timestamp applies. Opt-in: only descriptors that declare the kind use it. Static derived date fields keep `BackupValueKind::String`, so their descriptors and schema hashes are unchanged. See [backup runtime](docs/reference/graphql-orm/backup-runtime.md#logical-rows).
 - Fix: restore of a single-key table whose rows form a self-reference cycle (A → B → A) no longer fails with "contain a self-reference cycle". Rows parent-first order cannot place are inserted last with placeholder self-reference values (`NULL` when nullable, the row's own key otherwise) and then updated to their stored values in the table's import transaction. A `UNIQUE` nullable self-reference (one-to-one) cycle restores without a transient collision. Acyclic restores are unchanged.
@@ -25,6 +25,10 @@ Companion runtime/macros version: **0.76.0**.
 - Add `Database::database_identity()` returning `DatabaseIdentity` (PostgreSQL `current_database()` and its OID; SQLite main file path), for hosts to check a restore target before writing to it.
 - **Breaking (Rust):** `BackupValueKind` gains `DateTime` and is now `#[non_exhaustive]`. Matches outside the crate need a wildcard arm; later kinds will not break them again.
 - **Breaking (GraphQL):** any schema that exposes `BackupValueKind` gains the `DATE_TIME` enum value.
+
+## 0.76.0 (unreleased)
+
+Companion runtime/macros version: **0.76.0**.
 
 - Fix: generated SQL delimits identifiers that need it, so a table, column, index or constraint named with an SQL reserved word (`order`, `join`, `select`, `user`, `group`, …) or containing other characters works on SQLite, PostgreSQL and MSSQL. This covers create-table column definitions, primary-key, unique and foreign-key lists and referenced tables, add/drop/alter column, SQLite rebuild copies, append-only triggers, constraint comments, RLS statements, SQLite introspection `PRAGMA`s, the repository and loader select/count/delete DML, primary-key ordering, and the derive-generated insert, update, delete, filter, sort, check-constraint and relation SQL. Before, SQLite refused `CREATE TABLE … (join TEXT …)` with `near "join": syntax error`.
   - A plain identifier that is not reserved on the backend is still written bare and byte-identical, so statement text, plan hashes, migration history, schema hashes, the 0.50.2 compatibility goldens and PostgreSQL case folding are unchanged for every name that worked before. Reserved words are the ones each engine rejects as bare names, measured against SQLite 3.46 and PostgreSQL 17 (`pg_get_keywords()` categories `R` and `T`), plus the documented T-SQL reserved keywords. Introspection already read delimited names, so identities do not change.

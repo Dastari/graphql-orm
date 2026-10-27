@@ -15,7 +15,7 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
-## 0.75.0 to 0.76.0: date-time backups and self-reference cycles
+## 0.76.0 to 0.77.0: date-time backups and self-reference cycles
 
 Upgrade runtime/macros together. Breaking only at Rust compile time and for GraphQL schemas that
 expose `BackupValueKind`:
