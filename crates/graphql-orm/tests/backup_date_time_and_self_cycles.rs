@@ -290,6 +290,8 @@ async fn unportable_stored_date_times_fail_the_export() {
     #[cfg(feature = "sqlite")]
     let bad_values = [
         "'not a date'",
+        "'2016-12-31T23:59:60.000000Z'",
+        "'9999-12-31T23:59:60.000000Z'",
         "'0000-01-01T00:00:00Z'",
         "'0001-01-01T00:00:00+01:00'",
         "'9999-12-31T23:59:59-01:00'",
@@ -303,6 +305,8 @@ async fn unportable_stored_date_times_fail_the_export() {
         "'-infinity'",
         "'0001-01-01 00:00:00 BC'",
         "'10000-01-01 00:00:00+00'",
+        // PostgreSQL normalizes the boundary leap literal into year 10000.
+        "'9999-12-31T23:59:60.000000Z'",
     ];
     for bad in bad_values {
         exec(
@@ -493,5 +497,139 @@ async fn database_identity_names_the_connected_database() {
             db.owned.url.rsplit('/').next()
         );
         assert!(identity.object_id.is_some_and(|oid| oid > 0));
+    }
+}
+
+
+#[tokio::test]
+async fn late_invalid_table_values_and_shapes_leave_every_target_empty() {
+    let ddl = events_ddl();
+    let early_ddl = ddl.replace("dt_events", "dt_early");
+    let source = open("dt-preflight-source", &[&early_ddl, &ddl]).await;
+    for name in ["dt_early", "dt_events"] {
+        exec(&source.db, &format!("INSERT INTO {name} (id, created_at, label) VALUES (1, '2001-02-03T04:05:06.123456Z', 'a')")).await.unwrap();
+    }
+    let mut entities = events();
+    let mut early = entities[0].clone();
+    early.table_name = "dt_early".into();
+    early.entity_name = "dt_early".into();
+    early.restore_order = 0;
+    entities.insert(0, early);
+    let rows = export(&source.db, &entities).await.unwrap();
+    let target = open("dt-preflight-target", &[&early_ddl, &ddl]).await;
+    let snapshot = snapshot(&entities);
+    for case in 0..6 {
+        let mut tampered = rows.clone();
+        let row = &mut tampered.get_mut("dt_events").unwrap()[0];
+        match case {
+            0 => { row.values.insert("created_at".into(), BackupValue::String("2001-02-03T04:05:06Z".into())); }
+            1 => { row.values.insert("created_at".into(), BackupValue::Integer(1)); }
+            2 => { row.values.remove("created_at"); }
+            3 => { row.values.insert("unknown".into(), BackupValue::String("extra".into())); }
+            4 => { row.values.insert("created_at".into(), BackupValue::Null); }
+            5 => { row.table_name = "wrong_table".into(); }
+            _ => unreachable!(),
+        }
+        // Valid checksums must not obscure the independent value/shape refusal.
+        row.row_hash = canonical_row_hash(&row.table_name, &row.values);
+        for context in [RestoreContext::dry_run(), RestoreContext::empty_database()] {
+            let error = target.db.restore_backup_rows(&snapshot, &snapshot, &tampered, &context).await.unwrap_err();
+            assert!(!error.to_string().contains("row hash"), "{error}");
+            assert_eq!(count(&target.db, "dt_early").await, 0, "case {case}, {:?}", context.mode);
+            assert_eq!(count(&target.db, "dt_events").await, 0, "case {case}, {:?}", context.mode);
+        }
+    }
+    let reports = restore(&target.db, &entities, &rows).await.unwrap();
+    assert_eq!(reports.iter().map(|report| report.rows_imported).collect::<Vec<_>>(), [1, 1]);
+    assert_eq!(export(&target.db, &entities).await.unwrap(), rows);
+}
+
+#[tokio::test]
+async fn leap_second_snapshot_inputs_are_refused_in_dry_run_and_apply() {
+    let ddl = events_ddl();
+    let source = open("dt-leap-source", &[&ddl]).await;
+    exec(&source.db, "INSERT INTO dt_events (id, created_at, label) VALUES (1, '2017-01-01T00:00:00.000000Z', 'a')").await.unwrap();
+    let entities = events();
+    let rows = export(&source.db, &entities).await.unwrap();
+    let target = open("dt-leap-target", &[&ddl]).await;
+    let snapshot = snapshot(&entities);
+    for leap in ["2016-12-31T23:59:60.000000Z", "9999-12-31T23:59:60.000000Z"] {
+        let mut tampered = rows.clone();
+        let row = &mut tampered.get_mut("dt_events").unwrap()[0];
+        row.values.insert("created_at".into(), BackupValue::String(leap.into()));
+        row.row_hash = canonical_row_hash(&row.table_name, &row.values);
+        for context in [RestoreContext::dry_run(), RestoreContext::empty_database()] {
+            assert!(target.db.restore_backup_rows(&snapshot, &snapshot, &tampered, &context).await.is_err(), "{leap}, {:?}", context.mode);
+            assert_eq!(count(&target.db, "dt_events").await, 0);
+            // The single-table entry point must enforce the same restriction.
+            assert!(target.db.import_table_rows(&entities[0], &tampered["dt_events"], &context).await.is_err());
+            assert_eq!(count(&target.db, "dt_events").await, 0);
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_normalized_leap_literal_exports_its_real_instant() {
+    let ddl = events_ddl();
+    let source = open("dt-leap-normalized", &[&ddl]).await;
+    exec(&source.db, "INSERT INTO dt_events (id, created_at, label) VALUES (1, '2016-12-31T23:59:60.000000Z', 'normalized')").await.unwrap();
+    let entities = events();
+    let rows = export(&source.db, &entities).await.unwrap();
+    assert_eq!(value(&rows, "dt_events", "1", "created_at"), &BackupValue::String("2017-01-01T00:00:00.000000Z".into()));
+    let target = open("dt-leap-normalized-target", &[&ddl]).await;
+    restore(&target.db, &entities, &rows).await.unwrap();
+    assert_eq!(export(&target.db, &entities).await.unwrap(), rows);
+}
+
+#[tokio::test]
+async fn staged_cycle_errors_preserve_database_causes_and_operational_failures() {
+    let ddl = ["CREATE TABLE sr_fault (id BIGINT PRIMARY KEY, parent_id BIGINT NULL REFERENCES sr_fault(id))"];
+    let source = open("sr-fault-source", &ddl).await;
+    exec(&source.db, "INSERT INTO sr_fault (id, parent_id) VALUES (1, 2), (2, 1)").await.unwrap();
+    let entities = vec![table("sr_fault", vec![column("id", BackupValueKind::Integer, false), column("parent_id", BackupValueKind::Integer, true)], Some("parent_id"))];
+    let rows = export(&source.db, &entities).await.unwrap();
+    let target = open("sr-fault-target", &ddl).await;
+    #[cfg(feature = "sqlite")]
+    let faults = [("1811", true)];
+    #[cfg(feature = "postgres")]
+    let faults = [("P0001", true), ("23514", true), ("57014", false), ("40P01", false)];
+    for (code, named) in faults {
+        #[cfg(feature = "sqlite")]
+        exec(&target.db, "CREATE TRIGGER sr_refuse_update BEFORE UPDATE ON sr_fault WHEN OLD.id = 2 BEGIN SELECT RAISE(ABORT, 'staged cycle fault'); END").await.unwrap();
+        #[cfg(feature = "postgres")]
+        {
+            exec(&target.db, &format!("CREATE OR REPLACE FUNCTION sr_refuse_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.id = 2 THEN RAISE EXCEPTION 'staged cycle fault' USING ERRCODE = '{code}'; END IF; RETURN NEW; END $$")).await.unwrap();
+            exec(&target.db, "CREATE TRIGGER sr_refuse_update BEFORE UPDATE ON sr_fault FOR EACH ROW EXECUTE FUNCTION sr_refuse_update()").await.unwrap();
+        }
+        let error = restore(&target.db, &entities, &rows).await.unwrap_err();
+        if named {
+            let cycle = BackupSelfReferenceCycle::from_error(&error).expect("named trigger/constraint refusal");
+            assert_eq!(cycle.table_name, "sr_fault");
+            assert_eq!(cycle.primary_key, "2");
+            assert_eq!(cycle.columns, ["parent_id"]);
+            // Walk the standard source chain to the original SQLx error and database cause.
+            let mut cause: &dyn std::error::Error = &error;
+            let database = loop {
+                if let Some(error) = cause.downcast_ref::<graphql_orm::sqlx::Error>() {
+                    if let Some(database) = error.as_database_error() { break database; }
+                }
+                cause = cause.source().expect("original SQLx database error retained");
+            };
+            assert_eq!(database.code().as_deref(), Some(code));
+            assert_eq!(database.message(), "staged cycle fault");
+        } else {
+            assert!(BackupSelfReferenceCycle::from_error(&error).is_none());
+            assert!(matches!(error, graphql_orm::sqlx::Error::Database(_)));
+            let database = error.as_database_error().unwrap();
+            assert_eq!(database.code().as_deref(), Some(code));
+            assert_eq!(database.message(), "staged cycle fault");
+        }
+        // Both placeholder inserts and the first successful patch were rolled back.
+        assert_eq!(count(&target.db, "sr_fault").await, 0, "{code}");
+        #[cfg(feature = "sqlite")]
+        exec(&target.db, "DROP TRIGGER sr_refuse_update").await.unwrap();
+        #[cfg(feature = "postgres")]
+        exec(&target.db, "DROP TRIGGER sr_refuse_update ON sr_fault").await.unwrap();
     }
 }
