@@ -215,20 +215,22 @@ async fn date_times_round_trip_exactly_and_independently_of_the_session_time_zon
     #[cfg(feature = "postgres")]
     let target = {
         let mut target = open("dt-target", &[&ddl]).await;
-        let identity = target.db.database_identity().await.unwrap();
-        exec(
-            &target.db,
-            &format!(
-                "ALTER DATABASE \"{}\" SET timezone TO 'Asia/Kathmandu'",
-                identity.name
-            ),
-        )
-        .await
-        .unwrap();
         target.db.pool().close().await;
-        target.db = Database::<Backend>::connect_postgres(&target.owned.url)
+        // Set every physical connection's session zone explicitly. A database default can be
+        // overridden by the driver's startup settings and would leave this test exercising UTC.
+        let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    graphql_orm::sqlx::query("SET TIME ZONE 'Asia/Kathmandu'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&target.owned.url)
             .await
             .unwrap();
+        target.db = Database::<Backend>::new(pool);
         exec(
             &target.db,
             "CREATE TABLE tz_probe AS SELECT TIMESTAMPTZ '2001-02-03T04:05:06Z'::text AS rendered",
