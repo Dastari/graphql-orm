@@ -18,11 +18,11 @@ changes.
 
 | Package | Version | Path | Default features | Direct internal dependencies |
 | --- | --- | --- | --- | --- |
-| `graphql-orm` | `0.76.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
+| `graphql-orm` | `0.77.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
 | `graphql-orm-ai` | `0.116.0` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm` (dev-only), `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
 | `graphql-orm-ai-tool-profiles` | `0.17.0` | `crates/graphql-orm-ai-tool-profiles` | none | `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
 | `graphql-orm-backup` | `0.11.0` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
-| `graphql-orm-macros` | `0.76.0` | `crates/graphql-orm-macros` | `sqlite` | none |
+| `graphql-orm-macros` | `0.77.0` | `crates/graphql-orm-macros` | `sqlite` | none |
 | `graphql-orm-operation-catalog` | `0.5.0` | `crates/graphql-orm-operation-catalog` | none | `graphql-orm-router-protocol` (optional) |
 | `graphql-orm-router` | `0.6.7` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
 | `graphql-orm-router-protocol` | `0.2.1` | `crates/graphql-orm-router-protocol` | none | none |

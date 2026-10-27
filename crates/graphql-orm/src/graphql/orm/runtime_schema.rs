@@ -2222,6 +2222,7 @@ fn convert_value_kind(field: &FieldMetadata) -> Option<RuntimeValueKind> {
         BackupValueKind::Uuid => Some(RuntimeValueKind::Uuid),
         BackupValueKind::Json => Some(RuntimeValueKind::Json),
         BackupValueKind::Bytes => Some(RuntimeValueKind::Bytes),
+        BackupValueKind::DateTime => Some(RuntimeValueKind::DateTime),
         BackupValueKind::Null => None,
     }
 }

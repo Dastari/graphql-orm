@@ -15,6 +15,37 @@ workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
 
+## 0.76.0 to 0.77.0: date-time backups and self-reference cycles
+
+Upgrade runtime/macros together. Breaking only at Rust compile time and for GraphQL schemas that
+expose `BackupValueKind`:
+
+- **Rust:** `BackupValueKind` is `#[non_exhaustive]` and gains `DateTime`. Add a wildcard arm to
+  matches on it outside graphql-orm. Struct literals and constructors are unchanged.
+- **GraphQL:** a schema that exposes `BackupValueKind` gains `DATE_TIME`. Regenerate SDL and
+  clients.
+
+Nothing changes for existing descriptors, schema hashes or snapshots: static derived date fields
+keep `BackupValueKind::String`. To back up runtime `DateTime` columns, describe them with
+`BackupValueKind::DateTime`. That changes the schema hash of descriptors that previously could not
+include those columns. Export and restore (including `DryRun`) refuse UTC instants outside
+0001–9999 on both backends, including when offset normalization or microsecond rounding crosses
+the boundary, and leap-second text (`SS = 60`). PostgreSQL normalizes a stored leap-second
+literal to a real instant; export preserves that stored instant, while snapshot input containing
+`SS = 60` is refused. Existing `String` descriptors keep their previous behavior.
+
+Restore preflights row shapes and value kinds for every table before importing any table, so a
+late invalid snapshot row shape or value leaves all target tables untouched in applying restore and `DryRun`.
+Runtime database failures still have per-table rollback, not cross-table transactionality.
+
+Restores of self-referencing rows that form cycles now succeed instead of failing. A non-null
+`UNIQUE` self-reference cycle, or a cycle in an append-only table, is refused with
+`BackupSelfReferenceCycle`, and that table's import transaction rolls back. Read it with
+`BackupSelfReferenceCycle::from_error`; its enclosing error's standard source chain retains the
+original SQLx/database cause. Only constraint violations and explicit trigger refusals are
+classified this way. Operational failures such as PostgreSQL `57014` (cancellation) and `40P01`
+(deadlock) retain their original SQLx error and SQLSTATE.
+
 ## 0.75.0 to 0.76.0: delimited reserved-word identifiers
 
 Upgrade runtime/macros together. No action is needed for schemas whose table, column, index and constraint names are plain identifiers that are not reserved words: their statements, plan hashes, migration history and schema hashes are byte-identical.

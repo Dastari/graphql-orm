@@ -225,7 +225,26 @@ impl GraphqlOrmBackupRuntime for crate::db::Database {
     }
 }
 
+/// The database a handle is connected to, as the server reports it rather than as a connection
+/// string names it. Compare it with an operator-stated expectation before restoring into, or
+/// otherwise writing destructively to, a database.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DatabaseIdentity {
+    /// PostgreSQL: `current_database()`. SQLite: the main database file path, empty for an
+    /// in-memory database.
+    pub name: String,
+    /// PostgreSQL: the database's `pg_database` OID, which distinguishes a dropped and recreated
+    /// database of the same name. SQLite: `None`.
+    pub object_id: Option<i64>,
+}
+
 impl crate::db::Database {
+    /// Read the identity of the connected database. See [`DatabaseIdentity`].
+    pub async fn database_identity(&self) -> crate::Result<DatabaseIdentity> {
+        database_identity(self.pool()).await
+    }
+
     pub async fn ensure_change_journal_table(&self) -> crate::Result<()> {
         if !cfg!(feature = "change-journal") {
             return Err(sqlx::Error::Protocol(
@@ -305,9 +324,17 @@ pub async fn restore_backup_rows(
         }
     }
 
-    // Refuse before any write: every reference must resolve inside the backup, and an
-    // empty-database restore must find every table empty. A later failure can then only be a
-    // database error, never a partial restore of a backup that was invalid from the start.
+    // Preflight every table before starting any import transaction. Per-table validation alone
+    // would let earlier tables commit before a later row's invalid value or shape is discovered.
+    for entity in &current_snapshot.entities {
+        let rows = rows_by_table
+            .get(&entity.table_name)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        validate_import_rows(entity, rows)?;
+    }
+    // These checks also precede every write. Runtime database failures retain per-table
+    // transaction boundaries; the restore does not promise cross-table transactionality.
     validate_backup_references(&current_snapshot.entities, rows_by_table)?;
     if context.mode == RestoreMode::EmptyDatabase {
         let mut tx = database.pool().begin().await?;
@@ -332,6 +359,32 @@ pub async fn restore_backup_rows(
         reports.push(database.import_table_rows(&entity, rows, context).await?);
     }
     Ok(reports)
+}
+
+#[cfg(feature = "sqlite")]
+async fn database_identity(pool: &DbPool) -> crate::Result<DatabaseIdentity> {
+    let row = sqlx::query("SELECT file FROM pragma_database_list WHERE name = 'main'")
+        .fetch_one(pool)
+        .await?;
+    Ok(DatabaseIdentity {
+        name: row
+            .try_get::<Option<String>, _>("file")?
+            .unwrap_or_default(),
+        object_id: None,
+    })
+}
+
+#[cfg(feature = "postgres")]
+async fn database_identity(pool: &DbPool) -> crate::Result<DatabaseIdentity> {
+    let row = sqlx::query(
+        "SELECT datname::text AS name, oid::bigint AS object_id FROM pg_database WHERE datname = current_database()",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(DatabaseIdentity {
+        name: row.try_get("name")?,
+        object_id: Some(row.try_get("object_id")?),
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -513,6 +566,7 @@ async fn export_table_rows(
             .join(", ")
     );
 
+    check_portable_date_times(snapshot, entity, &export_columns).await?;
     let rows = fetch_snapshot_rows(snapshot, &sql).await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
@@ -578,8 +632,9 @@ async fn import_table_rows(
         .map(|column| quote_identifier(&column.column_name))
         .collect::<Vec<_>>()
         .join(", ");
-    let placeholder_sql = (0..import_columns.len())
-        .map(|_| "?")
+    let placeholder_sql = import_columns
+        .iter()
+        .map(|column| import_placeholder(column))
         .collect::<Vec<_>>()
         .join(", ");
     let insert_sql = format!(
@@ -589,22 +644,99 @@ async fn import_table_rows(
         placeholder_sql
     );
 
-    for row in import_row_order(entity, rows)? {
+    let order = import_row_order(entity, rows)?;
+    let stored = |row: &BackupRow, column: &super::ColumnBackupDescriptor| {
+        backup_value_to_sql_value(
+            row.values.get(&column.column_name).ok_or_else(|| {
+                sqlx::Error::Protocol(format!(
+                    "backup row {} for table {} is missing import column {}",
+                    row.primary_key, entity.table_name, column.column_name
+                ))
+            })?,
+            column,
+        )
+    };
+    for row in &order.ordered {
         let values = import_columns
             .iter()
-            .map(|column| {
-                backup_value_to_sql_value(
-                    row.values.get(&column.column_name).ok_or_else(|| {
-                        sqlx::Error::Protocol(format!(
-                            "backup row {} for table {} is missing import column {}",
-                            row.primary_key, entity.table_name, column.column_name
-                        ))
-                    })?,
-                    column,
-                )
-            })
+            .map(|column| stored(row, column))
             .collect::<Result<Vec<_>, _>>()?;
-        execute_import_insert(&mut tx, &insert_sql, &values).await?;
+        execute_import_statement(&mut tx, &insert_sql, &values).await?;
+    }
+    if !order.deferred.is_empty() {
+        // Rows on (or below) a self-reference cycle. Insert each with placeholder self-reference
+        // values that satisfy the foreign key on their own: NULL when the column is nullable,
+        // the row's own key otherwise (a row that references itself passes the check at the end
+        // of its statement). Then set the stored values. NULL placeholders never collide on a
+        // UNIQUE column; the stored values are distinct already.
+        let self_columns = import_columns
+            .iter()
+            .copied()
+            .filter(|column| order.self_columns.contains(&column.column_name.as_str()))
+            .collect::<Vec<_>>();
+        let key_column = entity
+            .columns
+            .iter()
+            .find(|column| column.column_name == entity.primary_key_column)
+            .ok_or_else(|| {
+                sqlx::Error::Protocol(format!(
+                    "backup descriptor for {} does not describe its primary key column",
+                    entity.table_name
+                ))
+            })?;
+        for row in &order.deferred {
+            let values = import_columns
+                .iter()
+                .map(|column| {
+                    if !order.self_columns.contains(&column.column_name.as_str()) {
+                        stored(row, column)
+                    } else if column.nullable {
+                        backup_value_to_sql_value(&BackupValue::Null, column)
+                    } else {
+                        stored(row, key_column)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            execute_import_statement(&mut tx, &insert_sql, &values).await?;
+        }
+        let update_sql = format!(
+            "UPDATE {} SET {} WHERE {} = {}",
+            quote_identifier(&entity.table_name),
+            self_columns
+                .iter()
+                .map(|column| format!(
+                    "{} = {}",
+                    quote_identifier(&column.column_name),
+                    import_placeholder(column)
+                ))
+                .collect::<Vec<_>>()
+                .join(", "),
+            quote_identifier(&key_column.column_name),
+            import_placeholder(key_column)
+        );
+        for row in &order.deferred {
+            let mut values = self_columns
+                .iter()
+                .map(|column| stored(row, column))
+                .collect::<Result<Vec<_>, _>>()?;
+            values.push(stored(row, key_column)?);
+            match execute_import_statement(&mut tx, &update_sql, &values).await {
+                Err(error) if is_staged_cycle_refusal(&error) => {
+                    return Err(sqlx::Error::Decode(Box::new(BackupCycleFailure {
+                        cycle: BackupSelfReferenceCycle {
+                            table_name: entity.table_name.clone(),
+                            primary_key: row.primary_key.clone(),
+                            columns: self_columns
+                                .iter()
+                                .map(|column| column.column_name.clone())
+                                .collect(),
+                        },
+                        source: error,
+                    })));
+                }
+                result => result?,
+            }
+        }
     }
 
     let imported_count = table_row_count_on(&mut tx, &entity.table_name).await? as usize;
@@ -689,6 +821,31 @@ fn validate_import_rows(entity: &EntityBackupDescriptor, rows: &[BackupRow]) -> 
     Ok(())
 }
 
+/// Reject parsed leap seconds before the record engine's canonicalization can round them away,
+/// then keep the UTC result inside the range both backup backends can store. Offsets and
+/// microsecond rounding can move a four-digit input outside this range, so check the output year.
+fn parse_backup_date_time(text: &str) -> crate::Result<super::RuntimeDateTime> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(text)
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    // Chrono represents seconds 60 as second 59 with nanoseconds >= 1_000_000_000.
+    // Inspect that representation before rounding: .9999995 within the leap second would
+    // otherwise carry into the next minute and lose the evidence needed for this refusal.
+    if chrono::Timelike::nanosecond(&parsed) >= 1_000_000_000 {
+        return Err(sqlx::Error::Protocol(
+            "backup date-time cannot contain a leap second".to_owned(),
+        ));
+    }
+    let canonical = super::RuntimeDateTime::from_utc(parsed.with_timezone(&chrono::Utc));
+    // Canonical UTC text has exactly 27 bytes for a four-digit year. Chrono can also represent
+    // year zero and signed extended years, which PostgreSQL's portable range excludes.
+    if canonical.as_str().len() != 27 || canonical.as_str().starts_with("0000-") {
+        return Err(sqlx::Error::Protocol(
+            "backup date-time is outside the portable range 0001-9999".to_owned(),
+        ));
+    }
+    Ok(canonical)
+}
+
 fn validate_backup_value(
     descriptor: &super::ColumnBackupDescriptor,
     value: &BackupValue,
@@ -708,6 +865,18 @@ fn validate_backup_value(
     );
     if valid {
         return Ok(());
+    }
+    if let (BackupValueKind::DateTime, BackupValue::String(text)) = (descriptor.logical_type, value)
+    {
+        // Only the canonical form the export writes: a hand-edited or foreign representation
+        // would restore a different stored text than the one the snapshot's row hash describes.
+        if parse_backup_date_time(text).is_ok_and(|canonical| canonical.as_str() == text) {
+            return Ok(());
+        }
+        return Err(sqlx::Error::Protocol(format!(
+            "backup date-time for column {} is not canonical UTC RFC 3339 text",
+            descriptor.column_name
+        )));
     }
     if let (BackupValueKind::Decimal, BackupValue::Decimal(value)) =
         (descriptor.logical_type, value)
@@ -756,6 +925,99 @@ impl BackupOrphanReference {
             sqlx::Error::Decode(source) => source.downcast_ref(),
             _ => None,
         }
+    }
+}
+
+/// A restore could not set the stored self-reference values of a row on a self-reference cycle:
+/// the table's constraints or triggers refused the staged update. A non-null UNIQUE
+/// self-reference column cannot be staged without a temporary value (each row's own-key
+/// placeholder is another row's stored value), and an append-only table refuses updates. The
+/// table's import transaction rolls back. Read it from the error with
+/// [`BackupSelfReferenceCycle::from_error`]. The enclosing SQLx error's standard source chain
+/// retains the original database error. Operational failures such as cancellation and deadlock
+/// propagate unchanged instead of receiving this classification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BackupSelfReferenceCycle {
+    /// Table of the row.
+    pub table_name: String,
+    /// Identity of the row whose update was refused.
+    pub primary_key: String,
+    /// The self-reference columns the update set.
+    pub columns: Vec<String>,
+}
+impl std::fmt::Display for BackupSelfReferenceCycle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "backup row {} of {} could not take its stored self-reference values ({}) after a cycle was staged",
+            self.primary_key,
+            self.table_name,
+            self.columns.join(", ")
+        )
+    }
+}
+impl std::error::Error for BackupSelfReferenceCycle {}
+impl BackupSelfReferenceCycle {
+    /// The self-reference cycle that refused a restore, if `error` is one.
+    pub fn from_error(error: &crate::Error) -> Option<&Self> {
+        match error {
+            sqlx::Error::Decode(source) => source.downcast_ref().or_else(|| {
+                source
+                    .downcast_ref::<BackupCycleFailure>()
+                    .map(|failure| &failure.cycle)
+            }),
+            _ => None,
+        }
+    }
+}
+
+// Keep the public, cloneable diagnostic intact; attach the non-cloneable SQLx cause privately.
+#[derive(Debug)]
+struct BackupCycleFailure {
+    cycle: BackupSelfReferenceCycle,
+    source: sqlx::Error,
+}
+impl std::fmt::Display for BackupCycleFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cycle.fmt(f)
+    }
+}
+impl std::error::Error for BackupCycleFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+fn is_staged_cycle_refusal(error: &sqlx::Error) -> bool {
+    let Some(database) = error.as_database_error() else {
+        return false;
+    };
+    if database.is_unique_violation()
+        || database.is_foreign_key_violation()
+        || matches!(database.kind(), sqlx::error::ErrorKind::NotNullViolation)
+        || database.is_check_violation()
+    {
+        return true;
+    }
+    // Use structured backend codes, never message matching. Triggers can also raise operational
+    // SQLSTATEs; those must preserve their original category, e.g. 57014 and 40P01 on PostgreSQL.
+    #[cfg(feature = "sqlite")]
+    {
+        database
+            .try_downcast_ref::<sqlx::sqlite::SqliteError>()
+            .is_some()
+            && database.code().as_deref() == Some("1811") // SQLITE_CONSTRAINT_TRIGGER
+    }
+    #[cfg(feature = "postgres")]
+    {
+        database
+            .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+            .is_some()
+            && database.code().is_some_and(|code| {
+                // Class 23 includes exclusion constraints, which SQLx's helpers do not cover.
+                code.starts_with("23") || matches!(code.as_ref(), "P0001" | "09000" | "27000")
+            })
     }
 }
 
@@ -918,10 +1180,19 @@ fn import_columns<'a>(
         .collect()
 }
 
+/// A table's rows in insert order. Rows a self-reference cycle keeps from parent-first order
+/// (the cycle's rows and every row below them) are `deferred`: inserted after `ordered` with
+/// placeholder values in `self_columns`, then updated to their stored values.
+struct ImportRowOrder<'a> {
+    ordered: Vec<&'a BackupRow>,
+    deferred: Vec<&'a BackupRow>,
+    self_columns: Vec<&'a str>,
+}
+
 fn import_row_order<'a>(
-    entity: &EntityBackupDescriptor,
+    entity: &'a EntityBackupDescriptor,
     rows: &'a [BackupRow],
-) -> crate::Result<Vec<&'a BackupRow>> {
+) -> crate::Result<ImportRowOrder<'a>> {
     // Self-references order rows by a single-column key; a composite-key table has none.
     let single_key = entity.primary_key_columns.is_empty();
     let self_dependencies = entity
@@ -935,7 +1206,11 @@ fn import_row_order<'a>(
         })
         .collect::<Vec<_>>();
     if self_dependencies.is_empty() || rows.len() < 2 {
-        return Ok(rows.iter().collect());
+        return Ok(ImportRowOrder {
+            ordered: rows.iter().collect(),
+            deferred: Vec::new(),
+            self_columns: Vec::new(),
+        });
     }
 
     let row_indexes = rows
@@ -980,8 +1255,10 @@ fn import_row_order<'a>(
         .enumerate()
         .filter_map(|(index, indegree)| (*indegree == 0).then_some(index))
         .collect::<std::collections::BTreeSet<_>>();
+    let mut placed = vec![false; rows.len()];
     let mut ordered = Vec::with_capacity(rows.len());
     while let Some(index) = ready.pop_first() {
+        placed[index] = true;
         ordered.push(&rows[index]);
         for child_index in &children[index] {
             indegrees[*child_index] -= 1;
@@ -990,14 +1267,24 @@ fn import_row_order<'a>(
             }
         }
     }
-
-    if ordered.len() != rows.len() {
-        return Err(sqlx::Error::Protocol(format!(
-            "backup rows for table {} contain a self-reference cycle",
-            entity.table_name
-        )));
-    }
-    Ok(ordered)
+    // A row whose parent is deferred is never ready, so it is deferred too: no ordered row
+    // references a deferred one.
+    let deferred = rows
+        .iter()
+        .zip(&placed)
+        .filter_map(|(row, placed)| (!placed).then_some(row))
+        .collect::<Vec<_>>();
+    let mut self_columns = self_dependencies
+        .iter()
+        .map(|dependency| dependency.source_column.as_str())
+        .collect::<Vec<_>>();
+    self_columns.sort_unstable();
+    self_columns.dedup();
+    Ok(ImportRowOrder {
+        ordered,
+        deferred,
+        self_columns,
+    })
 }
 
 #[cfg(feature = "sqlite")]
@@ -1014,7 +1301,7 @@ async fn table_row_count_on(
 }
 
 #[cfg(feature = "sqlite")]
-async fn execute_import_insert(
+async fn execute_import_statement(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     sql: &str,
     values: &[SqlValue],
@@ -1037,7 +1324,7 @@ async fn table_row_count_on(
 }
 
 #[cfg(feature = "postgres")]
-async fn execute_import_insert(
+async fn execute_import_statement(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     sql: &str,
     values: &[SqlValue],
@@ -1119,6 +1406,16 @@ fn decode_backup_value(
         BackupValueKind::Bytes => row
             .try_get::<Option<Vec<u8>>, _>(column)
             .map(|value| value.map(BackupValue::Bytes).unwrap_or(BackupValue::Null)),
+        // The record engine's own read: any RFC 3339 text, canonicalized. Text it cannot read
+        // fails the export instead of entering a snapshot.
+        BackupValueKind::DateTime => row.try_get::<Option<String>, _>(column).and_then(|value| {
+            value
+                .map(|value| {
+                    parse_backup_date_time(&value)
+                        .map(|value| BackupValue::String(value.as_str().to_owned()))
+                })
+                .unwrap_or(Ok(BackupValue::Null))
+        }),
     }
 }
 
@@ -1169,6 +1466,19 @@ fn decode_backup_value(
         BackupValueKind::Bytes => row
             .try_get::<Option<Vec<u8>>, _>(column)
             .map(|value| value.map(BackupValue::Bytes).unwrap_or(BackupValue::Null)),
+        // A `TIMESTAMPTZ` is an instant; reading it typed is independent of the session
+        // `TimeZone`. `check_portable_date_times` has already refused values chrono cannot hold.
+        BackupValueKind::DateTime => row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(column)
+            .map(|value| {
+                value
+                    .map(|value| {
+                        BackupValue::String(
+                            super::RuntimeDateTime::from_utc(value).as_str().to_owned(),
+                        )
+                    })
+                    .unwrap_or(BackupValue::Null)
+            }),
     }
 }
 
@@ -1179,7 +1489,9 @@ fn backup_value_to_sql_value(
     let logical_type = descriptor.logical_type;
     Ok(match value {
         BackupValue::Null => match logical_type {
-            BackupValueKind::Null | BackupValueKind::String => SqlValue::StringNull,
+            BackupValueKind::Null | BackupValueKind::String | BackupValueKind::DateTime => {
+                SqlValue::StringNull
+            }
             BackupValueKind::Bool => SqlValue::BoolNull,
             BackupValueKind::Integer => SqlValue::IntNull,
             BackupValueKind::Float => SqlValue::FloatNull,
@@ -1207,6 +1519,63 @@ fn backup_value_to_sql_value(
         BackupValue::Json(value) => SqlValue::Json(value.clone()),
         BackupValue::Bytes(value) => SqlValue::Bytes(value.clone()),
     })
+}
+
+/// The bind placeholder of an import column. A PostgreSQL `TIMESTAMPTZ` takes the canonical text
+/// through an explicit cast; its `Z` offset makes the cast independent of the session `TimeZone`.
+fn import_placeholder(column: &super::ColumnBackupDescriptor) -> &'static str {
+    if cfg!(feature = "postgres") && column.logical_type == BackupValueKind::DateTime {
+        "CAST(? AS TIMESTAMPTZ)"
+    } else {
+        "?"
+    }
+}
+
+/// Refuse a PostgreSQL date-time the portable encoding cannot carry before any row is decoded:
+/// `±infinity` and instants outside years 0001–9999 have no RFC 3339 form (and overflow the
+/// typed decode). Runs inside the export's consistent snapshot.
+#[cfg(feature = "postgres")]
+async fn check_portable_date_times(
+    snapshot: &mut BackupSnapshot,
+    entity: &EntityBackupDescriptor,
+    columns: &[&super::ColumnBackupDescriptor],
+) -> crate::Result<()> {
+    let outside = columns
+        .iter()
+        .filter(|column| column.logical_type == BackupValueKind::DateTime)
+        .map(|column| {
+            let column = quote_identifier(&column.column_name);
+            format!(
+                "NOT ({column} >= TIMESTAMPTZ '0001-01-01 00:00:00+00' AND {column} < TIMESTAMPTZ '10000-01-01 00:00:00+00')"
+            )
+        })
+        .collect::<Vec<_>>();
+    if outside.is_empty() {
+        return Ok(());
+    }
+    let sql = format!(
+        "SELECT 1 FROM {} WHERE {} LIMIT 1",
+        quote_identifier(&entity.table_name),
+        outside.join(" OR ")
+    );
+    if fetch_snapshot_rows(snapshot, &sql).await?.is_empty() {
+        Ok(())
+    } else {
+        Err(sqlx::Error::Protocol(format!(
+            "backup table {} has a date-time outside the portable range 0001-9999",
+            entity.table_name
+        )))
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn check_portable_date_times(
+    _: &mut BackupSnapshot,
+    _: &EntityBackupDescriptor,
+    _: &[&super::ColumnBackupDescriptor],
+) -> crate::Result<()> {
+    // SQLite stores text; the typed decode parses and canonicalizes each value instead.
+    Ok(())
 }
 
 fn require_decimal_definition(
@@ -1504,9 +1873,163 @@ mod tests {
             }],
         };
 
-        let ordered = import_row_order(&entity, &rows).expect("rows should order");
+        let order = import_row_order(&entity, &rows).expect("rows should order");
 
-        assert_eq!(ordered[0].primary_key, parent_id.to_string());
-        assert_eq!(ordered[1].primary_key, child_id.to_string());
+        assert!(order.deferred.is_empty());
+        assert_eq!(order.ordered[0].primary_key, parent_id.to_string());
+        assert_eq!(order.ordered[1].primary_key, child_id.to_string());
+    }
+
+    #[test]
+    fn self_reference_cycles_and_the_rows_below_them_are_deferred() {
+        let row = |id: i64, parent: Option<i64>| BackupRow {
+            table_name: "items".to_string(),
+            primary_key: id.to_string(),
+            row_hash: String::new(),
+            values: BTreeMap::from([
+                ("id".to_string(), BackupValue::Integer(id)),
+                (
+                    "parent_id".to_string(),
+                    parent.map_or(BackupValue::Null, BackupValue::Integer),
+                ),
+            ]),
+        };
+        // 1 ⇄ 2 is a cycle, 3 hangs below it, 4 is a root, 5 a self-loop below 4.
+        let rows = vec![
+            row(1, Some(2)),
+            row(2, Some(1)),
+            row(3, Some(1)),
+            row(4, None),
+            row(5, Some(5)),
+        ];
+        let entity = EntityBackupDescriptor {
+            entity_name: "Item".to_string(),
+            table_name: "items".to_string(),
+            primary_key_column: "id".to_string(),
+            primary_key_columns: Vec::new(),
+            retention_purge: false,
+            export_order: 0,
+            restore_order: 0,
+            columns: Vec::new(),
+            dependencies: vec![EntityDependencyDescriptor {
+                entity_name: "Item".to_string(),
+                table_name: "items".to_string(),
+                source_column: "parent_id".to_string(),
+                target_column: "id".to_string(),
+                nullable: true,
+                on_delete: DeletePolicy::Restrict,
+            }],
+        };
+
+        let order = import_row_order(&entity, &rows).expect("cycles defer instead of failing");
+        let keys = |rows: &[&BackupRow]| {
+            rows.iter()
+                .map(|row| row.primary_key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&order.ordered), ["4", "5"]);
+        assert_eq!(keys(&order.deferred), ["1", "2", "3"]);
+        assert_eq!(order.self_columns, ["parent_id"]);
+    }
+
+    #[test]
+    fn backup_date_time_refuses_leap_seconds_before_rounding() {
+        for leap in [
+            "2016-12-31T23:59:60.9999995Z",
+            "2016-12-31T23:59:60.9999994Z",
+            "2016-12-31T23:59:60.9999999Z",
+            "2017-01-01T05:44:60.9999995+05:45",
+            "9999-12-31T23:59:60.9999995Z",
+        ] {
+            let result = parse_backup_date_time(leap);
+            assert!(result.is_err(), "accepted {leap}: {result:?}");
+            assert!(
+                result.unwrap_err().to_string().contains("leap second"),
+                "{leap}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_date_time_preserves_non_leap_rounding_and_boundaries() {
+        for (raw, expected) in [
+            (
+                "2016-12-31T23:59:59.9999994Z",
+                "2016-12-31T23:59:59.999999Z",
+            ),
+            (
+                "2016-12-31T23:59:59.9999995Z",
+                "2017-01-01T00:00:00.000000Z",
+            ),
+            (
+                "2001-02-03T09:50:06.1234564+05:45",
+                "2001-02-03T04:05:06.123456Z",
+            ),
+            (
+                "2001-02-03T09:50:06.1234565+05:45",
+                "2001-02-03T04:05:06.123457Z",
+            ),
+            ("0001-01-01T00:00:00Z", "0001-01-01T00:00:00.000000Z"),
+            (
+                "9999-12-31T23:59:59.9999994Z",
+                "9999-12-31T23:59:59.999999Z",
+            ),
+        ] {
+            let parsed = parse_backup_date_time(raw).unwrap();
+            assert_eq!(parsed.as_str(), expected, "{raw}");
+            assert_eq!(parsed, super::super::RuntimeDateTime::parse(raw).unwrap());
+        }
+        assert!(parse_backup_date_time("9999-12-31T23:59:59.9999995Z").is_err());
+    }
+
+    #[test]
+    fn date_time_values_must_be_canonical_utc_text() {
+        let descriptor = super::super::ColumnBackupDescriptor {
+            column_name: "created_at".to_string(),
+            rust_field_name: "created_at".to_string(),
+            logical_type: BackupValueKind::DateTime,
+            decimal: None,
+            nullable: true,
+            is_primary_key: false,
+            is_generated: false,
+            backup_policy: ColumnBackupPolicy::Include,
+        };
+        let text = |value: &str| BackupValue::String(value.to_string());
+        assert!(validate_backup_value(&descriptor, &text("2026-10-27T01:02:03.000004Z")).is_ok());
+        assert!(validate_backup_value(&descriptor, &BackupValue::Null).is_ok());
+        for refused in [
+            text("2026-10-27T01:02:03Z"),
+            text("2026-10-27T11:02:03.000004+10:00"),
+            text("2026-10-27 01:02:03.000004"),
+            text("2026-10-27T01:02:03.0000041Z"),
+            text("0000-01-01T00:00:00.000000Z"),
+            text("+10000-01-01T00:00:00.000000Z"),
+            text("2016-12-31T23:59:60.000000Z"),
+            text("9999-12-31T23:59:60.000000Z"),
+            BackupValue::Integer(1),
+        ] {
+            assert!(
+                validate_backup_value(&descriptor, &refused).is_err(),
+                "{refused:?}"
+            );
+        }
+        for accepted in ["0001-01-01T00:00:00.000000Z", "9999-12-31T23:59:59.999999Z"] {
+            assert!(validate_backup_value(&descriptor, &text(accepted)).is_ok());
+        }
+        for outside in [
+            "2016-12-31T23:59:60.000000Z",
+            "9999-12-31T23:59:60.000000Z",
+            "0000-01-01T00:00:00Z",
+            "0001-01-01T00:00:00+01:00",
+            "9999-12-31T23:59:59-01:00",
+            "9999-12-31T23:59:59.9999995Z",
+        ] {
+            assert!(parse_backup_date_time(outside).is_err(), "{outside}");
+        }
+        assert_eq!(BackupValueKind::DateTime.as_schema_str(), "date_time");
+        assert!(matches!(
+            backup_value_to_sql_value(&BackupValue::Null, &descriptor),
+            Ok(SqlValue::StringNull)
+        ));
     }
 }

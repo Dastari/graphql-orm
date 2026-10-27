@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.77.0 is the companion of the runtime's date-time backups; the macros themselves are
+unchanged.
+
 Version 0.76.0 delimits reserved-word and irregular column and table names in generated
 DML. See the [migration guide](../../MIGRATION.md#0750-to-0760-delimited-reserved-word-identifiers).
 
