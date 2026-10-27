@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-backup
 
-Version 0.12.0 aligns the optional ORM adapter's public types with ORM 0.76.0
+Version 0.12.0 aligns the optional ORM adapter's public types with ORM 0.79.0
 and catalog 0.6.0. Select one reviewed workspace revision; see
 [MIGRATION.md](MIGRATION.md). Backup/restore logic, manifest formats and storage
 identities are unchanged. No data migration is required.
