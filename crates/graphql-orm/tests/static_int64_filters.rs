@@ -194,7 +194,7 @@ async fn list_limits_apply_before_decode_at_actual_operator_names() {
         assert!(Int64Filter::parse(Some(Value::Object([(Name::new(operator), Value::String("1".into()))].into_iter().collect()))).is_ok());
         // Oversize invalid elements must report the bound, not element decoding.
         let error = Int64Filter::parse(Some(Value::Object([(Name::new(operator), Value::List(vec![Value::Boolean(true); 257]))].into_iter().collect()))).unwrap_err();
-        assert!(error.to_string().contains("exceeds 256"));
+        assert!(error.into_server_error(Default::default()).message.contains("exceeds 256"));
     }
 }
 
