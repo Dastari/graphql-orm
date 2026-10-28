@@ -6439,8 +6439,10 @@ fn generate_filter_field(
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
                         f.validate()?;
-                        if !::graphql_orm::graphql::orm::spatial::int64_filter_matches(#value_expr, f) {
-                            return Ok(Some(false));
+                        match ::graphql_orm::graphql::orm::spatial::int64_filter_matches(#value_expr, f) {
+                            Some(true) => {},
+                            Some(false) => return Ok(Some(false)),
+                            None => _gom_unknown = true,
                         }
                     }
                 }

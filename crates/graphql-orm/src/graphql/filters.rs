@@ -253,6 +253,20 @@ impl async_graphql::InputType for Int64Filter {
         <Int64FilterWire as async_graphql::InputType>::create_type_info(registry)
     }
     fn parse(value: Option<async_graphql::Value>) -> async_graphql::InputValueResult<Self> {
+        // Inspect borrowed raw fields before derive clones fields or Vec decodes
+        // elements. Non-list values retain GraphQL singleton-list coercion.
+        if let Some(async_graphql::Value::Object(object)) = value.as_ref() {
+            for operator in ["in_list", "not_in"] {
+                let name = semantic_filter_name(operator, true);
+                if let Some(async_graphql::Value::List(list)) = object.get(name.as_str()) {
+                    if list.len() > 256 {
+                        return Err(async_graphql::InputValueError::custom(
+                            "signed64 filter list exceeds 256 operands",
+                        ));
+                    }
+                }
+            }
+        }
         let wire = <Int64FilterWire as async_graphql::InputType>::parse(value)
             .map_err(|error| error.propagate::<Self>())?;
         let filter = Self {

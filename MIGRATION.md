@@ -25,9 +25,12 @@ must reach the parser exactly; use decimal strings in JavaScript clients.
 This is the filter operand scalar, independent of runtime `RuntimeInt64`.
 
 All nine operators are supported. Empty in/notIn lists add no constraint (the
-existing static SQL convention); comparisons and nonempty lists exclude NULL.
+existing static SQL convention); comparisons and nonempty lists yield SQL UNKNOWN for NULL, including under
+NOT/OR/AND, and only the final match boundary excludes UNKNOWN.
 `isNull` composes with other operators using AND. Each list has a 256-member
-bound, validated for GraphQL and native Rust callers. Existing query-level
+bound, checked on borrowed raw objects at actual configured operator names
+before cloning/decoding list elements, and recursively for native Rust callers.
+GraphQL singleton-list coercion remains supported. Existing query-level
 policy, depth, work and database bind budgets remain required. Generated
 metadata advertises `Signed64` operands rather than GraphQL `Int`.
 

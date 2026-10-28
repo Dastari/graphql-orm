@@ -18,7 +18,8 @@ for historical context.
 
 - ORM/macros 0.81.0 add opt-in exact static signed64 filters (`int64`,
   `Int64Filter`, `Signed64`) with canonical metadata, bounded lists and exact SQL
-  bindings/matching. Existing 32-bit filters remain unchanged.
+  bindings/matching with SQL three-valued NULL composition and predecode list
+  admission. Existing 32-bit filters remain unchanged.
 
 - Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
   ORM/macros 0.80.0, profiles 0.19.0 and AI 0.118.0. Canonical operator meanings,
