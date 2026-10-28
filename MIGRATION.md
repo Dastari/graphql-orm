@@ -10,6 +10,27 @@ supersedes: []
 
 # Migration Guide
 
+## 0.80.0 to 0.81.0: exact static signed64 filters
+
+Use `#[filterable(type = "int64")]` on `i64` or `Option<i64>` fields and
+`Int64Filter` with native `i64` comparison/list operands. Existing `number` and
+`IntFilter` retain their 32-bit input contract. Upgrade ORM and macros together.
+No table or stored-value migration is required.
+
+The `Signed64` scalar accepts exact integer literals and canonical decimal
+strings in the inclusive signed64 range; output is a decimal string. SDKs must
+map it to bigint or decimal strings, never floating point. Fractions, exponents
+in strings, leading zeroes and overflow refuse. GraphQL JSON numeric variables
+must reach the parser exactly; use decimal strings in JavaScript clients.
+This is the filter operand scalar, independent of runtime `RuntimeInt64`.
+
+All nine operators are supported. Empty in/notIn lists add no constraint (the
+existing static SQL convention); comparisons and nonempty lists exclude NULL.
+`isNull` composes with other operators using AND. Each list has a 256-member
+bound, validated for GraphQL and native Rust callers. Existing query-level
+policy, depth, work and database bind budgets remain required. Generated
+metadata advertises `Signed64` operands rather than GraphQL `Int`.
+
 ## 0.78.0 to 0.80.0: canonical typed filter contracts
 
 For hosts already on 0.79.0, the same typed-contract migration applies from

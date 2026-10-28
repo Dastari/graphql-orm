@@ -349,6 +349,60 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
     true
 }
 
+/// Evaluate exact signed64 operands without narrowing. Empty lists are no-ops.
+pub fn int64_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::Int64Filter) -> bool {
+    if let Some(is_null) = filter.is_null {
+        if value.is_none() != is_null {
+            return false;
+        }
+    }
+    let Some(value) = value else {
+        return filter.eq.is_none()
+            && filter.ne.is_none()
+            && filter.lt.is_none()
+            && filter.lte.is_none()
+            && filter.gt.is_none()
+            && filter.gte.is_none()
+            && filter.in_list.as_ref().is_none_or(Vec::is_empty)
+            && filter.not_in.as_ref().is_none_or(Vec::is_empty);
+    };
+
+    if filter.eq.is_some_and(|expected| value != expected) {
+        return false;
+    }
+    if filter.ne.is_some_and(|expected| value == expected) {
+        return false;
+    }
+    if filter.lt.is_some_and(|expected| value >= expected) {
+        return false;
+    }
+    if filter.lte.is_some_and(|expected| value > expected) {
+        return false;
+    }
+    if filter.gt.is_some_and(|expected| value <= expected) {
+        return false;
+    }
+    if filter.gte.is_some_and(|expected| value < expected) {
+        return false;
+    }
+    if filter
+        .in_list
+        .as_ref()
+        .is_some_and(|list| !list.is_empty() && !list.iter().any(|candidate| value == *candidate))
+    {
+        return false;
+    }
+    if filter
+        .not_in
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|candidate| value == *candidate))
+    {
+        return false;
+    }
+
+    true
+}
+
 /// Evaluate a UUID filter in memory for fallback query paths.
 pub fn uuid_filter_matches(
     value: Option<uuid::Uuid>,

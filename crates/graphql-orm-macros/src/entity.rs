@@ -3777,6 +3777,7 @@ fn generate_entity_impl(
                             "string" => "StringFilter",
                             "uuid" => "UuidFilter",
                             "number" => "IntFilter",
+                            "int64" => "Int64Filter",
                             "decimal" => "DecimalFilter",
                             "boolean" | "bool" => "BoolFilter",
                             "bytes" => "BytesFilter",
@@ -4476,7 +4477,7 @@ fn generate_entity_impl(
                 filter_to_entity_match.push(entity_match_gen);
                 filter_is_empty_checks.push(is_empty_check);
                 filter_contains_spatial_checks.push(contains_spatial_check);
-                if filter_type == "date" {
+                if filter_type == "date" || filter_type == "int64" {
                     filter_validation_checks.push(quote! {
                         if let Some(filter) = &self.#filter_field_name {
                             filter.validate()?;
@@ -6345,6 +6346,99 @@ fn generate_filter_field(
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
                         if !::graphql_orm::graphql::orm::spatial::int_filter_matches(#value_expr, f) {
+                            return Ok(Some(false));
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+            Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
+        }
+        "int64" => {
+            let inner = option_inner_type(field_type).unwrap_or(field_type);
+            if !type_path_last_ident(inner).is_some_and(|name| name == "i64") {
+                return Err(syn::Error::new_spanned(field_type, "int64 filter requires i64 or Option<i64>"));
+            }
+            let input = quote! {
+                #[graphql(name = #graphql_name)]
+                pub #filter_field_name: Option<::graphql_orm::graphql::filters::Int64Filter>,
+            };
+            let sql = quote! {
+                if let Some(ref f) = self.#filter_field_name {
+                    if let Some(v) = f.eq {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} = {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
+                    }
+                    if let Some(v) = f.ne {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} != {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
+                    }
+                    if let Some(v) = f.lt {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} < {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
+                    }
+                    if let Some(v) = f.lte {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} <= {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
+                    }
+                    if let Some(v) = f.gt {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} > {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
+                    }
+                    if let Some(v) = f.gte {
+                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
+                        conditions.push(format!("{} >= {}", #db_col, placeholder));
+                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
+                    }
+                    if let Some(ref list) = f.in_list {
+                        if !list.is_empty() {
+                            let base_index = values.len() + 1;
+                            let placeholders: Vec<String> = (0..list.len())
+                                .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
+                                .collect();
+                            conditions.push(format!("{} IN ({})", #db_col, placeholders.join(", ")));
+                            for v in list {
+                                values.push(::graphql_orm::graphql::orm::SqlValue::Int(*v));
+                            }
+                        }
+                    }
+                    if let Some(ref list) = f.not_in {
+                        if !list.is_empty() {
+                            let base_index = values.len() + 1;
+                            let placeholders: Vec<String> = (0..list.len())
+                                .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
+                                .collect();
+                            conditions.push(format!("{} NOT IN ({})", #db_col, placeholders.join(", ")));
+                            for v in list {
+                                values.push(::graphql_orm::graphql::orm::SqlValue::Int(*v));
+                            }
+                        }
+                    }
+                    // IsNull / IsNotNull
+                    if let Some(is_null) = f.is_null {
+                        if is_null {
+                            conditions.push(format!("{} IS NULL", #db_col));
+                        } else {
+                            conditions.push(format!("{} IS NOT NULL", #db_col));
+                        }
+                    }
+                }
+            };
+            let value_expr = if is_option_type(field_type) {
+                quote! { entity.#field_name }
+            } else {
+                quote! { Some(entity.#field_name) }
+            };
+            let entity_match = if backend == BackendKind::Sqlite {
+                quote! {
+                    if let Some(ref f) = self.#filter_field_name {
+                        if !::graphql_orm::graphql::orm::spatial::int64_filter_matches(#value_expr, f) {
                             return Ok(Some(false));
                         }
                     }
