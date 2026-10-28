@@ -116,7 +116,7 @@ async fn exact_capability_execution_and_private_roles_stay_closed() {
         let filter = json!({"value": {(eq.clone()): value.to_string()}});
         let compiled = capability
             .compile_compact(
-                json!({"arguments":{"where":filter}, "maximumItems":10, "selections":["id"]}),
+                json!({"arguments":{"where":filter}, "maximumItems":10, "relationshipArguments":{}, "relationshipMaximumItems":{}, "selections":["id"]}),
             )
             .unwrap();
         assert!(
@@ -152,7 +152,7 @@ async fn exact_capability_execution_and_private_roles_stay_closed() {
         let filter = json!({"value": {(eq.clone()): value}});
         let compiled = capability
             .compile_compact(
-                json!({"arguments":{"where":filter}, "maximumItems":10, "selections":["id"]}),
+                json!({"arguments":{"where":filter}, "maximumItems":10, "relationshipArguments":{}, "relationshipMaximumItems":{}, "selections":["id"]}),
             )
             .unwrap();
         let response = schema
@@ -176,7 +176,7 @@ async fn exact_capability_execution_and_private_roles_stay_closed() {
         assert!(
             capability
                 .compile_compact(
-                    json!({"arguments":{"where":filter}, "maximumItems":10, "selections":["id"]})
+                    json!({"arguments":{"where":filter}, "maximumItems":10, "relationshipArguments":{}, "relationshipMaximumItems":{}, "selections":["id"]})
                 )
                 .is_err()
         );
@@ -217,11 +217,11 @@ async fn exact_capability_execution_and_private_roles_stay_closed() {
         .unwrap()
         .graphql_name;
     let flat_filter = json!({"value":{(in_name.clone()):[i64::MIN.to_string()]}});
-    let compiled = capability.compile_compact(json!({"arguments":{"where":flat_filter.clone()}, "maximumItems":10, "selections":["id"]})).unwrap();
+    let compiled = capability.compile_compact(json!({"arguments":{"where":flat_filter.clone()}, "maximumItems":10, "relationshipArguments":{}, "relationshipMaximumItems":{}, "selections":["id"]})).unwrap();
     let recursive_filter = json!({"or":[{"not":{"value":{(eq):i64::MAX.to_string()}}}, {"value":{(in_name):[i64::MIN.to_string()]}}]});
     // Provider plans deliberately omit recursive connectives. Keep that boundary
     // closed, then exercise the ordinary generated resolver's recursive input.
-    assert!(capability.compile_compact(json!({"arguments":{"where":recursive_filter.clone()}, "maximumItems":10, "selections":["id"]})).is_err());
+    assert!(capability.compile_compact(json!({"arguments":{"where":recursive_filter.clone()}, "maximumItems":10, "relationshipArguments":{}, "relationshipMaximumItems":{}, "selections":["id"]})).is_err());
     let mut recursive_variables = compiled.variables().clone();
     let where_variable = recursive_variables
         .as_object_mut()
