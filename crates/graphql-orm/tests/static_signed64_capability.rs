@@ -14,7 +14,13 @@ use std::sync::{
 };
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "capability64", plural = "Capability64Rows", backend = "sqlite", auth = "none", query_shapes = "list")]
+#[graphql_entity(
+    table = "capability64",
+    plural = "Capability64Rows",
+    backend = "sqlite",
+    auth = "none",
+    query_shapes = "list"
+)]
 struct Capability64 {
     #[primary_key]
     #[sortable]
