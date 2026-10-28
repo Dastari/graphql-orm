@@ -10,14 +10,17 @@ supersedes: []
 
 # Migration Guide
 
-## 0.116.0 to 0.117.0: canonical filter contract type identity
+## 0.116.0 to 0.118.0: canonical filter contract type identity
 
-Select AI 0.117.0 with ORM 0.79.0, catalog 0.6.0 and profiles 0.18.0 from one
+Hosts already on 0.117.0 apply the same contract migration to 0.118.0;
+the earlier explicit-feature/Auth contract remains in effect.
+
+Select AI 0.118.0 with ORM 0.80.0, catalog 0.6.0 and profiles 0.19.0 from one
 reviewed revision. Public APIs/reexports carry the new catalogue field types;
 update literals with `filter_input`, using `None` only for unfilterable fields.
 Regenerate semantic wire-3 payloads, capabilities and all fingerprint bindings.
 Old wire-2 or stale/forged payloads fail readiness; SDL is not fallback authority.
-See the [workspace migration](../../MIGRATION.md#0780-to-0790-canonical-typed-filter-contracts).
+See the [workspace migration](../../MIGRATION.md#0780-to-0800-canonical-typed-filter-contracts).
 No data migration required. `AI_SCHEMA_MODULE_VERSION` and provider, egress,
 authorization and backup behavior are unchanged. The spatial/JSON geometry
 codec gate remains outstanding. The mandatory baseline SemVer audit is a later

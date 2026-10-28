@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.12.0 (unreleased)
 
-- Align the optional adapter's concrete ORM public types with ORM 0.79.0 and
+- Align the optional adapter's concrete ORM public types with ORM 0.80.0 and
   canonical operation catalog 0.6.0. No backup/restore, storage, persistence or
   manifest-format changes; no data migration required.
 

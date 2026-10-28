@@ -13,7 +13,7 @@ supersedes: []
 ## 0.11.1 to 0.12.0: optional ORM public type identity
 
 Upgrade optional ORM adapters and any direct ORM consumer together to ORM
-0.79.0/catalog 0.6.0 from one reviewed workspace revision. Concrete public
+0.80.0/catalog 0.6.0 from one reviewed workspace revision. Concrete public
 `Database`, entity metadata and `ColumnBackupPolicy` types must share one source
 universe. Storage stays on its existing version. No backup/restore logic,
 schema, snapshot manifest or repository-format change; no data migration is

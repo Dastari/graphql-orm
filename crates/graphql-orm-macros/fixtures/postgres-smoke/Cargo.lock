@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.79.0"
+version = "0.80.0"
 dependencies = [
  "convert_case",
  "proc-macro2",

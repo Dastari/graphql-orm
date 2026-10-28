@@ -17,7 +17,7 @@ for historical context.
 ## Unreleased
 
 - Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
-  ORM/macros 0.79.0, profiles 0.18.0 and AI 0.117.0. Canonical operator meanings,
+  ORM/macros 0.80.0, profiles 0.19.0 and AI 0.118.0. Canonical operator meanings,
   exact operand types and closed auxiliary objects must match finished SDL;
   arbitrary record inputs, extra operators, wrong object operands and stale
   metadata fail readiness. Include `NotIn`, `Similar` and distinct spatial
@@ -29,7 +29,7 @@ for historical context.
   spatial/JSON planning codec gate remains outstanding; structural parity alone
   is not geometry planning qualification.
 
-Companion runtime/macros version: **0.79.0**.
+Companion runtime/macros version: **0.80.0**.
 
 - **Breaking (Cargo defaults and public reexport):** async-graphql defaults are
   disabled. ORM retains `dataloader`, `uuid` and `decimal`; `runtime-graphql`

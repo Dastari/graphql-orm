@@ -10,10 +10,14 @@ supersedes: []
 
 # Migration Guide
 
-## 0.78.0 to 0.79.0: canonical typed filter contracts
+## 0.78.0 to 0.80.0: canonical typed filter contracts
 
-Upgrade ORM and macros together, with operation catalog 0.6.0, profiles 0.18.0,
-AI 0.117.0 and optional backup 0.12.0 from one reviewed workspace revision.
+For hosts already on 0.79.0, the same typed-contract migration applies from
+0.79.0 to 0.80.0. The 0.79.0 feature/Auth release and this source-breaking
+contract release use distinct package versions; no data migration is added.
+
+Upgrade ORM and macros together, with operation catalog 0.6.0, profiles 0.19.0,
+AI 0.118.0 and optional backup 0.12.0 from one reviewed workspace revision.
 Storage identity is unchanged. Router 0.7.0 carries the explicit GraphQL feature
 and Auth source changes described below.
 

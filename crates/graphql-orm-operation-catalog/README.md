@@ -21,7 +21,7 @@ producer collections, while deserialized noncanonical or stale payloads fail
 validation. `NotIn`, `Similar` and distinct spatial operators complete producer
 coverage. SDL verifies mechanical conformance, never operator authority.
 Regenerate wire-3 payloads and fingerprint-bound consumers; wire 2 is rejected.
-See the [migration guide](../../MIGRATION.md#0780-to-0790-canonical-typed-filter-contracts).
+See the [migration guide](../../MIGRATION.md#0780-to-0800-canonical-typed-filter-contracts).
 
 `graphql-orm-operation-catalog` is the backend-neutral contract for the
 generated GraphQL resolver metadata emitted by `GraphQLOperations` and resolved

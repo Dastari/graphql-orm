@@ -10,11 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.79.0 emits canonical typed filter contracts for the actual static
+Version 0.80.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and
 spatial predicates. Runtime metadata likewise describes its actual operator
 surface. Upgrade runtime and macros together with operation catalog 0.6.0;
-see the [wire-3 migration](../../MIGRATION.md#0780-to-0790-canonical-typed-filter-contracts).
+see the [wire-3 migration](../../MIGRATION.md#0780-to-0800-canonical-typed-filter-contracts).
 No resolver policy, GraphQL filter SDL or database format changes.
 
 Version 0.79.0 disables incidental async-graphql defaults while retaining
@@ -248,7 +248,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.79.0", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.80.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

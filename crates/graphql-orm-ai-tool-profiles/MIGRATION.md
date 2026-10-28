@@ -10,9 +10,12 @@ supersedes: []
 
 # Migration Guide
 
-## 0.17.0 to 0.18.0: typed filter authority and semantic input ownership
+## 0.17.0 to 0.19.0: typed filter authority and semantic input ownership
 
-The unpublished 0.17.1 corrections are included in 0.18.0. Adopt operation
+Hosts already on 0.18.0 apply the same typed-contract migration to 0.19.0.
+The earlier explicit GraphQL feature contract remains in effect.
+
+The unpublished 0.17.1 corrections are included in 0.19.0. Adopt operation
 catalog 0.6.0 from the same workspace revision. Public field literals must add
 `filter_input`; every filterable scalar/enum needs a canonical typed contract,
 and unfilterable fields use `None`. Its sorted unique operator meanings must
