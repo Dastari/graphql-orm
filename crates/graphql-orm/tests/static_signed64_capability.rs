@@ -101,16 +101,36 @@ async fn exact_capability_execution_and_private_roles_stay_closed() {
     }
     let in_name = Int64Filter::graphql_semantic_filter_input().operators.into_iter()
         .find(|op| op.operator == GraphqlSemanticFilterOperator::In).unwrap().graphql_name;
-    let filter = json!({"or":[{"not":{"value":{(eq.clone()):i64::MAX.to_string()}}}, {"value":{(in_name.clone()):[i64::MIN.to_string()]}}]});
-    let compiled = capability.compile_compact(json!({"arguments":{"where":filter}, "maximumItems":10, "selections":["id"]})).unwrap();
-    allowed.store(false, Ordering::SeqCst); work.store(0, Ordering::SeqCst);
-    let response = schema.execute(Request::new(compiled.descriptor().document.clone())
-        .variables(Variables::from_json(compiled.variables().clone()))).await;
-    assert!(!response.errors.is_empty());
-    assert_eq!(work.load(Ordering::SeqCst), 0, "denied filter intent reached SQL");
-    allowed.store(true, Ordering::SeqCst);
-    let response = schema.execute(Request::new(compiled.descriptor().document.clone())
-        .variables(Variables::from_json(compiled.variables().clone()))).await;
-    assert!(response.errors.is_empty(), "{:?}", response.errors);
-    assert!(work.load(Ordering::SeqCst) > 0, "positive control observes VM work");
+    let flat_filter = json!({"value":{(in_name.clone()):[i64::MIN.to_string()]}});
+    let compiled = capability.compile_compact(json!({"arguments":{"where":flat_filter.clone()}, "maximumItems":10, "selections":["id"]})).unwrap();
+    let recursive_filter = json!({"or":[{"not":{"value":{(eq):i64::MAX.to_string()}}}, {"value":{(in_name):[i64::MIN.to_string()]}}]});
+    // Provider plans deliberately omit recursive connectives. Keep that boundary
+    // closed, then exercise the ordinary generated resolver's recursive input.
+    assert!(capability.compile_compact(json!({"arguments":{"where":recursive_filter.clone()}, "maximumItems":10, "selections":["id"]})).is_err());
+    let mut recursive_variables = compiled.variables().clone();
+    let where_variable = recursive_variables.as_object_mut().unwrap().values_mut()
+        .find(|value| **value == flat_filter).expect("compiled where variable");
+    *where_variable = recursive_filter;
+    for (recursive, variables) in [
+        (false, compiled.variables().clone()),
+        (true, recursive_variables),
+    ] {
+        allowed.store(false, Ordering::SeqCst);
+        work.store(0, Ordering::SeqCst);
+        let response = schema.execute(Request::new(compiled.descriptor().document.clone())
+            .variables(Variables::from_json(variables.clone()))).await;
+        assert!(!response.errors.is_empty());
+        assert_eq!(work.load(Ordering::SeqCst), 0, "denied filter intent reached SQL (recursive={recursive})");
+        allowed.store(true, Ordering::SeqCst);
+        work.store(0, Ordering::SeqCst);
+        let response = schema.execute(Request::new(compiled.descriptor().document.clone())
+            .variables(Variables::from_json(variables))).await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert!(work.load(Ordering::SeqCst) > 0, "positive control observes VM work (recursive={recursive})");
+        let data = response.data.into_json().unwrap().to_string();
+        for (value, id) in &ids {
+            let expected = if recursive { *value != i64::MAX } else { *value == i64::MIN };
+            assert_eq!(data.contains(&id.to_string()), expected);
+        }
+    }
 }
