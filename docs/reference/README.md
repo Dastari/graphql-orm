@@ -10,6 +10,7 @@ supersedes: []
 
 # Reference
 
+- [GraphQL feature selection](graphql-features.md)
 - [Current workspace packages](workspace-packages.md)
 - [Dependency security disposition](dependency-security-disposition.md)
 - [`graphql-orm` mechanics](graphql-orm/README.md)

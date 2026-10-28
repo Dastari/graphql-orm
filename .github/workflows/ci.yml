@@ -57,6 +57,10 @@ jobs:
       - name: Check standalone relationship fixture formatting
         run: cargo fmt --manifest-path crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml --all -- --check
       - run: scripts/check-workspace-dependencies.sh
+      - name: Check standalone minimal GraphQL features and host opt-ins
+        run: |
+          python3 scripts/check-graphql-features.py
+          scripts/check-graphql-consumer.sh
       - run: cargo test -p graphql-orm-storage
       - run: cargo test -p graphql-orm-backup --features orm-sqlite
       - run: cargo test -p graphql-orm-operation-catalog -p graphql-orm-ai-tool-profiles

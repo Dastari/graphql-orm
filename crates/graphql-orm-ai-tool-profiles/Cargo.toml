@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 authors = ["Toby Martin <toby@dastari.net>"]
 description = "Backend-neutral GraphQL AI tool profile compiler and manifest contracts"
@@ -17,7 +17,7 @@ publish = false
 method = "git-full-revision"
 
 [dependencies]
-async-graphql = { version = "7", features = ["uuid"] }
+async-graphql = { workspace = true }
 async-graphql-parser = { workspace = true }
 graphql-orm-operation-catalog = { workspace = true }
 hex = "0.4"

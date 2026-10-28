@@ -10,6 +10,24 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.6.7 to 0.7.0: canonical Auth 0.24 types
+
+The `auth-agql` public constructors take types from reviewed merged Auth
+0.24.0. Replace direct `v0.23.0`/other Auth selectors with:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0" }
+```
+
+Use exactly that source for the host, ORM, AI and router. Old-source
+`Arc<AccessTokenValidator>` and `Arc<dyn ScopeMatch>` values cannot cross this
+public type boundary. Refresh locks and rebuild hosts; the independent
+[consumer fixture](../graphql-orm/tests/fixtures/graphql-features/Cargo.toml)
+compiles both constructors using the host's canonical Auth types. This is an
+intentional pre-1.0 dependency/type-universe break, not a published Auth release
+claim. Router logic, TLS/provider behavior and the Datadog constraint are
+unchanged. No data migration is required.
+
 ## 0.6.6 to 0.6.7: preparation ownership and fresh consumer dependencies
 
 No breaking changes or application, protocol, configuration or data migration

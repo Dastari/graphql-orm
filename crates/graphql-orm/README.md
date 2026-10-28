@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.79.0 disables incidental async-graphql defaults while retaining
+loaders, UUID, Decimal and explicit runtime GraphQL. This changes optional
+reexport symbols and `UploadValue.content`; see the
+[feature contract](../../docs/reference/graphql-features.md) and
+[migration guide](../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
+
 Version 0.78.0 lets runtime GraphQL mutation payloads select to-many and many-to-many
 relation pages. See the
 [migration guide](../../MIGRATION.md#0770-to-0780-to-many-relations-in-mutation-payloads).
@@ -154,10 +160,11 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects published Auth release tag `v0.23.0`
-(commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`). Direct Auth consumers
-must select the same tag and refresh their locks to one source;
-see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
+The current workspace selects reviewed merged Auth 0.24.0 at full revision
+`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. This is provisional Git source,
+not a claim of a published Auth release. Direct Auth consumers must select the
+same revision and refresh their locks to one source; see the
+[workspace migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
 
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.
@@ -234,7 +241,7 @@ backend:
 
 ```toml
 [dependencies]
-graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.50.2", default-features = false, features = ["sqlite"] }
+graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.79.0", default-features = false, features = ["sqlite"] }
 ```
 
 This unpublished package has no docs.rs release. Use this Git README and the

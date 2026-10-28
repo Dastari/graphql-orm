@@ -10,10 +10,17 @@ supersedes: []
 
 # graphql-orm-ai
 
-The current workspace selects published Auth release tag `v0.23.0`
-(commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`). Direct Auth consumers
-must select the same tag and refresh their locks to one source;
-see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
+The current workspace selects reviewed merged Auth 0.24.0 at full revision
+`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. This is provisional Git source,
+not a claim of a published Auth release. Direct Auth consumers must select the
+same revision and refresh their locks to one source; see the
+[workspace migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
+
+Version `0.117.0` disables incidental async-graphql defaults and adopts the
+canonical reviewed Auth 0.24 source above. UUID and base GraphQL APIs remain;
+provider, attachment, TLS and schema behavior are unchanged. See the
+[feature contract](../../docs/reference/graphql-features.md) and
+[migration guide](MIGRATION.md).
 
 Version `0.116.0` adds `AnthropicProvider::with_endpoint` for an exact
 policy-checked Messages endpoint whose egress manifests must name it. See
@@ -240,7 +247,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.109.1", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.117.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

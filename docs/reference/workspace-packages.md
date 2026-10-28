@@ -18,19 +18,19 @@ changes.
 
 | Package | Version | Path | Default features | Direct internal dependencies |
 | --- | --- | --- | --- | --- |
-| `graphql-orm` | `0.78.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
-| `graphql-orm-ai` | `0.116.0` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm` (dev-only), `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
-| `graphql-orm-ai-tool-profiles` | `0.17.0` | `crates/graphql-orm-ai-tool-profiles` | none | `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
+| `graphql-orm` | `0.79.0` | `crates/graphql-orm` | `sqlite` | `graphql-orm-macros`, `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
+| `graphql-orm-ai` | `0.117.0` | `crates/graphql-orm-ai` | `sqlite` | `graphql-orm`, `graphql-orm` (dev-only), `graphql-orm-ai-tool-profiles`, `graphql-orm-storage` |
+| `graphql-orm-ai-tool-profiles` | `0.18.0` | `crates/graphql-orm-ai-tool-profiles` | none | `graphql-orm-operation-catalog`, `graphql-orm-router-protocol` (dev-only) |
 | `graphql-orm-backup` | `0.11.1` | `crates/graphql-orm-backup` | `local` | `graphql-orm` (optional), `graphql-orm-storage` |
-| `graphql-orm-macros` | `0.78.0` | `crates/graphql-orm-macros` | `sqlite` | none |
+| `graphql-orm-macros` | `0.79.0` | `crates/graphql-orm-macros` | `sqlite` | none |
 | `graphql-orm-operation-catalog` | `0.5.0` | `crates/graphql-orm-operation-catalog` | none | `graphql-orm-router-protocol` (optional) |
-| `graphql-orm-router` | `0.6.7` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
+| `graphql-orm-router` | `0.7.0` | `crates/graphql-orm-router` | none | `graphql-orm-router-protocol` |
 | `graphql-orm-router-protocol` | `0.2.1` | `crates/graphql-orm-router-protocol` | none | none |
 | `graphql-orm-storage` | `0.7.5` | `crates/graphql-orm-storage` | `local` | none |
 
 External Git dependency:
 
-- `agql-auth` requirement `^0.23.0`, source `git+https://github.com/Dastari/agql-auth.git?tag=v0.23.0`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
+- `agql-auth` requirement `^0.24.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
 
 <!-- END GENERATED WORKSPACE PACKAGES -->
 

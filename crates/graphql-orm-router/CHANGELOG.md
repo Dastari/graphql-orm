@@ -10,6 +10,17 @@ supersedes: []
 
 # Changelog
 
+## 0.7.0 (unreleased)
+
+- **Breaking (public Auth dependency types):** optional `auth-agql` now uses
+  reviewed merged Auth 0.24.0 full revision
+  `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. Host values passed to
+  `AgqlAuthenticationProvider::new` and `AgqlScopeMatcher::new` must come from
+  that exact source. This is provisional merged Git source, not a published
+  Auth release claim. See [MIGRATION.md](MIGRATION.md).
+- Router logic, TLS/provider behavior, Datadog constraint, authorization and
+  persisted data are unchanged. No data migration is required.
+
 ## 0.6.7 (unreleased)
 
 - Retain test-owned public listener guards across asynchronous preparation in

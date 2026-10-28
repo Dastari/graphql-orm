@@ -387,13 +387,14 @@ source obligations, and the actual delivery contents before providing the
 workflow's `router_distribution_approval` reference. Do not treat a missing
 notice as an automatically approved exception.
 
-External `agql-auth` dependencies may select a published `v<version>` release tag.
-The manifest keeps its full locked commit in `externalGitDependencies[].revision`
-and additionally records `tag`; all other external Git dependencies still require
-full revision pins. Generation fails if the lockfile has no unique matching source
+External `agql-auth` dependencies select a reviewed full revision, or may select
+an actually published `v<version>` release tag. The manifest keeps its full locked
+commit in `externalGitDependencies[].revision` and records `tag` only for a tag
+selector; all other external Git dependencies still require full revision pins. Generation fails if the lockfile has no unique matching source
 or disagrees with an explicit revision. Verify the auth release's attested manifest
 and peeled tag before adopting it. Consumers seeking one Cargo source must use the
-same tag selector: a `rev` and a tag remain different sources even at the same SHA.
+same canonical selector: a `rev`, tag and path remain different sources even at
+the same SHA. A reviewed merged revision is not proof of release publication.
 
 Pure Rust libraries do not receive optimized binary artifacts. Downstream
 Cargo builds compile them from the pinned Git source.

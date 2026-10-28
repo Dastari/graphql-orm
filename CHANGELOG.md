@@ -16,6 +16,29 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.79.0**.
+
+- **Breaking (Cargo defaults and public reexport):** async-graphql defaults are
+  disabled. ORM retains `dataloader`, `uuid` and `decimal`; `runtime-graphql`
+  still explicitly enables `dynamic-schema`. Incidental email validator,
+  GraphiQL/playground and tempfile APIs are no longer supplied by
+  `graphql_orm::async_graphql`. `UploadValue.content` is byte-backed
+  (`bytes::Bytes`) without `tempfile`, rather than `std::fs::File`. Hosts using
+  those APIs must explicitly enable the matching async-graphql features; see
+  [migration examples](MIGRATION.md#0780-to-0790-explicit-graphql-features).
+- AI 0.117.0 keeps UUID and base GraphQL APIs; profiles 0.18.0 keeps base
+  parser/errors without adding UUID. Macros remain aligned at 0.79.0 with no
+  generated-code change. Static/runtime SDL, scalar behavior, query/relation
+  batching, federation, authorization and persistence formats are unchanged.
+- **Breaking (Auth source identity):** ORM, AI and optional router 0.7.0 Auth
+  integration now use reviewed merged Auth 0.24.0 full revision
+  `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`, not a published release tag.
+  Hosts must use the identical selector to pass Auth types across public APIs.
+- Add independent locked minimal/additive host feature and public-constructor
+  probes. No data migration is required; no legacy umbrella is enabled.
+
+## 0.78.0 (unreleased)
+
 Companion runtime/macros version: **0.78.0**.
 
 - Runtime GraphQL mutation payloads may select the record's to-many and many-to-many (join) relations as `…Connection` pages with `first`/`last`, `after`/`before`, `where`, `orderBy`, `pageInfo` and `totalCount`, as queries do. Before, such a selection failed with `unsupported_capability`; to-one relations were already supported. Each page is planned, bounded and authorized like a query relation layer before the write (`RuntimeReadAuthority::authorize` with the relation), and read after commit through the batched relation executor, so a create or update with attached link changes, or a link mutation, shows the committed links. Rows hidden by the layer's grant are omitted from the page and its count; a layer denied outright refuses the mutation before the write; a failure while reading the page after commit is the existing committed, non-retryable `mutation_payload_failed`. The payload's record layer also loads the relation's source key fields (the join's source fields), which the host's read and output checks see.
