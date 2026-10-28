@@ -1,5 +1,5 @@
 [workspace]
-members = ["target-models", "source-models"]
+members = ["ancestor-models", "target-models", "source-models"]
 resolver = "3"
 
 [workspace.dependencies]

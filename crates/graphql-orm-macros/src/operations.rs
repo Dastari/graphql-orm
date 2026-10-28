@@ -2233,15 +2233,18 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     };
+    // These are generated host-to-host hooks, like SubscriptionEvent::new.
+    // Public entity expansions may cross Rust crates. Keep repository-only
+    // entity hooks private; visibility grants no subscriber release authority.
     let propagated_subscription_emitter = quote! {
         #[doc(hidden)]
-        pub(crate) fn __gom_propagation_key(entity: &Self) -> #key_type {
+        #subscription_key_visibility fn __gom_propagation_key(entity: &Self) -> #key_type {
             #propagation_entity_key
         }
 
         #[doc(hidden)]
         #[allow(clippy::too_many_arguments, unused_variables)]
-        pub(crate) fn __gom_queue_propagated_changed_event(
+        #subscription_key_visibility fn __gom_queue_propagated_changed_event(
             hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
             action: ::graphql_orm::graphql::orm::ChangeAction,
             id: #key_type,
@@ -5429,7 +5432,7 @@ fn generate_graphql_operations_unfiltered(
 
                 #[doc(hidden)]
                 #[allow(clippy::too_many_arguments)]
-                pub(crate) fn __gom_propagate_changed_event<'a>(
+                #subscription_key_visibility fn __gom_propagate_changed_event<'a>(
                     hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     action: ::graphql_orm::graphql::orm::ChangeAction,
                     entity: &'a Self,
@@ -7154,7 +7157,7 @@ fn generate_graphql_operations_unfiltered(
     let generated_propagation_driver = quote! {
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
-            pub(crate) fn __gom_propagate_changed_event<'a>(
+            #subscription_key_visibility fn __gom_propagate_changed_event<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
                 entity: &'a Self,

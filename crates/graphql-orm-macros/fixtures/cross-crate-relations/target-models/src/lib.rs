@@ -54,3 +54,23 @@ where
         B::try_get_string(row, "id")
     }
 }
+
+pub mod propagation {
+use graphql_orm::prelude::*;
+pub use cross_crate_ancestor_models::*;
+#[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, async_graphql::SimpleObject, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[graphql(complex)]
+#[cfg_attr(feature = "sqlite", graphql_entity(backend = "sqlite", table = "up_middles", plural = "UpMiddles", default_sort = "id ASC"))]
+#[cfg_attr(feature = "postgres", graphql_entity(backend = "postgres", table = "up_middles", plural = "UpMiddles", default_sort = "id ASC"))]
+#[cfg_attr(feature = "mssql", graphql_entity(backend = "mssql", table = "up_middles", plural = "UpMiddles", default_sort = "id ASC"))]
+pub struct UpMiddle {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    pub id: String,
+    pub tenant: String,
+    pub root_id: String,
+    #[graphql(skip)]
+    #[relation(target = "UpRoot", from = ["root_id", "tenant"], to = ["id", "tenant"], propagate_change = "up", emit_fk = false)]
+    pub root: Option<UpRoot>,
+}
+}

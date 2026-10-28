@@ -10,6 +10,25 @@ supersedes: []
 
 # Migration Guide
 
+## 0.80.0 to 0.81.0: generated cross-crate upward Changed hooks
+
+Public generated entities can now be the target of `propagate_change = "up"`
+across Rust crate boundaries. Upgrade ORM and macros together. Generated
+`__gom_propagation_key`, queue and propagation-driver hooks share the visibility
+of the existing complete subscription key hook. They are hidden implementation
+interfaces for trusted generated host code; callers must not construct events
+from client input. No GraphQL operation, write permission or subscriber authority
+is introduced. Repository-only entity hooks remain private, so they cannot be
+cross-crate subscription targets. Public read-only entities retain their existing
+read-only mutation and Changed restrictions.
+
+The bridge retains transaction-bound target lookup, complete keys, provenance,
+visited identities, hop/fanout limits and commit-before-emission. Generated
+GraphQL delivery still reauthorizes every source/hop/target under current entity,
+row, selected-field and assurance policy. Raw observer events do not enter that
+trusted delivery channel. Existing overflow behavior is unchanged; this change
+does not implement coalescing, durable replay or continuity signals.
+
 ## 0.78.0 to 0.80.0: canonical typed filter contracts
 
 For hosts already on 0.79.0, the same typed-contract migration applies from
