@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.81.0 allows generated upward Changed hooks to cross Rust crate
+boundaries for public entities. Repository-only hooks remain private; current
+subscriber authority and transaction/provenance semantics are unchanged. See the
+[cross-crate migration](../../MIGRATION.md#0800-to-0810-generated-cross-crate-upward-changed-hooks).
+
 Version 0.80.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and
 spatial predicates. Runtime metadata likewise describes its actual operator
