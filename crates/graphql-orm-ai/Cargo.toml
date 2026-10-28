@@ -55,7 +55,7 @@ graphql-case-pascal = [
 
 [dependencies]
 agql-auth = { workspace = true }
-async-graphql = { version = "7", features = ["uuid"] }
+async-graphql = { workspace = true, features = ["uuid"] }
 async-graphql-parser = { workspace = true }
 async-stream = "0.3"
 async-trait = "0.1"

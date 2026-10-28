@@ -17,7 +17,7 @@ publish = false
 method = "git-full-revision"
 
 [dependencies]
-async-graphql = { version = "7", features = ["uuid"] }
+async-graphql = { workspace = true }
 async-graphql-parser = { workspace = true }
 graphql-orm-operation-catalog = { workspace = true }
 hex = "0.4"

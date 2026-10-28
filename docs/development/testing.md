@@ -275,8 +275,9 @@ cargo test -p graphql-orm-router --locked --features auth-agql
 cargo tree -p graphql-orm-router --locked --features auth-agql
 ```
 
-The graph must resolve one `agql-auth` tag selector with its reviewed locked
-commit (not separate tag/revision sources), and one
+The graph must resolve one canonical `agql-auth` selector and its reviewed
+locked commit (a full revision, or an actually published tag; never mixed
+tag/revision/path sources), and one
 `graphql-orm`/macro universe. The router lane exercises only the one-way
 resource-server validator and matcher adapters; it must not instantiate
 issuer-side or storage services.

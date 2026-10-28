@@ -13,7 +13,7 @@ postgres = ["graphql-orm/postgres"]
 mssql = ["graphql-orm/mssql"]
 
 [dependencies]
-async-graphql = { version = "7", features = ["dataloader", "uuid"] }
+async-graphql = { version = "7", default-features = false, features = ["dataloader", "uuid", "decimal"] }
 graphql-orm = { path = "../../../graphql-orm", default-features = false, features = ["resolver-case-pascal", "argument-case-pascal", "field-case-pascal"] }
 graphql-orm-ai-tool-profiles = { path = "../../../graphql-orm-ai-tool-profiles" }
 serde = { version = "1", features = ["derive"] }

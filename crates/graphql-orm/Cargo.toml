@@ -67,7 +67,7 @@ chacha20poly1305 = "0.10"
 convert_case = { workspace = true }
 quick-xml = { version = "0.41", optional = true }
 agql-auth = { workspace = true, optional = true }
-async-graphql = { version = "7", features = ["dataloader", "uuid", "decimal"] }
+async-graphql = { workspace = true, features = ["dataloader", "uuid", "decimal"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }

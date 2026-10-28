@@ -46,6 +46,17 @@ supersedes: []
 - Affected capability input schemas and fingerprints change; regenerate
   definitions and retained bindings. No database migration.
 
+- **Breaking (Cargo feature/default contribution):** disable async-graphql
+  defaults. Profiles uses base parser/errors and contributes no UUID feature.
+  This feature-only change preserves profile APIs and fingerprints; the typed
+  contract and input-ownership changes above still require regenerated bindings.
+- Hosts that relied on incidental email/UI symbols or file-backed
+  `UploadValue.content` through ORM's public async_graphql reexport must
+  explicitly select the matching upstream flags; see the
+  [workspace migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features)
+  for host opt-in examples and byte-backed upload migration. No data migration
+  is required.
+
 ## 0.17.0 (unreleased)
 
 - Adopt operation catalog 0.5.0 (semantic label fields). Public compile APIs take

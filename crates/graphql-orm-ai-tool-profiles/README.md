@@ -61,6 +61,10 @@ Runtime ordering preserves its validated `field`, `direction` and `nulls`
 structure and restricts the field enum to exact public, non-secret,
 sortable scalar identities.
 
+Version 0.18.0 uses async-graphql base parser/errors without adding UUID or
+upstream defaults. See the [feature contract](../../docs/reference/graphql-features.md)
+and [migration guide](MIGRATION.md) for explicit host feature opt-ins.
+
 Version 0.17.0 adopts operation catalog 0.5.0 (semantic label fields). It is a
 breaking minor only because public APIs take catalogue types; capabilities are
 unchanged.

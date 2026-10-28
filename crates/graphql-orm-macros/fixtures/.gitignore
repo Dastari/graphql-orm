@@ -1,3 +1,7 @@
 */target/
 */Cargo.lock
 !relationship-capability/Cargo.lock
+
+# Feature-minimal standalone consumers retain reviewed locked graphs.
+!full-stack/Cargo.lock
+!postgres-smoke/Cargo.lock

@@ -10,6 +10,20 @@ supersedes: []
 
 # Changelog
 
+## 0.117.0 (unreleased)
+
+- **Breaking (Cargo feature/default contribution):** disable async-graphql
+  defaults. AI retains UUID and base objects, inputs, errors and Json; it does not need email, UI, tempfile or dynamic schema for attachments. Provider TLS flags, schema modules and persistence are unchanged.
+- Hosts that relied on incidental email/UI symbols or file-backed
+  `UploadValue.content` through ORM's public async_graphql reexport must
+  explicitly select the matching upstream flags; see the
+  [workspace migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features)
+  for host opt-in examples and byte-backed upload migration. No data migration
+  is required.
+- **Breaking (Auth types):** adopt reviewed merged Auth 0.24.0 full revision
+  `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`; direct hosts must use the same
+  selector. This is not a published Auth release claim.
+
 All notable user-visible changes are recorded here. The crate follows
 Semantic Versioning and keeps migration instructions in [MIGRATION.md](MIGRATION.md).
 

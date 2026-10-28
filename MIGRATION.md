@@ -14,7 +14,8 @@ supersedes: []
 
 Upgrade ORM and macros together, with operation catalog 0.6.0, profiles 0.18.0,
 AI 0.117.0 and optional backup 0.12.0 from one reviewed workspace revision.
-Storage and router package identities are unchanged.
+Storage identity is unchanged. Router 0.7.0 carries the explicit GraphQL feature
+and Auth source changes described below.
 
 `GraphqlSemanticFieldMetadata` struct literals must supply `filter_input`:
 `None` for unfilterable fields, otherwise an explicit
@@ -50,6 +51,56 @@ operator metadata does not resolve it or authorize provider execution.
 workspace release tag for every chosen workspace package and record its full
 commit from the release manifest. Neither the runtime nor macros crate is
 published to crates.io.
+
+## 0.78.0 to 0.79.0: explicit GraphQL features
+
+Upgrade ORM/macros together to 0.79.0, AI to 0.117.0, profiles to 0.18.0 and
+router to 0.7.0 when selected. This is an intentional pre-1.0 feature/default
+and public reexport compatibility break. ORM contributes only async-graphql
+`dataloader`, `uuid`, `decimal`; runtime GraphQL still needs `runtime-graphql`.
+AI contributes only `uuid`; profiles contributes no named GraphQL features.
+
+The `graphql_orm::async_graphql` reexport remains public but no longer supplies
+incidental email validation or GraphiQL/playground UI symbols. Without
+`tempfile`, `UploadValue.content` is `bytes::Bytes`, not `std::fs::File`.
+Code that constructs, reads or patterns on that public field must use bytes or
+opt into `tempfile`. AI's attachment transports do not require this flag.
+
+Hosts intentionally using optional upstream APIs add a direct dependency on
+the same async-graphql major. Cargo feature unification is additive:
+
+```toml
+[dependencies]
+async-graphql = { version = "7", default-features = false, features = ["graphiql", "playground", "tempfile"] }
+```
+
+Select only the capabilities used. For email validators, explicitly add
+`email-validator` to that feature list. This intentionally introduces
+`fast_chemail`/`ascii_utils` (MPL-2.0); review those licenses for your host.
+There is no default-on compatibility umbrella and no guarantee that every
+former incidental reexport usage remains source-compatible. Base `Json`,
+errors/parser, UUID/Decimal scalars, loaders and promised static/dynamic
+schema behavior remain available under their documented flags. See the
+[feature contract and independent host checks](docs/reference/graphql-features.md).
+
+All direct Auth consumers must also replace the old `v0.23.0` selector with:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0" }
+```
+
+Use this exact selector across ORM, AI, router and your host. Mixing a tag,
+revision or path source creates incompatible Auth type universes even when
+names match. Refresh all consumer lockfiles and inspect `cargo tree -d` and
+`cargo metadata --locked` for exactly one Auth source. This revision is
+reviewed merged source, not a published 0.24 release claim. Old clients passing
+Auth 0.23 types to ORM/AI/router need to rebuild against this identity.
+
+No data migration is required. The explicit GraphQL feature change itself
+preserves generated operation behavior, SDL/scalars, module/schema versions,
+stored data and authorization/provider behavior. Typed semantic public APIs
+and fingerprints change as described in the wire-3 migration above. Native
+SemVer version-policy permission is not compatibility proof.
 
 ## 0.77.0 to 0.78.0: to-many relations in mutation payloads
 

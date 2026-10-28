@@ -23,6 +23,17 @@ authorization and backup behavior are unchanged. The spatial/JSON geometry
 codec gate remains outstanding. The mandatory baseline SemVer audit is a later
 native qualification gate, not source implementation evidence.
 
+## 0.116.0 to 0.117.0: explicit GraphQL features
+
+AI retains UUID and base objects, inputs, errors and Json; it does not need email, UI, tempfile or dynamic schema for attachments. Provider TLS flags, schema modules and persistence are unchanged.
+
+This intentional pre-1.0 feature/default break removes incidental upstream
+email/UI/tempfile defaults. Follow the
+[workspace host opt-in examples](../../MIGRATION.md#0780-to-0790-explicit-graphql-features),
+including `UploadValue.content` byte-backed versus file-backed behavior and
+the canonical Auth 0.24 full revision when integrating AI. Features remain
+additive; do not add a default-on legacy umbrella. No data migration is required.
+
 `graphql-orm-ai` is Git-distributed and is not published to crates.io. This guide
 is mandatory so Git consumers and disposable test deployments can track schema
 and API changes without guessing.

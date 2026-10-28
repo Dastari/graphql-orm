@@ -10,10 +10,16 @@ supersedes: []
 
 # graphql-orm-router
 
-The current workspace selects published Auth release tag `v0.23.0`
-(commit `158c79e27117adc5a95d01d58c39c39fd44e6a1a`). Direct Auth consumers
-must select the same tag and refresh their locks to one source;
-see the [workspace migration](../../MIGRATION.md#agql-auth-0230-selection).
+The current workspace selects reviewed merged Auth 0.24.0 at full revision
+`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. This is provisional Git source,
+not a claim of a published Auth release. Direct Auth consumers must select the
+same revision and refresh their locks to one source; see the
+[workspace migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
+
+Version `0.7.0` adopts that Auth identity across its public constructor inputs.
+Hosts must rebuild with the identical Auth selector; see
+[MIGRATION.md](MIGRATION.md). Routing, TLS/provider behavior and the Datadog
+constraint are unchanged.
 
 Version `0.6.7` keeps preparation-test listener addresses owned across schema
 and protocol fetches. Invalid candidates still require their exact typed admission
@@ -67,7 +73,7 @@ This unpublished package is Git-only:
 
 ```toml
 [dependencies]
-graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.7" }
+graphql-orm-router = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0" }
 ```
 
 Version 0.6 makes `AuthenticationProvider::current_time` fallible. The agql

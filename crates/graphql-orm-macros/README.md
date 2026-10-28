@@ -17,6 +17,11 @@ surface. Upgrade runtime and macros together with operation catalog 0.6.0;
 see the [wire-3 migration](../../MIGRATION.md#0780-to-0790-canonical-typed-filter-contracts).
 No resolver policy, GraphQL filter SDL or database format changes.
 
+Version 0.79.0 pairs with the feature-minimal runtime. Generated references
+still use `graphql_orm::async_graphql`; independent consumers must select the
+needed GraphQL capabilities explicitly. See the
+[feature contract](../../docs/reference/graphql-features.md).
+
 Version 0.78.0 is the companion of runtime mutation payload relation pages; the macros
 themselves are unchanged.
 

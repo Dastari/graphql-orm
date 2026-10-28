@@ -67,12 +67,18 @@ deliberately when upgrading.
 
 ```toml
 [dependencies]
-async-graphql = "7"
+async-graphql = { version = "7", default-features = false, features = ["dataloader", "uuid", "decimal"] }
 axum = "0.8.9"
 graphql-orm = { git = "https://github.com/Dastari/graphql-orm.git", rev = "fac98d99e64c841a34d2d0096cdf928c3f9a7c6f", version = "0.21.0", default-features = false, features = ["sqlite"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
 ```
+
+The historical ORM 0.21.0 pin above still contributes async-graphql defaults;
+this application declaration alone does not make that older graph minimal.
+For a feature-minimal host, adopt a reviewed ORM 0.79.0-or-later source and
+follow the [feature migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
+No unmerged or unpublished source is represented here as a released pin.
 
 The source uses no application-specific names or framework adapter beyond
 Axum. You can replace the HTTP layer while keeping the explicit connection,
