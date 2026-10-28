@@ -373,6 +373,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                 type_ref: #type_ref,
                 selectable: true,
                 filter_operators: Vec::new(),
+                filter_input: None,
                 sortable: false,
                 groupable: false,
                 aggregate_operators: Vec::new(),

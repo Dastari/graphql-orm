@@ -10,6 +10,19 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version 0.6.0 adds `GraphqlSemanticFieldMetadata::filter_input` and semantic
+catalogue wire version 3. `GraphqlSemanticFilterInputMetadata` declares exact
+helper/value TypeRefs, `GraphqlSemanticFilterInputOperator` binds a canonical
+meaning to its wire name and typed operand, and
+`GraphqlSemanticFilterOperandObject` closes structured operator operands.
+Filterable fields require a validated contract whose meanings exactly equal
+`filter_operators`; unfilterable fields use `None`. Constructors normalize
+producer collections, while deserialized noncanonical or stale payloads fail
+validation. `NotIn`, `Similar` and distinct spatial operators complete producer
+coverage. SDL verifies mechanical conformance, never operator authority.
+Regenerate wire-3 payloads and fingerprint-bound consumers; wire 2 is rejected.
+See the [migration guide](../../MIGRATION.md#0780-to-0800-canonical-typed-filter-contracts).
+
 `graphql-orm-operation-catalog` is the backend-neutral contract for the
 generated GraphQL resolver metadata emitted by `GraphQLOperations` and resolved
 by `schema_roots!`. It is useful to deployment tooling, drift checks, and
@@ -38,7 +51,7 @@ relationship cycles, remain in the canonical GraphQL catalogue with
 
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.4.2" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0" }
 serde_json = "1"
 ```
 

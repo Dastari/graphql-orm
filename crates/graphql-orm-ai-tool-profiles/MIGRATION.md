@@ -10,9 +10,74 @@ supersedes: []
 
 # Migration Guide
 
+## 0.17.0 to 0.19.0: typed filter authority and semantic input ownership
+
+Hosts already on 0.18.0 apply the same typed-contract migration to 0.19.0.
+The earlier explicit GraphQL feature contract remains in effect.
+
+The unpublished 0.17.1 corrections are included in 0.19.0. Adopt operation
+catalog 0.6.0 from the same workspace revision. Public field literals must add
+`filter_input`; every filterable scalar/enum needs a canonical typed contract,
+and unfilterable fields use `None`. Its sorted unique operator meanings must
+exactly equal `filter_operators`. Operator names, full operand wrappers and
+finite closed auxiliary objects must match the actual producer and SDL, with
+no defaults or extra properties. Missing authority cannot be inferred from SDL.
+
+Recompile capability catalogues from the complete finished SDL and canonical
+semantics, then replace affected capability/provider definitions and retained
+fingerprint bindings. A `NeverExport` relation such as `Customer` no longer
+removes the distinct exportable/filterable scalar `CustomerId` from its owning
+`WhereInput` or sortable `OrderByInput`.
+
+Entity-owned input properties require an exact exportable non-secret scalar
+semantic field and the corresponding filter/order capability. Ordinary ordering
+requires `sortable`; generated keyset inputs also retain declared public primary
+keys whose ordinary sortable flag is false. Runtime ordering validates its
+structural members/operator enums and restricts its field enum to exact public
+sortable scalar identities. Unknown or relation-derived properties without
+that identity remain unavailable; do not restore them through a host allow-list.
+Generated input type names resolve to
+exact entity/type shapes, and ambiguous ownership fails closed instead of
+choosing a longer entity prefix. Shared page and scalar-filter helper ownership
+comes from typed references, so entities named `Page` or `StringFilter` do not
+capture those helpers. Entity-prefixed custom input ownership requires a
+matching canonical operation argument and entity result/generated identity;
+ownership also follows nested input references from operation and relationship
+arguments through list/non-null wrappers. Unknown owners or conflicting
+shared/custom roles, including transitive conflicts, fail closed. Type traversal
+is finite and cycle-safe; ordinary input recursion and depth limits still apply.
+Canonical generated Where scalar fields use exact typed operator helpers. These
+edges do not propagate entity-record ownership into the helper, including when
+the Where input is nested in a custom wrapper. The helper's independent direct
+or custom nested uses still require ownership assessment; private, unknown and
+nonfilterable Where fields stay absent.
+Unrelated custom inputs retain their finished-SDL contract.
+
+Private fields/relations, closed schemas, result disclosure and bounds, and
+ordinary resolver/current-principal authorization remain enforced. Public Rust
+catalogue types and semantic wire version change (2 to 3); old payloads are
+rejected. GraphQL SDL, tool-manifest wire version and stored data are unchanged;
+no database or schema migration is required. Do not retain an old capability
+fingerprint on a regenerated input schema. Never repair forged/stale payloads.
+
+Canonical static JSON operator operands now retain actual JSON wire values;
+RuntimeJson remains JSON text and unknown custom scalars remain strings. No
+stringification/coercion occurs. Private fixed ceilings are 65,536 serialized
+UTF-8 bytes and 4,096 nodes per scalar (containers/null/scalars count once, keys
+do not). JSON depth consumes the remaining root-argument input depth; arrays
+and objects both use `maximum_list_items` for width, and keys/strings use UTF-8
+`maximum_string_bytes`. Runtime checks before plan/value cloning enforce these
+bounds even with a retained/staged provider schema. The finite acyclic local
+JSON Schema projects depth/width/character limits; serialized-byte/node/UTF-8
+checks remain authoritative at runtime. No new public configuration or data
+migration. Real-derived geometry planning/bounds source tests remain UNRUN;
+geometry semantics and resolver/SQL authorization are separate gates.
+
 ## 0.17.0 to 0.18.0: explicit GraphQL features
 
-Profiles uses base parser/errors and contributes no UUID feature. Public profile APIs, capability manifests and fingerprints are unchanged.
+Profiles uses base parser/errors and contributes no UUID feature. This feature
+change alone does not change profile APIs, capability manifests or fingerprints;
+the typed-contract and input-ownership migration above remains required.
 
 This intentional pre-1.0 feature/default break removes incidental upstream
 email/UI/tempfile defaults. Follow the

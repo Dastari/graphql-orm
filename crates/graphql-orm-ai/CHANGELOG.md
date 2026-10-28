@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.118.0
+
+- Adopt the breaking public type closure as AI 0.118.0 with profiles 0.19.0,
+  catalog 0.6.0 and ORM 0.80.0. Require typed filter contracts/wire 3 and rebuild
+  capability bindings. No persistent schema or provider behavior changes;
+  spatial/JSON geometry planning remains an outstanding codec gate.
+
 ## 0.117.0 (unreleased)
 
 - **Breaking (Cargo feature/default contribution):** disable async-graphql

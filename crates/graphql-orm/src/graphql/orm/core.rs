@@ -3055,7 +3055,7 @@ pub enum BackupValueKind {
     Json,
     Bytes,
     /// A runtime `DateTime` column (`TEXT` on SQLite, `TIMESTAMPTZ` on PostgreSQL). Values are
-    /// [`BackupValue::String`](super::BackupValue::String) holding the canonical
+    /// `BackupValue::String` in supported SQLite/PostgreSQL backup codecs, holding the canonical
     /// [`RuntimeDateTime`](super::RuntimeDateTime) text, `YYYY-MM-DDTHH:MM:SS.ffffffZ`, on every
     /// backend. Static derived date fields keep [`BackupValueKind::String`].
     DateTime,

@@ -10,10 +10,46 @@ supersedes: []
 
 # Changelog
 
-## 0.18.0 (unreleased)
+## 0.19.0 (unreleased)
+
+- Keep the provider size ceiling on the compact projection; a wide closed execution schema may be larger.
+- Consolidate the unpublished 0.17.1 input-ownership fixes below into this
+  breaking minor adopting operation catalog 0.6.0 and semantic wire 3.
+- Require canonical operator/operand/auxiliary contracts at all filter-helper
+  boundaries. Reject private record helpers, renamed/wrong object operands,
+  unknown operators, defaults, extra properties and ambiguous shared roles.
+- Add real producer parity, typed operand and actual derived spatial planning
+  regression sources. Canonical JSON scalars retain JSON wire values with private
+  64 KiB/4,096-node ceilings, bounded depth/width and UTF-8 keys/strings; pre-clone
+  runtime admission and finite local schemas share the canonical operator proof.
+  RuntimeJson text and unknown scalar string codecs are unchanged. All native
+  verification, including the geometry planning/bounds gate, remains outstanding.
+
+- Preserve independently exportable scalar filters and ordering beside a
+  private relation with a shared name prefix (#236).
+- Bind generated input types to exact entity/type shapes; reject ambiguous
+  owners and omit unknown, private or unclassified relation-derived fields.
+- Cover bounded compact and nested plans, canonical input naming, entity-name
+  collisions, private controls and fingerprint/operation drift bindings.
+- Preserve declared public keyset primary-key ordering independently of the
+  ordinary sortable flag; resolve shared page/scalar-filter helpers by typed
+  usage rather than lexical entity prefixes.
+- Validate runtime order object/operator shapes and restrict their field enums
+  to exact public sortable scalars; cover actual bounded compact/nested ordered
+  plans and private, non-sortable, unknown and conflicting-owner controls.
+- Follow transitive nested input references from canonical operation and
+  relationship arguments before admitting shared helpers; fail closed on
+  nested custom/helper conflicts while retaining wrapper, cycle and depth rules.
+- Treat exact canonical scalar-filter references as operator-helper boundaries,
+  preserving public filters for an entity named StringFilter without weakening
+  private/nonfilterable fields or separate custom-input ownership checks.
+- Affected capability input schemas and fingerprints change; regenerate
+  definitions and retained bindings. No database migration.
 
 - **Breaking (Cargo feature/default contribution):** disable async-graphql
-  defaults. Profiles uses base parser/errors and contributes no UUID feature. Public profile APIs, capability manifests and fingerprints are unchanged.
+  defaults. Profiles uses base parser/errors and contributes no UUID feature.
+  This feature-only change preserves profile APIs and fingerprints; the typed
+  contract and input-ownership changes above still require regenerated bindings.
 - Hosts that relied on incidental email/UI symbols or file-backed
   `UploadValue.content` through ORM's public async_graphql reexport must
   explicitly select the matching upstream flags; see the

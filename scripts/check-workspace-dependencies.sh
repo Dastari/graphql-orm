@@ -85,10 +85,14 @@ allowed_internal_edges = {
     # router protocol's canonical extension transport. This edge must never
     # become a normal or build dependency.
     ("graphql-orm-ai-tool-profiles", "graphql-orm-router-protocol"),
+    # Real-producer filter contract tests compile the derived SDL and semantic
+    # metadata through profiles. This edge remains dev-only.
+    ("graphql-orm", "graphql-orm-ai-tool-profiles"),
 }
 test_only_internal_edges = {
     ("graphql-orm", "graphql-orm-router-protocol"),
     ("graphql-orm-ai-tool-profiles", "graphql-orm-router-protocol"),
+    ("graphql-orm", "graphql-orm-ai-tool-profiles"),
 }
 actual_internal_edges = set()
 for package_id, node in nodes_by_id.items():

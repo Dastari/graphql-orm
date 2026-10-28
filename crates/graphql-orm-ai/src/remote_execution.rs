@@ -1383,6 +1383,7 @@ mod tests {
             ),
             selectable: true,
             filter_operators: Vec::new(),
+            filter_input: None,
             sortable: false,
             groupable: false,
             aggregate_operators: Vec::new(),

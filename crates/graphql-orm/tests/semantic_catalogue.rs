@@ -492,6 +492,11 @@ fn entity_and_custom_root_semantics_are_canonical_and_safe() {
 
     let payload = catalog.extension_payload().expect("extension payload");
     let decoded = GraphqlSemanticCatalog::from_extension_payload(payload).expect("payload decodes");
+    assert_eq!(decoded.version, 3);
+    let mut old_wire = decoded.clone();
+    old_wire.version = 2;
+    assert!(old_wire.validate().is_err());
+
     assert_eq!(decoded.fingerprint, catalog.fingerprint);
     let encoded = serde_json::to_string(&decoded).expect("semantic catalogue serializes");
     assert!(!encoded.contains("semantic_records"));

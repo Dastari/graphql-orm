@@ -215,7 +215,8 @@ collection, one entity named by its GraphQL object (`RuntimeGraphqlModule::seman
 and its generated roots (`semantic_operations`):
 
 - scalar fields with their effective description, classification and export, the exact
-  runtime filter operators (`notIn` has no catalogue operator and is not advertised),
+  runtime filter operators, including `notIn`, with exact producer-owned typed
+  input contracts (semantic catalogue wire 3; finished SDL only checks conformance),
   `sortable`, and no grouping or aggregates (runtime GraphQL has none);
 - to-one relations as relationships; to-many relations are connection-typed and
   projector-served fields return host objects, so neither is advertised;

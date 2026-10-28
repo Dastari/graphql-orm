@@ -157,6 +157,37 @@ async fn runtime_collections_reach_the_capability_index() {
         AiGraphqlQueryCapabilityLimits::default(),
     )
     .unwrap();
+    let invoice_query = queries
+        .capabilities()
+        .find(|capability| capability.field_name() == "invoices")
+        .unwrap();
+    let arguments = serde_json::json!({"where": {"number": {"eq": "INV-1", "notIn": ["INV-hidden"]}},
+        "orderBy": [{"field": "number", "direction": "ASC", "nulls": "LAST"}]});
+    let compact = invoice_query
+        .compile_compact(serde_json::json!({
+            "arguments": arguments, "selections": ["id", "number"], "maximumItems": 1,
+            "relationshipArguments": {}, "relationshipMaximumItems": {}
+        }))
+        .expect("real runtime filtered and ordered compact plan");
+    let nested = invoice_query.compile(serde_json::json!({
+        "arguments": arguments, "fields": {"id": true, "number": true}, "relationships": {}, "maximumItems": 1
+    })).expect("real runtime filtered and ordered nested plan");
+    assert_eq!(
+        compact.variables(),
+        &serde_json::json!({"v0": 1,
+        "v1": [{"field": "number", "direction": "ASC", "nulls": "LAST"}],
+        "v2": {"number": {"eq": "INV-1", "notIn": ["INV-hidden"]}}})
+    );
+    assert_eq!(compact.variables(), nested.variables());
+    for plan in [&compact, &nested] {
+        assert_eq!(
+            plan.descriptor().document,
+            format!(
+                "query AiQuery_{}($v0: Int, $v1: [InvoiceOrderInput!], $v2: InvoiceWhereInput) {{ invoices(first: $v0, orderBy: $v1, where: $v2) {{ edges {{ node {{ id number }} }} }} }}",
+                &plan.plan_fingerprint()[..20],
+            )
+        );
+    }
     let index = AiCapabilityIndex::compile(
         target,
         queries.finished_schema_fingerprint(),

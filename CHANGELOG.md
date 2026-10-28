@@ -16,7 +16,20 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.79.0**.
+- Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
+  ORM/macros 0.80.0, profiles 0.19.0 and AI 0.118.0. Canonical operator meanings,
+  exact operand types and closed auxiliary objects must match finished SDL;
+  arbitrary record inputs, extra operators, wrong object operands and stale
+  metadata fail readiness. Include `NotIn`, `Similar` and distinct spatial
+  operators without deriving authority from SDL or helper names.
+- Preserve public scalar filters beside private relation prefixes, transitive
+  custom-input privacy, keyset primary keys and runtime order field restrictions.
+  Backup 0.12.0 adopts the optional ORM public type identity only. No data or
+  schema migration; regenerate semantic payloads and capability bindings. The
+  spatial/JSON planning codec gate remains outstanding; structural parity alone
+  is not geometry planning qualification.
+
+Companion runtime/macros version: **0.80.0**.
 
 - **Breaking (Cargo defaults and public reexport):** async-graphql defaults are
   disabled. ORM retains `dataloader`, `uuid` and `decimal`; `runtime-graphql`
@@ -27,9 +40,11 @@ Companion runtime/macros version: **0.79.0**.
   those APIs must explicitly enable the matching async-graphql features; see
   [migration examples](MIGRATION.md#0780-to-0790-explicit-graphql-features).
 - AI 0.117.0 keeps UUID and base GraphQL APIs; profiles 0.18.0 keeps base
-  parser/errors without adding UUID. Macros remain aligned at 0.79.0 with no
-  generated-code change. Static/runtime SDL, scalar behavior, query/relation
-  batching, federation, authorization and persistence formats are unchanged.
+  parser/errors without adding UUID. Macros remain aligned at 0.79.0; the
+  explicit feature change itself does not alter generated operation behavior.
+  Static/runtime SDL, scalar behavior,
+  query/relation batching, federation, authorization and persistence formats
+  are unchanged; typed semantic metadata changes are described above.
 - **Breaking (Auth source identity):** ORM, AI and optional router 0.7.0 Auth
   integration now use reviewed merged Auth 0.24.0 full revision
   `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`, not a published release tag.

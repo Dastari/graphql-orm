@@ -20,6 +20,47 @@ It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
 
+Version 0.19.0 requires operation catalog 0.6.0 and validated wire-3 producer
+filter contracts. One proof checks exact canonical operator names, operand
+TypeRefs and closed auxiliary structures at Where admission, helper discovery,
+ownership traversal and final argument validation. Missing contracts, arbitrary
+record helpers (including renamed helpers), defaults, unknown/extra properties,
+wrong object operands and conflicting roles fail readiness. SDL supplies only
+mechanical conformance. Regenerate all affected definitions and bindings.
+Canonical static JSON operator operands preserve actual JSON values; RuntimeJson
+and unknown custom scalars retain their existing string codecs. Each JSON scalar
+is limited to 65,536 serialized UTF-8 bytes and 4,096 nodes (each container, null
+or scalar counts once; keys do not). Depth includes its root-argument ancestry;
+every array and object is bounded by `maximum_list_items`, and each key/string
+by UTF-8 `maximum_string_bytes`. Finite acyclic local schema definitions project
+the shape/depth/width; authoritative pre-clone runtime checks also enforce total
+nodes, serialized bytes and UTF-8 bytes that JSON Schema character counts cannot.
+Geometry validity and resolver/SQL authorization remain separate. The real
+producer planning and bounds regression sources await native qualification.
+
+Version 0.19.0 resolves entity-owned input fields by their exact canonical
+semantic name. A private `Customer` relation does not hide an independently
+exportable, filterable `CustomerId` scalar. Unknown or private field and
+relation-derived inputs remain absent, and ambiguous entity input ownership
+fails readiness. Rebuild affected capability definitions and retained bindings;
+resolver authorization, disclosure and result limits remain mandatory.
+
+Ordinary ordering still requires sortable scalar metadata. A generated keyset
+input also admits its declared public primary-key fields when that ordinary
+sortable flag is false. Shared pagination and scalar-filter inputs are identified
+by their typed usage, not an entity-name prefix. Custom ownership follows nested
+input references from canonical operation and relationship arguments, including
+list/non-null wrappers; conflicting shared/custom roles fail closed. The finite
+type traversal is cycle-safe and retains ordinary input depth/recursion failures.
+Exact admitted scalar filter references in generated `WhereInput` objects lead
+to operator helpers rather than nested entity-record inputs. Those helpers do
+not inherit the result entity's ownership through that edge; separate direct or
+custom nested uses still undergo ownership checks. Private, unknown and
+nonfilterable Where fields remain excluded.
+Runtime ordering preserves its validated `field`, `direction` and `nulls`
+structure and restricts the field enum to exact public, non-secret,
+sortable scalar identities.
+
 Version 0.18.0 uses async-graphql base parser/errors without adding UUID or
 upstream defaults. See the [feature contract](../../docs/reference/graphql-features.md)
 and [migration guide](MIGRATION.md) for explicit host feature opt-ins.
@@ -40,7 +81,7 @@ authorization policies. No downstream catalogue filtering is needed.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.18.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.19.0" }
 serde_json = "1"
 ```
 

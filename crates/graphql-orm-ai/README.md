@@ -10,6 +10,13 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.118.0` adopts profiles 0.19.0, operation catalog 0.6.0 and ORM
+0.80.0 as one public type universe. Filter capabilities require canonical typed
+operator contracts and semantic wire 3. Rebuild definitions and bindings from
+producer metadata and finished SDL; see [MIGRATION.md](MIGRATION.md). No AI
+schema-module, persistence, provider or authorization behavior changes. The
+spatial/JSON scalar-codec gate remains outstanding.
+
 The current workspace selects reviewed merged Auth 0.24.0 at full revision
 `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. This is provisional Git source,
 not a claim of a published Auth release. Direct Auth consumers must select the
@@ -247,7 +254,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.117.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.118.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

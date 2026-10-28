@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-backup
 
+Version 0.12.0 aligns the optional ORM adapter's public types with ORM 0.80.0
+and catalog 0.6.0. Select one reviewed workspace revision; see
+[MIGRATION.md](MIGRATION.md). Backup/restore logic, manifest formats and storage
+identities are unchanged. No data migration is required.
+
 Backup and restore orchestration for `graphql-orm` applications. It writes
 versioned manifests, compressed table/change streams, and content-addressed
 objects; it validates chains, verifies snapshots, restores in a defined order,
@@ -31,7 +36,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.11.1" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a
