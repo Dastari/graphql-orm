@@ -18,7 +18,9 @@ for historical context.
 
 - ORM/macros 0.81.0 allow generated upward Changed propagation between public
   entities in different Rust crates, retaining trusted provenance and subscriber
-  authorization. Repository-only hooks remain private.
+  authorization. Enforce each source/hop's own Changed auth mode, scopes and
+  explicit assurance coordinate at current/final release. Repository-only hooks
+  remain private.
 
 - Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
   ORM/macros 0.80.0, profiles 0.19.0 and AI 0.118.0. Canonical operator meanings,

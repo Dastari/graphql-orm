@@ -23,9 +23,20 @@ cross-crate subscription targets. Public read-only entities retain their existin
 read-only mutation and Changed restrictions.
 
 The bridge retains transaction-bound target lookup, complete keys, provenance,
-visited identities, hop/fanout limits and commit-before-emission. Generated
-GraphQL delivery still reauthorizes every source/hop/target under current entity,
-row, selected-field and assurance policy. Raw observer events do not enter that
+visited identities, hop/fanout limits and commit-before-emission. Propagated
+GraphQL delivery additionally enforces each source/hop's own generated Changed
+authentication mode, operation scopes and assurance coordinate, independently
+of the root subscriber's requirements. Entity/row/selected-field/tuple authority
+continues to be checked. Operation authority is rechecked after awaited row
+checks and in the final proof after payload serialization. Existing subscriptions
+whose principals lack a source/hop requirement now suppress those invalidations.
+
+`SubscriptionEventSource::new` and `new_relation` now require a generated
+source-operation authorization callback. This trusted-host constructor change
+is deliberate: a row-policy callback cannot stand in for operation authority.
+`assurance::enforce_operation_assurance(ctx, kind, field_name)` supports explicit
+coordinates; `enforce_resolver_assurance` delegates to it for the current field.
+No subscriber policy is evaluated inside transaction target materialization. Raw observer events do not enter that
 trusted delivery channel. Existing overflow behavior is unchanged; this change
 does not implement coalescing, durable replay or continuity signals.
 

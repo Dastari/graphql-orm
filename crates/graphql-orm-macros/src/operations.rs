@@ -2159,6 +2159,15 @@ fn generate_graphql_operations_unfiltered(
         };
     let subscription_key_method = quote! {
         #[doc(hidden)]
+        fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
+            -> ::graphql_orm::async_graphql::Result<()> {
+            let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+            #subscription_scope_enforcement
+            ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription, #subscription_name,
+            )
+        }
+        #[doc(hidden)]
         #subscription_key_visibility fn __gom_subscription_key_values(entity: &Self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
             let mut bind_values = Vec::new();
             #(#subscription_key_binds)*
@@ -2312,7 +2321,7 @@ fn generate_graphql_operations_unfiltered(
                         next_path.push(#relation_name.to_string());
                         let mut next_provenance = provenance.to_vec();
                         next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
-                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*],
+                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*], Self::__gom_authorize_changed_operation,
                         ));
                         let dedupe_key = ::graphql_orm::serde_json::to_string(&(
                             <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -5394,6 +5403,8 @@ fn generate_graphql_operations_unfiltered(
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
                                 Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                             };
                             match authorize_current().await {
@@ -7125,6 +7136,8 @@ fn generate_graphql_operations_unfiltered(
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
                                 Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                             };
                             match authorize_current().await {

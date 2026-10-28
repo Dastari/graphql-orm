@@ -570,10 +570,19 @@ pub fn enforce_resolver_assurance(
     ctx: &async_graphql::Context<'_>,
     kind: GraphqlOperationKind,
 ) -> async_graphql::Result<()> {
+    enforce_operation_assurance(ctx, kind, ctx.field().name())
+}
+
+/// Enforce an explicit generated operation coordinate. Provenance callbacks
+/// must use their source Changed field, never the subscriber's root field.
+pub fn enforce_operation_assurance(
+    ctx: &async_graphql::Context<'_>,
+    kind: GraphqlOperationKind,
+    field_name: &str,
+) -> async_graphql::Result<()> {
     let Some(enforcement) = ctx.data_opt::<AssuranceEnforcement>() else {
         return Ok(());
     };
-    let field_name = ctx.field().name();
     let Some(operation) = enforcement.registry.operation(kind, field_name) else {
         return if kind == GraphqlOperationKind::Mutation
             && enforcement.registry.config.strict_mutation_classification
