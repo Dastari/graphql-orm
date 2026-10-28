@@ -6358,7 +6358,10 @@ fn generate_filter_field(
         "int64" => {
             let inner = option_inner_type(field_type).unwrap_or(field_type);
             if !type_path_last_ident(inner).is_some_and(|name| name == "i64") {
-                return Err(syn::Error::new_spanned(field_type, "int64 filter requires i64 or Option<i64>"));
+                return Err(syn::Error::new_spanned(
+                    field_type,
+                    "int64 filter requires i64 or Option<i64>",
+                ));
             }
             let input = quote! {
                 #[graphql(name = #graphql_name)]

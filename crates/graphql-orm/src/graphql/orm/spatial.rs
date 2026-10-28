@@ -350,17 +350,25 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
 }
 
 /// Evaluate exact signed64 operands without narrowing. Empty lists are no-ops.
-pub fn int64_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::Int64Filter) -> Option<bool> {
-    if filter.validate().is_err() { return Some(false); }
+pub fn int64_filter_matches(
+    value: Option<i64>,
+    filter: &crate::graphql::filters::Int64Filter,
+) -> Option<bool> {
+    if filter.validate().is_err() {
+        return Some(false);
+    }
     if let Some(is_null) = filter.is_null {
         if value.is_none() != is_null {
             return Some(false);
         }
     }
     let Some(value) = value else {
-        let has_comparison = filter.eq.is_some() || filter.ne.is_some()
-            || filter.lt.is_some() || filter.lte.is_some()
-            || filter.gt.is_some() || filter.gte.is_some()
+        let has_comparison = filter.eq.is_some()
+            || filter.ne.is_some()
+            || filter.lt.is_some()
+            || filter.lte.is_some()
+            || filter.gt.is_some()
+            || filter.gte.is_some()
             || filter.in_list.as_ref().is_some_and(|v| !v.is_empty())
             || filter.not_in.as_ref().is_some_and(|v| !v.is_empty());
         // isNull was evaluated first: a definite FALSE dominates UNKNOWN

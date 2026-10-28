@@ -202,11 +202,17 @@ pub struct Signed64(pub i64);
 impl async_graphql::ScalarType for Signed64 {
     fn parse(value: async_graphql::Value) -> async_graphql::InputValueResult<Self> {
         match value {
-            async_graphql::Value::Number(number) => number.as_i64().map(Self)
-                .ok_or_else(|| async_graphql::InputValueError::custom("signed64 integer out of range")),
-            async_graphql::Value::String(text) => text.parse::<i64>().ok()
-                .filter(|value| value.to_string() == text).map(Self)
-                .ok_or_else(|| async_graphql::InputValueError::custom("expected canonical signed64 integer")),
+            async_graphql::Value::Number(number) => number.as_i64().map(Self).ok_or_else(|| {
+                async_graphql::InputValueError::custom("signed64 integer out of range")
+            }),
+            async_graphql::Value::String(text) => text
+                .parse::<i64>()
+                .ok()
+                .filter(|value| value.to_string() == text)
+                .map(Self)
+                .ok_or_else(|| {
+                    async_graphql::InputValueError::custom("expected canonical signed64 integer")
+                }),
             other => Err(async_graphql::InputValueError::expected_type(other)),
         }
     }
@@ -276,11 +282,17 @@ impl async_graphql::InputType for Int64Filter {
             lte: wire.lte.map(|value| value.0),
             gt: wire.gt.map(|value| value.0),
             gte: wire.gte.map(|value| value.0),
-            in_list: wire.in_list.map(|values| values.into_iter().map(|value| value.0).collect()),
-            not_in: wire.not_in.map(|values| values.into_iter().map(|value| value.0).collect()),
+            in_list: wire
+                .in_list
+                .map(|values| values.into_iter().map(|value| value.0).collect()),
+            not_in: wire
+                .not_in
+                .map(|values| values.into_iter().map(|value| value.0).collect()),
             is_null: wire.is_null,
         };
-        filter.validate().map_err(async_graphql::InputValueError::custom)?;
+        filter
+            .validate()
+            .map_err(async_graphql::InputValueError::custom)?;
         Ok(filter)
     }
     fn to_value(&self) -> async_graphql::Value {
@@ -291,21 +303,32 @@ impl async_graphql::InputType for Int64Filter {
             lte: self.lte.map(Signed64),
             gt: self.gt.map(Signed64),
             gte: self.gte.map(Signed64),
-            in_list: self.in_list.as_ref().map(|values| values.iter().copied().map(Signed64).collect()),
-            not_in: self.not_in.as_ref().map(|values| values.iter().copied().map(Signed64).collect()),
+            in_list: self
+                .in_list
+                .as_ref()
+                .map(|values| values.iter().copied().map(Signed64).collect()),
+            not_in: self
+                .not_in
+                .as_ref()
+                .map(|values| values.iter().copied().map(Signed64).collect()),
             is_null: self.is_null,
         };
         async_graphql::InputType::to_value(&wire)
     }
-    fn as_raw_value(&self) -> Option<&Self> { Some(self) }
+    fn as_raw_value(&self) -> Option<&Self> {
+        Some(self)
+    }
 }
 
 impl Int64Filter {
     /// Bound each list before generated SQL or matching; applies to Rust callers too.
     pub fn validate(&self) -> crate::Result<()> {
         if self.in_list.as_ref().is_some_and(|v| v.len() > 256)
-            || self.not_in.as_ref().is_some_and(|v| v.len() > 256) {
-            return Err(crate::Error::Protocol("signed64 filter list exceeds 256 operands".into()));
+            || self.not_in.as_ref().is_some_and(|v| v.len() > 256)
+        {
+            return Err(crate::Error::Protocol(
+                "signed64 filter list exceeds 256 operands".into(),
+            ));
         }
         Ok(())
     }
