@@ -188,6 +188,9 @@ async fn list_limits_apply_before_decode_at_actual_operator_names() {
         }
         let singleton = schema.execute(format!("{{ admit(filter: {{ {operator}: \"9223372036854775807\" }}) }}")).await;
         assert!(singleton.errors.is_empty(), "{:?}", singleton.errors);
+        let singleton_variable = schema.execute(Request::new("query($f: Int64Filter!) { admit(filter: $f) }")
+            .variables(Variables::from_value(Value::Object([(Name::new("f"), Value::Object([(Name::new(operator), Value::String("1".into()))].into_iter().collect()))].into_iter().collect())))).await;
+        assert!(singleton_variable.errors.is_empty(), "{:?}", singleton_variable.errors);
         assert!(Int64Filter::parse(Some(Value::Object([(Name::new(operator), Value::String("1".into()))].into_iter().collect()))).is_ok());
         // Oversize invalid elements must report the bound, not element decoding.
         let error = Int64Filter::parse(Some(Value::Object([(Name::new(operator), Value::List(vec![Value::Boolean(true); 257]))].into_iter().collect()))).unwrap_err();
