@@ -6438,6 +6438,7 @@ fn generate_filter_field(
             let entity_match = if backend == BackendKind::Sqlite {
                 quote! {
                     if let Some(ref f) = self.#filter_field_name {
+                        f.validate()?;
                         if !::graphql_orm::graphql::orm::spatial::int64_filter_matches(#value_expr, f) {
                             return Ok(Some(false));
                         }

@@ -1,12 +1,14 @@
 //! Exact static signed64 generation, wire coercion, SQL bindings and matching.
-#![cfg(feature = "sqlite")]
+#![cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 use graphql_orm::async_graphql::{InputType, Schema, Value};
 use graphql_orm::graphql::filters::{Int64Filter, IntFilter};
 use graphql_orm::graphql::orm::*;
 use graphql_orm::prelude::*;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "signed64_rows", plural = "Signed64Rows", backend = "sqlite", auth = "none")]
+#[cfg_attr(feature = "sqlite", graphql_entity(table = "signed64_rows", plural = "Signed64Rows", backend = "sqlite", auth = "none"))]
+#[cfg_attr(feature = "postgres", graphql_entity(table = "signed64_rows", plural = "Signed64Rows", backend = "postgres", auth = "none"))]
+#[cfg_attr(feature = "mssql", graphql_entity(table = "signed64_rows", plural = "Signed64Rows", backend = "mssql", auth = "none"))]
 struct Signed64Row {
     #[primary_key]
     id: graphql_orm::uuid::Uuid,
@@ -33,7 +35,7 @@ fn exact_wire_scalar_and_existing_i32_contract() {
     }
     for wire in [Value::String("9223372036854775808".into()),
         Value::String("-9223372036854775809".into()), Value::String("01".into()),
-        Value::String("1e3".into()), Value::Number(1.5_f64.try_into().unwrap())] {
+        Value::String("1e3".into()), graphql_orm::async_graphql::value!(1.5)] {
         assert!(Int64Filter::parse(Some(Value::Object(
             [("eq".into(), wire)].into_iter().collect()))).is_err());
     }
@@ -44,6 +46,7 @@ fn exact_wire_scalar_and_existing_i32_contract() {
 }
 
 #[tokio::test]
+#[cfg(feature = "sqlite")]
 async fn sql_and_memory_preserve_every_operand_and_boolean_composition() {
     let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
         .connect("sqlite::memory:").await.unwrap();

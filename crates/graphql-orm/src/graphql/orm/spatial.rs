@@ -351,6 +351,7 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
 
 /// Evaluate exact signed64 operands without narrowing. Empty lists are no-ops.
 pub fn int64_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::Int64Filter) -> bool {
+    if filter.validate().is_err() { return false; }
     if let Some(is_null) = filter.is_null {
         if value.is_none() != is_null {
             return false;
