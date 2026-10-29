@@ -12,9 +12,12 @@ supersedes: []
 
 ## 0.82.0 to 0.83.0: committed relation transitions
 
-Upgrade runtime and macros together. Generated repository `update_by_id` and
-`update_by_key` and their `MutationContext` counterparts now queue both former
-and new parent invalidations when a declared upward relation tuple changes.
+Upgrade runtime and macros together. Generated single-key GraphQL update
+resolvers, repository `update_by_id`/`update_by_key` and their `MutationContext`
+counterparts now queue both former and new parent invalidations when a declared
+upward relation tuple changes. Direct GraphQL updates pass the locked preimage
+captured inside their authenticated pinned transaction to the same transition
+queue helper before commit; no preimage is loaded outside that transaction.
 Ordinary inserts, deletes and stale current-edge witnesses retain their existing
 contracts. No schema or stored-value migration is required.
 
@@ -51,10 +54,10 @@ retain their prior behavior.
 A NULL or missing new target can still invalidate a readable former target.
 Missing/denied targets are handled independently at subscriber release.
 
-This first slice covers generated single-key repository/context updates and
-composite-key repository/context updates. Direct single-key GraphQL update
-resolvers, CAS/predicate updates, upsert, direct bulk/update-where and runtime
-record updates remain on their prior postimage-only paths. Helper-delegating
+This slice covers generated single-key GraphQL updates, single-key
+repository/context updates and composite-key repository/context updates.
+CAS/predicate updates, upsert, direct bulk/update-where and runtime record
+updates remain on their prior postimage-only paths. Helper-delegating
 bounded or composite bulk paths inherit the per-row transition code, but their
 aggregate behavior is not qualified as complete. Do not infer coverage for all
 bulk surfaces. Repeated moves in one transaction are not coalesced: an earlier

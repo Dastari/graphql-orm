@@ -11,8 +11,9 @@ supersedes: []
 # `graphql-orm-macros`
 
 Version 0.83.0 adds committed former/new-parent invalidation for generated
-single/composite repository and MutationContext updates. Historical associations
-require a separate explicit default-deny policy; current authorization and
+single-key GraphQL updates and single/composite repository and MutationContext
+updates. Historical associations require a separate explicit default-deny
+policy; current authorization and
 commit/rollback proofs remain mandatory. Other write paths are not covered.
 See the [transition migration](../../MIGRATION.md#0820-to-0830-committed-relation-transitions).
 

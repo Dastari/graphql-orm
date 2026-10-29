@@ -18,15 +18,14 @@ for historical context.
 
 Companion runtime/macros version: **0.83.0**.
 
-- Generated single/composite repository and MutationContext updates retain a
-  committed before/postimage relation witness and queue former/new parent
-  invalidations. Historical release requires explicit default-deny
+- Generated single-key GraphQL updates and single/composite repository and
+  MutationContext updates retain a committed before/postimage relation witness
+  and queue former/new parent invalidations. Historical release requires explicit default-deny
   `RowPolicy::can_read_relation_transition` authority plus current source/target
   SQL, row, mapped-field and per-hop operation checks. An opaque transaction
   receipt prevents release before successful COMMIT. No production opt-in is
-  implied. Direct GraphQL single updates, CAS/upsert/direct-bulk/runtime paths,
-  complete bulk acceptance and transaction coalescing remain outside this first
-  slice; see the migration contract.
+  implied. CAS/upsert/direct-bulk/runtime paths, complete bulk acceptance and
+  transaction coalescing remain outside this slice; see the migration contract.
 
 ## 0.82.0 (unreleased)
 

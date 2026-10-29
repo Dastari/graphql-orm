@@ -3,7 +3,7 @@
 //! grants production access. Ordinary stale-edge checks remain independent.
 #![cfg(feature = "sqlite")]
 
-use graphql_orm::async_graphql::{Request, Response};
+use graphql_orm::async_graphql::{Request, Response, Variables};
 use graphql_orm::futures::{Stream, StreamExt, future::poll_fn};
 use graphql_orm::prelude::*;
 use graphql_orm::uuid::Uuid;
@@ -31,6 +31,7 @@ struct TransitionParent {
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(table = "transition_children", plural = "TransitionChildren")]
 #[graphql_orm(operation_authorization(categories = ["subscription"], all_scopes = ["transition.child"]))]
+#[graphql_orm(operation_authorization(categories = ["update"], all_scopes = ["transition.update"]))]
 struct TransitionChild {
     #[primary_key]
     #[sortable]
@@ -64,7 +65,12 @@ struct CompositeTransitionChild {
     parent: Option<TransitionParent>,
 }
 
-schema_roots! { query_custom_ops: [], generated_mutations: "none", entities: [TransitionParent, TransitionChild, CompositeTransitionChild] }
+schema_roots! {
+    query_custom_ops: [],
+    generated_mutations: "allowlist",
+    generated_mutation_allowlist: [TransitionChild],
+    entities: [TransitionParent, TransitionChild, CompositeTransitionChild]
+}
 
 const CURRENT_AUTH: usize = 1;
 const SOURCE_ROW: usize = 2;
@@ -519,4 +525,113 @@ async fn complete_sql_visibility_does_not_replace_current_association_callbacks(
         touch(&db).await;
         expect_parents(&mut stream, &[(1,20,200)]).await;
     }
+}
+
+// Exercise the actual schema_roots generated mutation, not repository calls or
+// hand-composed roots. Only the test child exposes mutations in this fixture.
+fn graphql_update_request(input: serde_json::Value, write_scope: bool) -> Request {
+    let document = format!(
+        "mutation($input: UpdateTransitionChildInput!) {{ updateTransitionChild(id: \"{}\", input: $input) {{ success error }} }}",
+        uid(999),
+    );
+    let scopes = if write_scope { vec!["transition.update".into()] } else { vec![] };
+    Request::new(document)
+        .variables(Variables::from_json(serde_json::json!({"input": input})))
+        .data(AuthSubject::with_details("writer", vec![], scopes, None))
+}
+fn graphql_move_input(label: &str) -> serde_json::Value {
+    serde_json::json!({
+        "customerId": uid(20).to_string(),
+        "targetId": uid(200).to_string(),
+        "label": label,
+    })
+}
+fn assert_graphql_update_success(response: Response) {
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    assert_eq!(data["updateTransitionChild"]["success"], true, "{data}");
+    assert!(data["updateTransitionChild"]["error"].is_null(), "{data}");
+}
+
+#[tokio::test]
+async fn graphql_update_commits_former_and_new_parent_invalidations() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db, authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    assert_graphql_update_success(schema.execute(
+        graphql_update_request(graphql_move_input("healthy"), true),
+    ).await);
+    expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
+    assert_graphql_update_success(schema.execute(graphql_update_request(
+        serde_json::json!({"label": "initial"}), true,
+    )).await);
+    expect_parents(&mut stream, &[(1,20,200)]).await;
+}
+
+#[tokio::test]
+async fn graphql_update_failed_commit_discards_transition_and_retry_observes_original_edge() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db, authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let failed = schema.execute(graphql_update_request(
+        graphql_move_input("missing-label"), true,
+    )).await;
+    // The deferred FK fails at actual COMMIT, after the resolver queued both legs.
+    assert!(!failed.errors.is_empty(), "a failed COMMIT cannot return success");
+    expect_parents(&mut stream, &[]).await;
+    assert_graphql_update_success(schema.execute(
+        graphql_update_request(graphql_move_input("healthy"), true),
+    ).await);
+    // Both keys are required: a partially committed first attempt would have
+    // lost the original parent and cannot satisfy this restored positive.
+    expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
+}
+
+#[tokio::test]
+async fn graphql_update_preserves_default_historical_denial_and_current_subscriber_authority() {
+    for denied in [HISTORICAL_EDGE, CURRENT_AUTH] {
+        let (mut db, authority) = fixture().await;
+        if denied == HISTORICAL_EDGE {
+            // No historical hook override, despite complete current SQL
+            // visibility and explicit deleted-preimage permission.
+            db.set_row_policy(CurrentOnly(authority.clone(), true));
+        }
+        let schema = schema(db, authority.clone());
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        assert_graphql_update_success(schema.execute(
+            graphql_update_request(graphql_move_input("healthy"), true),
+        ).await);
+        // Revoke only after the successful mutation committed, before delivery.
+        authority.0.store(denied, Ordering::SeqCst);
+        if denied == HISTORICAL_EDGE {
+            expect_parents(&mut stream, &[(1,20,200)]).await;
+        } else {
+            expect_parents(&mut stream, &[]).await;
+        }
+        authority.0.store(0, Ordering::SeqCst);
+        assert_graphql_update_success(schema.execute(graphql_update_request(
+            serde_json::json!({"label": "initial"}), true,
+        )).await);
+        expect_parents(&mut stream, &[(1,20,200)]).await;
+    }
+}
+
+#[tokio::test]
+async fn graphql_update_missing_operation_scope_leaves_original_edge_unchanged() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db, authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let denied = schema.execute(graphql_update_request(
+        graphql_move_input("healthy"), false,
+    )).await;
+    assert!(!denied.errors.is_empty(), "update requires its own write scope");
+    expect_parents(&mut stream, &[]).await;
+    assert_graphql_update_success(schema.execute(
+        graphql_update_request(graphql_move_input("healthy"), true),
+    ).await);
+    expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
 }

@@ -8164,10 +8164,11 @@ fn generate_graphql_operations_unfiltered(
                                         after_state,
                                     },
                                 ).await?;
-                                #struct_name::__gom_queue_changed_event(
+                                #struct_name::__gom_queue_changed_event_with_preimage(
                                     &mut hook_ctx,
                                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                                     Some(&entity),
+                                    Some(&current_entity),
                                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                                 hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
