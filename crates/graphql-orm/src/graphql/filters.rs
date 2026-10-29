@@ -177,6 +177,163 @@ pub struct IntFilter {
     pub is_null: Option<bool>,
 }
 
+/// Exact static signed-64 predicates. Rust operands stay `i64`; the GraphQL
+/// `Signed64` scalar emits canonical decimal strings and accepts exact integer
+/// literals or canonical decimal strings. Never pass a JavaScript Number through
+/// a floating point conversion; SDKs should map this scalar to bigint/string.
+#[derive(Clone, Debug, Default)]
+pub struct Int64Filter {
+    pub eq: Option<i64>,
+    pub ne: Option<i64>,
+    pub lt: Option<i64>,
+    pub lte: Option<i64>,
+    pub gt: Option<i64>,
+    pub gte: Option<i64>,
+    pub in_list: Option<Vec<i64>>,
+    pub not_in: Option<Vec<i64>>,
+    pub is_null: Option<bool>,
+}
+
+/// Exact wire representation for signed-64 static filter operands.
+#[derive(Clone, Copy, Debug)]
+pub struct Signed64(pub i64);
+
+#[async_graphql::Scalar(name = "Signed64")]
+impl async_graphql::ScalarType for Signed64 {
+    fn parse(value: async_graphql::Value) -> async_graphql::InputValueResult<Self> {
+        match value {
+            async_graphql::Value::Number(number) => number.as_i64().map(Self).ok_or_else(|| {
+                async_graphql::InputValueError::custom("signed64 integer out of range")
+            }),
+            async_graphql::Value::String(text) => text
+                .parse::<i64>()
+                .ok()
+                .filter(|value| value.to_string() == text)
+                .map(Self)
+                .ok_or_else(|| {
+                    async_graphql::InputValueError::custom("expected canonical signed64 integer")
+                }),
+            other => Err(async_graphql::InputValueError::expected_type(other)),
+        }
+    }
+
+    fn to_value(&self) -> async_graphql::Value {
+        async_graphql::Value::String(self.0.to_string())
+    }
+}
+
+#[derive(async_graphql::InputObject, Clone, Debug, Default)]
+#[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
+#[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
+#[cfg_attr(
+    feature = "field-case-screaming-snake",
+    graphql(rename_fields = "SCREAMING_SNAKE_CASE")
+)]
+#[cfg_attr(feature = "field-case-lower", graphql(rename_fields = "lowercase"))]
+#[cfg_attr(feature = "field-case-upper", graphql(rename_fields = "UPPERCASE"))]
+#[graphql(name = "Int64Filter")]
+struct Int64FilterWire {
+    pub eq: Option<Signed64>,
+    pub ne: Option<Signed64>,
+    pub lt: Option<Signed64>,
+    pub lte: Option<Signed64>,
+    pub gt: Option<Signed64>,
+    pub gte: Option<Signed64>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "inlist"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "INLIST"))]
+    pub in_list: Option<Vec<Signed64>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "notin"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "NOTIN"))]
+    pub not_in: Option<Vec<Signed64>>,
+    #[cfg_attr(feature = "field-case-lower", graphql(name = "isnull"))]
+    #[cfg_attr(feature = "field-case-upper", graphql(name = "ISNULL"))]
+    pub is_null: Option<bool>,
+}
+
+impl async_graphql::InputType for Int64Filter {
+    type RawValueType = Self;
+    fn type_name() -> std::borrow::Cow<'static, str> {
+        <Int64FilterWire as async_graphql::InputType>::type_name()
+    }
+    fn create_type_info(registry: &mut async_graphql::registry::Registry) -> String {
+        <Int64FilterWire as async_graphql::InputType>::create_type_info(registry)
+    }
+    fn parse(value: Option<async_graphql::Value>) -> async_graphql::InputValueResult<Self> {
+        // Inspect borrowed raw fields before derive clones fields or Vec decodes
+        // elements. Non-list values retain GraphQL singleton-list coercion.
+        if let Some(async_graphql::Value::Object(object)) = value.as_ref() {
+            for operator in ["in_list", "not_in"] {
+                let name = semantic_filter_name(operator, true);
+                if let Some(async_graphql::Value::List(list)) = object.get(name.as_str()) {
+                    if list.len() > 256 {
+                        return Err(async_graphql::InputValueError::custom(
+                            "signed64 filter list exceeds 256 operands",
+                        ));
+                    }
+                }
+            }
+        }
+        let wire = <Int64FilterWire as async_graphql::InputType>::parse(value)
+            .map_err(|error| error.propagate::<Self>())?;
+        let filter = Self {
+            eq: wire.eq.map(|value| value.0),
+            ne: wire.ne.map(|value| value.0),
+            lt: wire.lt.map(|value| value.0),
+            lte: wire.lte.map(|value| value.0),
+            gt: wire.gt.map(|value| value.0),
+            gte: wire.gte.map(|value| value.0),
+            in_list: wire
+                .in_list
+                .map(|values| values.into_iter().map(|value| value.0).collect()),
+            not_in: wire
+                .not_in
+                .map(|values| values.into_iter().map(|value| value.0).collect()),
+            is_null: wire.is_null,
+        };
+        filter
+            .validate()
+            .map_err(async_graphql::InputValueError::custom)?;
+        Ok(filter)
+    }
+    fn to_value(&self) -> async_graphql::Value {
+        let wire = Int64FilterWire {
+            eq: self.eq.map(Signed64),
+            ne: self.ne.map(Signed64),
+            lt: self.lt.map(Signed64),
+            lte: self.lte.map(Signed64),
+            gt: self.gt.map(Signed64),
+            gte: self.gte.map(Signed64),
+            in_list: self
+                .in_list
+                .as_ref()
+                .map(|values| values.iter().copied().map(Signed64).collect()),
+            not_in: self
+                .not_in
+                .as_ref()
+                .map(|values| values.iter().copied().map(Signed64).collect()),
+            is_null: self.is_null,
+        };
+        async_graphql::InputType::to_value(&wire)
+    }
+    fn as_raw_value(&self) -> Option<&Self> {
+        Some(self)
+    }
+}
+
+impl Int64Filter {
+    /// Bound each list before generated SQL or matching; applies to Rust callers too.
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.in_list.as_ref().is_some_and(|v| v.len() > 256)
+            || self.not_in.as_ref().is_some_and(|v| v.len() > 256)
+        {
+            return Err(crate::Error::Protocol(
+                "signed64 filter list exceeds 256 operands".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Exact comparison predicates for a fixed-precision decimal column.
 #[derive(async_graphql::InputObject, Clone, Debug, Default)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
@@ -701,6 +858,49 @@ impl IntFilter {
     {
         use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeRef};
         let value = semantic_filter_scalar("Int", false);
+        semantic_filter_contract::<Self>(
+            value.clone(),
+            vec![
+                (Equal, "eq", semantic_filter_optional(value.clone())),
+                (NotEqual, "ne", semantic_filter_optional(value.clone())),
+                (LessThan, "lt", semantic_filter_optional(value.clone())),
+                (
+                    LessThanOrEqual,
+                    "lte",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (GreaterThan, "gt", semantic_filter_optional(value.clone())),
+                (
+                    GreaterThanOrEqual,
+                    "gte",
+                    semantic_filter_optional(value.clone()),
+                ),
+                (
+                    In,
+                    "in_list",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
+                (
+                    NotIn,
+                    "not_in",
+                    GraphqlSemanticTypeRef::list(true, None, value.clone()),
+                ),
+                (IsNull, "is_null", semantic_filter_scalar("Boolean", true)),
+            ],
+            vec![],
+            true,
+        )
+    }
+}
+
+impl Int64Filter {
+    /// Declares this implementation's exact canonical operator input contract.
+    ///
+    /// Generated metadata uses this declaration; it grants no resolver authority.
+    pub fn graphql_semantic_filter_input() -> crate::graphql::orm::GraphqlSemanticFilterInputMetadata
+    {
+        use crate::graphql::orm::{GraphqlSemanticFilterOperator::*, GraphqlSemanticTypeRef};
+        let value = semantic_filter_scalar("Signed64", false);
         semantic_filter_contract::<Self>(
             value.clone(),
             vec![

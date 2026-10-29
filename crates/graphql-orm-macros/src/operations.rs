@@ -4934,6 +4934,22 @@ fn generate_graphql_operations_unfiltered(
             .fetch_authorized_keyset(db, Some(ctx), auth, page).await?
         }
     };
+    // Filtering reveals field information even when the response selects only
+    // unrelated fields. Authorize original recursive predicate intent before
+    // any list/count/scan SQL, using the same public identities as field reads.
+    let filter_read_authorization = quote! {
+        if let Some(filter) = where_input.as_ref() {
+            for field_name in ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter) {
+                let field = <#struct_name as ::graphql_orm::graphql::orm::Entity>::repository_field_policies()
+                    .iter()
+                    .find(|field| field.api_name == field_name)
+                    .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
+                db.ensure_readable_field(
+                    ctx, #entity_name_lit, field.api_name, field.read_policy, None,
+                ).await?;
+            }
+        }
+    };
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
             #[doc = #keyset_operation_description]
@@ -4953,6 +4969,7 @@ fn generate_graphql_operations_unfiltered(
                 )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
+                #filter_read_authorization
                 let filter = where_input.unwrap_or_default();
                 #runtime_keyset_prepare
                 let connection = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
@@ -4976,6 +4993,7 @@ fn generate_graphql_operations_unfiltered(
                 )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
+                #filter_read_authorization
                 let result = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input.unwrap_or_default())
                     .fetch_authorized_scan(db, Some(ctx), auth, page).await?;
@@ -7299,6 +7317,7 @@ fn generate_graphql_operations_unfiltered(
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await?;
 
+                    #filter_read_authorization
                     let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                     if let Some(ref filter) = where_input {
@@ -7674,6 +7693,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await?;
 
+                #filter_read_authorization
                 let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                 if let Some(ref filter) = where_input {
