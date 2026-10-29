@@ -138,6 +138,7 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -> Runtim
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 fn schema() -> Arc<ValidatedRuntimeSchema> {

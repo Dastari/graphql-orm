@@ -228,6 +228,7 @@ async fn all_runtime_value_kinds_match_actual_runtime_sdl() {
             classification: None,
             export: None,
             auto_timestamp: None,
+            auto_actor: None,
         })
         .collect::<Vec<_>>();
     let primary_key = vec![fields[0].id.clone()];

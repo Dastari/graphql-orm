@@ -76,6 +76,7 @@ fn field(
         default: None,
         format,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 

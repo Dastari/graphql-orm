@@ -3,12 +3,16 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-19
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.81.0 adds host-supplied runtime actor stamps (`RuntimeField::auto_actor`), written
+from the write grant's actor (`RuntimeWriteGrant::with_actor`). See the
+[migration guide](../../MIGRATION.md#0800-to-0810-runtime-actor-stamps).
 
 Version 0.80.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and

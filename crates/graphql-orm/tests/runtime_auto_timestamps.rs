@@ -46,6 +46,7 @@ fn field(collection: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 fn stamp(collection: &str, name: &str, auto: RuntimeAutoTimestamp) -> RuntimeField {

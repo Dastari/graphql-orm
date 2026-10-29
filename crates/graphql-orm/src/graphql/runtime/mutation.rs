@@ -25,6 +25,13 @@ pub struct RuntimeGraphqlMutationOptions {
     /// many-to-many relations when updates are enabled: link changes applied to the written row
     /// in the same transaction (`RuntimeMutationRequest::with_link_change`).
     pub links_in_writes: bool,
+    /// Opt-in optional inputs for [actor-stamped](RuntimeField::auto_actor) fields in
+    /// `Create<Object>Input` and `Update<Object>Input`, for hosts whose write
+    /// authority assigns actors explicitly. A supplied value is still refused with
+    /// `field_denied` unless the write grant permits actor assignment
+    /// (`RuntimeWriteGrant::with_actor_assignment`). Off by default: the fields
+    /// are not input.
+    pub actor_inputs: bool,
 }
 impl Default for RuntimeGraphqlMutationOptions {
     fn default() -> Self {
@@ -38,6 +45,7 @@ impl Default for RuntimeGraphqlMutationOptions {
             max_link_keys: RUNTIME_DEFAULT_MAX_LINK_KEYS,
             max_delete_links: RUNTIME_DEFAULT_MAX_DELETE_LINKS,
             links_in_writes: false,
+            actor_inputs: false,
         }
     }
 }
@@ -54,15 +62,42 @@ pub(super) fn actions(module: &RuntimeGraphqlModule) -> Vec<(&'static str, Runti
     .filter_map(|(enabled, prefix, action)| enabled.then_some((prefix, action)))
     .collect()
 }
-/// Whether `create<Object>` takes an `input`: some field is client-writable.
-pub(super) fn has_create_input(c: &RuntimeCollection) -> bool {
-    c.fields.iter().any(|f| f.is_client_writable())
+/// Whether `f` is a generated input field: client-writable, or an actor stamp
+/// when the module opted in to actor inputs.
+fn is_input(module: &RuntimeGraphqlModule, f: &RuntimeField) -> bool {
+    f.is_client_writable()
+        || (f.auto_actor.is_some()
+            && module
+                .options
+                .mutations
+                .as_ref()
+                .is_some_and(|o| o.actor_inputs))
 }
-/// Whether `update<Object>` exists: some non-key field is client-writable.
-pub(super) fn has_update_input(c: &RuntimeCollection) -> bool {
+/// Fields of `Create<Object>Input`.
+fn create_inputs<'a>(
+    module: &'a RuntimeGraphqlModule,
+    c: &'a RuntimeCollection,
+) -> impl Iterator<Item = &'a RuntimeField> + 'a {
+    c.fields.iter().filter(|f| is_input(module, f))
+}
+/// Fields of `Update<Object>Input`: non-key inputs.
+fn update_inputs<'a>(
+    module: &'a RuntimeGraphqlModule,
+    c: &'a RuntimeCollection,
+) -> impl Iterator<Item = &'a RuntimeField> + 'a {
     c.fields
         .iter()
-        .any(|f| f.is_client_writable() && !c.primary_key.contains(&f.id))
+        .filter(|f| is_input(module, f) && !c.primary_key.contains(&f.id))
+}
+/// Whether `create<Object>` takes an `input`: some field is client-writable (or an
+/// actor stamp with `actor_inputs`).
+pub(super) fn has_create_input(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -> bool {
+    create_inputs(module, c).next().is_some()
+}
+/// Whether `update<Object>` exists: some non-key field is client-writable (or an
+/// actor stamp with `actor_inputs`).
+pub(super) fn has_update_input(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -> bool {
+    update_inputs(module, c).next().is_some()
 }
 /// One generated mutation root of a collection.
 pub(super) struct Root<'a> {
@@ -78,7 +113,9 @@ pub(super) fn roots<'a>(module: &RuntimeGraphqlModule, c: &'a RuntimeCollection)
     let object = module.object_name(c);
     let mut roots = actions(module)
         .into_iter()
-        .filter(|(_, action)| *action != RuntimeMutationAction::Update || has_update_input(c))
+        .filter(|(_, action)| {
+            *action != RuntimeMutationAction::Update || has_update_input(module, c)
+        })
         .map(|(prefix, action)| Root {
             name: format!("{prefix}{object}"),
             action,
@@ -118,10 +155,10 @@ pub(super) fn type_names(module: &RuntimeGraphqlModule, c: &RuntimeCollection) -
         return vec![];
     };
     let mut names = vec![format!("{name}MutationPayload")];
-    if options.create && has_create_input(c) {
+    if options.create && has_create_input(module, c) {
         names.push(format!("Create{name}Input"));
     }
-    if options.update && has_update_input(c) {
+    if options.update && has_update_input(module, c) {
         names.push(format!("Update{name}Input"));
     }
     if options.update || options.delete {
@@ -156,10 +193,10 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
         );
         // Without client-writable fields `create<Object>` takes no input and
         // `update<Object>` is omitted (GraphQL has no empty input objects).
-        if options.create && has_create_input(c) {
+        if options.create && has_create_input(module, c) {
             let mut input = InputObject::new(format!("Create{name}Input"))
                 .description(format!("Values of a new {name} record"));
-            for f in c.fields.iter().filter(|f| f.is_client_writable()) {
+            for f in create_inputs(module, c) {
                 let required =
                     !f.nullable && (f.default.is_none() || c.primary_key.contains(&f.id));
                 input = input.field(
@@ -176,15 +213,11 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
             }
             types.push(input.into());
         }
-        if options.update && has_update_input(c) {
+        if options.update && has_update_input(module, c) {
             let mut input = InputObject::new(format!("Update{name}Input")).description(format!(
                 "Changed values of one {name} record; omitted fields are unchanged"
             ));
-            for f in c
-                .fields
-                .iter()
-                .filter(|f| f.is_client_writable() && !c.primary_key.contains(&f.id))
-            {
+            for f in update_inputs(module, c) {
                 input = input.field(
                     InputValue::new(
                         &f.api_name,
@@ -347,9 +380,12 @@ fn fields<B: RuntimeMutationBackend>(
                             .ok_or_else(|| RuntimeGraphqlError::new("invalid_composition"))?,
                     ),
                 ),
-                None => {
-                    super::semantic::mutation_arguments(action, &object, c, write_links(&module, c))
-                }
+                None => super::semantic::mutation_arguments(
+                    action,
+                    &object,
+                    has_create_input(&module, c),
+                    write_links(&module, c),
+                ),
             };
             let field = arguments.into_iter().fold(field, |field, (name, ty)| {
                 field.argument(

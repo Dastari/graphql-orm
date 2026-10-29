@@ -210,6 +210,7 @@ fn definition() -> RuntimeSchema {
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     }];
     for (column, kind, nullable, default) in matrix() {
         fields.push(RuntimeField {
@@ -228,6 +229,7 @@ fn definition() -> RuntimeSchema {
             default: Some(default),
             format: None,
             auto_timestamp: None,
+            auto_actor: None,
         });
     }
     RuntimeSchema {

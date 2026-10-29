@@ -1,10 +1,11 @@
-//! Identity goldens for a runtime schema that declares no automatic timestamps.
+//! Identity goldens for a runtime schema that declares no automatic timestamps and no
+//! actor stamps.
 //!
 //! The expected values were captured from graphql-orm 0.71.0
 //! (`01c966a9d86c1726a95018fa33af03dc67ef0aed`), before `RuntimeField::auto_timestamp`
-//! existed, by running this file unchanged. Equal values prove that adding the member
-//! left serialized documents, canonical bytes, fingerprints and the physical target of
-//! schemas without it byte-identical. The fixture is JSON, so the file compiles against
+//! existed, by running this file unchanged. Equal values prove that adding that member,
+//! and later `RuntimeField::auto_actor` (0.81.0), left serialized documents, canonical
+//! bytes, fingerprints and the physical target of schemas without them byte-identical. The fixture is JSON, so the file compiles against
 //! both releases. Run with `GRAPHQL_ORM_PRINT_GOLDENS=1` to print a fresh report.
 #![cfg(feature = "sqlite")]
 

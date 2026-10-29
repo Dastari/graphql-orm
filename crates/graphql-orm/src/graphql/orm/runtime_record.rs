@@ -14,8 +14,8 @@ use chrono::{SecondsFormat, Timelike, Utc};
 
 use super::{
     CollectionId, DecimalValue, FieldId, NoDefaultBackend, OrmBackend, RelationCardinality,
-    RelationId, RuntimeAutoTimestamp, RuntimeFieldFormat, RuntimeValueKind, SchemaFingerprint,
-    ValidatedRuntimeSchema,
+    RelationId, RuntimeAutoActor, RuntimeAutoTimestamp, RuntimeFieldFormat, RuntimeValueKind,
+    SchemaFingerprint, ValidatedRuntimeSchema,
 };
 
 /// Serialized format version for [`RuntimeRecord`].
@@ -429,6 +429,7 @@ pub struct RuntimeFieldHandle {
     sortable: bool,
     format: Option<std::sync::Arc<RuntimeFieldFormat>>,
     auto_timestamp: Option<RuntimeAutoTimestamp>,
+    auto_actor: Option<RuntimeAutoActor>,
 }
 
 impl RuntimeFieldHandle {
@@ -436,6 +437,13 @@ impl RuntimeFieldHandle {
     /// field is never accepted as create or update input.
     pub const fn auto_timestamp(&self) -> Option<RuntimeAutoTimestamp> {
         self.auto_timestamp
+    }
+
+    /// Host-supplied actor stamp declared by the validated schema, if any. Such a
+    /// field is accepted as create or update input only under a write grant that
+    /// permits actor assignment.
+    pub const fn auto_actor(&self) -> Option<RuntimeAutoActor> {
+        self.auto_actor
     }
 
     /// Semantic format descriptor declared by the validated schema, if any.
@@ -715,6 +723,7 @@ impl ValidatedRuntimeSchema {
             sortable: field.sortable,
             format: field.format.clone().map(std::sync::Arc::new),
             auto_timestamp: field.auto_timestamp,
+            auto_actor: field.auto_actor,
         })
     }
 

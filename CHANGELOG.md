@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-22
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,24 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+Companion runtime/macros version: **0.81.0**.
+
+- Add host-supplied actor stamps for runtime fields, the analogue of Spring Data's `@CreatedBy`/`AuditorAware`: `RuntimeField::auto_actor: Option<RuntimeAutoActor>` with `OnCreate`. Valid only on nullable, non-primary-key `Uuid` or `String` fields that are not generated, have no default and do not declare `auto_timestamp` (`InvalidAutoActor` with a value-free `RuntimeAutoActorProblem` detail). See [actor stamps](docs/reference/graphql-orm/runtime-schema-ir.md#actor-stamps).
+  - `RuntimeWriteGrant::with_actor(RuntimeValue)`: the value every runtime create writes into each actor stamp the request does not supply (SQL NULL without it). It is checked against each stamp's value kind before any SQL write (`invalid_input` on mismatch). Updates never write the actor.
+  - `RuntimeWriteGrant::with_actor_assignment()`: permits the request itself to supply actor stamps on create and update. Without it, a supplied value (explicit `Null` included) fails with `field_denied` after `authorize_intent` and before any SQL write. Request construction accepts the field so the decision can use the grant. Both survive the GraphQL restriction of a grant.
+  - Dependent `SetNull` updates and link mutations never change an actor stamp, except that the referential action clears a stamp that is itself the relation key being nulled.
+  - Staged and preimage images always include actor stamps, so result checks and `before_commit` hooks see them; client output stays the return projection.
+  - Runtime GraphQL omits actor stamps from `Create<T>Input` and `Update<T>Input`. The new opt-in `RuntimeGraphqlMutationOptions::actor_inputs` (default `false`) adds them as optional inputs of both, for hosts that assign actors explicitly.
+  - Migrations: the column is plain nullable with no default; adding it leaves existing rows NULL, and switching the flag plans no DDL. Backup/restore keeps stored values.
+  - `RuntimeField::is_client_writable` is `false` for actor stamps; `RuntimeFieldHandle::auto_actor` exposes the flag.
+  - Identity: the member is omitted when absent and joins the field's ID-bearing and structural canonical lines (`|auto_actor=on_create`) only when present. Schemas without it are byte-identical (pinned by `tests/runtime_identity_goldens.rs`).
+- **Breaking (Rust):** `RuntimeField` struct literals must add `auto_actor: None`.
+- **Breaking (Rust):** `RuntimeSchemaDiagnosticCode` gains `InvalidAutoActor`; exhaustive matches need an arm. (`RuntimeSchemaDiagnosticDetail` and `RuntimeGraphqlMutationOptions` are `#[non_exhaustive]`; the new `AutoActor` variant and `actor_inputs` field are additive.)
+- **Breaking (behaviour, opt-in schemas only):** a runtime create or update that supplies an actor-stamped field is refused with `field_denied` unless the write grant permits assignment, and `RuntimeField::is_client_writable` is `false` for such fields. Schemas that declare no actor stamp are unaffected.
+- **Breaking (serialized IR):** readers older than 0.81.0 reject a schema document that declares `auto_actor` (`deny_unknown_fields`). Documents without it are unchanged and the format version stays 1.
+
+## 0.80.0 (unreleased)
 
 - Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
   ORM/macros 0.80.0, profiles 0.19.0 and AI 0.118.0. Canonical operator meanings,

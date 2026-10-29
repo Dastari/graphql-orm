@@ -199,6 +199,7 @@ fn field(id: &str, api: &str, column: &str, kind: RuntimeValueKind) -> RuntimeFi
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 

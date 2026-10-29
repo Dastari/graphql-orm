@@ -48,6 +48,7 @@ fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
         classification: None,
         export: None,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 
