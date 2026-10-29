@@ -10,22 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.80.0 to 0.81.0: runtime actor stamps
-
-Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:
-
-- **Rust:** add `auto_actor: None` to `RuntimeField` struct literals (or use `..base` update syntax), and an arm for `RuntimeSchemaDiagnosticCode::InvalidAutoActor` in exhaustive matches.
-- **Serialized IR:** a document that declares `auto_actor` cannot be read by graphql-orm older than 0.81.0. Upgrade every reader of a catalog before writing the member. Documents without it read, validate and fingerprint exactly as before.
-- **Hosts that build inputs from the IR:** treat `RuntimeField::is_client_writable()` (or `RuntimeFieldHandle::auto_actor()`) like `generated` unless your write authority permits actor assignment. Generated runtime GraphQL omits actor stamps from create and update inputs unless `RuntimeGraphqlMutationOptions::actor_inputs` is set.
-
-To adopt actor stamps:
-
-- declare `auto_actor: Some(RuntimeAutoActor::OnCreate)` on a nullable, non-primary-key `Uuid` or `String` field that is not generated, with `default: None` and no `auto_timestamp`;
-- plan and apply the owned migration, then rebuild the mutation environment. A new column is plain nullable: existing rows stay NULL (backfill them explicitly if needed). Switching the flag on an existing column plans no DDL;
-- in `RuntimeWriteAuthority::authorize_intent`, return `RuntimeWriteGrant::new(..)?.with_actor(actor)` with the acting principal as a `RuntimeValue` of the stamp's kind; creates write it into every stamp they do not supply. Add `.with_actor_assignment()` only for principals allowed to set or change stamps explicitly, and check the supplied value in the intent;
-- updates never restamp, and backup/restore keeps stored values.
-
-## 0.80.0 to 0.81.0: exact static signed64 filters
+## 0.81.0 to 0.82.0: exact static signed64 filters
 
 Use `#[filterable(type = "int64")]` on `i64` or `Option<i64>` fields and
 `Int64Filter` with native `i64` comparison/list operands. Existing `number` and
@@ -59,7 +44,7 @@ use in a predicate; row and selected-field authorization remain independent.
 Previously accepted filtered reads may now return forbidden or a missing-policy
 error. No additional client scope or read authority is implied.
 
-## 0.80.0 to 0.81.0: generated cross-crate upward Changed hooks
+## 0.81.0 to 0.82.0: generated cross-crate upward Changed hooks
 
 Public generated entities can now be the target of `propagate_change = "up"`
 across Rust crate boundaries. Upgrade ORM and macros together. Generated
@@ -88,6 +73,24 @@ coordinates; `enforce_resolver_assurance` delegates to it for the current field.
 No subscriber policy is evaluated inside transaction target materialization. Raw observer events do not enter that
 trusted delivery channel. Existing overflow behavior is unchanged; this change
 does not implement coalescing, durable replay or continuity signals.
+Generated updates still propagate from the post-update row only. This release
+does not establish invalidation of both former and new parents after a relation
+moves; stale provenance is still suppressed rather than authorized by an old edge.
+
+## 0.80.0 to 0.81.0: runtime actor stamps
+
+Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:
+
+- **Rust:** add `auto_actor: None` to `RuntimeField` struct literals (or use `..base` update syntax), and an arm for `RuntimeSchemaDiagnosticCode::InvalidAutoActor` in exhaustive matches.
+- **Serialized IR:** a document that declares `auto_actor` cannot be read by graphql-orm older than 0.81.0. Upgrade every reader of a catalog before writing the member. Documents without it read, validate and fingerprint exactly as before.
+- **Hosts that build inputs from the IR:** treat `RuntimeField::is_client_writable()` (or `RuntimeFieldHandle::auto_actor()`) like `generated` unless your write authority permits actor assignment. Generated runtime GraphQL omits actor stamps from create and update inputs unless `RuntimeGraphqlMutationOptions::actor_inputs` is set.
+
+To adopt actor stamps:
+
+- declare `auto_actor: Some(RuntimeAutoActor::OnCreate)` on a nullable, non-primary-key `Uuid` or `String` field that is not generated, with `default: None` and no `auto_timestamp`;
+- plan and apply the owned migration, then rebuild the mutation environment. A new column is plain nullable: existing rows stay NULL (backfill them explicitly if needed). Switching the flag on an existing column plans no DDL;
+- in `RuntimeWriteAuthority::authorize_intent`, return `RuntimeWriteGrant::new(..)?.with_actor(actor)` with the acting principal as a `RuntimeValue` of the stamp's kind; creates write it into every stamp they do not supply. Add `.with_actor_assignment()` only for principals allowed to set or change stamps explicitly, and check the supplied value in the intent;
+- updates never restamp, and backup/restore keeps stored values.
 
 ## 0.78.0 to 0.80.0: canonical typed filter contracts
 

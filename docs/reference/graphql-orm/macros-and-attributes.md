@@ -577,6 +577,6 @@ and [repository example](repository-only-entities.md).
 ### Exact signed64 static filters
 
 `#[filterable(type = "int64")]` requires `i64` or `Option<i64>` and generates
-`Int64Filter`. See the [migration contract](../../../MIGRATION.md#0800-to-0810-exact-static-signed64-filters)
+`Int64Filter`. See the [migration contract](../../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters)
 for coercion, SDK mappings, null/empty-list semantics and finite list bounds.
 `number` continues to select the existing `IntFilter`.

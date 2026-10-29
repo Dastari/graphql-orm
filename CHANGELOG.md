@@ -16,6 +16,25 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.82.0**.
+
+- ORM/macros 0.82.0 add opt-in exact static signed64 filters (`int64`,
+  `Int64Filter`, `Signed64`) with canonical metadata, bounded lists and exact SQL
+  bindings/matching with SQL three-valued NULL composition and predecode list
+  admission. Existing 32-bit filters remain unchanged.
+- Generated GraphQL list (including composite keys), keyset and authorized-scan
+  reads preflight the read policies of all static predicate fields before SQL,
+  including recursive predicates whose protected fields are absent from the
+  response selection. Hosts must authorize predicate intent without a row.
+
+- ORM/macros 0.82.0 allow generated upward Changed propagation between public
+  entities in different Rust crates, retaining trusted provenance and subscriber
+  authorization. Enforce each source/hop's own Changed auth mode, scopes and
+  explicit assurance coordinate at current/final release. Repository-only hooks
+  remain private.
+
+## 0.81.0 (unreleased)
+
 Companion runtime/macros version: **0.81.0**.
 
 - Add host-supplied actor stamps for runtime fields, the analogue of Spring Data's `@CreatedBy`/`AuditorAware`: `RuntimeField::auto_actor: Option<RuntimeAutoActor>` with `OnCreate`. Valid only on nullable, non-primary-key `Uuid` or `String` fields that are not generated, have no default and do not declare `auto_timestamp` (`InvalidAutoActor` with a value-free `RuntimeAutoActorProblem` detail). See [actor stamps](docs/reference/graphql-orm/runtime-schema-ir.md#actor-stamps).
@@ -31,21 +50,6 @@ Companion runtime/macros version: **0.81.0**.
 - **Breaking (Rust):** `RuntimeSchemaDiagnosticCode` gains `InvalidAutoActor`; exhaustive matches need an arm. (`RuntimeSchemaDiagnosticDetail` and `RuntimeGraphqlMutationOptions` are `#[non_exhaustive]`; the new `AutoActor` variant and `actor_inputs` field are additive.)
 - **Breaking (behaviour, opt-in schemas only):** a runtime create or update that supplies an actor-stamped field is refused with `field_denied` unless the write grant permits assignment, and `RuntimeField::is_client_writable` is `false` for such fields. Schemas that declare no actor stamp are unaffected.
 - **Breaking (serialized IR):** readers older than 0.81.0 reject a schema document that declares `auto_actor` (`deny_unknown_fields`). Documents without it are unchanged and the format version stays 1.
-
-- ORM/macros 0.81.0 add opt-in exact static signed64 filters (`int64`,
-  `Int64Filter`, `Signed64`) with canonical metadata, bounded lists and exact SQL
-  bindings/matching with SQL three-valued NULL composition and predecode list
-  admission. Existing 32-bit filters remain unchanged.
-- Generated GraphQL list (including composite keys), keyset and authorized-scan
-  reads preflight the read policies of all static predicate fields before SQL,
-  including recursive predicates whose protected fields are absent from the
-  response selection. Hosts must authorize predicate intent without a row.
-
-- ORM/macros 0.81.0 allow generated upward Changed propagation between public
-  entities in different Rust crates, retaining trusted provenance and subscriber
-  authorization. Enforce each source/hop's own Changed auth mode, scopes and
-  explicit assurance coordinate at current/final release. Repository-only hooks
-  remain private.
 
 ## 0.80.0 (unreleased)
 

@@ -10,19 +10,19 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.81.0 adds host-supplied runtime actor stamps (`RuntimeField::auto_actor`), written
-from the write grant's actor (`RuntimeWriteGrant::with_actor`). See the
-[migration guide](../../MIGRATION.md#0800-to-0810-runtime-actor-stamps).
-
-Version 0.81.0 adds opt-in `int64` static filters with native `i64` operands,
+Version 0.82.0 adds opt-in `int64` static filters with native `i64` operands,
 `Signed64` wire coercion and exact typed metadata. Existing `number` filters
-remain 32-bit. See the [signed64 migration](../../MIGRATION.md#0800-to-0810-exact-static-signed64-filters).
+remain 32-bit. See the [signed64 migration](../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters).
 
-Version 0.81.0 allows generated upward Changed hooks to cross Rust crate
+Version 0.82.0 allows generated upward Changed hooks to cross Rust crate
 boundaries for public entities. Repository-only hooks remain private; current
 subscriber operation authority is checked independently at every source/hop,
 including after serialization. Transaction/provenance semantics are retained. See the
-[cross-crate migration](../../MIGRATION.md#0800-to-0810-generated-cross-crate-upward-changed-hooks).
+[cross-crate migration](../../MIGRATION.md#0810-to-0820-generated-cross-crate-upward-changed-hooks).
+
+Version 0.81.0 adds host-supplied runtime actor stamps (`RuntimeField::auto_actor`), written
+from the write grant's actor (`RuntimeWriteGrant::with_actor`). See the
+[migration guide](../../MIGRATION.md#0800-to-0810-runtime-actor-stamps).
 
 Version 0.80.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and
