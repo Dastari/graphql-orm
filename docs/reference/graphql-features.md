@@ -35,8 +35,9 @@ not change to accommodate a regression. No schema/data migration is needed.
 
 The [locked host fixture](../../crates/graphql-orm/tests/fixtures/graphql-features/Cargo.toml)
 is outside the root workspace and has no dev dependency that can mask feature
-selection. Minimal and additive hosts share one lock and canonical reviewed
-Auth 0.24 full revision. With `router-auth`, a host-owned
+selection. Minimal and additive hosts share one lock and published Auth
+`v0.24.0`, locked to reviewed commit
+`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. With `router-auth`, a host-owned
 `Arc<agql_auth::AccessTokenValidator>` and `Arc<dyn agql_auth::ScopeMatch>`
 compile through both public router constructors. Source assertions require
 one Auth identity across direct host, ORM, AI and router.

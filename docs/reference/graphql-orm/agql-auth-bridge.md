@@ -15,15 +15,15 @@ supersedes: []
 
 ## Accepted request and current authority
 
-Enable `auth-agql` and use the same reviewed `agql-auth` selector as the workspace:
-`git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0"`.
-This is reviewed merged Git source, not a published Auth 0.24 release claim.
-The host lockfile must select that exact revision. Matching only the commit is
+Enable `auth-agql` and use the same published `agql-auth` selector as the workspace:
+`git = "https://github.com/Dastari/agql-auth.git", tag = "v0.24.0", version = "0.24.0"`.
+The tag peels to `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`.
+The host lockfile must select that tag and full commit. Matching only the commit is
 not enough: Cargo treats a revision, tag and path as different sources, which
 can split principal types. Refresh the host lockfile and verify one Auth source
 across ORM, AI, router and host. Git release metadata retains the full locked
 revision; `tag` is present only for an actually selected published tag. See the
-[feature and Auth migration](../../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
+[published Auth migration](../../../MIGRATION.md#published-agql-auth-0240-selection).
 
 Authenticate the credential before constructing a bundle. Signature/secret,
 issuer, audience and transport proof validation belong to the trusted host

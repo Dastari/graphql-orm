@@ -30,7 +30,7 @@ changes.
 
 External Git dependency:
 
-- `agql-auth` requirement `^0.24.0`, source `git+https://github.com/Dastari/agql-auth.git?rev=1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
+- `agql-auth` requirement `^0.24.0`, source `git+https://github.com/Dastari/agql-auth.git?tag=v0.24.0`, consumed by `graphql-orm`, `graphql-orm-ai`, `graphql-orm-router`.
 
 <!-- END GENERATED WORKSPACE PACKAGES -->
 

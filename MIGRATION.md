@@ -10,6 +10,32 @@ supersedes: []
 
 # Migration Guide
 
+## Published agql-auth 0.24.0 selection
+
+The workspace selects published Auth `v0.24.0` instead of the full revision
+selector. Its annotated tag `f2bbce2f1ddc7f33deafa0370073b9a7e91be8d7` peels to
+the same reviewed commit `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`; Auth source
+bytes, version and behavior are unchanged. All direct hosts must select:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.24.0", version = "0.24.0" }
+```
+
+Cargo treats revision and tag selectors as different sources even at the same
+commit. Align the host, ORM, AI and router selectors, refresh their locks, and
+verify exactly one Auth source locked to the full commit above. No data/schema
+migration or new authorization grant is implied.
+
+The [official release](https://github.com/Dastari/agql-auth/releases/tag/v0.24.0)
+was published on 2026-10-28. Its `v0.24.0.json` records version `0.24.0`, the
+commit above and Auth Cargo.lock SHA-256
+`49af97991af195aeaaf9ea36c185a2981f509f877f23d83a69e8fadee10be13b`.
+The JSON SHA-256 is
+`0e803ce2ce4eaeba274e3bddc40a6415926538fdddbb0a67c11cf4505ffaed7c`, matching
+the release's `SHA256SUMS`. Retain the full locked revision and tag together in
+the eventual ORM release manifest. Auth publication does not publish this ORM
+candidate or authorize downstream adoption.
+
 ## 0.81.0 to 0.82.0: exact static signed64 filters
 
 Use `#[filterable(type = "int64")]` on `i64` or `Option<i64>` fields and
@@ -172,14 +198,15 @@ schema behavior remain available under their documented flags. See the
 All direct Auth consumers must also replace the old `v0.23.0` selector with:
 
 ```toml
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.24.0", version = "0.24.0" }
 ```
 
 Use this exact selector across ORM, AI, router and your host. Mixing a tag,
 revision or path source creates incompatible Auth type universes even when
 names match. Refresh all consumer lockfiles and inspect `cargo tree -d` and
-`cargo metadata --locked` for exactly one Auth source. This revision is
-reviewed merged source, not a published 0.24 release claim. Old clients passing
+`cargo metadata --locked` for exactly one Auth source. The tag peels to reviewed
+commit `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`; see the
+[published selection](#published-agql-auth-0240-selection). Old clients passing
 Auth 0.23 types to ORM/AI/router need to rebuild against this identity.
 
 No data migration is required. The explicit GraphQL feature change itself

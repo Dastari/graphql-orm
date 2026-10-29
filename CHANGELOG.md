@@ -18,6 +18,11 @@ for historical context.
 
 Companion runtime/macros version: **0.82.0**.
 
+- Select published Auth `v0.24.0` instead of its full revision selector. The tag
+  peels to the same `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd` source; align
+  direct host selectors to retain one Auth type universe. See the
+  [selection migration](MIGRATION.md#published-agql-auth-0240-selection).
+
 - ORM/macros 0.82.0 add opt-in exact static signed64 filters (`int64`,
   `Int64Filter`, `Signed64`) with canonical metadata, bounded lists and exact SQL
   bindings/matching with SQL three-valued NULL composition and predecode list
