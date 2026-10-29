@@ -17,6 +17,7 @@ use tokio::time::{Duration, timeout};
 struct TransitionParent {
     #[primary_key]
     #[sortable]
+    #[filterable(type = "uuid")]
     #[graphql_orm(auto_generated = false)]
     security_tenant_id: Uuid,
     #[primary_key]
@@ -386,6 +387,12 @@ impl RowPolicy for CurrentOnly {
                     ..Default::default()
                 };
                 Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<SqliteBackend, _>(&filter)?))
+            } else if self.1 && entity == "TransitionParent" {
+                let filter = TransitionParentWhereInput {
+                    security_tenant_id: Some(UuidFilter { eq: Some(uid(1)), ..Default::default() }),
+                    ..Default::default()
+                };
+                Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<SqliteBackend, _>(&filter)?))
             } else { Ok(ReadVisibility::CallbackOnly) }
         })
     }
@@ -495,4 +502,21 @@ async fn missing_former_target_does_not_veto_readable_current_target() {
     expect_parents(&mut stream, &[(1,20,200)]).await;
     touch(&db).await;
     expect_parents(&mut stream, &[(1,20,200)]).await;
+}
+
+#[tokio::test]
+async fn complete_sql_visibility_does_not_replace_current_association_callbacks() {
+    for denied in [SOURCE_ROW, NEW_PARENT_ROW] {
+        let (mut db, authority) = fixture().await;
+        db.set_row_policy(CurrentOnly(authority.clone(), true));
+        let schema = schema(db.clone(), authority.clone());
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        move_to(&db, 20, Some(200)).await;
+        authority.0.store(denied, Ordering::SeqCst);
+        expect_parents(&mut stream, &[]).await;
+        authority.0.store(0, Ordering::SeqCst);
+        touch(&db).await;
+        expect_parents(&mut stream, &[(1,20,200)]).await;
+    }
 }
