@@ -610,6 +610,10 @@ where
         )
         .await?
         .ok_or_else(denied)?;
+        // Propagated metadata requires both current SQL authority and current
+        // callbacks, even when a Complete policy replaces callbacks for queries.
+        if !db.can_read_row(Some(ctx), S::entity_name(), S::metadata().read_policy,
+            EntityAccessSurface::GraphqlSubscription, &row).await? { return Err(denied()); }
         authorize_subscription_keys::<S, B>(db, ctx, &row).await?;
         for field in source_fields {
             check_field::<S, B>(db, ctx, &row, field).await?;
@@ -618,6 +622,8 @@ where
         let target = authorize_subscription_row::<T, B>(db, ctx, target_keys, None)
             .await?
             .ok_or_else(denied)?;
+        if !db.can_read_row(Some(ctx), T::entity_name(), T::metadata().read_policy,
+            EntityAccessSurface::GraphqlSubscription, &target).await? { return Err(denied()); }
         authorize_subscription_keys::<T, B>(db, ctx, &target).await?;
         for field in target_fields {
             check_field::<T, B>(db, ctx, &target, field).await?;

@@ -33,8 +33,10 @@ Current source must still exist and match the captured postimage tuple. The
 former target must still exist under its complete key and preimage tuple.
 Current SQL visibility, row callbacks, key/mapped-field/relation checks and
 per-hop operation authentication/scopes/assurance remain independent of the
-historical hook. Historical checks require row callbacks even with complete SQL
-visibility; the host's explicit historical contract must handle RLS, rather
+historical hook. Both current-edge and historical propagated provenance require
+current source/target row callbacks even with complete SQL visibility. This is
+stricter than ordinary query visibility: a SQL-only provider whose callback
+refuses the association suppresses it. The host's explicit historical contract must handle RLS, rather
 than assuming old snapshots satisfy current SQL. The generated stream repeats
 its full release proof after awaited checks and payload serialization.
 
