@@ -102,6 +102,8 @@ type RelationSourceCheck<B> = for<'a, 'ctx> fn(
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SubscriptionEventSource<B: OrmBackend = DefaultBackend> {
+    // Monomorphized by the source expansion; no client data or root-scope inheritance.
+    operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>,
     entity: &'static str,
     id: String,
     keys: Vec<SqlValue>,
@@ -118,7 +120,8 @@ impl<B: OrmBackend> std::fmt::Debug for SubscriptionEventSource<B> {
 }
 impl<B: OrmBackend> SubscriptionEventSource<B> {
     /// Constructed by generated propagation code from a complete typed key.
-    pub fn new<T>(keys: Vec<SqlValue>, relation: &'static str, source_field: &'static str) -> Self
+    pub fn new<T>(keys: Vec<SqlValue>, relation: &'static str, source_field: &'static str,
+        operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>) -> Self
     where
         T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
@@ -132,6 +135,7 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
                 .unwrap_or_default()
         };
         Self {
+            operation_authority,
             entity: T::entity_name(),
             id,
             keys,
@@ -149,12 +153,13 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
         keys: Vec<SqlValue>,
         relation: &'static str,
         fields: Vec<(&'static str, &'static str)>,
+        operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>,
     ) -> Self
     where
         S: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
         T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
-        let mut source = Self::new::<S>(keys, relation, "");
+        let mut source = Self::new::<S>(keys, relation, "", operation_authority);
         source.relation_fields = fields;
         source.relation_check = Some(check_relation_source::<S, T, B>);
         source
@@ -232,6 +237,7 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
                 .sources
                 .get(index + 1)
                 .map_or(self.keys.as_slice(), |next| next.keys.as_slice());
+            (source.operation_authority)(ctx)?;
             if let Some(check) = source.relation_check {
                 check(
                     db,
@@ -254,6 +260,9 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
                 .await?;
             }
         }
+        // Every typed row/relation check can await. Recheck all operation
+        // requirements after the final await, not just the last source.
+        for source in &self.sources { (source.operation_authority)(ctx)?; }
         Ok(())
     }
 }
