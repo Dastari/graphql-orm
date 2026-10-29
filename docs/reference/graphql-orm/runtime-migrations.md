@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-25
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -382,6 +382,21 @@ is `None`.
   keeps them for good; an `OnCreateAndUpdate` column until the row is next updated).
   Backfill them explicitly if readers expect a value. Turning the flag
   off removes the effective default unless `default: CurrentTimestamp` stays declared.
+
+### Actor stamps (0.81.0)
+
+An [actor stamp](runtime-schema-ir.md#actor-stamps) column is the plain nullable `uuid` or
+`string` column of the same field without the flag: same type, nullable, no default. The
+flag never changes the physical target.
+
+- **Adding the column to a table with rows** is an ordinary nullable `AddColumn` (`ALTER
+  TABLE … ADD COLUMN` on both backends). Existing rows keep SQL NULL; nothing is backfilled,
+  because the ORM cannot know who created them. Fill them explicitly if readers expect a
+  value. Later runtime creates write the grant's actor.
+- **Switching the flag on or off on an existing column** is a catalog-only identity change:
+  the plan is empty and existing values are kept. Only the fingerprint and the write rules
+  change.
+- **Backup and restore** copy stored column values; a restore never restamps them.
 
 ## Released repository capability compatibility
 

@@ -240,6 +240,32 @@ impl RuntimeAutoTimestamp {
     }
 }
 
+/// Host-supplied actor stamp of a nullable `Uuid` or `String` runtime field,
+/// the analogue of a "created by" auditing column.
+///
+/// The host supplies the acting principal through the mutation's write grant
+/// ([`RuntimeWriteGrant::with_actor`](super::RuntimeWriteGrant::with_actor));
+/// requests may supply the field only when the grant permits actor assignment
+/// ([`RuntimeWriteGrant::with_actor_assignment`](super::RuntimeWriteGrant::with_actor_assignment)).
+/// See the runtime schema IR reference for the exact semantics.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAutoActor {
+    /// Written by every runtime insert from the grant's actor and never changed
+    /// afterwards unless an assignment-permitted request supplies it.
+    OnCreate,
+}
+
+impl RuntimeAutoActor {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OnCreate => "on_create",
+        }
+    }
+}
+
 /// Sort direction for deterministic default ordering.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
@@ -304,13 +330,20 @@ pub struct RuntimeField {
     /// absent, keeping earlier documents and identities byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_timestamp: Option<RuntimeAutoTimestamp>,
+    /// Optional host-supplied actor stamp; valid only on nullable, non-key
+    /// `Uuid` or `String` fields that are not generated, have no default and do
+    /// not declare `auto_timestamp`. Omitted when absent, keeping earlier
+    /// documents and identities byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_actor: Option<RuntimeAutoActor>,
 }
 
 impl RuntimeField {
-    /// Whether clients may supply this field's value: neither generated nor a
-    /// server-managed timestamp.
+    /// Whether clients may supply this field's value: neither generated, a
+    /// server-managed timestamp nor a host-supplied actor stamp. An actor stamp
+    /// is writable only under a grant that permits actor assignment.
     pub fn is_client_writable(&self) -> bool {
-        !self.generated && self.auto_timestamp.is_none()
+        !self.generated && self.auto_timestamp.is_none() && self.auto_actor.is_none()
     }
 
     /// The default the database applies: the declared default, or
@@ -549,6 +582,10 @@ pub enum RuntimeSchemaDiagnosticCode {
     /// An automatic timestamp is declared on a field that is not a `DateTime`,
     /// is generated, has a literal default, or is a primary or relation key.
     InvalidAutoTimestamp,
+    /// An actor stamp is declared on a field that is not a `Uuid` or `String`,
+    /// is not nullable, is generated, has a default, is a primary-key member, or
+    /// also declares an automatic timestamp.
+    InvalidAutoActor,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -585,6 +622,7 @@ impl RuntimeSchemaDiagnosticCode {
             Self::InvalidLabelField => "invalid_label_field",
             Self::InvalidJoinTable => "invalid_join_table",
             Self::InvalidAutoTimestamp => "invalid_auto_timestamp",
+            Self::InvalidAutoActor => "invalid_auto_actor",
         }
     }
 }
@@ -602,6 +640,42 @@ pub enum RuntimeSchemaDiagnosticDetail {
     Format(RuntimeFormatProblem),
     /// Why an automatic timestamp was rejected.
     AutoTimestamp(RuntimeAutoTimestampProblem),
+    /// Why an actor stamp was rejected.
+    AutoActor(RuntimeAutoActorProblem),
+}
+
+/// Value-free reason an actor stamp declaration is invalid.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RuntimeAutoActorProblem {
+    /// The field's value kind is neither `Uuid` nor `String`.
+    UnsupportedKind,
+    /// The field is not nullable.
+    NotNullable,
+    /// The field is also `generated`.
+    Generated,
+    /// The field declares a default.
+    HasDefault,
+    /// The field is a primary-key member.
+    KeyField,
+    /// The field also declares an automatic timestamp.
+    AutoTimestamp,
+}
+
+impl RuntimeAutoActorProblem {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnsupportedKind => "unsupported_kind",
+            Self::NotNullable => "not_nullable",
+            Self::Generated => "generated",
+            Self::HasDefault => "has_default",
+            Self::KeyField => "key_field",
+            Self::AutoTimestamp => "auto_timestamp",
+        }
+    }
 }
 
 /// Value-free reason an automatic timestamp declaration is invalid.
@@ -1223,6 +1297,39 @@ impl RuntimeSchema {
                                 subject,
                             )
                             .with_detail(RuntimeSchemaDiagnosticDetail::AutoTimestamp(problem)),
+                        );
+                    }
+                }
+                if field.auto_actor.is_some() {
+                    // One problem per field, the most specific first: primary-key
+                    // members are never nullable, so the key check precedes nullability.
+                    let problem = if field.auto_timestamp.is_some() {
+                        Some(RuntimeAutoActorProblem::AutoTimestamp)
+                    } else if !matches!(
+                        field.value_kind,
+                        RuntimeValueKind::Uuid | RuntimeValueKind::String
+                    ) {
+                        Some(RuntimeAutoActorProblem::UnsupportedKind)
+                    } else if collection.primary_key.contains(&field.id) {
+                        Some(RuntimeAutoActorProblem::KeyField)
+                    } else if !field.nullable {
+                        Some(RuntimeAutoActorProblem::NotNullable)
+                    } else if field.generated {
+                        Some(RuntimeAutoActorProblem::Generated)
+                    } else if field.default.is_some() {
+                        Some(RuntimeAutoActorProblem::HasDefault)
+                    } else {
+                        None
+                    };
+                    if let Some(problem) = problem {
+                        diagnostics.push(
+                            RuntimeSchemaDiagnostic::scoped(
+                                RuntimeSchemaDiagnosticCode::InvalidAutoActor,
+                                format!("actor stamp is invalid ({})", problem.as_str()),
+                                cid,
+                                subject,
+                            )
+                            .with_detail(RuntimeSchemaDiagnosticDetail::AutoActor(problem)),
                         );
                     }
                 }
@@ -2002,6 +2109,10 @@ impl ValidatedRuntimeSchema {
                     out.push_str("|auto_timestamp=");
                     out.push_str(auto.as_str());
                 }
+                if let Some(actor) = field.auto_actor {
+                    out.push_str("|auto_actor=");
+                    out.push_str(actor.as_str());
+                }
                 // Semantic descriptors join the ID-bearing identity only when present, so
                 // schemas without them keep their exact earlier bytes. The structural
                 // fingerprint stays structural-only.
@@ -2404,6 +2515,7 @@ impl RuntimeSchema {
                     default,
                     format: None,
                     auto_timestamp: None,
+                    auto_actor: None,
                 });
             }
 

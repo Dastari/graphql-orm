@@ -3,12 +3,15 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-19
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.81.0 is the companion of the runtime's actor stamps; the macros themselves
+are unchanged.
 
 Version 0.80.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and

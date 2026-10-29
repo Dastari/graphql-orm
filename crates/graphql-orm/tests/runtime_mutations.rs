@@ -64,6 +64,7 @@ fn definition() -> RuntimeSchema {
             default,
             format: None,
             auto_timestamp: None,
+            auto_actor: None,
         });
     }
     RuntimeSchema {
@@ -899,6 +900,7 @@ async fn generated_uuid_json_null_bytes_and_exact_values_use_existing_runtime_ty
             default: None,
             format: None,
             auto_timestamp: None,
+            auto_actor: None,
         });
     }
     let f = Fixture::with_definition(schema).await;
@@ -1029,6 +1031,7 @@ fn self_referencing(action: DeletePolicy) -> RuntimeSchema {
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     });
     schema.collections[0].relations.push(RuntimeRelation {
         description: None,

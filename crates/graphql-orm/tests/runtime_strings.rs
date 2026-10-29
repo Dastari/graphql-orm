@@ -54,6 +54,7 @@ fn field(name: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 fn schema() -> ValidatedRuntimeSchema {

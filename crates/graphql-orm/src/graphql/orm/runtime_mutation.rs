@@ -293,9 +293,15 @@ redacted_debug!(
     RuntimeResultCheck<'_>
 );
 /// Explicit approval of the entire intent, internal policy projection and row restriction.
+///
+/// It also carries the host's acting principal for
+/// [actor stamps](super::RuntimeAutoActor) ([`Self::with_actor`]) and whether the
+/// request itself may assign them ([`Self::with_actor_assignment`]).
 pub struct RuntimeWriteGrant {
     projection: RuntimeProjection,
     predicate: Option<RuntimePredicate>,
+    actor: Option<RuntimeValue>,
+    actor_assignment: bool,
 }
 impl RuntimeWriteGrant {
     #[cfg(feature = "runtime-graphql")]
@@ -314,7 +320,12 @@ impl RuntimeWriteGrant {
             ),
             (a, b) => a.or(b),
         };
-        Self::new(self.projection, predicate)
+        let restricted = Self::new(self.projection, predicate)?;
+        Ok(Self {
+            actor: self.actor,
+            actor_assignment: self.actor_assignment,
+            ..restricted
+        })
     }
 
     /// Reject cross-schema/collection predicates; this does not narrow input approval.
@@ -333,7 +344,32 @@ impl RuntimeWriteGrant {
         Ok(Self {
             projection,
             predicate,
+            actor: None,
+            actor_assignment: false,
         })
+    }
+
+    /// The acting principal a create writes into every actor-stamped field
+    /// ([`RuntimeField::auto_actor`](super::RuntimeField::auto_actor)) the request
+    /// does not supply. Without it those fields are written NULL.
+    ///
+    /// The value is checked against each actor-stamped field's value kind when the
+    /// write is prepared, before any SQL write; a mismatch refuses the write with
+    /// `invalid_input`. Updates never write the actor.
+    #[must_use]
+    pub fn with_actor(mut self, actor: RuntimeValue) -> Self {
+        self.actor = Some(actor);
+        self
+    }
+
+    /// Permit the request itself to supply actor-stamped fields on create and
+    /// update. Without it, a request that supplies one is refused with
+    /// `field_denied` before any SQL write. A supplied value takes precedence
+    /// over [`Self::with_actor`].
+    #[must_use]
+    pub fn with_actor_assignment(mut self) -> Self {
+        self.actor_assignment = true;
+        self
     }
 }
 /// Explicit final-row approval and exact authorized return projection.
@@ -670,7 +706,9 @@ impl ValidatedRuntimeSchema {
                 .iter()
                 .find(|f| &f.id == field.id())
                 .ok_or_else(|| err(RuntimeMutationErrorCode::InvalidInput))?;
-            if !definition.is_client_writable()
+            // Actor stamps are decided once the write grant is known
+            // (`RuntimeWriteGrant::with_actor_assignment`), before any SQL write.
+            if (!definition.is_client_writable() && definition.auto_actor.is_none())
                 || (action != RuntimeMutationAction::Create && c.primary_key.contains(field.id()))
             {
                 return Err(err(RuntimeMutationErrorCode::FieldDenied));
@@ -722,6 +760,23 @@ impl ValidatedRuntimeSchema {
     }
 }
 
+/// Actor-stamped fields of `c` that a create request does not supply.
+fn stamped_actor_fields(
+    request: &RuntimeMutationRequest,
+    c: &RuntimeCollection,
+) -> Result<Vec<RuntimeFieldHandle>, RuntimeMutationError> {
+    c.fields
+        .iter()
+        .filter(|f| f.auto_actor.is_some())
+        .filter(|f| {
+            !request
+                .fields
+                .iter()
+                .any(|(supplied, _)| supplied.id() == &f.id)
+        })
+        .map(|f| Ok(request.schema.resolve_field(&request.collection, &f.id)?))
+        .collect()
+}
 fn bind_value(
     backend: DatabaseBackend,
     field: &RuntimeFieldHandle,
@@ -942,6 +997,26 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         }
         let intent = RuntimeWriteIntent { request };
         let grant = authority.authorize_intent(intent, self).await?;
+        // Actor stamps are accepted at request construction only so that this
+        // decision can use the grant. The ORM's own dependent SetNull updates may
+        // clear an actor stamp that is also the relation key; that is the
+        // referential action, not an assigned actor.
+        if request.cause.is_none()
+            && !grant.actor_assignment
+            && request.fields.iter().any(|(f, _)| f.auto_actor().is_some())
+        {
+            return Err(err(E::FieldDenied));
+        }
+        let stamped_actors = if request.action == RuntimeMutationAction::Create {
+            stamped_actor_fields(request, c)?
+        } else {
+            Vec::new()
+        };
+        if let Some(actor) = &grant.actor {
+            for field in &stamped_actors {
+                check_value(field, actor, request.limits)?;
+            }
+        }
         // Validate every host-supplied handle before selecting any protected values.
         request
             .schema
@@ -956,6 +1031,13 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .count();
         if request.action == RuntimeMutationAction::Create {
             binds = binds.saturating_add(c.fields.iter().filter(|field| field.generated).count());
+            if grant
+                .actor
+                .as_ref()
+                .is_some_and(|actor| !matches!(actor, RuntimeValue::Null))
+            {
+                binds = binds.saturating_add(stamped_actors.len());
+            }
         } else {
             binds = binds.saturating_add(c.primary_key.len());
             for predicate in [grant.predicate.as_ref(), request.expected.as_ref()]
@@ -986,7 +1068,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         // Automatic timestamps are always part of the staged image, so hooks see
         // the stamped values even when the host's grant does not project them.
         // Client output remains limited to the approved return projection.
-        for f in c.fields.iter().filter(|f| f.auto_timestamp.is_some()) {
+        // Actor stamps likewise, so hooks see the stamped actor.
+        for f in c
+            .fields
+            .iter()
+            .filter(|f| f.auto_timestamp.is_some() || f.auto_actor.is_some())
+        {
             fields.push(request.schema.resolve_field(&request.collection, &f.id)?);
         }
         fields.extend(request.fields.iter().map(|(f, _)| f.clone()));
@@ -1101,6 +1188,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                             .resolve_field(&request.collection, &field.id)?,
                         RuntimeValue::Uuid(uuid::Uuid::new_v4()),
                     ));
+                }
+                // Actor stamps the request does not supply get the grant's actor, or
+                // NULL, explicitly; their columns have no default.
+                let actor = grant.actor.clone().unwrap_or(RuntimeValue::Null);
+                for field in stamped_actor_fields(request, c)? {
+                    entries.push((field, actor.clone()));
                 }
                 // Automatic timestamps are written explicitly from the database clock,
                 // so the insert never depends on the column default.

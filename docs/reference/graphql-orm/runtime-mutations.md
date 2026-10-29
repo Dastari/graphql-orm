@@ -3,7 +3,7 @@ title: Schema-bound transactional runtime mutations
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-25
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -85,6 +85,10 @@ Implement every `RuntimeWriteAuthority<B>` method; no default allow exists:
   selects the minimum internal policy fields. The engine unions keys, changed/CAS
   fields and requested output privately. The row predicate limits preimages and
   actual create/update results. A result outside it denies and rolls back.
+  `with_actor(value)` adds the acting principal that creates write into
+  [actor stamps](runtime-schema-ir.md#actor-stamps) the request does not supply, and
+  `with_actor_assignment()` permits the request itself to supply actor stamps on create
+  and update; without it a supplied actor stamp is `field_denied` before any write.
 - `authorize_preimage`: check the authoritative visible row before update/delete.
   Missing/invisible rows return `not_found`; conflicts disclose no current value
   and are distinguished only after preimage authorization.
@@ -111,7 +115,11 @@ when nullable, otherwise `missing_required`. [Automatic timestamps](runtime-sche
 are never input (`field_denied`, also for explicit `Null`). Every insert writes them,
 and every update writes `OnCreateAndUpdate` fields, from the database clock in the same
 statement. That includes the dependent `SetNull` updates below. Standalone link mutations
-write no row field and leave them unchanged. Omitted patches preserve the stored
+write no row field and leave them unchanged. [Actor stamps](runtime-schema-ir.md#actor-stamps)
+are input only under a grant built with `with_actor_assignment()` (otherwise
+`field_denied` after `authorize_intent`, before any write, also for explicit `Null`).
+A create writes the grant's actor, or SQL NULL, into every actor stamp it does not
+supply; updates never write the actor. Omitted patches preserve the stored
 value. Explicit `RuntimeValue::Null` writes SQL NULL and never requests a default.
 `RuntimeValue::Json(JSON null)` remains distinct. Integers, bytes, UUIDs and canonical
 runtime DateTime values retain existing storage semantics; no epoch-unit conversion
@@ -291,7 +299,9 @@ transaction, after the requested row's intent and preimage checks, it:
 
 A row nulled through several relations gets one `SetNull` update per relation. Each
 `SetNull` update refreshes the row's `OnCreateAndUpdate`
-[automatic timestamps](runtime-schema-ir.md#automatic-timestamps), because the row changed. All
+[automatic timestamps](runtime-schema-ir.md#automatic-timestamps), because the row changed. It
+leaves [actor stamps](runtime-schema-ir.md#actor-stamps) unchanged unless the stamp is one of
+the relation's key fields it clears. All
 preimages are captured before any write, so the preimage of a later update still shows
 the key fields an earlier update of the same row cleared.
 

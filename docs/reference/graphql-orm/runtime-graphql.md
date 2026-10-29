@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-25
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -304,9 +304,17 @@ so when a collection has no client-writable field `create<Object>` takes no `inp
 argument (it inserts defaults, generated values and automatic timestamps), and when it
 has no client-writable non-key field `update<Object>` and `Update<Object>Input` are
 omitted. Before 0.75.0 such a module failed to compile with `unsupported_capability`.
-Link roots and deletes are unaffected. Generated fields and
-[automatic timestamps](runtime-schema-ir.md#automatic-timestamps) are excluded from both
-input types, keys are required on create and absent from update. Defaults stay omitted in GraphQL
+Link roots and deletes are unaffected. Generated fields,
+[automatic timestamps](runtime-schema-ir.md#automatic-timestamps) and
+[actor stamps](runtime-schema-ir.md#actor-stamps) are excluded from both
+input types, keys are required on create and absent from update. With
+`RuntimeGraphqlMutationOptions::actor_inputs` (0.81.0, default `false`), actor stamps are
+optional inputs of both `Create<Object>Input` and `Update<Object>Input`, and count as
+writable for the input-less rules above. A supplied value still fails with `field_denied`
+unless the host's write grant permits actor assignment
+(`RuntimeWriteGrant::with_actor_assignment`); the grant's actor
+(`RuntimeWriteGrant::with_actor`) and its assignment permission survive the GraphQL
+visibility restriction of the grant. Defaults stay omitted in GraphQL
 SDL so omission and explicit null remain distinct. Payloads may select the record's
 relations, including nested selections under them: a to-one relation as an object, and
 a to-many or many-to-many (join) relation as its `…Connection` page with `first`/`last`,

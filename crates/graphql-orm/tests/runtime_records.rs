@@ -50,6 +50,7 @@ fn field(id: &str, column: &str, kind: RuntimeValueKind, nullable: bool) -> Runt
         default: None,
         format: None,
         auto_timestamp: None,
+        auto_actor: None,
     }
 }
 

@@ -1103,6 +1103,7 @@ mod checked_compatibility_tests {
                     default: None,
                     format: None,
                     auto_timestamp: None,
+                    auto_actor: None,
                 })
                 .collect(),
                 relations: vec![],

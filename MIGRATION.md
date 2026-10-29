@@ -3,12 +3,27 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-22
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.80.0 to 0.81.0: runtime actor stamps
+
+Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:
+
+- **Rust:** add `auto_actor: None` to `RuntimeField` struct literals (or use `..base` update syntax), and an arm for `RuntimeSchemaDiagnosticCode::InvalidAutoActor` in exhaustive matches.
+- **Serialized IR:** a document that declares `auto_actor` cannot be read by graphql-orm older than 0.81.0. Upgrade every reader of a catalog before writing the member. Documents without it read, validate and fingerprint exactly as before.
+- **Hosts that build inputs from the IR:** treat `RuntimeField::is_client_writable()` (or `RuntimeFieldHandle::auto_actor()`) like `generated` unless your write authority permits actor assignment. Generated runtime GraphQL omits actor stamps from create and update inputs unless `RuntimeGraphqlMutationOptions::actor_inputs` is set.
+
+To adopt actor stamps:
+
+- declare `auto_actor: Some(RuntimeAutoActor::OnCreate)` on a nullable, non-primary-key `Uuid` or `String` field that is not generated, with `default: None` and no `auto_timestamp`;
+- plan and apply the owned migration, then rebuild the mutation environment. A new column is plain nullable: existing rows stay NULL (backfill them explicitly if needed). Switching the flag on an existing column plans no DDL;
+- in `RuntimeWriteAuthority::authorize_intent`, return `RuntimeWriteGrant::new(..)?.with_actor(actor)` with the acting principal as a `RuntimeValue` of the stamp's kind; creates write it into every stamp they do not supply. Add `.with_actor_assignment()` only for principals allowed to set or change stamps explicitly, and check the supplied value in the intent;
+- updates never restamp, and backup/restore keeps stored values.
 
 ## 0.78.0 to 0.80.0: canonical typed filter contracts
 

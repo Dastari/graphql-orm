@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-25
+last_reviewed: 2026-10-29
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -28,6 +28,8 @@ and `IndexId`.
   [semantic field formats](#semantic-field-formats).
 - `RuntimeField::auto_timestamp`: an optional server-managed creation or modification
   timestamp. See [automatic timestamps](#automatic-timestamps).
+- `RuntimeField::auto_actor`: an optional host-supplied actor stamp, like a "created by"
+  auditing column. See [actor stamps](#actor-stamps).
 - `description`, `classification` and `export` on collections, fields and relations. See
   [descriptions, classification and export](#descriptions-classification-and-export).
 - `RuntimeCollection::label_fields`: ordered fields forming one human-readable record label.
@@ -271,6 +273,66 @@ part of both the ID-bearing and the structural forms; `format_fingerprint()` is
 unaffected. Readers older than 0.75.0 reject documents that declare it
 (`deny_unknown_fields`); the format version stays 1. Static conversion leaves it absent:
 derived `created_at`/`updated_at` behaviour is unchanged.
+
+## Actor stamps
+
+`RuntimeField::auto_actor: Option<RuntimeAutoActor>` (only `OnCreate`) makes the host's
+acting principal the writer of a nullable `uuid` or `string` field, like Spring Data's
+`@CreatedBy` with an `AuditorAware`, or Rails/Django audit columns filled from the current
+user. The ORM has no notion of users: the host's `RuntimeWriteAuthority` supplies the actor
+in the write grant it returns from `authorize_intent`. Field names are the host's choice.
+
+| Write | Request does not supply the field | Request supplies the field |
+| --- | --- | --- |
+| Create | the grant's actor (`RuntimeWriteGrant::with_actor`), else SQL NULL | the supplied value, if the grant permits assignment; otherwise `field_denied` |
+| Update | never changed | the supplied value, if the grant permits assignment; otherwise `field_denied` |
+
+- **Actor.** `RuntimeWriteGrant::with_actor(value)` sets the value a create writes into
+  every actor-stamped field the request does not supply, in the same `INSERT`. It is
+  checked against each such field's value kind when the write is prepared, after
+  `authorize_intent` and before any SQL write; a mismatch is `invalid_input`. Without it
+  those fields are written SQL NULL. `RuntimeValue::Null` is a valid actor. Updates never
+  write the actor, so an ordinary update by another principal keeps the stored value.
+- **Assignment.** By default the field is not client input. Request construction
+  (`runtime_create_request`, `runtime_update_request`) still accepts it, value-checked like
+  any input, so that the decision can use the grant. After `authorize_intent`, a request
+  that supplies it, explicit `Null` included, fails with `field_denied` before the preimage
+  read or any SQL write unless the grant is built with
+  `RuntimeWriteGrant::with_actor_assignment()`. A supplied value takes precedence over the
+  grant's actor. The intent (`RuntimeWriteIntent::fields`) shows the supplied value, so the
+  authority can check it. `RuntimeField::is_client_writable` is `false` and
+  `RuntimeFieldHandle::auto_actor` exposes the flag to hosts.
+- **ORM-performed writes.** Link mutations write no row field. The dependent `SetNull`
+  updates of an opted-in delete write only the relation's key fields, so they leave actor
+  stamps unchanged, except a stamp that is itself one of those key fields: the referential
+  action clears it without assignment permission.
+- **Staged images.** Actor-stamped fields are always part of the staged and preimage
+  projection, independent of the grant's projection, so `authorize_result` and
+  `before_commit` hooks see the stamped value. Client output stays limited to the
+  approved return projection.
+- **GraphQL.** Runtime GraphQL omits the field from `Create<T>Input` and `Update<T>Input`
+  unless `RuntimeGraphqlMutationOptions::actor_inputs` is set; then it is an optional input
+  of both, still subject to the grant. See [runtime GraphQL](runtime-graphql.md).
+- **Physical shape.** A plain nullable column with no default; adding one leaves existing
+  rows NULL and switching the flag has no physical effect. See
+  [runtime migrations](runtime-migrations.md#actor-stamps-0810). Backup and restore copy the
+  stored values and never restamp them.
+- **Validation.** `InvalidAutoActor` with the value-free detail
+  `RuntimeSchemaDiagnosticDetail::AutoActor(RuntimeAutoActorProblem)` rejects, reporting
+  the first that applies: a field that also declares `auto_timestamp` (`auto_timestamp`), a
+  kind other than `uuid` or `string` (`unsupported_kind`), a primary-key member
+  (`key_field`), a non-nullable field (`not_nullable`), a `generated` field (`generated`),
+  and any default (`has_default`). A relation source key may be an actor stamp; a stored
+  actor must then satisfy the foreign key.
+
+Identity: the member is omitted from serialization when absent, and the field's canonical
+line gains `|auto_actor=on_create` after any `auto_timestamp` only when present. Schemas
+without it keep their exact serialized documents, `canonical_bytes()`, `fingerprint()` and
+`structural_fingerprint()` (pinned by `tests/runtime_identity_goldens.rs`). It describes
+write semantics, so it is part of both the ID-bearing and the structural forms;
+`format_fingerprint()` is unaffected. Readers older than 0.81.0 reject documents that
+declare it (`deny_unknown_fields`); the format version stays 1. Static conversion leaves
+it absent.
 
 ## Many-to-many relations
 
