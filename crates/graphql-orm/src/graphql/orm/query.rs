@@ -810,7 +810,13 @@ pub enum GraphqlAggregateResultKind {
 }
 
 /// One typed entry in a generated aggregate result.
+///
+/// Every `graphql-orm` subgraph with an aggregate entity exports this same
+/// object. Federation v2 composition rejects two subgraphs that define the same
+/// non-entity object field unless the type is `@shareable`. The type carries no
+/// owned data, so, as with `PageInfo`, the directive describes it accurately.
 #[derive(Clone, Debug, PartialEq, async_graphql::SimpleObject)]
+#[graphql(shareable)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
 #[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(
@@ -831,7 +837,11 @@ pub struct GraphqlAggregateResultValue {
 }
 
 /// One generated aggregate result group.
+///
+/// Shared by every aggregate-enabled subgraph and therefore `@shareable`, like
+/// [`GraphqlAggregateResultValue`].
 #[derive(Clone, Debug, PartialEq, async_graphql::SimpleObject)]
+#[graphql(shareable)]
 #[cfg_attr(feature = "field-case-pascal", graphql(rename_fields = "PascalCase"))]
 #[cfg_attr(feature = "field-case-snake", graphql(rename_fields = "snake_case"))]
 #[cfg_attr(

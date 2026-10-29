@@ -161,8 +161,9 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
     let zones = zones_subgraph::start().await;
     let readings = readings_subgraph::start().await;
 
-    // (a) Composition proof. Both subgraphs export `PageInfo`; without
-    // `@shareable` on it the composed graph is rejected here.
+    // (a) Composition proof. Both subgraphs export `PageInfo` and, because each
+    // opts one entity into `aggregate`, the shared aggregate result objects;
+    // without `@shareable` on them the composed graph is rejected here.
     let router = match start_router(zones, readings) {
         Ok(router) => router,
         Err(error) => panic!("the composed graph must prepare: {error}"),

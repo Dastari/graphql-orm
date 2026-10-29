@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.81.2**.
+
+- Declare the shared aggregate result objects `GraphqlAggregateResultRow` and `GraphqlAggregateResultValue` `@shareable` in exported federation SDL, as `PageInfo` already is. Two subgraphs that each opt an entity into `aggregate` export identical copies of both objects, and Federation v2 composition rejected the supergraph. The objects carry no owned data. The identical aggregate enums already composed. Pinned by `tests/federation_shareable_aggregate_results.rs`; the end-to-end federation fixture now opts both subgraphs into `aggregate`. SDL-only; no migration.
+
+## 0.81.0 (unreleased)
+
 Companion runtime/macros version: **0.81.0**.
 
 - Add host-supplied actor stamps for runtime fields, the analogue of Spring Data's `@CreatedBy`/`AuditorAware`: `RuntimeField::auto_actor: Option<RuntimeAutoActor>` with `OnCreate`. Valid only on nullable, non-primary-key `Uuid` or `String` fields that are not generated, have no default and do not declare `auto_timestamp` (`InvalidAutoActor` with a value-free `RuntimeAutoActorProblem` detail). See [actor stamps](docs/reference/graphql-orm/runtime-schema-ir.md#actor-stamps).

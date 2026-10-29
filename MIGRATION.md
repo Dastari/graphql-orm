@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.81.0 to 0.81.2: shareable aggregate result objects
+
+No change is required. Exported federation SDL now marks `GraphqlAggregateResultRow` and
+`GraphqlAggregateResultValue` `@shareable`. Subgraphs that held `aggregate = false` only
+because two aggregate-enabled subgraphs failed to compose can turn aggregates back on.
+
 ## 0.80.0 to 0.81.0: runtime actor stamps
 
 Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:

@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.81.2 is the companion of the runtime's shareable aggregate result objects; the
+macros themselves are unchanged.
+
 Version 0.81.0 is the companion of the runtime's actor stamps; the macros themselves
 are unchanged.
 

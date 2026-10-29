@@ -33,7 +33,8 @@ pub struct ZoneReference {
     backend = "sqlite",
     table = "readings",
     plural = "Readings",
-    default_sort = "id ASC"
+    default_sort = "id ASC",
+    aggregate = true
 )]
 pub struct Reading {
     #[primary_key]

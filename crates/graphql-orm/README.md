@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.81.2 marks the shared aggregate result objects `@shareable` in federation SDL, so
+two subgraphs with aggregate-enabled entities compose. No migration is needed.
+
 Version 0.81.0 adds host-supplied runtime actor stamps (`RuntimeField::auto_actor`), written
 from the write grant's actor (`RuntimeWriteGrant::with_actor`). See the
 [migration guide](../../MIGRATION.md#0800-to-0810-runtime-actor-stamps).
