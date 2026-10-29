@@ -26,7 +26,10 @@ Companion runtime/macros version: **0.83.0**.
   receipt prevents release before successful COMMIT. No production opt-in is
   implied. Transaction-owned first-before/final-after aggregation prevents
   transient parent disclosure and deduplicates final parents across repeated
-  covered updates. CAS/upsert/direct-bulk/runtime historical capture and complete
+  covered updates. Versioned single-key CAS and existing complete-key
+  `update_if` share this capture only on successful conditions; version,
+  predicate, conflict/missing-row and savepoint semantics are unchanged.
+  Upsert/direct-bulk/runtime historical capture and complete
   bulk acceptance remain outside this slice; see the migration contract.
 
 ## 0.82.0 (unreleased)

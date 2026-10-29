@@ -4487,10 +4487,10 @@ fn generate_graphql_operations_unfiltered(
                             after_state: Some(Self::__gom_capture_entity_state(&entity)?),
                         },
                     ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
-                    Self::__gom_queue_changed_event(
+                    Self::__gom_queue_changed_event_with_preimage(
                         hook_ctx,
                         ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                        Some(&entity),
+                        Some(&entity), current_entity.as_ref(),
                     ).await?;
                     #cas_release_savepoint
                     Ok(::graphql_orm::graphql::orm::ConditionalUpdateOutcome::Updated(entity))
@@ -6313,7 +6313,9 @@ fn generate_graphql_operations_unfiltered(
                         id: Self::__gom_event_id(key), changes,
                         before_state: Some(before_state), after_state: Some(Self::__gom_capture_entity_state(&entity)?),
                     }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity)).await?;
+                    Self::__gom_queue_changed_event_with_preimage(hook_ctx,
+                        ::graphql_orm::graphql::orm::ChangeAction::Updated,
+                        Some(&entity), Some(&current_entity)).await?;
                     Ok(::graphql_orm::graphql::orm::PredicateUpdateOutcome::Updated(entity))
                 }
 

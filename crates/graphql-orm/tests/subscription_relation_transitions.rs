@@ -65,11 +65,33 @@ struct CompositeTransitionChild {
     parent: Option<TransitionParent>,
 }
 
+// Dedicated conditional fixture: the original unversioned entities and all
+// existing case bodies keep their original write contracts.
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(table = "versioned_transition_children", plural = "VersionedTransitionChildren")]
+#[graphql_orm(operation_authorization(categories = ["subscription"], all_scopes = ["transition.child"]))]
+struct VersionedTransitionChild {
+    #[primary_key]
+    #[sortable]
+    #[graphql_orm(auto_generated = false)]
+    id: Uuid,
+    security_tenant_id: Uuid,
+    customer_id: Uuid,
+    target_id: Option<Uuid>,
+    #[filterable(type = "string")]
+    label: String,
+    #[graphql_orm(version, default = "0")]
+    version: i64,
+    #[graphql(skip)]
+    #[relation(target = "TransitionParent", from = ["security_tenant_id", "customer_id", "target_id"], to = ["security_tenant_id", "customer_id", "id"], propagate_change = "up", emit_fk = false)]
+    parent: Option<TransitionParent>,
+}
+
 schema_roots! {
     query_custom_ops: [],
     generated_mutations: "allowlist",
     generated_mutation_allowlist: [TransitionChild],
-    entities: [TransitionParent, TransitionChild, CompositeTransitionChild]
+    entities: [TransitionParent, TransitionChild, CompositeTransitionChild, VersionedTransitionChild]
 }
 
 const CURRENT_AUTH: usize = 1;
@@ -104,7 +126,8 @@ impl RowPolicy for Authority {
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
             let denied = self.0.load(Ordering::SeqCst);
-            if entity == "TransitionChild" || entity == "CompositeTransitionChild" { return Ok(denied & SOURCE_ROW == 0); }
+            if entity == "TransitionChild" || entity == "CompositeTransitionChild"
+                || entity == "VersionedTransitionChild" { return Ok(denied & SOURCE_ROW == 0); }
             let parent = row.downcast_ref::<TransitionParent>().expect("typed parent policy row");
             Ok(!(parent.id == uid(100) && denied & OLD_PARENT_ROW != 0
                 || parent.id == uid(200) && denied & NEW_PARENT_ROW != 0))
@@ -141,6 +164,9 @@ impl RowPolicy for Authority {
                 "CompositeTransitionChild" => transition.before_source.downcast_ref::<CompositeTransitionChild>().is_some()
                     && transition.after_source.downcast_ref::<CompositeTransitionChild>().is_some()
                     && transition.current_source.downcast_ref::<CompositeTransitionChild>().is_some(),
+                "VersionedTransitionChild" => transition.before_source.downcast_ref::<VersionedTransitionChild>().is_some()
+                    && transition.after_source.downcast_ref::<VersionedTransitionChild>().is_some()
+                    && transition.current_source.downcast_ref::<VersionedTransitionChild>().is_some(),
                 _ => false,
             })
         })
@@ -154,7 +180,8 @@ impl FieldPolicy for Authority {
         _: Option<&'a (dyn std::any::Any + Send + Sync)>,
     ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
         Box::pin(async move {
-            Ok((entity != "TransitionChild" && entity != "CompositeTransitionChild") || field != "targetId"
+            Ok((entity != "TransitionChild" && entity != "CompositeTransitionChild"
+                && entity != "VersionedTransitionChild") || field != "targetId"
                 || self.0.load(Ordering::SeqCst) & MAPPED_FIELD == 0)
         })
     }
@@ -191,7 +218,8 @@ fn schema(db: Database, authority: Authority) -> AppSchema {
         graphql_orm_operation_catalog(), AssuranceSchemaConfig::legacy());
     for (field, policy) in [("transitionParentChanged", "transition.parent"),
         ("transitionChildChanged", "transition.child"),
-        ("compositeTransitionChildChanged", "transition.child")] {
+        ("compositeTransitionChildChanged", "transition.child"),
+        ("versionedTransitionChildChanged", "transition.child")] {
         registry.require(GraphqlOperationKind::Subscription, field, policy).unwrap();
     }
     schema_builder(db).data(AssuranceEnforcement::new(
@@ -828,5 +856,305 @@ async fn aggregated_transitions_do_not_upgrade_default_historical_denial() {
         move_in_transaction(&mut tx, 20, 100).await;
         tx.commit_and_emit().await.unwrap();
         expect_parents(&mut stream, &[(1,20,100)]).await;
+    }
+}
+
+async fn conditional_fixture() -> (Database, Authority) {
+    let (db, authority) = fixture().await;
+    // Owned schema setup only. All conditional data mutations below are generated.
+    sqlx::query("CREATE TABLE versioned_transition_children (id TEXT PRIMARY KEY, security_tenant_id TEXT NOT NULL, customer_id TEXT NOT NULL, target_id TEXT, label TEXT NOT NULL REFERENCES transition_labels(label) DEFERRABLE INITIALLY DEFERRED, version INTEGER NOT NULL DEFAULT 0)")
+        .execute(db.pool()).await.unwrap();
+    VersionedTransitionChild::insert(&db, CreateVersionedTransitionChildInput {
+        id: uid(999), security_tenant_id: uid(1), customer_id: uid(10),
+        target_id: Some(uid(100)), label: "initial".into(),
+    }).await.unwrap();
+    (db, authority)
+}
+fn cas_expected(label: &str) -> VersionedTransitionChildWhereInput {
+    VersionedTransitionChildWhereInput {
+        label: Some(StringFilter { eq: Some(label.into()), ..Default::default() }),
+        ..Default::default()
+    }
+}
+fn cas_move(customer: u128, target: u128) -> UpdateVersionedTransitionChildInput {
+    UpdateVersionedTransitionChildInput {
+        customer_id: Some(uid(customer)), target_id: Some(Some(uid(target))), ..Default::default()
+    }
+}
+async fn cas_in_transaction(tx: &mut MutationContext<'_>, version: i64, customer: u128, target: u128) {
+    let outcome = tx.compare_and_swap::<VersionedTransitionChild>(
+        &uid(999), version, cas_expected("initial"), cas_move(customer, target),
+    ).await.unwrap();
+    let ConditionalUpdateOutcome::Updated(row) = outcome else { panic!("matching CAS must update"); };
+    assert_eq!(row.version, version + 1);
+    assert_eq!((row.customer_id, row.target_id), (uid(customer), Some(uid(target))));
+}
+fn predicate_key(security: u128) -> CompositeTransitionChildKey {
+    CompositeTransitionChildKey { security_tenant_id: uid(security), id: uid(888) }
+}
+fn predicate_expected(security: u128) -> CompositeTransitionChildWhereInput {
+    CompositeTransitionChildWhereInput {
+        security_tenant_id: Some(UuidFilter { eq: Some(uid(security)), ..Default::default() }),
+        ..Default::default()
+    }
+}
+fn predicate_move(customer: u128, target: u128) -> UpdateCompositeTransitionChildInput {
+    UpdateCompositeTransitionChildInput {
+        customer_id: Some(uid(customer)), target_id: Some(Some(uid(target))), ..Default::default()
+    }
+}
+fn predicate_source_id() -> String {
+    graphql_orm::graphql::orm::composite_key_id(&[SqlValue::Uuid(uid(1)), SqlValue::Uuid(uid(888))])
+}
+async fn insert_predicate_source(db: &Database) {
+    CompositeTransitionChild::insert(db, CreateCompositeTransitionChildInput {
+        security_tenant_id: uid(1), id: uid(888), customer_id: uid(10), target_id: Some(uid(100)),
+    }).await.unwrap();
+}
+async fn predicate_in_transaction(tx: &mut MutationContext<'_>, customer: u128, target: u128) {
+    let outcome = tx.update_if::<CompositeTransitionChild>(
+        &predicate_key(1), predicate_expected(1), predicate_move(customer, target),
+    ).await.unwrap();
+    let PredicateUpdateOutcome::Updated(row) = outcome else { panic!("matching predicate must update"); };
+    assert_eq!((row.security_tenant_id, row.customer_id, row.target_id),
+        (uid(1), uid(customer), Some(uid(target))));
+}
+
+#[tokio::test]
+async fn conditional_cas_repository_commits_former_and_new_parents() {
+    let (db, authority) = conditional_fixture().await;
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let outcome = VersionedTransitionChild::compare_and_swap(
+        &db, &uid(999), 0, cas_expected("initial"), cas_move(20, 200),
+    ).await.unwrap();
+    let ConditionalUpdateOutcome::Updated(row) = outcome else { panic!("matching CAS must update"); };
+    assert_eq!(row.version, 1);
+    expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
+}
+
+#[tokio::test]
+async fn conditional_cas_failed_version_predicate_and_missing_row_do_not_queue() {
+    let (db, authority) = conditional_fixture().await;
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    for (id, version, label) in [(999,9,"initial"), (999,0,"healthy"), (404,0,"initial")] {
+        let outcome = VersionedTransitionChild::compare_and_swap(
+            &db, &uid(id), version, cas_expected(label), cas_move(20, 100),
+        ).await.unwrap();
+        if id == 404 { assert!(matches!(outcome, ConditionalUpdateOutcome::NotFound)); }
+        else { assert!(matches!(outcome, ConditionalUpdateOutcome::Conflict)); }
+        expect_parents(&mut stream, &[]).await;
+    }
+    // Version0 and formerA must still be current after all failed attempts.
+    let outcome = VersionedTransitionChild::compare_and_swap(
+        &db, &uid(999), 0, cas_expected("initial"), cas_move(20, 200),
+    ).await.unwrap();
+    let ConditionalUpdateOutcome::Updated(row) = outcome else { panic!("original version must remain current"); };
+    assert_eq!(row.version, 1);
+    expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
+}
+
+#[tokio::test]
+async fn conditional_predicate_uses_complete_key_and_keeps_failed_attempts_silent() {
+    let (db, authority) = fixture().await;
+    insert_predicate_source(&db).await;
+    CompositeTransitionChild::insert(&db, CreateCompositeTransitionChildInput {
+        security_tenant_id: uid(2), id: uid(888), customer_id: uid(10), target_id: Some(uid(100)),
+    }).await.unwrap();
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    assert!(matches!(CompositeTransitionChild::update_if(
+        &db, &predicate_key(1), predicate_expected(2), predicate_move(20, 100),
+    ).await.unwrap(), PredicateUpdateOutcome::PredicateConflict));
+    let absent = CompositeTransitionChildKey { security_tenant_id: uid(1), id: uid(404) };
+    assert!(matches!(CompositeTransitionChild::update_if(
+        &db, &absent, predicate_expected(1), predicate_move(20, 100),
+    ).await.unwrap(), PredicateUpdateOutcome::NotFound));
+    expect_parents(&mut stream, &[]).await;
+    assert!(matches!(CompositeTransitionChild::update_if(
+        &db, &predicate_key(1), predicate_expected(1), predicate_move(20, 200),
+    ).await.unwrap(), PredicateUpdateOutcome::Updated(_)));
+    expect_parent_source(&mut stream, &[(1,10,100), (1,20,200)], predicate_source_id()).await;
+    let untouched = CompositeTransitionChild::find_by_key(&db, &predicate_key(2)).await.unwrap().unwrap();
+    assert_eq!((untouched.customer_id, untouched.target_id), (uid(10), Some(uid(100))));
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    predicate_in_transaction(&mut tx, 20, 100).await;
+    tx.commit_and_emit().await.unwrap();
+    expect_parent_source(&mut stream, &[(1,20,200), (1,20,100)], predicate_source_id()).await;
+}
+
+#[tokio::test]
+async fn conditional_cas_repeated_moves_and_failed_intermediate_attempt_keep_first_and_final() {
+    for return_to_a in [false, true] {
+        let (db, authority) = conditional_fixture().await;
+        let schema = schema(db.clone(), authority);
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        cas_in_transaction(&mut tx, 0, 20, 200).await;
+        assert!(matches!(tx.compare_and_swap::<VersionedTransitionChild>(
+            &uid(999), 0, cas_expected("initial"), cas_move(20, 100),
+        ).await.unwrap(), ConditionalUpdateOutcome::Conflict));
+        cas_in_transaction(&mut tx, 1, if return_to_a { 10 } else { 20 }, 100).await;
+        expect_parents(&mut stream, &[]).await;
+        tx.commit_and_emit().await.unwrap();
+        if return_to_a { expect_parents(&mut stream, &[(1,10,100)]).await; }
+        else { expect_parents(&mut stream, &[(1,10,100), (1,20,100)]).await; }
+    }
+}
+
+#[tokio::test]
+async fn conditional_and_regular_updates_share_first_and_final_aggregation_in_both_orders() {
+    for cas_first in [false, true] {
+        for return_to_a in [false, true] {
+            let (db, authority) = conditional_fixture().await;
+            let schema = schema(db.clone(), authority);
+            let mut stream = Box::pin(schema.execute_stream(request(true)));
+            register(&mut stream).await;
+            let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+            let final_customer = if return_to_a { 10 } else { 20 };
+            if cas_first {
+                cas_in_transaction(&mut tx, 0, 20, 200).await;
+                tx.update_by_id::<VersionedTransitionChild>(&uid(999), cas_move(final_customer, 100))
+                    .await.unwrap().unwrap();
+            } else {
+                tx.update_by_id::<VersionedTransitionChild>(&uid(999), cas_move(20, 200))
+                    .await.unwrap().unwrap();
+                cas_in_transaction(&mut tx, 0, final_customer, 100).await;
+            }
+            tx.commit_and_emit().await.unwrap();
+            if return_to_a { expect_parents(&mut stream, &[(1,10,100)]).await; }
+            else { expect_parents(&mut stream, &[(1,10,100), (1,20,100)]).await; }
+        }
+    }
+}
+
+#[tokio::test]
+async fn conditional_predicate_repeated_moves_ignore_failed_intermediate_predicate() {
+    for return_to_a in [false, true] {
+        let (db, authority) = fixture().await;
+        insert_predicate_source(&db).await;
+        let schema = schema(db.clone(), authority);
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        predicate_in_transaction(&mut tx, 20, 200).await;
+        assert!(matches!(tx.update_if::<CompositeTransitionChild>(
+            &predicate_key(1), predicate_expected(2), predicate_move(20, 100),
+        ).await.unwrap(), PredicateUpdateOutcome::PredicateConflict));
+        predicate_in_transaction(&mut tx, if return_to_a { 10 } else { 20 }, 100).await;
+        tx.commit_and_emit().await.unwrap();
+        let expected = if return_to_a { vec![(1,10,100)] } else { vec![(1,10,100), (1,20,100)] };
+        expect_parent_source(&mut stream, &expected, predicate_source_id()).await;
+    }
+}
+
+#[tokio::test]
+async fn conditional_rollback_and_failed_commit_discard_both_legs_and_preserve_original_edge() {
+    for use_cas in [false, true] {
+        for failed_commit in [false, true] {
+            let (db, authority) = conditional_fixture().await;
+            if !use_cas { insert_predicate_source(&db).await; }
+            let schema = schema(db.clone(), authority);
+            let mut stream = Box::pin(schema.execute_stream(request(true)));
+            register(&mut stream).await;
+            let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+            if use_cas { cas_in_transaction(&mut tx, 0, 20, 200).await; }
+            else { predicate_in_transaction(&mut tx, 20, 200).await; }
+            if failed_commit {
+                // A real deferred FK violation causes backend COMMIT to fail.
+                tx.update_by_id::<TransitionChild>(&uid(999), UpdateTransitionChildInput {
+                    label: Some("missing-label".into()), ..Default::default()
+                }).await.unwrap().unwrap();
+                assert!(tx.commit_and_emit().await.is_err());
+            } else { tx.rollback().await.unwrap(); }
+            expect_parents(&mut stream, &[]).await;
+            if use_cas {
+                assert!(matches!(VersionedTransitionChild::compare_and_swap(
+                    &db, &uid(999), 0, cas_expected("initial"), cas_move(20, 200),
+                ).await.unwrap(), ConditionalUpdateOutcome::Updated(_)));
+                expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
+            } else {
+                assert!(matches!(CompositeTransitionChild::update_if(
+                    &db, &predicate_key(1), predicate_expected(1), predicate_move(20, 200),
+                ).await.unwrap(), PredicateUpdateOutcome::Updated(_)));
+                expect_parent_source(&mut stream, &[(1,10,100), (1,20,200)], predicate_source_id()).await;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn conditional_paths_leave_historical_authority_default_deny() {
+    for use_cas in [false, true] {
+        let (mut db, authority) = conditional_fixture().await;
+        if !use_cas { insert_predicate_source(&db).await; }
+        db.set_row_policy(CurrentOnly(authority.clone(), false));
+        let schema = schema(db.clone(), authority);
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        if use_cas { cas_in_transaction(&mut tx, 0, 20, 200).await; }
+        else { predicate_in_transaction(&mut tx, 20, 200).await; }
+        tx.commit_and_emit().await.unwrap();
+        expect_parent_source(&mut stream, &[(1,20,200)],
+            if use_cas { uid(999).to_string() } else { predicate_source_id() }).await;
+    }
+}
+
+#[tokio::test]
+async fn conditional_current_source_target_field_and_assurance_revocation_remain_independent() {
+    for use_cas in [false, true] {
+        for denial in [CURRENT_AUTH, SOURCE_ROW, MAPPED_FIELD, CHILD_ASSURANCE,
+            PARENT_ASSURANCE, OLD_PARENT_ROW, NEW_PARENT_ROW, HISTORICAL_EDGE] {
+            let (db, authority) = conditional_fixture().await;
+            if !use_cas { insert_predicate_source(&db).await; }
+            let schema = schema(db.clone(), authority.clone());
+            let mut stream = Box::pin(schema.execute_stream(request(true)));
+            register(&mut stream).await;
+            let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+            if use_cas { cas_in_transaction(&mut tx, 0, 20, 200).await; }
+            else { predicate_in_transaction(&mut tx, 20, 200).await; }
+            tx.commit_and_emit().await.unwrap();
+            authority.0.store(denial, Ordering::SeqCst);
+            let expected = match denial {
+                OLD_PARENT_ROW | HISTORICAL_EDGE => vec![(1,20,200)],
+                NEW_PARENT_ROW => vec![(1,10,100)],
+                _ => Vec::new(),
+            };
+            let source = if use_cas { uid(999).to_string() } else { predicate_source_id() };
+            expect_parent_source(&mut stream, &expected, source.clone()).await;
+            authority.0.store(0, Ordering::SeqCst);
+            let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+            if use_cas { cas_in_transaction(&mut tx, 1, 20, 200).await; }
+            else { predicate_in_transaction(&mut tx, 20, 200).await; }
+            tx.commit_and_emit().await.unwrap();
+            expect_parent_source(&mut stream, &[(1,20,200)], source).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn conditional_each_source_requires_its_own_changed_operation_scope() {
+    for use_cas in [false, true] {
+        let (db, authority) = conditional_fixture().await;
+        if !use_cas { insert_predicate_source(&db).await; }
+        let schema = schema(db.clone(), authority);
+        let mut denied = Box::pin(schema.execute_stream(request(false)));
+        let mut allowed = Box::pin(schema.execute_stream(request(true)));
+        register(&mut denied).await;
+        register(&mut allowed).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        if use_cas { cas_in_transaction(&mut tx, 0, 20, 200).await; }
+        else { predicate_in_transaction(&mut tx, 20, 200).await; }
+        tx.commit_and_emit().await.unwrap();
+        expect_parent_source(&mut denied, &[],
+            if use_cas { uid(999).to_string() } else { predicate_source_id() }).await;
+        expect_parent_source(&mut allowed, &[(1,10,100), (1,20,200)],
+            if use_cas { uid(999).to_string() } else { predicate_source_id() }).await;
     }
 }

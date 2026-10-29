@@ -13,11 +13,19 @@ supersedes: []
 ## 0.82.0 to 0.83.0: committed relation transitions
 
 Upgrade runtime and macros together. Generated single-key GraphQL update
-resolvers, repository `update_by_id`/`update_by_key` and their `MutationContext`
+resolvers, repository `update_by_id`/`update_by_key`, versioned single-key
+`compare_and_swap`, complete-key `update_if` and their `MutationContext`
 counterparts now queue both former and new parent invalidations when a declared
 upward relation tuple changes. Direct GraphQL updates pass the locked preimage
 captured inside their authenticated pinned transaction to the same transition
 queue helper before commit; no preimage is loaded outside that transaction.
+Conditional helpers pass their existing transaction-locked preimage only after
+the conditional statement succeeds. CAS version/typed-predicate checks,
+savepoints, version increment and `Conflict`/`NotFound` outcomes are unchanged.
+The existing composite-key `update_if` keeps its complete key plus non-empty
+SQL predicate, `PredicateConflict`/`NotFound` and exact cardinality checks.
+Failed conditions register no transition and cannot replace an earlier
+successful transaction capture. No new conditional API or GraphQL root is added.
 The transaction retains the first preimage and final image per entity type and
 complete source key. At finalization, every declared upward mapping uses those
 two snapshots on the same pinned connection. A → B → C invalidates only A and C;
@@ -67,8 +75,9 @@ while independent sources with shared tenant/key components remain independent.
 Finalization failure rolls back without activating receipts or releasing events.
 
 This slice covers generated single-key GraphQL updates, single-key
-repository/context updates and composite-key repository/context updates.
-CAS/predicate updates, upsert, direct bulk/update-where and runtime record
+repository/context updates, versioned single-key CAS, and composite-key
+repository/context updates including the existing `update_if` surface.
+Upsert, direct bulk/update-where and runtime record
 updates remain on their prior postimage-only paths. Helper-delegating
 bounded or composite bulk paths inherit the per-row transition code, but their
 aggregate behavior is not qualified as complete. Do not infer coverage for all
