@@ -884,6 +884,7 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) runtime_state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
+    relation_transition_commit: crate::graphql::subscriptions::RelationTransitionCommit,
 }
 
 /// Narrow transaction-bound capability for regulated retention maintenance.
@@ -1311,6 +1312,7 @@ where
             runtime_state: Default::default(),
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
+            relation_transition_commit: crate::graphql::subscriptions::RelationTransitionCommit::pending(),
         }
     }
 
@@ -1358,6 +1360,13 @@ where
                 "{operation} requires TransactionMode::StateMachine to fence an absent-key write decision"
             )),
         ))
+    }
+
+    /// Receipt for generated historical-edge witnesses on this transaction.
+    /// It remains inactive until commit_and_emit commits successfully.
+    #[doc(hidden)]
+    pub fn relation_transition_commit(&self) -> crate::graphql::subscriptions::RelationTransitionCommit {
+        self.relation_transition_commit.clone()
     }
 
     pub fn database(&self) -> &crate::db::Database<B> {
@@ -1479,8 +1488,10 @@ where
             runtime_state: _,
             deferred_events,
             deferred_actions,
+            relation_transition_commit,
         } = self;
         B::commit_write_transaction(tx).await?;
+        relation_transition_commit.mark_committed();
         for event in deferred_events {
             event.emit(db);
         }
@@ -2610,6 +2621,22 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// Explicit opt-in for the historical association in a committed relation
+    /// transition. Default DENY, including under Unrestricted/Complete SQL
+    /// visibility. This is independent of deleted-preimage permission. Hosts
+    /// opting in must enforce historical tenant/business/field and SQL/RLS
+    /// authority using current request evidence and the trusted snapshots.
+    /// The ORM independently checks both current rows, keys, mapped fields,
+    /// relation and each hop's operation authority, again after serialization.
+    fn can_read_relation_transition<'a>(
+        &'a self,
+        _ctx: &'a async_graphql::Context<'_>,
+        _db: &'a crate::db::Database<B>,
+        _transition: &'a crate::graphql::subscriptions::RelationTransitionRead<'a>,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
 
     /// Explicitly authorize release of a trusted generated deleted preimage.
     ///

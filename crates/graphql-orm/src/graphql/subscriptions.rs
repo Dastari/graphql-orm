@@ -98,7 +98,64 @@ type RelationSourceCheck<B> = for<'a, 'ctx> fn(
     &'a [(&'static str, &'static str)],
 ) -> BoxFuture<'a, async_graphql::Result<()>>;
 
-/// Server-only source identity. It retains typed keys, never source snapshots.
+/// Opaque receipt issued by a pinned MutationContext. Only a successful
+/// backend commit activates it; rollback, cancellation and failed COMMIT do not.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RelationTransitionCommit(Arc<std::sync::atomic::AtomicBool>);
+impl RelationTransitionCommit {
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn pending() -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+    #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+    pub(crate) fn mark_committed(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+    fn is_committed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Current authorization request for a committed, historical relation edge.
+///
+/// This is not deleted-preimage permission. The host must explicitly authorize
+/// the historical association, including historical SQL/RLS conditions where
+/// applicable. Current source and target SQL/row/field checks run independently.
+/// Values and snapshots are server-only and must not be copied into diagnostics.
+pub struct RelationTransitionRead<'a> {
+    pub source_entity: &'static str,
+    pub target_entity: &'static str,
+    pub relation: &'static str,
+    pub mapping: &'a [(&'static str, &'static str)],
+    pub source_keys: &'a [SqlValue],
+    pub target_keys: &'a [SqlValue],
+    pub before_values: &'a [SqlValue],
+    pub after_values: &'a [SqlValue],
+    pub before_source: &'a (dyn std::any::Any + Send + Sync),
+    pub after_source: &'a (dyn std::any::Any + Send + Sync),
+    pub current_source: &'a (dyn std::any::Any + Send + Sync),
+    pub current_target: &'a (dyn std::any::Any + Send + Sync),
+    pub source_visibility: &'a ReadVisibility,
+    pub target_visibility: &'a ReadVisibility,
+}
+
+#[derive(Clone)]
+struct RelationTransition {
+    commit: RelationTransitionCommit,
+    before_values: Vec<SqlValue>,
+    after_values: Vec<SqlValue>,
+    before: Arc<dyn std::any::Any + Send + Sync>,
+    after: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+type TransitionSourceCheck<B> = for<'a, 'ctx> fn(
+    &'a Database<B>, &'a Context<'ctx>, &'a [SqlValue], &'a [SqlValue],
+    &'static str, &'a [(&'static str, &'static str)], &'a RelationTransition,
+) -> BoxFuture<'a, async_graphql::Result<()>>;
+
+/// Server-only source identity. Ordinary edges retain keys; transition edges
+/// additionally retain trusted transaction pre/postimages, never client data.
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct SubscriptionEventSource<B: OrmBackend = DefaultBackend> {
@@ -111,6 +168,7 @@ pub struct SubscriptionEventSource<B: OrmBackend = DefaultBackend> {
     source_field: &'static str,
     relation_fields: Vec<(&'static str, &'static str)>,
     relation_check: Option<RelationSourceCheck<B>>,
+    transition: Option<(RelationTransition, TransitionSourceCheck<B>)>,
     check: SourceCheck<B>,
 }
 impl<B: OrmBackend> std::fmt::Debug for SubscriptionEventSource<B> {
@@ -143,6 +201,7 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
             source_field,
             relation_fields: Vec::new(),
             relation_check: None,
+            transition: None,
             check: check_source::<T, B>,
         }
     }
@@ -164,6 +223,31 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
         source.relation_check = Some(check_relation_source::<S, T, B>);
         source
     }
+    /// Bind a generated update's former edge to its pinned transaction images.
+    /// Queue the resulting witness only through MutationContext: successful
+    /// commit is required before delivery. Like the other hidden constructors,
+    /// this is a trusted host boundary, never an untrusted event decoder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_relation_transition<S, T>(
+        commit: RelationTransitionCommit,
+        keys: Vec<SqlValue>, relation: &'static str,
+        fields: Vec<(&'static str, &'static str)>,
+        before_values: Vec<SqlValue>, after_values: Vec<SqlValue>,
+        before: S, after: S,
+        operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>,
+    ) -> Self
+    where
+        S: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+        T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    {
+        let mut source = Self::new::<S>(keys, relation, "", operation_authority);
+        source.relation_fields = fields;
+        source.transition = Some((RelationTransition {
+            commit, before_values, after_values, before: Arc::new(before), after: Arc::new(after),
+        }, check_transition_source::<S, T, B>));
+        source
+    }
+
 }
 
 /// Trusted host emission envelope used by generated code.
@@ -238,7 +322,10 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
                 .get(index + 1)
                 .map_or(self.keys.as_slice(), |next| next.keys.as_slice());
             (source.operation_authority)(ctx)?;
-            if let Some(check) = source.relation_check {
+            if let Some((transition, check)) = &source.transition {
+                check(db, ctx, &source.keys, target_keys, source.relation,
+                    &source.relation_fields, transition).await?;
+            } else if let Some(check) = source.relation_check {
                 check(
                     db,
                     ctx,
@@ -535,6 +622,89 @@ where
         for field in target_fields {
             check_field::<T, B>(db, ctx, &target, field).await?;
         }
+        Ok(())
+    })
+}
+
+fn transition_tuple_predicate<B: OrmBackend>(
+    columns: &[&crate::graphql::orm::ColumnDef], values: &[SqlValue],
+) -> (String, Vec<SqlValue>) {
+    let mut predicates = Vec::new();
+    let mut bindings = Vec::new();
+    for (column, value) in columns.iter().zip(values) {
+        let name = B::DIALECT.quote_identifier_path(column.name);
+        if matches!(value, SqlValue::Null | SqlValue::StringNull | SqlValue::BytesNull
+            | SqlValue::JsonNull | SqlValue::UuidNull | SqlValue::IntNull
+            | SqlValue::FloatNull | SqlValue::DecimalNull(_) | SqlValue::BoolNull) {
+            predicates.push(format!("{name} IS NULL"));
+        } else {
+            predicates.push(format!("{name} = ?"));
+            bindings.push(value.clone());
+        }
+    }
+    (predicates.join(" AND "), bindings)
+}
+
+fn check_transition_source<'a, 'ctx, S, T, B>(
+    db: &'a Database<B>, ctx: &'a Context<'ctx>, keys: &'a [SqlValue],
+    target_keys: &'a [SqlValue], relation: &'static str,
+    fields: &'a [(&'static str, &'static str)], transition: &'a RelationTransition,
+) -> BoxFuture<'a, async_graphql::Result<()>>
+where
+    B: OrmBackend,
+    S: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+{
+    Box::pin(async move {
+        let denied = || OrmPublicError::forbidden().into_graphql_error();
+        if !transition.commit.is_committed()
+            || fields.is_empty() || fields.len() > S::columns().len()
+            || fields.len() != transition.before_values.len()
+            || fields.len() != transition.after_values.len()
+            || transition.before_values == transition.after_values {
+            return Err(denied());
+        }
+        // No provider (including SQL-only providers using the default hook)
+        // can grant historical authority implicitly.
+        let policy = db.row_policy().ok_or_else(denied)?;
+        let mut source_columns = Vec::new();
+        let mut target_columns = Vec::new();
+        for (from, to) in fields {
+            source_columns.push(S::columns().iter().find(|c| c.rust_name == *from).ok_or_else(denied)?);
+            target_columns.push(T::columns().iter().find(|c| c.rust_name == *to).ok_or_else(denied)?);
+        }
+        // A later move must not revive this queued transition. Current source
+        // must still match this transition's complete postimage tuple.
+        let source = authorize_subscription_row_matching::<S, B>(db, ctx, keys, None,
+            Some(transition_tuple_predicate::<B>(&source_columns, &transition.after_values)))
+            .await?.ok_or_else(denied)?;
+        // The former target must still exist under its exact key AND old tuple.
+        let target = authorize_subscription_row_matching::<T, B>(db, ctx, target_keys, None,
+            Some(transition_tuple_predicate::<B>(&target_columns, &transition.before_values)))
+            .await?.ok_or_else(denied)?;
+        for (entity, metadata, row) in [
+            (S::entity_name(), S::metadata(), &source as &(dyn std::any::Any + Send + Sync)),
+            (T::entity_name(), T::metadata(), &target as &(dyn std::any::Any + Send + Sync)),
+        ] {
+            if !db.can_read_row(Some(ctx), entity, metadata.read_policy,
+                EntityAccessSurface::GraphqlSubscription, row).await? { return Err(denied()); }
+        }
+        authorize_subscription_keys::<S, B>(db, ctx, &source).await?;
+        authorize_subscription_keys::<T, B>(db, ctx, &target).await?;
+        for column in source_columns { check_field::<S, B>(db, ctx, &source, column.api_name).await?; }
+        for column in target_columns { check_field::<T, B>(db, ctx, &target, column.api_name).await?; }
+        check_field::<S, B>(db, ctx, &source, relation).await?;
+        let source_visibility = db.read_visibility::<S>(Some(ctx), EntityAccessSurface::GraphqlSubscription).await?;
+        let target_visibility = db.read_visibility::<T>(Some(ctx), EntityAccessSurface::GraphqlSubscription).await?;
+        let request = RelationTransitionRead {
+            source_entity: S::entity_name(), target_entity: T::entity_name(), relation,
+            mapping: fields, source_keys: keys, target_keys,
+            before_values: &transition.before_values, after_values: &transition.after_values,
+            before_source: transition.before.as_ref(), after_source: transition.after.as_ref(),
+            current_source: &source, current_target: &target,
+            source_visibility: &source_visibility, target_visibility: &target_visibility,
+        };
+        if !policy.can_read_relation_transition(ctx, db, &request).await? { return Err(denied()); }
         Ok(())
     })
 }
