@@ -10,6 +10,74 @@ supersedes: []
 
 # Migration Guide
 
+## 0.82.0 to 0.83.0: committed relation transitions
+
+Upgrade runtime and macros together. Generated single-key GraphQL update
+resolvers, repository `update_by_id`/`update_by_key` and their `MutationContext`
+counterparts now queue both former and new parent invalidations when a declared
+upward relation tuple changes. Direct GraphQL updates pass the locked preimage
+captured inside their authenticated pinned transaction to the same transition
+queue helper before commit; no preimage is loaded outside that transaction.
+The transaction retains the first preimage and final image per entity type and
+complete source key. At finalization, every declared upward mapping uses those
+two snapshots on the same pinned connection. A → B → C invalidates only A and C;
+A → B → A invalidates A once. Intermediate B is not a historical association.
+Parent propagation is materialized once before COMMIT and released only after
+success. Direct source events keep their existing per-operation semantics;
+stale ordinary current-edge witnesses remain suppressed. No schema or
+stored-value migration is required.
+
+Historical release is **default deny**, separately from current-row reads and
+`can_read_deleted_preimage`. Opt in only with
+`RowPolicy::can_read_relation_transition(ctx, database, &RelationTransitionRead)`.
+The request supplies exact source/target identities, relation mapping, typed
+before/after tuples, trusted transaction snapshots, both current rows and both
+current visibility decisions. A host opting in must establish permission to
+reveal the historical association under current tenant/business/field and
+SQL/RLS authority. SQL-only, unrestricted and callback providers that leave the
+hook at its default do not authorize historical delivery. This capability adds
+no production opt-in or disclosure permission. Never log these private values.
+
+Current source must still exist and match the captured postimage tuple. The
+former target must still exist under its complete key and preimage tuple.
+Current SQL visibility, row callbacks, key/mapped-field/relation checks and
+per-hop operation authentication/scopes/assurance remain independent of the
+historical hook. Both current-edge and historical propagated provenance require
+current source/target row callbacks even with complete SQL visibility. This is
+stricter than ordinary query visibility: a SQL-only provider whose callback
+refuses the association suppresses it. The host's explicit historical contract must handle RLS, rather
+than assuming old snapshots satisfy current SQL. The generated stream repeats
+its full release proof after awaited checks and payload serialization.
+
+`SubscriptionEventSource::new_relation_transition` is a hidden trusted-host
+constructor, not a decoder for client or raw observer data. Its opaque
+`RelationTransitionCommit` receipt is issued by the pinned `MutationContext` and
+activates only after a successful backend COMMIT. Rollback, cancellation and
+failed COMMIT leave it inactive. Generated former/new legs share the existing
+origin/dedup and remaining event budget. Former-target lookup fanout overflow or
+an exhausted first-leg budget fails the mutation; ancestor hop/event bounds
+retain their prior behavior.
+A NULL or missing new target can still invalidate a readable former target.
+Missing/denied targets are handled independently at subscriber release.
+Insert-then-move has no committed historical baseline. A first postimage-only
+write likewise cannot acquire historical authority from a later covered update
+in the same transaction. Repeated captures replace only the final image, never
+the first baseline. Parent identity is deduplicated per complete source origin,
+while independent sources with shared tenant/key components remain independent.
+Finalization failure rolls back without activating receipts or releasing events.
+
+This slice covers generated single-key GraphQL updates, single-key
+repository/context updates and composite-key repository/context updates.
+CAS/predicate updates, upsert, direct bulk/update-where and runtime record
+updates remain on their prior postimage-only paths. Helper-delegating
+bounded or composite bulk paths inherit the per-row transition code, but their
+aggregate behavior is not qualified as complete. Do not infer coverage for all
+bulk surfaces. The covered context updates coalesce repeated moves within one
+transaction; this is association invalidation, not a per-call history stream.
+Multi-hop propagation uses current edges after the first historical leg and
+existing dedup/hop bounds.
+These limits are broader alignment work, not additional D08 rollout gates.
+
 ## 0.81.0 to 0.82.0: exact static signed64 filters
 
 Use `#[filterable(type = "int64")]` on `i64` or `Option<i64>` fields and

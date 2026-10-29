@@ -824,6 +824,64 @@ trait DeferredEventEmitter<B: OrmBackend>: Send {
     fn emit(self: Box<Self>, db: &crate::db::Database<B>);
 }
 
+/// Generated propagation is materialized once from the transaction's first
+/// preimage and final image, before COMMIT on the same pinned connection.
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+trait PendingRelationTransition<B: WriteBackend>: Send {
+    fn replace_final(
+        &mut self,
+        image: Box<dyn Any + Send + Sync>,
+        action: ChangeAction,
+    ) -> crate::Result<()>;
+
+    fn materialize<'a, 'tx>(
+        self: Box<Self>,
+        ctx: &'a mut MutationContext<'tx, B>,
+    ) -> futures::future::BoxFuture<'a, crate::Result<()>>;
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub type RelationTransitionFinalizer<S, B> = for<'a, 'tx> fn(
+    &'a mut MutationContext<'tx, B>,
+    Option<S>,
+    S,
+    ChangeAction,
+) -> futures::future::BoxFuture<'a, crate::Result<()>>;
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+struct TypedRelationTransition<S, B: WriteBackend> {
+    before: Option<S>,
+    after: S,
+    action: ChangeAction,
+    finalize: RelationTransitionFinalizer<S, B>,
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+impl<S: Send + Sync + 'static, B: WriteBackend> PendingRelationTransition<B>
+    for TypedRelationTransition<S, B>
+{
+    fn replace_final(
+        &mut self,
+        image: Box<dyn Any + Send + Sync>,
+        action: ChangeAction,
+    ) -> crate::Result<()> {
+        self.after = *image.downcast::<S>().map_err(|_| {
+            sqlx::Error::Protocol("relation transition source type changed".into())
+        })?;
+        self.action = action;
+        Ok(())
+    }
+
+    fn materialize<'a, 'tx>(
+        self: Box<Self>,
+        ctx: &'a mut MutationContext<'tx, B>,
+    ) -> futures::future::BoxFuture<'a, crate::Result<()>> {
+        let Self { before, after, action, finalize } = *self;
+        finalize(ctx, before, after, action)
+    }
+}
+
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 trait PostCommitActionRunner<B: OrmBackend>: Send {
     fn run(
@@ -884,6 +942,12 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) runtime_state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
+    relation_transition_commit: crate::graphql::subscriptions::RelationTransitionCommit,
+    relation_transitions: std::collections::BTreeMap<
+        (std::any::TypeId, String),
+        Box<dyn PendingRelationTransition<B>>,
+    >,
+    materializing_relations: bool,
 }
 
 /// Narrow transaction-bound capability for regulated retention maintenance.
@@ -1311,6 +1375,9 @@ where
             runtime_state: Default::default(),
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
+            relation_transition_commit: crate::graphql::subscriptions::RelationTransitionCommit::pending(),
+            relation_transitions: Default::default(),
+            materializing_relations: false,
         }
     }
 
@@ -1358,6 +1425,13 @@ where
                 "{operation} requires TransactionMode::StateMachine to fence an absent-key write decision"
             )),
         ))
+    }
+
+    /// Receipt for generated historical-edge witnesses on this transaction.
+    /// It remains inactive until commit_and_emit commits successfully.
+    #[doc(hidden)]
+    pub fn relation_transition_commit(&self) -> crate::graphql::subscriptions::RelationTransitionCommit {
+        self.relation_transition_commit.clone()
     }
 
     pub fn database(&self) -> &crate::db::Database<B> {
@@ -1462,7 +1536,36 @@ where
         self.runtime_state.cannot_commit()
     }
 
-    pub async fn commit_and_emit(self) -> crate::Result<()> {
+    /// Register generated association work by complete source identity. Only
+    /// the first capture can establish a historical baseline; an insert or an
+    /// unsupported postimage-only path cannot promote a later transient row.
+    #[doc(hidden)]
+    pub fn queue_relation_transition<S: Send + Sync + 'static>(
+        &mut self,
+        source_keys: &[SqlValue],
+        before: Option<S>,
+        after: S,
+        action: ChangeAction,
+        finalize: RelationTransitionFinalizer<S, B>,
+    ) -> crate::Result<()> {
+        if self.materializing_relations || source_keys.is_empty() {
+            return Err(sqlx::Error::Protocol("invalid relation transition registration".into()));
+        }
+        let key = (std::any::TypeId::of::<S>(), composite_key_id(source_keys));
+        if let Some(pending) = self.relation_transitions.get_mut(&key) {
+            pending.replace_final(Box::new(after), action)?;
+        } else {
+            self.relation_transitions.insert(key, Box::new(TypedRelationTransition {
+                before: if action == ChangeAction::Created { None } else { before },
+                after,
+                action,
+                finalize,
+            }));
+        }
+        Ok(())
+    }
+
+    pub async fn commit_and_emit(mut self) -> crate::Result<()> {
         if self.runtime_cannot_commit() {
             self.rollback().await?;
             return Err(crate::graphql::errors::sqlx_error_from_public(
@@ -1472,6 +1575,21 @@ where
                 ),
             ));
         }
+        // No subscriber policy runs here. Resolve the first/final complete
+        // tuples under the pinned transaction and retain opaque receipt-backed
+        // provenance for current authorization after successful COMMIT.
+        self.materializing_relations = true;
+        for pending in std::mem::take(&mut self.relation_transitions).into_values() {
+            if let Err(error) = pending.materialize(&mut self).await {
+                self.rollback().await?;
+                return Err(error);
+            }
+        }
+        self.materializing_relations = false;
+        if self.runtime_cannot_commit() {
+            self.rollback().await?;
+            return Err(sqlx::Error::Protocol("runtime work invalidated relation finalization".into()));
+        }
         let Self {
             db,
             tx,
@@ -1479,8 +1597,12 @@ where
             runtime_state: _,
             deferred_events,
             deferred_actions,
+            relation_transition_commit,
+            relation_transitions: _,
+            materializing_relations: _,
         } = self;
         B::commit_write_transaction(tx).await?;
+        relation_transition_commit.mark_committed();
         for event in deferred_events {
             event.emit(db);
         }
@@ -2610,6 +2732,22 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
         surface: EntityAccessSurface,
         row: &'a (dyn std::any::Any + Send + Sync),
     ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>>;
+
+    /// Explicit opt-in for the historical association in a committed relation
+    /// transition. Default DENY, including under Unrestricted/Complete SQL
+    /// visibility. This is independent of deleted-preimage permission. Hosts
+    /// opting in must enforce historical tenant/business/field and SQL/RLS
+    /// authority using current request evidence and the trusted snapshots.
+    /// The ORM independently checks both current rows, keys, mapped fields,
+    /// relation and each hop's operation authority, again after serialization.
+    fn can_read_relation_transition<'a>(
+        &'a self,
+        _ctx: &'a async_graphql::Context<'_>,
+        _db: &'a crate::db::Database<B>,
+        _transition: &'a crate::graphql::subscriptions::RelationTransitionRead<'a>,
+    ) -> futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(false) })
+    }
 
     /// Explicitly authorize release of a trusted generated deleted preimage.
     ///

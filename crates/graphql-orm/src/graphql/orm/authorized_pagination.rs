@@ -131,7 +131,9 @@ pub enum ReadVisibility {
     CallbackOnly,
     /// SQL narrows candidates; every remaining candidate still needs a callback.
     Prefilter(ReadPredicate),
-    /// SQL is sufficient authorization; row callbacks cannot additionally veto.
+    /// SQL is sufficient for query visibility; row callbacks cannot additionally
+    /// veto those queries. Generated subscription provenance independently checks
+    /// current source/target callbacks before disclosing a propagated association.
     Complete(ReadPredicate),
     /// Explicitly authorize every matching row for this request and entity.
     Unrestricted,

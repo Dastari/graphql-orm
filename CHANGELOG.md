@@ -16,6 +16,21 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.83.0**.
+
+- Generated single-key GraphQL updates and single/composite repository and
+  MutationContext updates retain a committed before/postimage relation witness
+  and queue former/new parent invalidations. Historical release requires explicit default-deny
+  `RowPolicy::can_read_relation_transition` authority plus current source/target
+  SQL, row, mapped-field and per-hop operation checks. An opaque transaction
+  receipt prevents release before successful COMMIT. No production opt-in is
+  implied. Transaction-owned first-before/final-after aggregation prevents
+  transient parent disclosure and deduplicates final parents across repeated
+  covered updates. CAS/upsert/direct-bulk/runtime historical capture and complete
+  bulk acceptance remain outside this slice; see the migration contract.
+
+## 0.82.0 (unreleased)
+
 Companion runtime/macros version: **0.82.0**.
 
 - ORM/macros 0.82.0 add opt-in exact static signed64 filters (`int64`,

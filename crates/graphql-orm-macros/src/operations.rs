@@ -2288,27 +2288,64 @@ fn generate_graphql_operations_unfiltered(
         )).map_err(|error| ::graphql_orm::sqlx::Error::Protocol(error.to_string()))?;
         let mut visited = ::std::collections::HashSet::from([origin_dedupe_key]);
     };
-    let propagation_blocks: Vec<proc_macro2::TokenStream> = propagated_relations.iter()
+    let propagation_code = |historical: bool| -> syn::Result<Vec<proc_macro2::TokenStream>> {
+        propagated_relations.iter()
         .map(|relation| -> syn::Result<proc_macro2::TokenStream> {
             let relation_name = &relation.graphql_name;
             let target_type = &relation.target_type;
             let target_fields = &relation.target_fields;
             let mut value_tokens = Vec::new();
+            let mut after_tokens = Vec::new();
+            let active_entity = if historical { quote! { before } } else { quote! { entity } };
             let mut optional_checks = Vec::new();
             let mut source_names = Vec::new();
             for (field, ty, metadata) in &relation.source_fields {
                 source_names.push(field.to_string());
-                if is_option_type(ty) { optional_checks.push(quote! { entity.#field.is_some() }); }
+                if is_option_type(ty) { optional_checks.push(quote! { #active_entity.#field.is_some() }); }
                 let mut metadata = metadata.clone();
                 metadata.transform_write = None;
                 value_tokens.push(push_create_input_sql_value_tokens(backend, struct_name,
+                    quote! { #active_entity.#field.clone() }, ty, &metadata, quote! { ::graphql_orm::sqlx::Error }));
+                after_tokens.push(push_create_input_sql_value_tokens(backend, struct_name,
                     quote! { entity.#field.clone() }, ty, &metadata, quote! { ::graphql_orm::sqlx::Error }));
             }
+            let prepare_transition = if historical { quote! {
+                let after_values = {
+                    let mut bind_values = Vec::new();
+                    #(#after_tokens)*
+                    bind_values
+                };
+            } } else { quote! {} };
+            let changed = if historical { quote! { bind_values != after_values } } else { quote! { true } };
+            let witness = if historical { quote! {
+                ::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation_transition::<Self, #target_type>(
+                    hook_ctx.relation_transition_commit(), Self::__gom_subscription_key_values(entity), #relation_name,
+                    vec![#((#source_names, #target_fields)),*], bind_values.clone(), after_values.clone(),
+                    before.clone(), entity.clone(), Self::__gom_authorize_changed_operation,
+                )
+            } } else { quote! {
+                ::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
+                    Self::__gom_subscription_key_values(entity), #relation_name,
+                    vec![#((#source_names, #target_fields)),*], Self::__gom_authorize_changed_operation,
+                )
+            } };
+            let exhausted = if historical { quote! {
+                return Err(::graphql_orm::sqlx::Error::Protocol("relation transition propagation budget exhausted".into()));
+            } } else { quote! { return Ok(()); } };
+            let early_budget = if historical { quote! {} } else { quote! {
+                if visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return Ok(()); }
+            } };
+            let late_budget = if historical { quote! {
+                if visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { #exhausted }
+            } } else { quote! {} };
             Ok(quote! {
                 if true #(&& #optional_checks)* {
-                    if visited.len() >= ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS { return Ok(()); }
+                    #early_budget
                     let mut bind_values = Vec::new();
                     #(#value_tokens)*
+                    #prepare_transition
+                    if #changed {
+                    #late_budget
                     let parent_entities = ::graphql_orm::graphql::subscriptions::propagation_targets::<#target_type, #backend_marker>(
                         hook_ctx, &[#(#target_fields),*], &bind_values,
                         ::graphql_orm::graphql::subscriptions::MAX_SUBSCRIPTION_PROPAGATION_EVENTS - visited.len(),
@@ -2320,9 +2357,7 @@ fn generate_graphql_operations_unfiltered(
                         let mut next_path = path.clone();
                         next_path.push(#relation_name.to_string());
                         let mut next_provenance = provenance.to_vec();
-                        next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
-                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*], Self::__gom_authorize_changed_operation,
-                        ));
+                        next_provenance.push(#witness);
                         let dedupe_key = ::graphql_orm::serde_json::to_string(&(
                             <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                             parent_id_string, source_entity, source_id,
@@ -2334,9 +2369,78 @@ fn generate_graphql_operations_unfiltered(
                                 source_entity, source_id, next_path, visited, &next_provenance).await?;
                         }
                     }
+                    }
                 }
             })
-        }).collect::<syn::Result<Vec<_>>>()?;
+        }).collect::<syn::Result<Vec<_>>>()
+    };
+    let propagation_blocks = propagation_code(false)?;
+    let historical_propagation_blocks = propagation_code(true)?;
+    let transition_queue_wrapper = quote! {
+        #[doc(hidden)]
+        async fn __gom_queue_changed_event(
+            hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
+            action: ::graphql_orm::graphql::orm::ChangeAction,
+            entity: Option<&Self>,
+        ) -> ::graphql_orm::Result<()> {
+            Self::__gom_queue_changed_event_with_preimage(hook_ctx, action, entity, None).await
+        }
+    };
+
+    let historical_queue = if propagated_relations.is_empty() {
+        quote! { let _ = preimage; }
+    } else { quote! {
+    if let Some(before) = preimage {
+        if Self::__gom_subscription_key_values(before) != Self::__gom_subscription_key_values(entity) {
+            return Err(::graphql_orm::sqlx::Error::Protocol("relation transition source key changed".into()));
+        }
+        let path = Vec::<String>::new();
+        let provenance = Vec::<::graphql_orm::graphql::subscriptions::SubscriptionEventSource<#backend_marker>>::new();
+        let source_entity = #entity_name_lit;
+        let source_id = source_id.as_str();
+        let visited = &mut visited;
+        #(#historical_propagation_blocks)*
+    }
+    } };
+
+    let transition_source_id = if has_composite_primary_key {
+        quote! { ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_subscription_key_values(entity)) }
+    } else {
+        pk_id_for_entity.clone()
+    };
+    let transition_finalizer = quote! {
+        #[doc(hidden)]
+        fn __gom_finalize_relation_transition<'a, 'tx>(
+            hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'tx, #backend_marker>,
+            before: Option<Self>,
+            after: Self,
+            action: ::graphql_orm::graphql::orm::ChangeAction,
+        ) -> ::graphql_orm::futures::future::BoxFuture<'a, ::graphql_orm::Result<()>> {
+            Box::pin(async move {
+                // Deleted sources cannot satisfy the current-source release
+                // proof. Keep direct deletion events on their existing path.
+                if action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { return Ok(()); }
+                let entity = &after;
+                let preimage = before.as_ref();
+                let source_id = #transition_source_id;
+                #propagation_visited_seed
+                Self::__gom_propagate_changed_event(hook_ctx, action, entity, #entity_name_lit,
+                    &source_id, Vec::new(), &mut visited, &[]).await?;
+                #historical_queue
+                Ok(())
+            })
+        }
+    };
+    let queue_coalesced_transition = quote! {
+        let source_keys = Self::__gom_subscription_key_values(entity);
+        if let Some(before) = preimage {
+            if Self::__gom_subscription_key_values(before) != source_keys {
+                return Err(::graphql_orm::sqlx::Error::Protocol("relation transition source key changed".into()));
+            }
+        }
+        hook_ctx.queue_relation_transition(&source_keys, preimage.cloned(), entity.clone(), action,
+            Self::__gom_finalize_relation_transition)?;
+    };
 
     // Generate input fields (excluding primary key for create, all optional for update)
     let mut create_input_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -5722,11 +5826,15 @@ fn generate_graphql_operations_unfiltered(
                     rows.first().map(<Self as FromSqlRow<#backend_marker>>::from_row).transpose()
                 }
 
+                #transition_queue_wrapper
+                #transition_finalizer
+
                 #[doc(hidden)]
-                async fn __gom_queue_changed_event(
+                async fn __gom_queue_changed_event_with_preimage(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     action: ::graphql_orm::graphql::orm::ChangeAction,
                     entity: Option<&Self>,
+                    preimage: Option<&Self>,
                 ) -> ::graphql_orm::Result<()> {
                     if let Some(entity) = entity {
                         #search_write_maintenance
@@ -5740,9 +5848,7 @@ fn generate_graphql_operations_unfiltered(
                         };
                         hook_ctx.queue_event(event.clone());
                         #queue_subscription_witness
-                        #propagation_visited_seed
-                        Self::__gom_propagate_changed_event(hook_ctx, action, entity, #entity_name_lit,
-                            &source_id, Vec::new(), &mut visited, &[]).await?;
+                        #queue_coalesced_transition
                     }
                     Ok(())
                 }
@@ -5956,7 +6062,7 @@ fn generate_graphql_operations_unfiltered(
                         id: Self::__gom_event_id(key), changes,
                         before_state: Some(before_state), after_state: Some(Self::__gom_capture_entity_state(&entity)?),
                     }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
-                    Self::__gom_queue_changed_event(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity)).await?;
+                    Self::__gom_queue_changed_event_with_preimage(hook_ctx, ::graphql_orm::graphql::orm::ChangeAction::Updated, Some(&entity), Some(&current_entity)).await?;
                     Ok(Some(entity))
                 }
 
@@ -8095,10 +8201,11 @@ fn generate_graphql_operations_unfiltered(
                                         after_state,
                                     },
                                 ).await?;
-                                #struct_name::__gom_queue_changed_event(
+                                #struct_name::__gom_queue_changed_event_with_preimage(
                                     &mut hook_ctx,
                                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
                                     Some(&entity),
+                                    Some(&current_entity),
                                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                                 hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
@@ -8360,15 +8467,18 @@ fn generate_graphql_operations_unfiltered(
 
             #generated_propagation_driver
 
+            #transition_queue_wrapper
+            #transition_finalizer
+
             #[doc(hidden)]
-            async fn __gom_queue_changed_event(
+            async fn __gom_queue_changed_event_with_preimage(
                 hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
                 entity: Option<&Self>,
+                preimage: Option<&Self>,
             ) -> ::graphql_orm::Result<()> {
                 if let Some(entity) = entity {
                     #search_write_maintenance
-                    let source_id = #pk_id_for_entity;
                     let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
@@ -8380,17 +8490,7 @@ fn generate_graphql_operations_unfiltered(
                     };
                     hook_ctx.queue_event(event.clone());
                     #queue_subscription_witness
-                    #propagation_visited_seed
-                    Self::__gom_propagate_changed_event(
-                        hook_ctx,
-                        action,
-                        entity,
-                        #entity_name_lit,
-                        &source_id,
-                        Vec::new(),
-                        &mut visited,
-                        &[],
-                    ).await?;
+                    #queue_coalesced_transition
                 }
                 Ok(())
             }
@@ -8611,10 +8711,10 @@ fn generate_graphql_operations_unfiltered(
                 .await
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
-                Self::__gom_queue_changed_event(
+                Self::__gom_queue_changed_event_with_preimage(
                     hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                    Some(&entity),
+                    Some(&entity), Some(&current_entity),
                 ).await?;
 
                 Ok(Some(entity))
@@ -9152,10 +9252,10 @@ fn generate_graphql_operations_unfiltered(
                 )
                 .await
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
-                Self::__gom_queue_changed_event(
+                Self::__gom_queue_changed_event_with_preimage(
                     &mut hook_ctx,
                     ::graphql_orm::graphql::orm::ChangeAction::Updated,
-                    Some(&entity),
+                    Some(&entity), Some(&current_entity),
                 ).await?;
                 hook_ctx.commit_and_emit().await?;
 
