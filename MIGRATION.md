@@ -18,8 +18,14 @@ counterparts now queue both former and new parent invalidations when a declared
 upward relation tuple changes. Direct GraphQL updates pass the locked preimage
 captured inside their authenticated pinned transaction to the same transition
 queue helper before commit; no preimage is loaded outside that transaction.
-Ordinary inserts, deletes and stale current-edge witnesses retain their existing
-contracts. No schema or stored-value migration is required.
+The transaction retains the first preimage and final image per entity type and
+complete source key. At finalization, every declared upward mapping uses those
+two snapshots on the same pinned connection. A → B → C invalidates only A and C;
+A → B → A invalidates A once. Intermediate B is not a historical association.
+Parent propagation is materialized once before COMMIT and released only after
+success. Direct source events keep their existing per-operation semantics;
+stale ordinary current-edge witnesses remain suppressed. No schema or
+stored-value migration is required.
 
 Historical release is **default deny**, separately from current-row reads and
 `can_read_deleted_preimage`. Opt in only with
@@ -53,6 +59,12 @@ an exhausted first-leg budget fails the mutation; ancestor hop/event bounds
 retain their prior behavior.
 A NULL or missing new target can still invalidate a readable former target.
 Missing/denied targets are handled independently at subscriber release.
+Insert-then-move has no committed historical baseline. A first postimage-only
+write likewise cannot acquire historical authority from a later covered update
+in the same transaction. Repeated captures replace only the final image, never
+the first baseline. Parent identity is deduplicated per complete source origin,
+while independent sources with shared tenant/key components remain independent.
+Finalization failure rolls back without activating receipts or releasing events.
 
 This slice covers generated single-key GraphQL updates, single-key
 repository/context updates and composite-key repository/context updates.
@@ -60,9 +72,10 @@ CAS/predicate updates, upsert, direct bulk/update-where and runtime record
 updates remain on their prior postimage-only paths. Helper-delegating
 bounded or composite bulk paths inherit the per-row transition code, but their
 aggregate behavior is not qualified as complete. Do not infer coverage for all
-bulk surfaces. Repeated moves in one transaction are not coalesced: an earlier
-transition whose postimage no longer matches is suppressed. Multi-hop propagation
-uses current edges after the first historical leg and existing dedup/hop bounds.
+bulk surfaces. The covered context updates coalesce repeated moves within one
+transaction; this is association invalidation, not a per-call history stream.
+Multi-hop propagation uses current edges after the first historical leg and
+existing dedup/hop bounds.
 These limits are broader alignment work, not additional D08 rollout gates.
 
 ## 0.81.0 to 0.82.0: exact static signed64 filters

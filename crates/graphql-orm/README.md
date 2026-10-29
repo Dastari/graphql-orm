@@ -13,8 +13,9 @@ supersedes: []
 Version 0.83.0 adds committed former/new-parent invalidation for generated
 single-key GraphQL updates and single/composite repository and MutationContext
 updates. Historical associations require a separate explicit default-deny
-policy; current authorization and
-commit/rollback proofs remain mandatory. Other write paths are not covered.
+policy; current authorization and commit/rollback proofs remain mandatory.
+Transaction-owned first-before/final-after aggregation suppresses intermediate
+associations across repeated updates. Other write paths are not covered.
 See the [transition migration](../../MIGRATION.md#0820-to-0830-committed-relation-transitions).
 
 Version 0.82.0 adds opt-in `int64` static filters with native `i64` operands,

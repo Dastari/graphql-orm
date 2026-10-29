@@ -24,8 +24,10 @@ Companion runtime/macros version: **0.83.0**.
   `RowPolicy::can_read_relation_transition` authority plus current source/target
   SQL, row, mapped-field and per-hop operation checks. An opaque transaction
   receipt prevents release before successful COMMIT. No production opt-in is
-  implied. CAS/upsert/direct-bulk/runtime paths, complete bulk acceptance and
-  transaction coalescing remain outside this slice; see the migration contract.
+  implied. Transaction-owned first-before/final-after aggregation prevents
+  transient parent disclosure and deduplicates final parents across repeated
+  covered updates. CAS/upsert/direct-bulk/runtime historical capture and complete
+  bulk acceptance remain outside this slice; see the migration contract.
 
 ## 0.82.0 (unreleased)
 

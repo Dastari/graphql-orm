@@ -635,3 +635,198 @@ async fn graphql_update_missing_operation_scope_leaves_original_edge_unchanged()
     ).await);
     expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
 }
+
+async fn move_in_transaction(tx: &mut MutationContext<'_>, customer: u128, target: u128) {
+    tx.update_by_id::<TransitionChild>(&uid(999), UpdateTransitionChildInput {
+        customer_id: Some(uid(customer)), target_id: Some(Some(uid(target))), ..Default::default()
+    }).await.unwrap().expect("current source must exist");
+}
+
+#[tokio::test]
+async fn transaction_first_before_final_after_excludes_transient_parent() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    move_in_transaction(&mut tx, 20, 200).await; // A -> B, B never committed.
+    move_in_transaction(&mut tx, 20, 100).await; // C shares A's id, B's customer.
+    expect_parents(&mut stream, &[]).await;
+    tx.commit_and_emit().await.unwrap();
+    expect_parents(&mut stream, &[(1,10,100), (1,20,100)]).await;
+}
+
+#[tokio::test]
+async fn transaction_return_to_original_parent_excludes_transient_parent() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    move_in_transaction(&mut tx, 20, 200).await;
+    move_in_transaction(&mut tx, 10, 100).await;
+    tx.commit_and_emit().await.unwrap();
+    expect_parents(&mut stream, &[(1,10,100)]).await;
+}
+
+#[tokio::test]
+async fn transaction_repeated_final_target_is_deduplicated() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    for (customer, target) in [(20,200), (20,100), (20,100), (20,100)] {
+        move_in_transaction(&mut tx, customer, target).await;
+    }
+    tx.commit_and_emit().await.unwrap();
+    expect_parents(&mut stream, &[(1,10,100), (1,20,100)]).await;
+}
+
+#[tokio::test]
+async fn transaction_rollback_and_failed_commit_discard_all_aggregated_edges() {
+    for fail_commit in [false, true] {
+        let (db, authority) = fixture().await;
+        let schema = schema(db.clone(), authority);
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        move_in_transaction(&mut tx, 20, 200).await;
+        move_in_transaction(&mut tx, 20, 100).await;
+        if fail_commit {
+            tx.update_by_id::<TransitionChild>(&uid(999), UpdateTransitionChildInput {
+                label: Some("missing-label".into()), ..Default::default()
+            }).await.unwrap().unwrap();
+            assert!(tx.commit_and_emit().await.is_err());
+        } else {
+            tx.rollback().await.unwrap();
+        }
+        expect_parents(&mut stream, &[]).await;
+        // A real subsequent generated write must still observe committed A.
+        move_to(&db, 20, Some(200)).await;
+        expect_parents(&mut stream, &[(1,10,100), (1,20,200)]).await;
+    }
+}
+
+#[tokio::test]
+async fn aggregated_transition_retains_current_and_historical_authorization() {
+    for denial in [HISTORICAL_EDGE, SOURCE_ROW, MAPPED_FIELD, CURRENT_AUTH,
+        CHILD_ASSURANCE, PARENT_ASSURANCE] {
+        let (db, authority) = fixture().await;
+        let schema = schema(db.clone(), authority.clone());
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        move_in_transaction(&mut tx, 20, 200).await;
+        move_in_transaction(&mut tx, 20, 100).await;
+        tx.commit_and_emit().await.unwrap();
+        authority.0.store(denial, Ordering::SeqCst);
+        if denial == HISTORICAL_EDGE {
+            expect_parents(&mut stream, &[(1,20,100)]).await;
+        } else {
+            expect_parents(&mut stream, &[]).await;
+        }
+        authority.0.store(0, Ordering::SeqCst);
+        touch(&db).await;
+        expect_parents(&mut stream, &[(1,20,100)]).await;
+    }
+}
+
+#[tokio::test]
+async fn composite_context_moves_preserve_first_and_final_complete_tuples() {
+    let (db, authority) = fixture().await;
+    CompositeTransitionChild::insert(&db, CreateCompositeTransitionChildInput {
+        security_tenant_id: uid(1), id: uid(888), customer_id: uid(10), target_id: Some(uid(100)),
+    }).await.unwrap();
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    for target in [200, 100] {
+        tx.update_by_key::<CompositeTransitionChild>(&CompositeTransitionChildKey {
+            security_tenant_id: uid(1), id: uid(888),
+        }, UpdateCompositeTransitionChildInput {
+            customer_id: Some(uid(20)), target_id: Some(Some(uid(target))), ..Default::default()
+        }).await.unwrap().unwrap();
+    }
+    tx.commit_and_emit().await.unwrap();
+    let source_id = graphql_orm::graphql::orm::composite_key_id(&[
+        SqlValue::Uuid(uid(1)), SqlValue::Uuid(uid(888)),
+    ]);
+    expect_parent_source(&mut stream, &[(1,10,100), (1,20,100)], source_id).await;
+}
+
+#[tokio::test]
+async fn inserted_then_moved_source_has_no_committed_historical_association() {
+    let (db, authority) = fixture().await;
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    tx.insert::<TransitionChild>(CreateTransitionChildInput {
+        id: uid(998), security_tenant_id: uid(1), customer_id: uid(10),
+        target_id: Some(uid(100)), label: "initial".into(),
+    }).await.unwrap();
+    tx.update_by_id::<TransitionChild>(&uid(998), UpdateTransitionChildInput {
+        customer_id: Some(uid(20)), target_id: Some(Some(uid(200))), ..Default::default()
+    }).await.unwrap().unwrap();
+    tx.commit_and_emit().await.unwrap();
+    expect_parent_source(&mut stream, &[(1,20,200)], uid(998).to_string()).await;
+}
+
+#[tokio::test]
+async fn aggregated_sources_with_shared_first_key_component_remain_independent() {
+    let (db, authority) = fixture().await;
+    for id in [888, 889] {
+        CompositeTransitionChild::insert(&db, CreateCompositeTransitionChildInput {
+            security_tenant_id: uid(1), id: uid(id), customer_id: uid(10), target_id: Some(uid(100)),
+        }).await.unwrap();
+    }
+    let schema = schema(db.clone(), authority);
+    let mut stream = Box::pin(schema.execute_stream(request(true)));
+    register(&mut stream).await;
+    let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+    for (id, customer, target) in [(888,20,200), (889,20,200), (888,20,100), (889,10,100)] {
+        tx.update_by_key::<CompositeTransitionChild>(&CompositeTransitionChildKey {
+            security_tenant_id: uid(1), id: uid(id),
+        }, UpdateCompositeTransitionChildInput {
+            customer_id: Some(uid(customer)), target_id: Some(Some(uid(target))), ..Default::default()
+        }).await.unwrap().unwrap();
+    }
+    tx.commit_and_emit().await.unwrap();
+    let mut actual = Vec::new();
+    for _ in 0..3 {
+        let response = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        let event = &data["transitionParentChanged"];
+        assert_eq!(event["path"], serde_json::json!(["parent"]));
+        let row = &event["transitionParent"];
+        actual.push((event["sourceId"].as_str().unwrap().to_owned(),
+            row["securityTenantId"].as_str().unwrap().to_owned(),
+            row["customerId"].as_str().unwrap().to_owned(), row["id"].as_str().unwrap().to_owned()));
+    }
+    let mut expected = [(888,10,100), (888,20,100), (889,10,100)].into_iter().map(|(id,c,t)| {
+        (graphql_orm::graphql::orm::composite_key_id(&[SqlValue::Uuid(uid(1)), SqlValue::Uuid(uid(id))]),
+            uid(1).to_string(), uid(c).to_string(), uid(t).to_string())
+    }).collect::<Vec<_>>();
+    actual.sort(); expected.sort(); assert_eq!(actual, expected);
+    assert!(timeout(Duration::from_millis(100), stream.next()).await.is_err(),
+        "transient or duplicate association was released");
+}
+
+#[tokio::test]
+async fn aggregated_transitions_do_not_upgrade_default_historical_denial() {
+    for sql_visibility in [false, true] {
+        let (mut db, authority) = fixture().await;
+        db.set_row_policy(CurrentOnly(authority.clone(), sql_visibility));
+        let schema = schema(db.clone(), authority);
+        let mut stream = Box::pin(schema.execute_stream(request(true)));
+        register(&mut stream).await;
+        let mut tx = MutationContext::begin(&db, TransactionMode::Default).await.unwrap();
+        move_in_transaction(&mut tx, 20, 200).await;
+        move_in_transaction(&mut tx, 20, 100).await;
+        tx.commit_and_emit().await.unwrap();
+        expect_parents(&mut stream, &[(1,20,100)]).await;
+    }
+}

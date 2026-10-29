@@ -122,6 +122,8 @@ impl RelationTransitionCommit {
 /// This is not deleted-preimage permission. The host must explicitly authorize
 /// the historical association, including historical SQL/RLS conditions where
 /// applicable. Current source and target SQL/row/field checks run independently.
+/// Generated context updates retain the transaction's first preimage and final
+/// postimage. Intermediate per-call associations are not historical witnesses.
 /// Values and snapshots are server-only and must not be copied into diagnostics.
 pub struct RelationTransitionRead<'a> {
     pub source_entity: &'static str,
