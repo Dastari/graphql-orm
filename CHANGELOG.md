@@ -20,6 +20,10 @@ for historical context.
   `Int64Filter`, `Signed64`) with canonical metadata, bounded lists and exact SQL
   bindings/matching with SQL three-valued NULL composition and predecode list
   admission. Existing 32-bit filters remain unchanged.
+- Generated GraphQL list (including composite keys), keyset and authorized-scan
+  reads preflight the read policies of all static predicate fields before SQL,
+  including recursive predicates whose protected fields are absent from the
+  response selection. Hosts must authorize predicate intent without a row.
 
 - Add producer-owned typed filter contracts in operation catalog 0.6.0 (wire 3),
   ORM/macros 0.80.0, profiles 0.19.0 and AI 0.118.0. Canonical operator meanings,

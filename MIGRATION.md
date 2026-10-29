@@ -34,6 +34,16 @@ GraphQL singleton-list coercion remains supported. Existing query-level
 policy, depth, work and database bind budgets remain required. Generated
 metadata advertises `Signed64` operands rather than GraphQL `Int`.
 
+Generated list, keyset and authorized-scan GraphQL resolvers now check read
+policies for every field referenced by a static filter, including nested
+NOT/OR/AND, before list/count/scan SQL. This applies to all static filter
+families. A predicate cannot bypass a field policy by selecting only another
+field in the response. Providers receive the original public field identity
+and policy key with no row (`record = None`), and must authorize that field's
+use in a predicate; row and selected-field authorization remain independent.
+Previously accepted filtered reads may now return forbidden or a missing-policy
+error. No additional client scope or read authority is implied.
+
 ## 0.78.0 to 0.80.0: canonical typed filter contracts
 
 For hosts already on 0.79.0, the same typed-contract migration applies from

@@ -242,7 +242,10 @@ async fn exact_capability_execution_and_private_roles_stay_closed() {
                     .variables(Variables::from_json(variables.clone())),
             )
             .await;
-        assert!(!response.errors.is_empty());
+        assert!(
+            !response.errors.is_empty(),
+            "denied filter intent was accepted (recursive={recursive})"
+        );
         assert_eq!(
             work.load(Ordering::SeqCst),
             0,
