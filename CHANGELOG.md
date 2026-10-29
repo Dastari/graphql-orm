@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.81.1**.
+
+- Add `RuntimeReadAuthority::release_mutation_result` and `RuntimeMutationRelease` (`Release`, `Withhold`), so a host can withhold a committed mutation's record that the caller may not view: the payload is `{"record": null}` with no error, and no record value, projected host object or relation is serialized. The default releases exactly when `authorize_mutation_result` succeeds, so existing hosts are unchanged. See [post-commit record release](docs/reference/graphql-orm/runtime-graphql.md). Additive; no migration.
+
+## 0.81.0 (unreleased)
+
 Companion runtime/macros version: **0.81.0**.
 
 - Add host-supplied actor stamps for runtime fields, the analogue of Spring Data's `@CreatedBy`/`AuditorAware`: `RuntimeField::auto_actor: Option<RuntimeAutoActor>` with `OnCreate`. Valid only on nullable, non-primary-key `Uuid` or `String` fields that are not generated, have no default and do not declare `auto_timestamp` (`InvalidAutoActor` with a value-free `RuntimeAutoActorProblem` detail). See [actor stamps](docs/reference/graphql-orm/runtime-schema-ir.md#actor-stamps).

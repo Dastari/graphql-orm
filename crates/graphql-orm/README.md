@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.81.1 adds `RuntimeReadAuthority::release_mutation_result`, which lets a host
+withhold a committed mutation's record (`record: null`, no error) from a caller who may
+not view it. The default keeps the previous behaviour; no migration is needed.
+
 Version 0.81.0 adds host-supplied runtime actor stamps (`RuntimeField::auto_actor`), written
 from the write grant's actor (`RuntimeWriteGrant::with_actor`). See the
 [migration guide](../../MIGRATION.md#0800-to-0810-runtime-actor-stamps).

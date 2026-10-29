@@ -285,6 +285,82 @@ impl RuntimeReadAuthority for OutputRead {
         })
     }
 }
+/// Withholds every committed record through the release callback.
+struct WithholdRead {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl RuntimeReadAuthority for WithholdRead {
+    fn authorize<'a>(
+        &'a self,
+        check: RuntimeReadCheck<'a>,
+    ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+        Read.authorize(check)
+    }
+    fn authorize_mutation_result<'a>(
+        &'a self,
+        _: RuntimeMutationOutputCheck<'a>,
+    ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+        panic!("the ORM calls release_mutation_result")
+    }
+    fn release_mutation_result<'a>(
+        &'a self,
+        check: RuntimeMutationOutputCheck<'a>,
+    ) -> BoxFuture<'a, Result<RuntimeMutationRelease, RuntimeGraphqlError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            check.kind == RuntimeMutationRecordKind::DeletedPreimage,
+            check.action == RuntimeMutationAction::Delete
+        );
+        Box::pin(async { Ok(RuntimeMutationRelease::Withhold) })
+    }
+}
+#[tokio::test]
+async fn post_commit_withheld_records_are_null_and_committed() {
+    for delete in [false, true] {
+        let f = Fixture::new().await;
+        let api = api(&f);
+        if delete {
+            f.run(f.create(1), f.authority()).await.unwrap();
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let context = RuntimeGraphqlRequest::new(
+            f.schema().fingerprint(),
+            Arc::new(WithholdRead {
+                calls: calls.clone(),
+            }),
+            None,
+            Default::default(),
+        )
+        .with_mutation_environment(f.environment.clone())
+        .with_write_authority(Arc::new(f.authority()))
+        .with_mutation_hook(Arc::new(JournalHook {
+            staged: Arc::new(AtomicBool::new(false)),
+            pending: false,
+            fail: false,
+        }));
+        let (root, query) = if delete {
+            (
+                "deleteRecord",
+                r#"mutation($schema:String!){deleteRecord(key:{id:"1"},expectedSchema:$schema){record{label}}}"#,
+            )
+        } else {
+            (
+                "createRecord",
+                r#"mutation($schema:String!){createRecord(input:{id:"1",tenant:"north",label:"initial"},expectedSchema:$schema){record{label}}}"#,
+            )
+        };
+        let response = api.execute(request(&f, query).data(context)).await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert_eq!(
+            response.data.into_json().unwrap()[root],
+            serde_json::json!({"record": null})
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(f.count().await, if delete { 0 } else { 1 });
+        assert_eq!(Journal::count_all(&f.db).await.unwrap(), 1);
+        f.finish().await;
+    }
+}
 #[tokio::test]
 async fn post_commit_allow_denial_error_timeout_and_deleted_preimages() {
     for delete in [false, true] {
