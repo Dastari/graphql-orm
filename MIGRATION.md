@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.81.0 to 0.82.0: shareable aggregate result objects
+
+The 0.82.0 candidate includes the fix originally prepared in the 0.81.2 source
+checkpoint. Generated federation SDL marks `GraphqlAggregateResultRow` and
+`GraphqlAggregateResultValue` `@shareable`, like `PageInfo`, so two subgraphs
+with aggregate-enabled entities can compose. No stored-data migration is needed.
+Subgraphs that disabled aggregates solely because those shared wrapper fields
+collided may restore their entity-level aggregate opt-in after adopting the
+qualified release. Entity read/aggregate policies and other authorization checks
+remain required; sharing the wrappers grants no data access. Current runtime and
+macros are paired at 0.82.0, not the historical source checkpoint's version.
+
 ## Published agql-auth 0.24.0 selection
 
 The workspace selects published Auth `v0.24.0` instead of the full revision

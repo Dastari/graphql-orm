@@ -18,6 +18,13 @@ for historical context.
 
 Companion runtime/macros version: **0.82.0**.
 
+- Include the shareable aggregate-result fix from the 0.81.2 source checkpoint:
+  generated federation SDL marks `GraphqlAggregateResultRow` and
+  `GraphqlAggregateResultValue` `@shareable`, as `PageInfo` already is. This lets
+  two aggregate-enabled subgraphs compose without duplicate wrapper-field
+  ownership errors. The SDL regression and two-subgraph aggregate fixture are
+  included; no stored-data migration or aggregate-policy change is required.
+
 - Select published Auth `v0.24.0` instead of its full revision selector. The tag
   peels to the same `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd` source; align
   direct host selectors to retain one Auth type universe. See the

@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.82.0 also pairs with the runtime's shareable aggregate result objects.
+The aggregate fix does not change macro generation. See the
+[aggregate migration](../../MIGRATION.md#0810-to-0820-shareable-aggregate-result-objects).
+
 Version 0.82.0 adds opt-in `int64` static filters with native `i64` operands,
 `Signed64` wire coercion and exact typed metadata. Existing `number` filters
 remain 32-bit. See the [signed64 migration](../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters).
