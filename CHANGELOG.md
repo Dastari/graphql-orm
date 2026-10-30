@@ -45,6 +45,8 @@ Companion runtime/macros version: **0.82.0**.
   explicit assurance coordinate at current/final release. Repository-only hooks
   remain private.
 
+- Add `RuntimeReadAuthority::release_mutation_result` and `RuntimeMutationRelease` (`Release`, `Withhold`), so a host can withhold a committed mutation's record that the caller may not view: the payload is `{"record": null}` with no error, and no record value, projected host object or relation is serialized. The default releases exactly when `authorize_mutation_result` succeeds, so existing hosts are unchanged. See [post-commit record release](docs/reference/graphql-orm/runtime-graphql.md). Additive; no migration.
+
 ## 0.81.0 (unreleased)
 
 Companion runtime/macros version: **0.81.0**.

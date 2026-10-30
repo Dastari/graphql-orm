@@ -72,10 +72,38 @@ pub trait RuntimeReadAuthority: Send + Sync + 'static {
         Box::pin(async { Err(RuntimeGraphqlError::denied()) })
     }
 
+    /// Release or withhold a committed mutation's captured record. The ORM calls this
+    /// method, not [`Self::authorize_mutation_result`], after confirmed commit.
+    ///
+    /// The default releases exactly when `authorize_mutation_result` succeeds and returns
+    /// its error otherwise, so existing hosts keep their behaviour. A host whose callers
+    /// may write rows they may not read returns [`RuntimeMutationRelease::Withhold`]: the
+    /// payload's `record` is `null`, without an error, and no record value, projected host
+    /// object or relation is read or serialized. Errors keep their committed
+    /// classification (`mutation_payload_denied`, `mutation_payload_failed`).
+    fn release_mutation_result<'a>(
+        &'a self,
+        check: RuntimeMutationOutputCheck<'a>,
+    ) -> BoxFuture<'a, Result<RuntimeMutationRelease, RuntimeGraphqlError>> {
+        let decision = self.authorize_mutation_result(check);
+        Box::pin(async move { decision.await.map(|()| RuntimeMutationRelease::Release) })
+    }
+
     fn authorize<'a>(
         &'a self,
         check: RuntimeReadCheck<'a>,
     ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>>;
+}
+/// The host's decision for a committed mutation's record
+/// ([`RuntimeReadAuthority::release_mutation_result`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuntimeMutationRelease {
+    /// Serialize the authorized selected projection.
+    Release,
+    /// The caller may not see this record: the payload's `record` is `null`. The mutation
+    /// remains committed; this is not an error.
+    Withhold,
 }
 /// Trusted request data. Reuse does not reuse execution caches or grants.
 pub struct RuntimeGraphqlRequest<B: RuntimeReadBackend> {
