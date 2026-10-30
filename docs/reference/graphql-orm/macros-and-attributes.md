@@ -649,8 +649,10 @@ for `Key`, including the key fields themselves. A key the subscriber cannot read
 its events, and the subscriber cannot tell it apart from a key that does not exist.
 
 graphql-ws cannot change the arguments of a live subscription. To change the set, subscribe with
-the new `Keys` and then close the old subscription, debouncing rapid changes. Refetch the records
-that were added, because events written before the new subscription started are not replayed.
+the new `Keys` and then close the old subscription, debouncing rapid changes. While both are open,
+an event for a key in both sets can arrive twice; drop the duplicate by record version (see
+[managed versions](#managed-versions)). Refetch the records that were added, because events
+written before the new subscription started are not replayed.
 Unkeyed subscriptions, and subscriptions that pass only `Key`, behave as before. Generated
 broadcast subscriptions are best effort: lag and continuity signalling is tracked separately in
 [#225](https://github.com/Dastari/graphql-orm/issues/225).
