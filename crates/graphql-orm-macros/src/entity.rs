@@ -1276,6 +1276,8 @@ pub(crate) struct FieldMetadata {
     pub(crate) unique: bool,
     pub(crate) is_primary_key: bool,
     pub(crate) is_version: bool,
+    /// `#[graphql_orm(version = "managed")]`: every generated write advances it.
+    pub(crate) managed_version: bool,
     pub(crate) minimum: Option<String>,
     pub(crate) maximum: Option<String>,
     pub(crate) exclusive_minimum: Option<String>,
@@ -1460,6 +1462,7 @@ impl Default for FieldMetadata {
             unique: false,
             is_primary_key: false,
             is_version: false,
+            managed_version: false,
             minimum: None,
             maximum: None,
             exclusive_minimum: None,
@@ -1928,6 +1931,20 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                         } else if nested.path.is_ident("non_exportable") {
                             meta.non_exportable = true;
                         } else if nested.path.is_ident("version") {
+                            if nested.input.peek(syn::Token![=]) {
+                                let value = nested.value()?;
+                                let lit: syn::LitStr = value.parse()?;
+                                match lit.value().as_str() {
+                                    "managed" => meta.managed_version = true,
+                                    "cas" => {}
+                                    _ => {
+                                        return Err(syn::Error::new(
+                                            lit.span(),
+                                            "version accepts \"managed\" or \"cas\"; bare `version` is \"cas\"",
+                                        ));
+                                    }
+                                }
+                            }
                             meta.is_version = true;
                             meta.skip_input = true;
                             meta.write = false;

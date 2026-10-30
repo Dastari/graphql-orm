@@ -1631,6 +1631,120 @@ fn generate_graphql_operations_unfiltered(
         let column = meta.db_column.clone().unwrap_or(rust_name);
         (ident, field.ty.clone(), column)
     });
+    let managed_version_field = version_fields
+        .first()
+        .filter(|(_, meta)| meta.managed_version)
+        .and_then(|_| version_field.clone());
+    let expected_version_arg_name =
+        apply_graphql_case("expected_version", selected_argument_case());
+    let (expected_version_param, expected_version_binding) = if managed_version_field.is_some() {
+        (
+            quote! {
+                #[graphql(
+                    name = #expected_version_arg_name,
+                    desc = "Apply only if the record's current managed version equals this value; otherwise fail with CONFLICT and write nothing"
+                )]
+                expected_version: Option<i64>,
+            },
+            quote! { expected_version },
+        )
+    } else {
+        (quote! {}, quote! { None })
+    };
+    let managed_version_column_option = match &managed_version_field {
+        Some((_, _, column)) => quote! { Some(#column) },
+        None => quote! { None },
+    };
+    // Managed versions advance on every generated write. CAS-only versions (bare
+    // `version`) keep their historical behaviour: only compare-and-swap advances them.
+    let managed_version_helper_methods = if let Some((version_ident, _, version_column)) =
+        &managed_version_field
+    {
+        quote! {
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_assignment() -> Option<String> {
+                use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+                let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                let column = dialect.quote_identifier_path(#version_column);
+                Some(format!("{column} = {column} + 1"))
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_guard() -> String {
+                use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+                let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                format!(" AND {} < {}", dialect.quote_identifier_path(#version_column), i64::MAX)
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_of(entity: &Self) -> Option<i64> {
+                Some(entity.#version_ident)
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_expectation(expected: Option<i64>) -> String {
+                use ::graphql_orm::graphql::orm::{OrmBackend, SqlDialect};
+                let dialect = <#backend_marker as OrmBackend>::DIALECT;
+                // An i64 literal cannot carry SQL; it keeps the bind order unchanged.
+                expected
+                    .map(|expected| format!(" AND {} = {expected}", dialect.quote_identifier_path(#version_column)))
+                    .unwrap_or_default()
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_managed_version_headroom(entity: &Self) -> ::graphql_orm::Result<()> {
+                if entity.#version_ident >= i64::MAX {
+                    return Err(Self::__gom_runtime_error("managed version cannot advance past i64::MAX"));
+                }
+                Ok(())
+            }
+
+            /// An upsert's update branch is guarded by `version < i64::MAX`, which
+            /// SQLite and PostgreSQL treat as "update nothing" rather than an error.
+            /// Require the committed row to have advanced exactly once.
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_managed_version_advanced(before: Option<&Self>, after: &Self) -> ::graphql_orm::Result<()> {
+                if let Some(before) = before
+                    && before.#version_ident.checked_add(1) != Some(after.#version_ident)
+                {
+                    return Err(Self::__gom_runtime_error("managed version did not advance"));
+                }
+                Ok(())
+            }
+        }
+    } else {
+        quote! {
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_assignment() -> Option<String> {
+                None
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_guard() -> String {
+                String::new()
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_of(_entity: &Self) -> Option<i64> {
+                None
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_managed_version_expectation(_expected: Option<i64>) -> String {
+                String::new()
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_managed_version_headroom(_entity: &Self) -> ::graphql_orm::Result<()> {
+                Ok(())
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_managed_version_advanced(_before: Option<&Self>, _after: &Self) -> ::graphql_orm::Result<()> {
+                Ok(())
+            }
+        }
+    };
     if let Some((_, ty, _)) = &version_field {
         if !matches!(ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "i64"))
         {
@@ -3789,13 +3903,14 @@ fn generate_graphql_operations_unfiltered(
     };
     let upsert_sql_expression = if upsert_config.is_some() {
         quote! {
-            ::graphql_orm::graphql::orm::build_upsert_sql(
+            ::graphql_orm::graphql::orm::build_upsert_sql_with_managed_version(
                 #table_name,
                 &[#(#upsert_insert_column_literals),*],
                 &[#(#upsert_insert_value_literals),*],
                 &[#(#upsert_conflict_column_literals),*],
                 &[#(#upsert_update_column_literals),*],
                 #has_updated_at_column,
+                #managed_version_column_option,
             )
         }
     } else {
@@ -3903,9 +4018,13 @@ fn generate_graphql_operations_unfiltered(
                     },
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
+                if let Some(current_entity) = current_entity.as_ref() {
+                    Self::__gom_require_managed_version_headroom(current_entity)?;
+                }
                 hook_ctx.execute(&sql, &bind_values).await?;
                 let entity = Self::__gom_fetch_by_upsert_on(hook_ctx, &lookup_input).await?
                     .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                Self::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)?;
                 let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
 
                 hook_ctx.run_mutation_hook(
@@ -4035,6 +4154,10 @@ fn generate_graphql_operations_unfiltered(
                     },
                 ).await?;
 
+                if let Some(current_entity) = current_entity.as_ref() {
+                    #struct_name::__gom_require_managed_version_headroom(current_entity)
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                }
                 hook_ctx.execute(&sql, &bind_values)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -4042,6 +4165,8 @@ fn generate_graphql_operations_unfiltered(
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after upsert"))?;
+                #struct_name::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let after_state = Some(
                     #struct_name::__gom_capture_entity_state(&entity)
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
@@ -5919,9 +6044,13 @@ fn generate_graphql_operations_unfiltered(
                             Self::__gom_current_epoch_expr(),
                         ));
                     }
+                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                        set_clauses.push(assignment);
+                    }
                     if set_clauses.is_empty() {
                         return Err(Self::__gom_runtime_error("No fields to update"));
                     }
+                    Self::__gom_require_managed_version_headroom(&current_entity)?;
                     let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                     let changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                     hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
@@ -5934,10 +6063,11 @@ fn generate_graphql_operations_unfiltered(
                     }).await.map_err(|error| Self::__gom_runtime_error(format!("{error:?}")))?;
                     let key_start = values.len() + 1;
                     let sql = Self::__gom_rebind_sql(&format!(
-                        "UPDATE {} SET {} WHERE {}",
+                        "UPDATE {} SET {} WHERE {}{}",
                         dialect.quote_identifier_path(#table_name),
                         set_clauses.join(", "),
                         Self::__gom_key_where_clause_at(key_start),
+                        Self::__gom_managed_version_guard(),
                     ), 1);
                     values.extend(Self::__gom_key_values(key));
                     let result = hook_ctx.execute(&sql, &values,).await?;
@@ -6156,6 +6286,9 @@ fn generate_graphql_operations_unfiltered(
                             Self::__gom_current_epoch_expr(),
                         ));
                     }
+                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                        set_clauses.push(assignment);
+                    }
                     if set_clauses.is_empty() {
                         return Err(Self::__gom_runtime_error("No fields to update"));
                     }
@@ -6164,6 +6297,7 @@ fn generate_graphql_operations_unfiltered(
                     let expected_clause = delete_sql.split_once(" WHERE ")
                         .map(|(_, clause)| clause)
                         .ok_or_else(|| Self::__gom_runtime_error("conditional predicate rendered empty SQL"))?;
+                    Self::__gom_require_managed_version_headroom(&current_entity)?;
                     let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                     let changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                     hook_ctx.run_mutation_hook(None, &::graphql_orm::graphql::orm::MutationEvent {
@@ -6178,10 +6312,11 @@ fn generate_graphql_operations_unfiltered(
                     let expected_start = key_start + <Self as ::graphql_orm::graphql::orm::DatabaseEntity>::PRIMARY_KEYS.len();
                     let expected_clause = Self::__gom_rebind_sql(expected_clause, expected_start);
                     let sql = Self::__gom_rebind_sql(&format!(
-                        "UPDATE {} SET {} WHERE {} AND ({expected_clause})",
+                        "UPDATE {} SET {} WHERE {}{} AND ({expected_clause})",
                         dialect.quote_identifier_path(#table_name),
                         set_clauses.join(", "),
                         Self::__gom_key_where_clause_at(key_start),
+                        Self::__gom_managed_version_guard(),
                     ), 1);
                     values.extend(Self::__gom_key_values(key));
                     values.extend(expected_values);
@@ -7248,6 +7383,10 @@ fn generate_graphql_operations_unfiltered(
         return Ok(quote! {
             #operation_metadata_impl
 
+            impl #struct_name {
+                #managed_version_helper_methods
+            }
+
             // ============================================================================
             // Connection/Edge Types (for pagination)
             // ============================================================================
@@ -7962,8 +8101,10 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #id_arg_name, desc = #id_arg_description)] id: #pk_type,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_update_input,
+                #expected_version_param
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
+                let __gom_expected_version: Option<i64> = #expected_version_binding;
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #update_scope_enforcement
@@ -8009,6 +8150,13 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                     &current_entity as &(dyn ::std::any::Any + Send + Sync),
                 ).await?;
+                if __gom_expected_version.is_some()
+                    && #struct_name::__gom_managed_version_of(&current_entity) != __gom_expected_version
+                {
+                    return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                        ::graphql_orm::graphql::errors::OrmErrorCode::Conflict,
+                    ).into_graphql_error());
+                }
                 {
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::graphql_in_transaction(
                         ctx,
@@ -8034,10 +8182,15 @@ fn generate_graphql_operations_unfiltered(
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", #struct_name::__gom_current_epoch_expr()));
                 }
+                if let Some(assignment) = #struct_name::__gom_managed_version_assignment() {
+                    set_clauses.push(assignment);
+                }
 
                 if set_clauses.is_empty() {
                     return Ok(#result_type::err("No fields to update"));
                 }
+                #struct_name::__gom_require_managed_version_headroom(&current_entity)
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let before_state = #struct_name::__gom_capture_entity_state(&current_entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
@@ -8057,10 +8210,15 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
 
                 let sql = #struct_name::__gom_rebind_sql(&format!(
-                    "UPDATE {} SET {} WHERE {} = ?",
+                    "UPDATE {} SET {} WHERE {} = ?{}",
                     #sql_table_name,
                     set_clauses.join(", "),
-                    #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY)
+                    #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY),
+                    format!(
+                        "{}{}",
+                        #struct_name::__gom_managed_version_guard(),
+                        #struct_name::__gom_managed_version_expectation(__gom_expected_version),
+                    ),
                 ), 1);
 
                 // Add the ID to the values for the WHERE clause
@@ -8122,8 +8280,10 @@ fn generate_graphql_operations_unfiltered(
                 &self,
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #id_arg_name, desc = #id_arg_description)] id: #pk_type,
+                #expected_version_param
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
+                let __gom_expected_version: Option<i64> = #expected_version_binding;
 
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #delete_scope_enforcement
@@ -8171,6 +8331,13 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                     &entity as &(dyn ::std::any::Any + Send + Sync),
                 ).await?;
+                if __gom_expected_version.is_some()
+                    && #struct_name::__gom_managed_version_of(&entity) != __gom_expected_version
+                {
+                    return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                        ::graphql_orm::graphql::errors::OrmErrorCode::Conflict,
+                    ).into_graphql_error());
+                }
                 let before_state = #struct_name::__gom_capture_entity_state(&entity)
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.run_mutation_hook(
@@ -8189,7 +8356,12 @@ fn generate_graphql_operations_unfiltered(
                 ).await?;
 
                 let sql = #struct_name::__gom_rebind_sql(
-                    &format!("DELETE FROM {} WHERE {} = ?", #sql_table_name, #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY)),
+                    &format!(
+                        "DELETE FROM {} WHERE {} = ?{}",
+                        #sql_table_name,
+                        #sql_dialect.render_identifier_path(#struct_name::PRIMARY_KEY),
+                        #struct_name::__gom_managed_version_expectation(__gom_expected_version),
+                    ),
                     1
                 );
                 let values = [#pk_bind_value];
@@ -8553,11 +8725,15 @@ fn generate_graphql_operations_unfiltered(
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
                 }
+                if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    set_clauses.push(assignment);
+                }
 
                 if set_clauses.is_empty() {
                     return Err(Self::__gom_runtime_error("No fields to update"));
                 }
 
+                Self::__gom_require_managed_version_headroom(&current_entity)?;
                 let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 hook_ctx.run_mutation_hook(
@@ -8578,7 +8754,7 @@ fn generate_graphql_operations_unfiltered(
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("UPDATE {} SET {} WHERE {} = ?", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                    &format!("UPDATE {} SET {} WHERE {} = ?{}", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_managed_version_guard()),
                     1,
                 );
                 values.push(#pk_bind_value_ref);
@@ -8678,12 +8854,18 @@ fn generate_graphql_operations_unfiltered(
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
                 }
+                if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    set_clauses.push(assignment);
+                }
 
                 if set_clauses.is_empty() {
                     return Err(Self::__gom_runtime_error("No fields to update"));
                 }
 
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                for entity in &matched_entities {
+                    Self::__gom_require_managed_version_headroom(entity)?;
+                }
                 for entity in &matched_entities {
                     hook_ctx.run_mutation_hook(
                         None,
@@ -8704,10 +8886,11 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let sql = Self::__gom_rebind_sql(&format!(
-                    "UPDATE {} SET {} WHERE {} = ?",
+                    "UPDATE {} SET {} WHERE {} = ?{}",
                     #sql_table_name,
                     set_clauses.join(", "),
                     #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
+                    Self::__gom_managed_version_guard(),
                 ), 1);
                 let mut affected = 0_i64;
                 for entity in &matched_entities {
@@ -9094,11 +9277,15 @@ fn generate_graphql_operations_unfiltered(
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
                 }
+                if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    set_clauses.push(assignment);
+                }
 
                 if set_clauses.is_empty() {
                     return Err(Self::__gom_runtime_error("No fields to update"));
                 }
 
+                Self::__gom_require_managed_version_headroom(&current_entity)?;
                 let before_state = Self::__gom_capture_entity_state(&current_entity)?;
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 hook_ctx.run_mutation_hook(
@@ -9119,7 +9306,7 @@ fn generate_graphql_operations_unfiltered(
                 .map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
                 let sql = Self::__gom_rebind_sql(
-                    &format!("UPDATE {} SET {} WHERE {} = ?", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY)),
+                    &format!("UPDATE {} SET {} WHERE {} = ?{}", #sql_table_name, set_clauses.join(", "), #sql_dialect.render_identifier_path(Self::PRIMARY_KEY), Self::__gom_managed_version_guard()),
                     1,
                 );
                 values.push(#pk_bind_value_ref);
@@ -9264,12 +9451,18 @@ fn generate_graphql_operations_unfiltered(
                 if #has_updated_at_column {
                     set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
                 }
+                if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                    set_clauses.push(assignment);
+                }
 
                 if set_clauses.is_empty() {
                     return Err(Self::__gom_runtime_error("No fields to update"));
                 }
 
                 let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                for entity in &matched_entities {
+                    Self::__gom_require_managed_version_headroom(entity)?;
+                }
                 for entity in &matched_entities {
                     hook_ctx.run_mutation_hook(
                         graphql_ctx,
@@ -9290,10 +9483,11 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let sql = Self::__gom_rebind_sql(&format!(
-                    "UPDATE {} SET {} WHERE {} = ?",
+                    "UPDATE {} SET {} WHERE {} = ?{}",
                     #sql_table_name,
                     set_clauses.join(", "),
                     #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
+                    Self::__gom_managed_version_guard(),
                 ), 1);
                 let mut affected = 0_i64;
                 for entity in &matched_entities {
@@ -9792,6 +9986,10 @@ fn generate_graphql_operations_unfiltered(
         #retention_surface
         #cas_trait_impl
         #keyset_trait_impl
+
+        impl #struct_name {
+            #managed_version_helper_methods
+        }
 
         impl ::graphql_orm::graphql::orm::MutationContextUpdateById<#backend_marker> for #struct_name {
             type Id = #pk_type_ty;

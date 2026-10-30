@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.84.0 generates managed record versions: `#[graphql_orm(version = "managed")]` is advanced
+by every generated write, and generated update and delete accept `ExpectedVersion`.
+
 Version 0.82.0 also pairs with the runtime's shareable aggregate result objects.
 The aggregate fix does not change macro generation. See the
 [aggregate migration](../../MIGRATION.md#0810-to-0820-shareable-aggregate-result-objects).

@@ -10,6 +10,15 @@ supersedes: []
 
 # Migration Guide
 
+## 0.82.0 to 0.84.0: managed record versions
+
+No change is required. `#[graphql_orm(version)]` keeps its compare-and-swap-only behaviour.
+
+To have every generated write advance a version, declare it `#[graphql_orm(version = "managed")]`.
+Switching an existing `version` field to `managed` changes no column or default, so no schema
+migration is planned. From then on, ordinary updates also advance it, so code that compared it
+across ordinary writes should expect new values.
+
 ## 0.81.0 to 0.82.0: shareable aggregate result objects
 
 The 0.82.0 candidate includes the fix originally prepared in the 0.81.2 source

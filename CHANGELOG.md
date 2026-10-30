@@ -16,6 +16,22 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.84.0**.
+
+- Add managed record versions: `#[graphql_orm(version = "managed")]` on an `i64` field. Every generated write advances it by one in the same statement:
+  - generated GraphQL `Update`;
+  - repository and transaction `update_by_id` and `update_where`;
+  - `update_by_key`, `update_if` and `update_where_bounded`;
+  - the update branch of `upsert`;
+  - `compare_and_swap`.
+
+  Inserts write the declared default. Rollback leaves the value unchanged. Advancing past `i64::MAX` is refused with an error on every path and backend, including the update branch of an upsert. Concurrent writers lose no increments; on PostgreSQL and SQL Server a racing writer may instead get a retryable `SERVICE_UNAVAILABLE` that writes nothing. `Changed` events carry the committed version. The value stays out of inputs. See [managed versions](docs/reference/graphql-orm/macros-and-attributes.md#managed-versions). ([#259](https://github.com/Dastari/graphql-orm/issues/259))
+- Generated GraphQL `Update` and `Delete` for a managed entity accept an optional `ExpectedVersion`. A mismatch fails with `CONFLICT` and writes nothing.
+- Add `render_upsert_sql_with_managed_version` and `build_upsert_sql_with_managed_version`. The existing functions are unchanged.
+- Document that a bare `#[graphql_orm(version)]` is compare-and-swap only: ordinary writes do not advance it. That is the existing behaviour, and `version = "cas"` names it explicitly. Entities without `version = "managed"` produce unchanged SDL and SQL.
+
+## 0.82.0 (unreleased)
+
 Companion runtime/macros version: **0.82.0**.
 
 - Include the shareable aggregate-result fix from the 0.81.2 source checkpoint:
