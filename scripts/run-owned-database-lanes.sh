@@ -34,6 +34,8 @@ run_sqlite() {
     --test runtime_graphql_formats \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
+    --test managed_version --locked
+  cargo test -p graphql-orm --no-default-features --features sqlite \
     --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
@@ -79,6 +81,7 @@ run_postgres_legacy() {
     --test lifecycle_cleanup_and_deferred \
     --test lifecycle_hooks \
     --test lifecycle_related_writes \
+    --test managed_version \
     --test mutation_context_reads \
     --test nullable_update_clear \
     --test owned_postgres_lifecycle \
@@ -102,7 +105,7 @@ run_postgres_legacy() {
 
 run_mssql() {
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_integration --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_integration --test managed_version --locked -- --ignored --test-threads=1
 }
 
 run_ai_postgres() {

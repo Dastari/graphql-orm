@@ -599,12 +599,22 @@ update that sets no field still advances the version, because the row was writte
 no row, so the `Changed` event carries the last version.
 
 The value is never caller-controlled: it is omitted from create and update inputs. A rolled-back
-transaction leaves it unchanged. A write that would advance it past `i64::MAX` is refused. For an
-upsert, SQLite and PostgreSQL skip the update branch and SQL Server fails the statement.
+transaction leaves it unchanged. A write that would advance it past `i64::MAX` is refused with an
+error and writes nothing, on every path and backend, including the update branch of an upsert.
+`compare_and_swap` reports that case as `Conflict`.
 
 Generated GraphQL `Update` and `Delete` for a managed entity accept an optional `ExpectedVersion`
 (`Int`). When the current version differs, the mutation fails with `CONFLICT` and writes nothing.
 Repository callers use `compare_and_swap` for the same check.
+
+Concurrent writers never lose an increment: every committed write advances the version exactly
+once. Generated writes read the row under a write lock and run serializably on PostgreSQL and
+SQL Server, so a racing writer can instead be refused with a retryable `SERVICE_UNAVAILABLE`
+error that writes nothing. Retry it: under `ExpectedVersion`, the retry then fails with `CONFLICT`,
+so exactly one of several writers that expected the same version commits.
+
+Only generated writes advance the version. Raw SQL, a database-enforced
+`ON DELETE SET NULL` foreign key action, and backup restore (which keeps stored values) do not.
 
 `Changed` events carry the entity as committed, so they include the new version. Clients can
 use it to order writes: a result carrying an older version never replaces a newer one.

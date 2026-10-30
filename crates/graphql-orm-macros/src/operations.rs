@@ -1698,6 +1698,19 @@ fn generate_graphql_operations_unfiltered(
                 }
                 Ok(())
             }
+
+            /// An upsert's update branch is guarded by `version < i64::MAX`, which
+            /// SQLite and PostgreSQL treat as "update nothing" rather than an error.
+            /// Require the committed row to have advanced exactly once.
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_managed_version_advanced(before: Option<&Self>, after: &Self) -> ::graphql_orm::Result<()> {
+                if let Some(before) = before
+                    && before.#version_ident.checked_add(1) != Some(after.#version_ident)
+                {
+                    return Err(Self::__gom_runtime_error("managed version did not advance"));
+                }
+                Ok(())
+            }
         }
     } else {
         quote! {
@@ -1723,6 +1736,11 @@ fn generate_graphql_operations_unfiltered(
 
             #[doc(hidden)]
             pub(crate) fn __gom_require_managed_version_headroom(_entity: &Self) -> ::graphql_orm::Result<()> {
+                Ok(())
+            }
+
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_managed_version_advanced(_before: Option<&Self>, _after: &Self) -> ::graphql_orm::Result<()> {
                 Ok(())
             }
         }
@@ -4000,9 +4018,13 @@ fn generate_graphql_operations_unfiltered(
                     },
                 ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?;
 
+                if let Some(current_entity) = current_entity.as_ref() {
+                    Self::__gom_require_managed_version_headroom(current_entity)?;
+                }
                 hook_ctx.execute(&sql, &bind_values).await?;
                 let entity = Self::__gom_fetch_by_upsert_on(hook_ctx, &lookup_input).await?
                     .ok_or(::graphql_orm::sqlx::Error::RowNotFound)?;
+                Self::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)?;
                 let after_state = Some(Self::__gom_capture_entity_state(&entity)?);
 
                 hook_ctx.run_mutation_hook(
@@ -4132,6 +4154,10 @@ fn generate_graphql_operations_unfiltered(
                     },
                 ).await?;
 
+                if let Some(current_entity) = current_entity.as_ref() {
+                    #struct_name::__gom_require_managed_version_headroom(current_entity)
+                        .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                }
                 hook_ctx.execute(&sql, &bind_values)
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
@@ -4139,6 +4165,8 @@ fn generate_graphql_operations_unfiltered(
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
                     .ok_or_else(|| ::graphql_orm::async_graphql::Error::new("Entity not found after upsert"))?;
+                #struct_name::__gom_require_managed_version_advanced(current_entity.as_ref(), &entity)
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 let after_state = Some(
                     #struct_name::__gom_capture_entity_state(&entity)
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?
