@@ -91,8 +91,7 @@ async fn generated_graphql_schema_uses_pascal_case_types_and_camel_case_fields()
         )
     );
     assert!(compact_sdl.contains("deleteCollection(id:String!):CollectionResult!"));
-    let subscription_signature =
-        "collectionChanged(filter:SubscriptionFilterInput,key:String,keys:[String!]):CollectionChangedEvent!";
+    let subscription_signature = "collectionChanged(filter:SubscriptionFilterInput,key:String,keys:[String!]):CollectionChangedEvent!";
     assert!(compact_sdl.contains(subscription_signature));
 
     assert!(sdl.contains("type CollectionResult {"));
