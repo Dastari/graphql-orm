@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-10-30
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -621,3 +621,38 @@ use it to order writes: a result carrying an older version never replaces a newe
 
 A bare `#[graphql_orm(version)]` keeps its compare-and-swap-only behaviour. Switching an existing
 field to `managed` changes no column or default, so no migration is planned.
+
+## Generated `Changed` subscriptions
+
+Every generated `<Entity>Changed` subscription accepts three optional arguments:
+
+- `Filter: { Actions }` delivers only the listed actions.
+- `Key` observes one exact complete primary key.
+- `Keys` observes a bounded set of complete keys, for example the records a client currently
+  shows. Its element type is the same as `Key`: the key scalar for a single-column key, or
+  `<Entity>KeyInput` for a composite key.
+
+`Keys` rules:
+
+- Supplying both `Key` and `Keys` fails with `INVALID_INPUT`.
+- A list longer than `Database::subscription_key_limit()` fails with `INVALID_INPUT` at admission.
+  The limit defaults to `DEFAULT_SUBSCRIPTION_KEY_LIMIT` (500). Change it with
+  `set_subscription_key_limit`, `with_subscription_key_limit` or the builder's
+  `subscription_key_limit`. The bound applies to the list as sent.
+- Duplicates are ignored, and an empty list matches nothing.
+- An event is delivered when its complete key is in the set, using the same comparison as `Key`.
+  Every part of a composite key must match.
+- A `PROPAGATED` event for a parent matches the parent's key, as it does for `Key`.
+
+Admission reads no rows. Every delivered event is still authorized at delivery time, exactly as
+for `Key`, including the key fields themselves. A key the subscriber cannot read never delivers
+its events, and the subscriber cannot tell it apart from a key that does not exist.
+
+graphql-ws cannot change the arguments of a live subscription. To change the set, subscribe with
+the new `Keys` and then close the old subscription, debouncing rapid changes. While both are open,
+an event for a key in both sets can arrive twice; drop the duplicate by record version (see
+[managed versions](#managed-versions)). Refetch the records that were added, because events
+written before the new subscription started are not replayed.
+Unkeyed subscriptions, and subscriptions that pass only `Key`, behave as before. Generated
+broadcast subscriptions are best effort: lag and continuity signalling is tracked separately in
+[#225](https://github.com/Dastari/graphql-orm/issues/225).

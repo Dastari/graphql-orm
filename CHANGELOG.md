@@ -16,6 +16,14 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.85.0**.
+
+- Generated `<Entity>Changed` subscriptions accept an optional `Keys` list, with the same element type as `Key`: the key scalar, or `<Entity>KeyInput` for composite keys. An event is delivered when its complete key is in the set, and a `PROPAGATED` parent event matches the parent's key. Duplicates are ignored and an empty list matches nothing. Every delivered event is authorized at delivery time, exactly as for `Key`. See [generated `Changed` subscriptions](docs/reference/graphql-orm/macros-and-attributes.md#generated-changed-subscriptions). ([#261](https://github.com/Dastari/graphql-orm/issues/261))
+- `Key` and `Keys` together, or a `Keys` list longer than `Database::subscription_key_limit()`, fail with `INVALID_INPUT` at admission. The limit defaults to the new `DEFAULT_SUBSCRIPTION_KEY_LIMIT` (500). Set it with `Database::set_subscription_key_limit`, `Database::with_subscription_key_limit` or `DatabaseBuilder::subscription_key_limit`.
+- Additive. Subscriptions that do not pass `Keys` behave as before; their SDL gains only the optional argument.
+
+## 0.84.0 (unreleased)
+
 Companion runtime/macros version: **0.84.0**.
 
 - Add managed record versions: `#[graphql_orm(version = "managed")]` on an `i64` field. Every generated write advances it by one in the same statement:

@@ -65,6 +65,10 @@ impl Default for ConnectionOptions {
 /// change-journal state, and schema ownership policy. Cloning a `Database`
 /// clones the pool handle and shared runtime state; it does not open a new
 /// database connection by itself.
+/// Default maximum length of the `Keys` list a generated `<Entity>Changed`
+/// subscription accepts. See [`Database::subscription_key_limit`].
+pub const DEFAULT_SUBSCRIPTION_KEY_LIMIT: usize = 500;
+
 pub struct Database<B: OrmBackend = DefaultBackend> {
     pool: B::Pool,
     mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
@@ -80,6 +84,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     event_senders: Arc<EventSenders>,
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
     read_observer: Option<Arc<dyn crate::graphql::orm::ReadQueryObserver>>,
+    subscription_key_limit: usize,
     _backend: PhantomData<B>,
 }
 
@@ -100,6 +105,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             event_senders: self.event_senders.clone(),
             scan_config: self.scan_config.clone(),
             read_observer: self.read_observer.clone(),
+            subscription_key_limit: self.subscription_key_limit,
             _backend: PhantomData,
         }
     }
@@ -112,6 +118,7 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
         debug.field("schema_policy", &self.schema_policy);
         debug.field("pagination_config", &self.pagination_config);
         debug.field("authorization_mode", &self.authorization_mode);
+        debug.field("subscription_key_limit", &self.subscription_key_limit);
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -144,6 +151,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -170,6 +178,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -193,6 +202,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -216,6 +226,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -239,6 +250,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -265,6 +277,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -298,6 +311,7 @@ impl<B: OrmBackend> Database<B> {
             event_senders: Arc::new(EventSenders::default()),
             scan_config: None,
             read_observer: None,
+            subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
             _backend: PhantomData,
         }
     }
@@ -336,6 +350,24 @@ impl<B: OrmBackend> Database<B> {
     /// Return a copy of this handle with different pagination defaults and caps.
     pub fn with_pagination_config(mut self, pagination_config: PaginationConfig) -> Self {
         self.pagination_config = pagination_config;
+        self
+    }
+
+    /// Return the maximum length of the `Keys` list a generated `<Entity>Changed`
+    /// subscription accepts. A longer list is refused with `INVALID_INPUT` at
+    /// admission. Defaults to [`DEFAULT_SUBSCRIPTION_KEY_LIMIT`].
+    pub fn subscription_key_limit(&self) -> usize {
+        self.subscription_key_limit
+    }
+
+    /// Update the maximum `Keys` list length for generated `Changed` subscriptions in place.
+    pub fn set_subscription_key_limit(&mut self, limit: usize) {
+        self.subscription_key_limit = limit;
+    }
+
+    /// Return a copy of this handle with a different maximum `Keys` list length.
+    pub fn with_subscription_key_limit(mut self, limit: usize) -> Self {
+        self.subscription_key_limit = limit;
         self
     }
 
@@ -1695,6 +1727,12 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Disable both the default connection limit and max-limit cap.
     pub fn unbounded_pagination(mut self) -> Self {
         self.database.pagination_config = PaginationConfig::unbounded();
+        self
+    }
+
+    /// Set the maximum `Keys` list length for generated `Changed` subscriptions.
+    pub fn subscription_key_limit(mut self, limit: usize) -> Self {
+        self.database.subscription_key_limit = limit;
         self
     }
 

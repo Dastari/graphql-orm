@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.85.0 generates an optional `Keys` argument on every `<Entity>Changed` subscription.
+
 Version 0.84.0 generates managed record versions: `#[graphql_orm(version = "managed")]` is advanced
 by every generated write, and generated update and delete accept `ExpectedVersion`.
 

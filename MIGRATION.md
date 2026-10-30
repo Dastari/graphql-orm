@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.84.0 to 0.85.0: keyed Changed subscriptions
+
+No change is required. Generated `<Entity>Changed` subscriptions gain an optional `Keys`
+argument. To keep a set of on-screen records live, pass their keys in one subscription per type
+instead of one subscription per record, staying within `Database::subscription_key_limit()`
+(default 500). Clients that generate code from the SDL see one new optional argument.
+
 ## 0.82.0 to 0.84.0: managed record versions
 
 No change is required. `#[graphql_orm(version)]` keeps its compare-and-swap-only behaviour.
