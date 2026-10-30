@@ -385,6 +385,38 @@ where
     Ok(row)
 }
 
+/// Complete keys a generated `Changed` subscription observes through `Keys`.
+#[doc(hidden)]
+pub type SubscriptionKeySet = Arc<std::collections::HashSet<crate::graphql::loaders::RelationKey>>;
+
+/// Admit the `Key` and `Keys` arguments of a generated `Changed` subscription.
+///
+/// Supplying both, or more keys than [`Database::subscription_key_limit`], is
+/// `INVALID_INPUT`. The bound applies to the list as sent; duplicates are then
+/// ignored. An empty list matches nothing. Admission never reads rows, so it
+/// cannot reveal whether a key exists or is readable.
+#[doc(hidden)]
+pub fn admit_subscription_keys<B: OrmBackend>(
+    db: &Database<B>,
+    has_key: bool,
+    keys: Option<Vec<Vec<SqlValue>>>,
+) -> async_graphql::Result<Option<SubscriptionKeySet>> {
+    let Some(keys) = keys else {
+        return Ok(None);
+    };
+    if has_key || keys.len() > db.subscription_key_limit() {
+        return Err(
+            OrmPublicError::new(crate::graphql::errors::OrmErrorCode::InvalidInput)
+                .into_graphql_error(),
+        );
+    }
+    Ok(Some(Arc::new(
+        keys.iter()
+            .map(|values| crate::graphql::loaders::RelationKey::from_sql_values(values))
+            .collect(),
+    )))
+}
+
 /// Check key-field authority before an event identifier or source is released.
 #[doc(hidden)]
 pub async fn authorize_subscription_keys<T, B>(

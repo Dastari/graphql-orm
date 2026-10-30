@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.85.0 adds an optional `Keys` list to generated `<Entity>Changed` subscriptions, bounded
+by `Database::subscription_key_limit()` (default 500). No migration is needed.
+
 Version 0.84.0 adds managed record versions (`#[graphql_orm(version = "managed")]`), advanced by
 every generated write, and an optional `ExpectedVersion` on generated update and delete. Bare
 `version` fields are unchanged. No migration is needed.
