@@ -12,12 +12,15 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
+use crate::local_namespace::LOCAL_KEY_EQUIVALENCE;
 use crate::{
     BlobBody, BlobListPage, BlobMetadata, BlobPutOptions, BlobStore, BlobWriteOutcome,
-    BoxedMultipartWriter, MultipartWriter, ObjectContentRange, ObjectInfo, ObjectMetadata,
-    ObjectRangeBody, ObjectStorage, StorageBackend, StorageByteStream, StorageError,
-    StorageObjectBody, StoredObject, StreamingObjectStore, collect_storage_stream,
-    validate_blob_key, validate_object_bucket,
+    BoxedMultipartWriter, CapacityDomainObservation, MultipartWriter, NamespaceFence, NamespaceId,
+    NamespaceInitialisation, NamespaceObservation, NamespaceTarget, ObjectContentRange, ObjectInfo,
+    ObjectMetadata, ObjectRangeBody, ObjectStorage, ObservationEpoch, StorageBackend,
+    StorageByteStream, StorageError, StorageObjectBody, StoredObject, StreamingObjectStore,
+    TopologyScan, collect_storage_stream, is_reserved_component, is_reserved_key,
+    validate_blob_key, validate_object_bucket, validate_unreserved_key,
 };
 
 const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
@@ -33,13 +36,18 @@ const OBJECT_METADATA_DIR: &str = "object-metadata";
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,
+    /// Random per constructed backend; clones share it. Part of fence epochs.
+    instance: Uuid,
 }
 
 impl LocalStorageBackend {
     /// Creates a local storage backend rooted at the given directory.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            instance: Uuid::new_v4(),
+        }
     }
 
     /// Removes stale temporary upload files under the local storage root.
@@ -61,6 +69,11 @@ impl LocalStorageBackend {
         let mut stack = vec![self.root.clone()];
 
         while let Some(path) = stack.pop() {
+            // Reserved marker names (and anything beneath one) are never
+            // traversed or removed by the sweep.
+            if path != self.root && self.is_reserved_path(&path) {
+                continue;
+            }
             let metadata = match tokio::fs::symlink_metadata(&path).await {
                 Ok(metadata) => metadata,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -86,14 +99,28 @@ impl LocalStorageBackend {
         Ok(removed)
     }
 
+    fn is_reserved_path(&self, path: &Path) -> bool {
+        path.strip_prefix(&self.root)
+            .map(|relative| {
+                relative.components().any(|component| {
+                    is_reserved_component(
+                        &component.as_os_str().to_string_lossy(),
+                        LOCAL_KEY_EQUIVALENCE,
+                    )
+                })
+            })
+            .unwrap_or(true)
+    }
+
     fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
-        validate_blob_key(key)?;
+        validate_unreserved_key(key, LOCAL_KEY_EQUIVALENCE)?;
         Ok(self.root.join(Path::new(key)))
     }
 
     fn object_path_for(&self, bucket: &str, key: &str) -> Result<PathBuf, StorageError> {
         validate_object_bucket(bucket)?;
-        validate_blob_key(key)?;
+        validate_unreserved_key(bucket, LOCAL_KEY_EQUIVALENCE)?;
+        validate_unreserved_key(key, LOCAL_KEY_EQUIVALENCE)?;
         Ok(self.root.join(bucket).join(Path::new(key)))
     }
 
@@ -127,6 +154,61 @@ impl BlobStore for LocalStorageBackend {
 
     fn backend(&self) -> StorageBackend {
         StorageBackend::Local
+    }
+
+    fn observation_epoch(&self) -> ObservationEpoch {
+        ObservationEpoch {
+            backend_instance: self.instance,
+            connection_generation: 0,
+            root_witness: None,
+        }
+    }
+
+    async fn observe_namespace(
+        &self,
+        target: &NamespaceTarget,
+        scan: &TopologyScan,
+    ) -> Result<NamespaceObservation, StorageError> {
+        crate::local_namespace::observe(&self.root, self.instance, target, scan).await
+    }
+
+    async fn initialise_namespace(
+        &self,
+        target: &NamespaceTarget,
+        proposed: NamespaceId,
+    ) -> Result<NamespaceInitialisation, StorageError> {
+        crate::local_namespace::initialise(&self.root, target, proposed).await
+    }
+
+    async fn observe_capacity_domain(&self) -> Result<CapacityDomainObservation, StorageError> {
+        crate::local_namespace::capacity_domain(&self.root, self.instance).await
+    }
+
+    async fn put_blob_fenced(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        options: BlobPutOptions,
+        fence: &NamespaceFence,
+    ) -> Result<BlobWriteOutcome, StorageError> {
+        self.path_for(key)?;
+        // Residual race: the root can be replaced between this check and the write.
+        crate::local_namespace::check_fence(&self.root, self.instance, fence, key).await?;
+        self.put_blob(key, body, options).await
+    }
+
+    async fn put_blob_if_not_exists_fenced(
+        &self,
+        key: &str,
+        body: StorageByteStream,
+        options: BlobPutOptions,
+        fence: &NamespaceFence,
+    ) -> Result<Option<BlobWriteOutcome>, StorageError> {
+        self.path_for(key)?;
+        // The create itself is atomic (temporary file plus hard link). The
+        // root can still be replaced between the fence check and the create.
+        crate::local_namespace::check_fence(&self.root, self.instance, fence, key).await?;
+        self.put_blob_if_not_exists(key, body, options).await
     }
 
     async fn put_blob(
@@ -539,7 +621,7 @@ impl StreamingObjectStore for LocalStorageBackend {
                 let Some(key) = self.key_for_bucket_path(bucket, &path) else {
                     continue;
                 };
-                if !key.starts_with(prefix) {
+                if !key.starts_with(prefix) || is_reserved_key(&key, LOCAL_KEY_EQUIVALENCE) {
                     continue;
                 }
                 if let Ok(info) = self.get_object_metadata(bucket, &key).await {
@@ -689,6 +771,9 @@ impl LocalStorageBackend {
                     continue;
                 }
                 if let Some(key) = self.key_for_path(&path) {
+                    if is_reserved_key(&key, LOCAL_KEY_EQUIVALENCE) {
+                        continue;
+                    }
                     if continuation.is_some_and(|token| key.as_str() <= token) {
                         continue;
                     }

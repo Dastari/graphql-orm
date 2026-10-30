@@ -39,6 +39,9 @@ mod error;
 mod key;
 #[cfg(feature = "local")]
 mod local;
+#[cfg(feature = "local")]
+mod local_namespace;
+mod namespace;
 mod object;
 #[cfg(feature = "s3")]
 mod s3;
@@ -59,6 +62,16 @@ pub use error::{StorageError, StorageProviderErrorKind};
 pub use key::{build_storage_key, file_extension};
 #[cfg(feature = "local")]
 pub use local::LocalStorageBackend;
+pub use namespace::{
+    AncestorScan, CapacityDomainObservation, DEFAULT_MARKER_READ_TIMEOUT, DomainFact, DomainState,
+    FactComparison, FactScope, FoundNamespace, KeyEquivalence, MAX_NAMESPACE_MARKER_BYTES,
+    MAX_SCAN_BYTES, MAX_SCAN_DEPTH, MAX_SCAN_DURATION, MAX_SCAN_ITEMS, MAX_SCAN_RESULTS,
+    NAMESPACE_MARKER, NAMESPACE_MARKER_FORMAT, NAMESPACE_MARKER_PUBLISHING, NamespaceFence,
+    NamespaceId, NamespaceInitialisation, NamespaceObservation, NamespaceRelation, NamespaceState,
+    NamespaceTarget, NestedScan, ObservationEpoch, ScanCompleteness, ScanResult, TopologyScan,
+    decode_marker, encode_marker, is_reserved_component, is_reserved_key, relate_namespaces,
+    validate_unreserved_key,
+};
 pub use object::{
     StorageObjectBody, StorageObjectStream, StoragePutRequest, StoragePutStreamRequest,
     StoredObject,

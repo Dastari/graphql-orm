@@ -105,5 +105,6 @@ use atomic `put_blob_if_not_exists` for locks and deduplication.
 - [Documentation index](docs/README.md)
 - [Usage](docs/usage.md), [streaming](docs/streaming.md), and [large-object recording](docs/recording-streams.md)
 - [Native SMB setup and safety](docs/native-smb.md)
+- [Namespace identity and capacity-domain facts](docs/namespace-identity.md)
 - [Backup integration](docs/backup-integration.md)
 - [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)

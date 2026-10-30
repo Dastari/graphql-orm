@@ -10,6 +10,40 @@ supersedes: []
 
 # Changelog
 
+## Unreleased (namespace identity; version assigned when rebased after the 0.7.6 capacity release)
+
+- Added `BlobStore::observe_namespace`, `initialise_namespace`,
+  `observe_capacity_domain`, `put_blob_fenced` and `observation_epoch`, with
+  non-positive defaults (`Unsupported` or `UnsupportedOperation`, no I/O).
+- Local, SMB and S3 implement durable object-namespace markers:
+  - strict canonical bodies and bounded reads;
+  - explicit create-if-absent publication with same-identity reconciliation;
+  - bounded topology scans with completeness states;
+  - scoped capacity-domain facts and fenced writes.
+  See [namespace identity](docs/namespace-identity.md).
+- Ordinary key paths reject the reserved marker names under each provider's key
+  equivalence (case folding, trailing dots and spaces, SMB streams and short
+  names), and listings hide them. SMB keys containing `:` are now rejected,
+  because they address alternate data streams.
+- Added `BlobStore::put_blob_if_not_exists_fenced`, a create-only fenced write.
+  Fenced writes require the key to lie inside the fence's target, and the
+  epoch witnesses the observed target root. On SMB the create is session-bound
+  and never reconnects, and the overwriting `put_blob_fenced` is
+  `UnsupportedOperation`.
+- `AncestorScan` gains `max_duration`, and `NestedScan` gains `max_bytes` and
+  `max_results`. Scan limits are validated against the new `MAX_SCAN_*`
+  constants, and one deadline bounds every await of a scan.
+- Fenced SMB creates bind parent-directory creation and cleanup to the
+  checked session as well, without reconnect or replay. Fenced S3 writes send
+  each mutation once with SDK retries disabled, across the multipart lifecycle.
+  Local and S3 nested scans charge the whole bounded marker read (1 KiB plus
+  the one-byte overflow probe) before each read.
+- Local stores on Windows hosts use the `Windows` key equivalence. The local
+  temporary-file sweep skips reserved names. SMB marker publication no longer
+  uses delete-on-close.
+- No storage key, object format or persisted-data migration is required for
+  existing data.
+
 ## 0.7.5 - 2026-10-18
 
 - Refresh package identity for the maintained Samba fixture and protocol
