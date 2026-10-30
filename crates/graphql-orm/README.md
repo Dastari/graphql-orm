@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.84.0 adds managed record versions (`#[graphql_orm(version = "managed")]`), advanced by
+every generated write, and an optional `ExpectedVersion` on generated update and delete. Bare
+`version` fields are unchanged. No migration is needed.
+
 Version 0.82.0 includes shareable aggregate result objects in federation SDL,
 allowing two aggregate-enabled subgraphs to compose. No stored-data migration or
 aggregate-policy change is required. See the

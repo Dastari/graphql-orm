@@ -119,7 +119,8 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql_orm(description = "…")]` | nonempty semantic description, maximum 1,024 bytes |
 | `#[graphql_orm(read = bool, write = bool, filter = bool, order = bool, subscribe = bool)]` | per-surface capability switches; `write = false` also skips input |
 | `#[graphql_orm(read_policy = "…", write_policy = "…")]` | policy identifiers for runtime enforcement |
-| `#[graphql_orm(version)]` | optimistic-version field; is not writable and is omitted from inputs |
+| `#[graphql_orm(version)]` | compare-and-swap version (`i64`, one per entity). Only `compare_and_swap` advances it; ordinary inserts, updates and upserts leave it unchanged. Not writable and omitted from inputs. Same as `version = "cas"` |
+| `#[graphql_orm(version = "managed")]` | managed record version (`i64`). See [managed versions](#managed-versions) |
 | `#[graphql_orm(default = "SQL expression" | false)]` | explicit SQL default or disables the implicit default; one declaration only |
 | `#[graphql_orm(decimal(precision = P, scale = S))]` | required for `rust_decimal::Decimal`; portable precision is 1 through 18 and scale must not exceed precision |
 | `#[graphql_orm(mssql_money)]` | SQL Server only: exact native `MONEY` field as `rust_decimal::Decimal` or `Option<Decimal>`; scale 4 and signed 64-bit scaled range; cannot be combined with `decimal(...)` |
@@ -580,3 +581,33 @@ and [repository example](repository-only-entities.md).
 `Int64Filter`. See the [migration contract](../../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters)
 for coercion, SDK mappings, null/empty-list semantics and finite list bounds.
 `number` continues to select the existing `IntFilter`.
+
+## Managed versions
+
+`#[graphql_orm(version = "managed")]` declares a record version that every generated write advances
+in the same statement:
+
+- generated GraphQL `Update`;
+- repository and transaction `update_by_id` and `update_where`;
+- `update_by_key`, `update_if` and `update_where_bounded`;
+- the update branch of `upsert`;
+- `compare_and_swap`.
+
+Each committed statement adds one, including two updates of the same row in one transaction. An
+update that sets no field still advances the version, because the row was written. Insert,
+`insert_if_absent` and the insert branch of `upsert` write the declared default. Deletes leave
+no row, so the `Changed` event carries the last version.
+
+The value is never caller-controlled: it is omitted from create and update inputs. A rolled-back
+transaction leaves it unchanged. A write that would advance it past `i64::MAX` is refused. For an
+upsert, SQLite and PostgreSQL skip the update branch and SQL Server fails the statement.
+
+Generated GraphQL `Update` and `Delete` for a managed entity accept an optional `ExpectedVersion`
+(`Int`). When the current version differs, the mutation fails with `CONFLICT` and writes nothing.
+Repository callers use `compare_and_swap` for the same check.
+
+`Changed` events carry the entity as committed, so they include the new version. Clients can
+use it to order writes: a result carrying an older version never replaces a newer one.
+
+A bare `#[graphql_orm(version)]` keeps its compare-and-swap-only behaviour. Switching an existing
+field to `managed` changes no column or default, so no migration is planned.

@@ -2837,6 +2837,34 @@ pub fn render_upsert_sql(
     update_columns: &[&str],
     update_updated_at: bool,
 ) -> String {
+    render_upsert_sql_with_managed_version(
+        dialect,
+        table,
+        insert_columns,
+        insert_values,
+        conflict_columns,
+        update_columns,
+        update_updated_at,
+        None,
+    )
+}
+
+/// Render an upsert whose update branch also advances a managed version column.
+///
+/// The insert branch writes the declared default. The update branch sets
+/// `version = version + 1` and only applies while the stored version is below
+/// `i64::MAX`.
+#[allow(clippy::too_many_arguments)]
+pub fn render_upsert_sql_with_managed_version(
+    dialect: DatabaseBackend,
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+    update_updated_at: bool,
+    managed_version: Option<&str>,
+) -> String {
     let quoted_table = dialect.quote_identifier_path(table);
     let quoted_insert_columns = insert_columns
         .iter()
@@ -2861,14 +2889,19 @@ pub fn render_upsert_sql(
                 dialect.current_epoch_expr()
             ));
         }
-        let predicates = conflict_columns
+        let mut predicates = conflict_columns
             .iter()
             .map(|column| {
                 let quoted = dialect.quote_identifier_path(column);
                 format!("target.{quoted} = source.{quoted}",)
             })
-            .collect::<Vec<_>>()
-            .join(" AND ");
+            .collect::<Vec<_>>();
+        if let Some(column) = managed_version {
+            let quoted = dialect.quote_identifier_path(column);
+            assignments.push(format!("target.{quoted} = target.{quoted} + 1"));
+            predicates.push(format!("target.{quoted} < {}", i64::MAX));
+        }
+        let predicates = predicates.join(" AND ");
         let source_projection = insert_values
             .iter()
             .zip(&quoted_insert_columns)
@@ -2902,14 +2935,21 @@ pub fn render_upsert_sql(
             dialect.current_epoch_expr()
         ));
     }
+    let mut version_guard = String::new();
+    if let Some(column) = managed_version {
+        let quoted = dialect.quote_identifier_path(column);
+        set_clauses.push(format!("{quoted} = {quoted_table}.{quoted} + 1"));
+        version_guard = format!(" WHERE {quoted_table}.{quoted} < {}", i64::MAX);
+    }
 
     format!(
-        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
+        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}{}",
         quoted_table,
         quoted_insert_columns.join(", "),
         insert_values.join(", "),
         quoted_conflict_columns.join(", "),
-        set_clauses.join(", ")
+        set_clauses.join(", "),
+        version_guard
     )
 }
 
@@ -3013,7 +3053,28 @@ pub fn build_upsert_sql(
     update_columns: &[&str],
     update_updated_at: bool,
 ) -> String {
-    render_upsert_sql(
+    build_upsert_sql_with_managed_version(
+        table,
+        insert_columns,
+        insert_values,
+        conflict_columns,
+        update_columns,
+        update_updated_at,
+        None,
+    )
+}
+
+/// [`build_upsert_sql`] for an entity with a managed version column.
+pub fn build_upsert_sql_with_managed_version(
+    table: &str,
+    insert_columns: &[&str],
+    insert_values: &[&str],
+    conflict_columns: &[&str],
+    update_columns: &[&str],
+    update_updated_at: bool,
+    managed_version: Option<&str>,
+) -> String {
+    render_upsert_sql_with_managed_version(
         current_backend(),
         table,
         insert_columns,
@@ -3021,6 +3082,7 @@ pub fn build_upsert_sql(
         conflict_columns,
         update_columns,
         update_updated_at,
+        managed_version,
     )
 }
 type EntityMatcher<T> = Arc<dyn Fn(&T, chrono::NaiveDate) -> crate::Result<bool> + Send + Sync>;
