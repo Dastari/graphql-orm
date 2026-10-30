@@ -115,6 +115,12 @@ Generated updates still propagate from the post-update row only. This release
 does not establish invalidation of both former and new parents after a relation
 moves; stale provenance is still suppressed rather than authorized by an old edge.
 
+## 0.81.0 to 0.81.1: post-commit record release
+
+No change is required. `RuntimeReadAuthority` gains `release_mutation_result`, whose default
+calls `authorize_mutation_result` exactly as before. Override it to return
+`RuntimeMutationRelease::Withhold` when a caller may write a row it may not view.
+
 ## 0.80.0 to 0.81.0: runtime actor stamps
 
 Upgrade runtime/macros together. Opt-in; nothing changes for schemas that do not declare the new member. Breaking only at Rust compile time and for older readers of new documents:

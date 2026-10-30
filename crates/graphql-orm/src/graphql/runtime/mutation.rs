@@ -1122,7 +1122,7 @@ async fn execute_once<B: RuntimeMutationBackend>(
         timeout,
         context
             .authority
-            .authorize_mutation_result(RuntimeMutationOutputCheck {
+            .release_mutation_result(RuntimeMutationOutputCheck {
                 schema: &prepared.module.schema,
                 collection: &prepared.collection,
                 action: effect.action(),
@@ -1138,7 +1138,13 @@ async fn execute_once<B: RuntimeMutationBackend>(
     )
     .await;
     match decision {
-        Ok(Ok(())) => {}
+        Ok(Ok(super::RuntimeMutationRelease::Release)) => {}
+        // The host withholds a record the caller may not see; the mutation stays committed.
+        Ok(Ok(super::RuntimeMutationRelease::Withhold)) => {
+            let payload = async_graphql::value!({"record":null});
+            reserve_payload(prepared, &payload, key)?;
+            return Ok(payload);
+        }
         Ok(Err(error)) if error == RuntimeGraphqlError::denied() => {
             return Err(committed_error("mutation_payload_denied"));
         }

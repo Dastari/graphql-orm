@@ -24,6 +24,9 @@ subscriber operation authority is checked independently at every source/hop,
 including after serialization. Transaction/provenance semantics are retained. See the
 [cross-crate migration](../../MIGRATION.md#0810-to-0820-generated-cross-crate-upward-changed-hooks).
 
+Version 0.81.1 is the companion of the runtime's post-commit record release; the macros
+themselves are unchanged.
+
 Version 0.81.0 remains paired with the runtime actor-stamp contract.
 
 Version 0.80.0 emits canonical typed filter contracts for the actual static

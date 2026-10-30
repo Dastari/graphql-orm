@@ -382,6 +382,14 @@ The object-safe callback defaults to denial, preserving existing read-only host
 implementations. Hosts must deny when required policy information is absent.
 Only selecting `__typename` requests no record and does not call this callback.
 
+The ORM reaches that callback through `RuntimeReadAuthority::release_mutation_result`,
+whose default releases exactly when `authorize_mutation_result` succeeds. A host whose
+callers may write rows they may not read (for example "anyone signed in may delete,
+but only owners may view") overrides it and returns `RuntimeMutationRelease::Withhold`
+for such a record: the payload is `{"record": null}` without an error, and no record
+value, projected host object or relation is read or serialized. `Release` serializes
+the projection as before; errors keep the committed classification below.
+
 The callback timeout defaults to five seconds and is host configurable through
 `output_authorization_timeout`. Denial yields `mutation_payload_denied`, other
 errors yield `mutation_payload_failed`, and timeout yields
