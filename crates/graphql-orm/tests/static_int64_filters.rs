@@ -255,7 +255,7 @@ async fn sql_and_memory_preserve_every_operand_and_boolean_composition() {
         })),
         ..Default::default()
     };
-    assert!(composed.matches_entity(rows.last().unwrap()).unwrap() == false);
+    assert!(!composed.matches_entity(rows.last().unwrap()).unwrap());
     assert!(composed.matches_entity(&rows[VALUES.len() - 1]).unwrap());
 }
 
