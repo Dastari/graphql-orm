@@ -32,7 +32,7 @@ mod tests {
     schema_roots! { entities: [UpRoot, UpMiddle, UpLeaf] }
 
     fn subject(scopes: &[&str]) -> AuthSubject {
-        AuthSubject::with_details("fixture-user", vec![], scopes.iter().map(|s| (*s).to_owned()).collect(), None)
+        AuthSubject::from_parts("fixture-user", vec![], scopes.iter().map(|s| (*s).to_owned()).collect(), None)
     }
 
     #[derive(Clone)]
