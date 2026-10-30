@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "federation-e2e",
+  "fixture-database",
   "readings-subgraph",
   "subgraph-http",
   "zones-subgraph",

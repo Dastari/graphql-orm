@@ -24,6 +24,8 @@ use hive_router::{
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::node_lookup::{NodeLookup, NodeLookupConfig, node_candidate, node_implementers};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CandidateSubgraph {
     pub(crate) name: String,
@@ -118,6 +120,8 @@ pub(crate) enum FederationError {
     MissingJoinGraph { subgraph: String },
     #[error("Hive could not construct an executable supergraph: {details}")]
     Runtime { details: String },
+    #[error("node lookup cannot be composed: {details}")]
+    NodeLookup { details: String },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -146,6 +150,8 @@ pub(crate) struct ActiveGraph {
     pub(crate) supergraph_sdl: Arc<str>,
     pub(crate) warnings: Arc<[CompositionDiagnostic]>,
     pub(crate) hive: Arc<Supergraph>,
+    /// The router-hosted `Node` implementations, when node lookup is composed.
+    pub(crate) node_lookup: Option<Arc<NodeLookup>>,
 }
 
 #[cfg(test)]
@@ -189,15 +195,30 @@ pub(crate) fn build_active_graph(
     inputs: &[CandidateSubgraph],
     version: u64,
 ) -> Result<Arc<ActiveGraph>, FederationError> {
-    build_active_graph_with_options(inputs, version, SupergraphOptions::default())
+    build_active_graph_with_options(inputs, version, SupergraphOptions::default(), None)
 }
 
+/// Compose `inputs`, plus the router-hosted `Node` subgraph when node lookup is
+/// enabled and at least one input type declares a resolvable `NodeId` key.
 pub(crate) fn build_active_graph_with_options(
     inputs: &[CandidateSubgraph],
     version: u64,
     options: SupergraphOptions,
+    node_lookup: Option<&NodeLookupConfig>,
 ) -> Result<Arc<ActiveGraph>, FederationError> {
-    let composed = compose_candidate(inputs)?;
+    let mut node_lookup_graph = None;
+    let mut inputs = std::borrow::Cow::Borrowed(inputs);
+    if let Some(config) = node_lookup {
+        let types = node_implementers(&inputs)?;
+        if !types.is_empty() {
+            inputs.to_mut().push(node_candidate(&types));
+            node_lookup_graph = Some(Arc::new(NodeLookup {
+                types,
+                max_nodes: config.max_nodes,
+            }));
+        }
+    }
+    let composed = compose_candidate(&inputs)?;
     let fingerprint = format!("sha256:{:x}", Sha256::digest(composed.sdl.as_bytes()));
     let hive = Supergraph::from_document("graphql-orm-router", composed.document, options)
         .map_err(|error| FederationError::Runtime {
@@ -210,6 +231,7 @@ pub(crate) fn build_active_graph_with_options(
         supergraph_sdl: composed.sdl,
         warnings: composed.warnings.into(),
         hive: Arc::new(hive),
+        node_lookup: node_lookup_graph,
     }))
 }
 
@@ -841,6 +863,125 @@ mod tests {
             BTreeSet::from(["FIRST".to_owned(), "SECOND".to_owned()])
         );
         assert_plan_builds(&graph, "query { first second }");
+    }
+
+    const NODE_ZONES: &str = r#"
+        extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
+        type Query { zones: [Zone!]! }
+        type Zone @key(fields: "id") @key(fields: "NodeId") { id: String! NodeId: ID! name: String! }
+    "#;
+    const NODE_READINGS: &str = r#"
+        extend schema @link(url: "https://specs.apollo.dev/federation/v2.7", import: ["@key"])
+        type Query { readings: [Reading!]! }
+        type Reading @key(fields: "NodeId") @key(fields: "id") { id: String! NodeId: ID! label: String! }
+    "#;
+
+    fn node_inputs() -> Vec<CandidateSubgraph> {
+        vec![
+            CandidateSubgraph::new("zones", "http://127.0.0.1:4201/graphql", NODE_ZONES),
+            CandidateSubgraph::new("readings", "http://127.0.0.1:4202/graphql", NODE_READINGS),
+        ]
+    }
+
+    fn node_graph(inputs: &[CandidateSubgraph]) -> Arc<ActiveGraph> {
+        build_active_graph_with_options(
+            inputs,
+            1,
+            SupergraphOptions::default(),
+            Some(&NodeLookupConfig::new()),
+        )
+        .expect("the node lookup candidate should compose")
+    }
+
+    fn plan_text(graph: &ActiveGraph, operation: &str) -> String {
+        let parsed = safe_parse_operation(operation).expect("operation should parse");
+        let normalized = normalize_operation(&graph.hive.planner.supergraph, &parsed, None)
+            .expect("operation should normalize");
+        graph
+            .hive
+            .planner
+            .plan_from_normalized_operation(
+                &normalized.operation,
+                PlannerOverrideContext::default(),
+                &CancellationToken::new(),
+            )
+            .expect("the node lookup should plan")
+            .to_string()
+    }
+
+    #[test]
+    fn node_lookup_composes_an_entity_interface_owned_by_the_router() {
+        let graph = node_graph(&node_inputs());
+        let lookup = graph.node_lookup.as_ref().expect("node lookup is composed");
+        assert_eq!(
+            lookup.types,
+            BTreeSet::from(["Reading".to_owned(), "Zone".to_owned()])
+        );
+        assert!(graph.warnings.is_empty(), "{:?}", graph.warnings);
+        assert!(
+            graph
+                .supergraph_sdl
+                .contains("interface Node @join__type(graph: GRAPHQL_ORM_NODE, key: \"NodeId\")")
+        );
+        assert!(!graph.supergraph_sdl.contains("isInterfaceObject: true"));
+
+        // One `_entities` fetch per owning subgraph, whatever the list length.
+        let plan = plan_text(
+            &graph,
+            r#"{ nodes(NodeIds: ["a", "b", "c"]) { NodeId ... on Zone { name } ... on Reading { label } } }"#,
+        );
+        assert_eq!(
+            plan.matches("Fetch(service: \"graphql-orm-node\")").count(),
+            1,
+            "{plan}"
+        );
+        assert_eq!(
+            plan.matches("Fetch(service: \"zones\")").count(),
+            1,
+            "{plan}"
+        );
+        assert_eq!(
+            plan.matches("Fetch(service: \"readings\")").count(),
+            1,
+            "{plan}"
+        );
+        assert!(plan.contains("Flatten(path: \"nodes.@|[Zone]\")"), "{plan}");
+
+        let plan = plan_text(&graph, r#"{ node(NodeId: "x") { __typename NodeId } }"#);
+        assert_eq!(plan.matches("Fetch(service:").count(), 1, "{plan}");
+    }
+
+    #[test]
+    fn node_lookup_leaves_graphs_without_node_ids_unchanged() {
+        let inputs = inputs(PRODUCTS_V1, REVIEWS);
+        let plain = build_active_graph(&inputs, 1).unwrap();
+        let enabled = node_graph(&inputs);
+        assert!(enabled.node_lookup.is_none());
+        assert_eq!(plain.supergraph_sdl, enabled.supergraph_sdl);
+        assert_eq!(plain.fingerprint, enabled.fingerprint);
+
+        let disabled = build_active_graph(&node_inputs(), 1).unwrap();
+        assert!(disabled.node_lookup.is_none());
+        assert!(!disabled.supergraph_sdl.contains("interface Node"));
+    }
+
+    #[test]
+    fn a_subgraph_cannot_take_the_reserved_node_subgraph_name() {
+        let mut inputs = node_inputs();
+        inputs.push(CandidateSubgraph::new(
+            crate::NODE_SUBGRAPH_NAME,
+            "http://127.0.0.1:4203/graphql",
+            PRODUCTS_V1,
+        ));
+        assert!(matches!(
+            build_active_graph_with_options(
+                &inputs,
+                1,
+                SupergraphOptions::default(),
+                Some(&NodeLookupConfig::new()),
+            ),
+            Err(FederationError::DuplicateSubgraph { .. })
+        ));
     }
 
     fn root_join_graphs(graph: &ActiveGraph, root_name: &str) -> BTreeSet<String> {

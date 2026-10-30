@@ -23,6 +23,7 @@ use crate::{
         ActiveGraph, CandidateSubgraph, FederationError, build_active_graph_with_options,
     },
     metrics::{RouterMetrics, RouterMetricsSnapshot},
+    node_lookup::NodeLookupConfig,
     server::ActiveGraphIdentity,
 };
 
@@ -285,6 +286,7 @@ pub(crate) struct GraphLifecycle {
     authorization_required: bool,
     subscriptions_enabled: bool,
     graph_options: SupergraphOptions,
+    node_lookup: Option<NodeLookupConfig>,
     metrics: Arc<RouterMetrics>,
 }
 
@@ -301,6 +303,7 @@ impl GraphLifecycle {
         authorization_required: bool,
         subscriptions_enabled: bool,
         graph_options: SupergraphOptions,
+        node_lookup: Option<NodeLookupConfig>,
     ) -> Result<Arc<Self>, RouterError> {
         if subgraphs.len() != fetched.len()
             || subgraphs
@@ -320,6 +323,7 @@ impl GraphLifecycle {
             authorization_required,
             subscriptions_enabled,
             &graph_options,
+            node_lookup.as_ref(),
         )?;
         let now = SystemTime::now();
         let metrics = Arc::new(RouterMetrics::default());
@@ -364,6 +368,7 @@ impl GraphLifecycle {
             authorization_required,
             subscriptions_enabled,
             graph_options,
+            node_lookup,
             metrics,
         }))
     }
@@ -467,6 +472,7 @@ impl GraphLifecycle {
             self.authorization_required,
             self.subscriptions_enabled,
             &self.graph_options,
+            self.node_lookup.as_ref(),
         );
         let candidate = match candidate {
             Ok(candidate) => candidate,
@@ -537,6 +543,7 @@ impl GraphLifecycle {
             self.authorization_required,
             self.subscriptions_enabled,
             &self.graph_options,
+            self.node_lookup.as_ref(),
         );
         let candidate = match candidate {
             Ok(candidate) => candidate,
@@ -609,6 +616,7 @@ impl GraphLifecycle {
             self.authorization_required,
             self.subscriptions_enabled,
             &self.graph_options,
+            self.node_lookup.as_ref(),
         );
         let name = fetched.candidate.name.clone();
         let fingerprint = fetched.fingerprint.clone();
@@ -1086,11 +1094,13 @@ fn build_snapshot<'a>(
     authorization_required: bool,
     subscriptions_enabled: bool,
     graph_options: &SupergraphOptions,
+    node_lookup: Option<&NodeLookupConfig>,
 ) -> Result<Arc<ActiveRouterGraph>, RouterError> {
     let inputs = inputs.into_iter().cloned().collect::<Vec<_>>();
     let descriptors = descriptors.into_iter().cloned().collect::<Vec<_>>();
-    let graph = build_active_graph_with_options(&inputs, version, graph_options.clone())
-        .map_err(map_federation_error)?;
+    let graph =
+        build_active_graph_with_options(&inputs, version, graph_options.clone(), node_lookup)
+            .map_err(map_federation_error)?;
     if authorization_required && descriptors.len() != inputs.len() {
         return Err(RouterError::new(
             RouterErrorKind::AuthorizationMetadata,
@@ -1565,6 +1575,7 @@ mod tests {
             false,
             false,
             SupergraphOptions::default(),
+            None,
         )
         .unwrap()
     }

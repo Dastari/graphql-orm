@@ -261,6 +261,31 @@ impl AuthorizationCatalog {
                 }
             }
         }
+        // The router owns the Node subgraph's roots. They release only
+        // `{ __typename, NodeId }`; every other field is fetched from, and
+        // authorized by, the owning subgraph. In an authenticated graph the
+        // router still requires a caller, as for any described root field.
+        if graph.node_lookup.is_some() {
+            for operation in crate::node_lookup::router_operations() {
+                let key = (operation.root_type, operation.field_name.clone());
+                let Some(expected_arguments) = expected.get(&key) else {
+                    return Err(RouterError::new(
+                        RouterErrorKind::AuthorizationMetadata,
+                        format!("node lookup root {:?}.{} is absent", key.0, key.1),
+                    ));
+                };
+                validate_operation_argument_contract(&operation, expected_arguments)?;
+                if operations.insert(key.clone(), operation).is_some() {
+                    return Err(RouterError::new(
+                        RouterErrorKind::AuthorizationMetadata,
+                        format!(
+                            "a subgraph also describes the router-owned node lookup field {:?}.{}",
+                            key.0, key.1
+                        ),
+                    ));
+                }
+            }
+        }
         let expected_keys = expected.keys().cloned().collect::<BTreeSet<_>>();
         let actual = operations.keys().cloned().collect::<BTreeSet<_>>();
         if actual != expected_keys {

@@ -1,0 +1,15 @@
+[package]
+name = "fixture-database"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["sqlite"]
+sqlite = ["graphql-orm/sqlite"]
+postgres = ["graphql-orm/postgres"]
+mssql = ["graphql-orm/mssql"]
+
+[dependencies]
+graphql-orm = { path = "../../../../", default-features = false }
+tokio = { version = "1", features = ["net", "rt", "time"] }

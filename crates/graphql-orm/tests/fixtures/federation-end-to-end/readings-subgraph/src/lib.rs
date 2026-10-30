@@ -29,12 +29,36 @@ pub struct ZoneReference {
     PartialEq,
 )]
 #[graphql(complex)]
-#[graphql_entity(
-    backend = "sqlite",
-    table = "readings",
-    plural = "Readings",
-    default_sort = "id ASC",
-    aggregate = true
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "readings",
+        plural = "Readings",
+        default_sort = "id ASC",
+        aggregate = true
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "readings",
+        plural = "Readings",
+        default_sort = "id ASC",
+        aggregate = true
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_read_only",
+        table = "readings",
+        plural = "Readings",
+        default_sort = "id ASC",
+        aggregate = true
+    )
 )]
 pub struct Reading {
     #[primary_key]
@@ -73,38 +97,145 @@ impl Reading {
     }
 }
 
+/// A sensor whose `id` deliberately collides with a `Zone` id in the zones
+/// subgraph: the type in the `NodeId` keeps the two records apart.
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(backend = "sqlite", table = "sensors", plural = "Sensors", node_id)
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(backend = "postgres", table = "sensors", plural = "Sensors", node_id)
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_read_only",
+        table = "sensors",
+        plural = "Sensors",
+        node_id
+    )
+)]
+pub struct Sensor {
+    #[primary_key]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+
+    pub name: String,
+}
+
+/// A composite-key entity: its `NodeId` encodes both key parts in order.
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "calibrations",
+        plural = "Calibrations",
+        node_id
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "calibrations",
+        plural = "Calibrations",
+        node_id
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_read_only",
+        table = "calibrations",
+        plural = "Calibrations",
+        node_id
+    )
+)]
+pub struct Calibration {
+    #[primary_key]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub sensor_id: String,
+
+    #[primary_key]
+    #[filterable(type = "number")]
+    pub slot: i64,
+
+    pub label: String,
+}
+
+#[cfg(feature = "sqlite")]
 schema_roots! {
     backend: "sqlite",
     federation: true,
     query_custom_ops: [],
-    entities: [Reading],
+    entities: [Reading, Sensor, Calibration],
+}
+#[cfg(feature = "postgres")]
+schema_roots! {
+    backend: "postgres",
+    federation: true,
+    query_custom_ops: [],
+    entities: [Reading, Sensor, Calibration],
+}
+#[cfg(feature = "mssql")]
+schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_read_only",
+    federation: true,
+    query_custom_ops: [],
+    entities: [Reading, Sensor, Calibration],
 }
 
 async fn seeded_database() -> graphql_orm::db::Database {
-    let database = graphql_orm::db::Database::connect_sqlite("sqlite::memory:")
-        .await
-        .expect("open the readings fixture database");
-    let pool = database.pool();
-    graphql_orm::sqlx::query(
-        "CREATE TABLE readings (id TEXT PRIMARY KEY, zone_id TEXT NOT NULL, label TEXT NOT NULL)",
-    )
-    .execute(pool)
-    .await
-    .expect("create the readings table");
+    let text = fixture_database::text_type();
+    let mut statements = vec![
+        format!(
+            "CREATE TABLE readings (id {text} NOT NULL PRIMARY KEY, zone_id {text} NOT NULL, label {text} NOT NULL)"
+        ),
+        format!("CREATE TABLE sensors (id {text} NOT NULL PRIMARY KEY, name {text} NOT NULL)"),
+        format!(
+            "CREATE TABLE calibrations (sensor_id {text} NOT NULL, slot BIGINT NOT NULL, label {text} NOT NULL, PRIMARY KEY (sensor_id, slot))"
+        ),
+    ];
     for (id, zone_id, label) in [
         ("reading-1", "zone-north", "inlet"),
         ("reading-2", "zone-south", "outlet"),
         ("reading-3", "zone-east", "ambient"),
     ] {
-        graphql_orm::sqlx::query("INSERT INTO readings (id, zone_id, label) VALUES (?1, ?2, ?3)")
-            .bind(id)
-            .bind(zone_id)
-            .bind(label)
-            .execute(pool)
-            .await
-            .expect("seed a reading");
+        statements.push(format!(
+            "INSERT INTO readings (id, zone_id, label) VALUES ('{id}', '{zone_id}', '{label}')"
+        ));
     }
-    database
+    for (id, name) in [
+        ("zone-north", "colliding sensor"),
+        ("sensor-2", "second sensor"),
+        ("sensor-3", "third sensor"),
+    ] {
+        statements.push(format!(
+            "INSERT INTO sensors (id, name) VALUES ('{id}', '{name}')"
+        ));
+    }
+    for (sensor_id, slot, label) in [
+        ("zone-north", 1, "low"),
+        ("zone-north", 2, "high"),
+        ("sensor-2", 1, "only"),
+    ] {
+        statements.push(format!(
+            "INSERT INTO calibrations (sensor_id, slot, label) VALUES ('{sensor_id}', {slot}, '{label}')"
+        ));
+    }
+    fixture_database::seeded("readings", &statements).await
 }
 
 /// Starts the readings subgraph on loopback and returns its bound address.

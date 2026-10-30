@@ -18,6 +18,7 @@ mod jwt;
 mod lifecycle;
 mod metrics;
 mod network;
+mod node_lookup;
 mod server;
 mod subscriptions;
 
@@ -89,3 +90,4 @@ pub use lifecycle::{
 };
 pub use metrics::RouterMetricsSnapshot;
 pub use network::{HostResolver, NetworkCidr, NetworkPolicy, SystemHostResolver};
+pub use node_lookup::{DEFAULT_MAX_NODES, NODE_SUBGRAPH_NAME, NodeLookupConfig};

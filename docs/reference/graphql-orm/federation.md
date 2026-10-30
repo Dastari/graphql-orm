@@ -3,7 +3,7 @@ title: "Federation entities, keys, and operation roots"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-09-17
+last_reviewed: 2026-10-30
 review_by: 2027-03-01
 supersedes: []
 ---
@@ -366,6 +366,71 @@ let schema = schema_builder(database)
 They never create a dangling operation mapping or a fieldless placeholder
 object.
 
+## Global `NodeId`
+
+`#[graphql_entity(node_id)]` gives an entity one identity across the whole
+federated graph, plus a refetch by that identity through
+`graphql-orm-router`'s `node(NodeId)` and `nodes(NodeIds)`:
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(table = "zones", plural = "Zones", federation_key, node_id)]
+pub struct Zone {
+    #[primary_key]
+    pub id: String,
+    pub name: String,
+}
+```
+
+The entity gains a read-only `NodeId: ID!` field, which has no column and no
+input, and a resolvable `@key(fields: "NodeId")` next to any `federation_key`.
+The subgraph SDL never declares `interface Node` or `implements Node`. The
+router discovers the implementing types from these keys and owns the
+interface; with `graphql-composition` 0.12.2, a subgraph-local `interface Node`
+fails composition.
+
+### Encoding
+
+A `NodeId` is base64url, without padding, of the UTF-8 bytes of the compact
+JSON array `[typename, ...keyParts]`:
+
+- `typename` is the entity's GraphQL type name;
+- key parts are the primary-key values in primary-key order, each as its JSON
+  wire value (string, number or boolean; a UUID is its hyphenated string);
+- non-ASCII characters are not escaped, exactly as `JSON.stringify` and
+  `serde_json` write them.
+
+graphql-orm-client computes the same identities, so the encoding is a wire
+contract. `graphql_orm::graphql::federation::encode_node_id` and
+`decode_node_id` implement it; these vectors are pinned by the ORM's and the
+router's tests:
+
+| JSON | NodeId |
+| --- | --- |
+| `["FameDevice","9b2c0f2e-1d1a-4f6e-9c1e-0a1b2c3d4e5f"]` | `WyJGYW1lRGV2aWNlIiwiOWIyYzBmMmUtMWQxYS00ZjZlLTljMWUtMGExYjJjM2Q0ZTVmIl0` |
+| `["FameEnrollmentTenantRecord","acme:sub.team_1"]` | `WyJGYW1lRW5yb2xsbWVudFRlbmFudFJlY29yZCIsImFjbWU6c3ViLnRlYW1fMSJd` |
+| `["ManagedSlot","north","a"]` | `WyJNYW5hZ2VkU2xvdCIsIm5vcnRoIiwiYSJd` |
+| `["Ticket",42]` | `WyJUaWNrZXQiLDQyXQ` |
+| `["Note","ünïcødé ✓"]` | `WyJOb3RlIiwiw7xuw69jw7hkw6kg4pyTIl0` |
+| `["Quote","say \"hi\"\\n"]` | `WyJRdW90ZSIsInNheSBcImhpXCJcXG4iXQ` |
+
+Float primary keys are refused at compile time, because `serde_json` and
+`JSON.stringify` spell some floats differently. Integer keys beyond ±2⁵³ encode
+exactly on the server, but a JavaScript client cannot represent them
+losslessly.
+
+### Resolution
+
+The `NodeId` entity resolver first decodes the identity and requires its
+canonical encoding of this entity's typename and complete key. Anything else,
+including padding, whitespace, escaped non-ASCII, a different number spelling,
+a wrong part count or type, or another entity's typename, resolves to `null`
+before any read. A decoded key then follows the primary-key resolver's chain
+exactly: resolver auth, `single_read` scope templates, assurance, entity
+access, one batched authorized fetch per `_entities` request, and a row-policy
+check that yields `null`. A denied row is therefore indistinguishable from a
+missing one.
+
 ## Composition acceptance
 
 The repository tests parse the actual macro-generated federation SDL and
@@ -382,6 +447,15 @@ representations cost the owning subgraph one statement, that an unscoped caller
 is refused by the owning subgraph while the router grants nothing, and that a
 nullable reference degrades to `null` while a non-null one propagates to the
 root.
+
+The same fixture runs the global node lookup with both subgraphs on SQLite,
+test-owned PostgreSQL, or test-owned SQL Server (`--features postgres` or
+`mssql` on the fixture workspace). It proves that the router composes and
+serves its Node subgraph in-process. It also proves that `node` and `nodes`
+return each type, including a composite key and two types whose `Id`s
+collide, from its owning subgraph. Three NodeIds of one type cost one
+statement. Denied, missing, mismatched, unknown and malformed identities are
+plain `null`, and the router enforces its `nodes` bound.
 
 For a connected external graph, validate regenerated provider SDL without
 publishing it, and review the resulting query root nodes before promotion. Do

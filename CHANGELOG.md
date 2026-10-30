@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-29
+last_reviewed: 2026-10-30
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,17 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+Companion runtime/macros version: **0.86.0**. Router: **0.8.0**.
+
+- Add the opt-in global record identity `#[graphql_entity(node_id)]`. It generates a read-only `NodeId: ID!` field: base64url, without padding, of the compact JSON array `[typename, ...primaryKeyParts]`, with non-ASCII left unescaped, matching graphql-orm-client. It also generates a resolvable `@key(fields: "NodeId")` entity resolver. A malformed, non-canonical or mismatched NodeId resolves to null before any read. A decoded key follows the primary-key resolver's authorization, batching and null-on-deny chain exactly. Subgraph SDL declares no `interface Node`. See [global NodeId](docs/reference/graphql-orm/federation.md#global-nodeid). ([#260](https://github.com/Dastari/graphql-orm/issues/260))
+- Add `graphql_orm::graphql::federation::{NODE_ID_FIELD, encode_node_id, decode_node_id}`.
+- `node_id` is a compile error on repository-only, schema-only and `#[graphql(complex)]` entities, and on float, nullable or read-policy primary-key fields.
+- graphql-orm-router 0.8.0 adds the router-hosted `node(NodeId)` / `nodes(NodeIds)` lookup that composes and serves `interface Node` in-process; see the [router changelog](crates/graphql-orm-router/CHANGELOG.md).
+- `base64` becomes an ordinary dependency of `graphql-orm`. It was already in the lockfile, behind `runtime-graphql`.
+- Additive. Entities without `node_id` produce unchanged SDL and behaviour.
+
+## 0.85.0 (unreleased)
 
 Companion runtime/macros version: **0.85.0**.
 

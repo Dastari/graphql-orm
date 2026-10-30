@@ -4,9 +4,16 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["sqlite"]
+sqlite = ["graphql-orm/sqlite", "fixture-database/sqlite"]
+postgres = ["graphql-orm/postgres", "fixture-database/postgres"]
+mssql = ["graphql-orm/mssql", "fixture-database/mssql"]
+
 [dependencies]
 async-graphql = { version = "7", default-features = false, features = ["dataloader", "uuid", "decimal"] }
-graphql-orm = { path = "../../../../", default-features = false, features = ["sqlite"] }
+fixture-database = { path = "../fixture-database", default-features = false }
+graphql-orm = { path = "../../../../", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subgraph-http = { path = "../subgraph-http" }

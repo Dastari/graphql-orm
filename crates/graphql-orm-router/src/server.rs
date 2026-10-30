@@ -219,6 +219,7 @@ impl PreparedRouter {
             config.authentication.is_some(),
             config.subscriptions.is_some(),
             build_graph_options(&config)?,
+            config.node_lookup.clone(),
         )?;
         let active = lifecycle.load();
         let graph = &active.graph;
@@ -464,6 +465,9 @@ struct StaticGraphPlugin {
 
 struct SelectedRouterPolicy(Option<Arc<crate::auth::AuthorizationCatalog>>);
 
+/// The `Node` implementations of the graph this request is pinned to.
+struct SelectedNodeLookup(Option<Arc<crate::node_lookup::NodeLookup>>);
+
 #[derive(Clone, Copy)]
 struct TrustedInternalSubscription;
 
@@ -535,6 +539,9 @@ impl RouterPlugin for StaticGraphPlugin {
             payload
                 .context
                 .insert(SelectedRouterPolicy(selected.authorization.clone()));
+            payload
+                .context
+                .insert(SelectedNodeLookup(selected.graph.node_lookup.clone()));
             if let Some(internal) = &self.runtime.internal_subscription {
                 let is_internal_subscription = payload.router_http_request.path() == internal.path;
                 let supplied = payload
@@ -741,6 +748,29 @@ impl RouterPlugin for StaticGraphPlugin {
         &'execution self,
         payload: OnSubgraphHttpRequestHookPayload<'execution>,
     ) -> OnSubgraphHttpRequestHookResult<'execution> {
+        if payload.subgraph_name == crate::node_lookup::NODE_SUBGRAPH_NAME {
+            // The router-hosted Node subgraph is never contacted over the
+            // network; answer from the graph this request is pinned to.
+            let response = {
+                let selected = payload.context.get_ref::<SelectedNodeLookup>();
+                crate::node_lookup::execute(
+                    selected.as_deref().and_then(|selected| selected.0.as_ref()),
+                    &payload.body,
+                )
+            };
+            let mut headers = hive_router::http::HeaderMap::new();
+            headers.insert(
+                hive_router::http::header::CONTENT_TYPE,
+                hive_router::http::HeaderValue::from_static("application/json"),
+            );
+            return payload.end_with_response(hive_router::SubgraphHttpResponse {
+                status: hive_router::http::StatusCode::OK,
+                headers: Arc::new(headers),
+                body: serde_json::to_vec(&response)
+                    .expect("a JSON value always serializes")
+                    .into(),
+            });
+        }
         let metrics = self.runtime.lifecycle.metrics();
         metrics.subgraph_request();
         let started = Instant::now();

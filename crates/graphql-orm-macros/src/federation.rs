@@ -349,33 +349,7 @@ pub(crate) fn federation_entity_resolver_tokens(
                 quote! { #[graphql(name = #name)] #ident: #ty, }
             });
             let value_bindings = key.arguments.iter().map(|argument| {
-                let ident = &argument.argument_ident;
-                let (sql_value, key_part) = match argument.kind {
-                    RelationValueKind::String => (
-                        quote! { ::graphql_orm::graphql::orm::SqlValue::String(#ident.clone()) },
-                        quote! { #ident.clone() },
-                    ),
-                    RelationValueKind::Uuid => (
-                        quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(#ident) },
-                        quote! { #ident.to_string() },
-                    ),
-                    RelationValueKind::Int => (
-                        quote! { ::graphql_orm::graphql::orm::SqlValue::Int(#ident as i64) },
-                        quote! { #ident.to_string() },
-                    ),
-                    RelationValueKind::Float => (
-                        quote! { ::graphql_orm::graphql::orm::SqlValue::Float(#ident.into()) },
-                        quote! { #ident.to_string() },
-                    ),
-                    RelationValueKind::Bool => (
-                        quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(#ident) },
-                        quote! { #ident.to_string() },
-                    ),
-                };
-                quote! {
-                    __gom_federation_values.push(#sql_value);
-                    __gom_federation_parts.push(#key_part);
-                }
+                key_value_binding(argument.kind, &argument.argument_ident)
             });
             let key_columns = key
                 .arguments
@@ -473,6 +447,185 @@ pub(crate) fn federation_entity_resolver_tokens(
     quote! { #(#resolvers)* }
 }
 
+/// Push one key part's SQL bind value and its loader representation.
+fn key_value_binding(kind: RelationValueKind, ident: &syn::Ident) -> proc_macro2::TokenStream {
+    let (sql_value, key_part) = match kind {
+        RelationValueKind::String => (
+            quote! { ::graphql_orm::graphql::orm::SqlValue::String(#ident.clone()) },
+            quote! { #ident.clone() },
+        ),
+        RelationValueKind::Uuid => (
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Uuid(#ident) },
+            quote! { #ident.to_string() },
+        ),
+        RelationValueKind::Int => (
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Int(#ident as i64) },
+            quote! { #ident.to_string() },
+        ),
+        RelationValueKind::Float => (
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Float(#ident.into()) },
+            quote! { #ident.to_string() },
+        ),
+        RelationValueKind::Bool => (
+            quote! { ::graphql_orm::graphql::orm::SqlValue::Bool(#ident) },
+            quote! { #ident.to_string() },
+        ),
+    };
+    quote! {
+        __gom_federation_values.push(#sql_value);
+        __gom_federation_parts.push(#key_part);
+    }
+}
+
+/// Emit the resolvable `@key(fields: "NodeId")` entity resolver.
+///
+/// The identity is decoded and checked first: anything that is not the
+/// canonical encoding of this entity's typename and complete primary key
+/// resolves to null before any read, so a malformed or mismatched NodeId never
+/// reveals whether a row exists. A decoded key then follows exactly the
+/// primary-key entity resolver's chain — scope enforcement, assurance, entity
+/// access, a batched authorized fetch and a row-policy check that yields null.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn node_id_entity_resolver_tokens(
+    struct_name: &syn::Ident,
+    entity_name_lit: &str,
+    backend_marker: &proc_macro2::TokenStream,
+    resolver_auth_mode: &proc_macro2::TokenStream,
+    relation_preload_single: &proc_macro2::TokenStream,
+    parts: &[NodeIdPart],
+    scope_enforcement: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let typename = struct_name.to_string();
+    let part_count = parts.len();
+    let loader_identity = format!("{struct_name}::@key(NodeId)");
+    let description = format!("Resolve one {entity_name_lit} from its global NodeId.");
+    let idents = (0..parts.len()).map(node_id_part_ident).collect::<Vec<_>>();
+    let decode_parts = parts.iter().zip(&idents).map(|(part, ident)| {
+        let ty = &part.rust_type;
+        quote! {
+            let Some(#ident) = __gom_node_parts
+                .next()
+                .and_then(|part| ::graphql_orm::serde_json::from_value::<#ty>(part).ok())
+            else {
+                return Ok(None);
+            };
+        }
+    });
+    let canonical_parts = parts
+        .iter()
+        .zip(&idents)
+        .map(|(part, ident)| node_id_json_part(part.kind, quote! { #ident }));
+    let value_bindings = parts
+        .iter()
+        .zip(&idents)
+        .map(|(part, ident)| key_value_binding(part.kind, ident));
+    let key_columns = parts.iter().map(|part| {
+        let column = &part.quoted_column;
+        quote! { #column }
+    });
+    let key_part_kinds = parts
+        .iter()
+        .map(|part| relation_key_part_kind_tokens(part.kind))
+        .collect::<Vec<_>>();
+
+    quote! {
+        #[doc = #description]
+        #[graphql(entity)]
+        async fn __gom_federation_node_id(
+            &self,
+            ctx: &::graphql_orm::async_graphql::Context<'_>,
+            #[graphql(name = "NodeId")] __gom_node_id: ::graphql_orm::async_graphql::ID,
+        ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
+            let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(
+                ctx,
+                #resolver_auth_mode,
+            )?;
+            let Some(__gom_node_parts) = ::graphql_orm::graphql::federation::decode_node_id(
+                &__gom_node_id,
+                #typename,
+                #part_count,
+            ) else {
+                return Ok(None);
+            };
+            let mut __gom_node_parts = __gom_node_parts.into_iter();
+            #(#decode_parts)*
+            // Typed values must re-encode to the same id, so one row has one NodeId.
+            if ::graphql_orm::graphql::federation::encode_node_id(#typename, vec![#(#canonical_parts),*]).0
+                != __gom_node_id.0
+            {
+                return Ok(None);
+            }
+            #scope_enforcement
+            ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                ctx,
+                ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            )?;
+            let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+            let pool = db.pool();
+            let auth_context = ctx
+                .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
+                .cloned();
+            db.ensure_entity_access(
+                Some(ctx),
+                #entity_name_lit,
+                <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+            ).await?;
+
+            let mut __gom_federation_values = Vec::new();
+            let mut __gom_federation_parts = Vec::new();
+            #(#value_bindings)*
+
+            let __gom_federation_loader = ctx.data_unchecked::<
+                ::graphql_orm::async_graphql::dataloader::DataLoader<
+                    ::graphql_orm::graphql::loaders::FederationKeyLoader<
+                        #struct_name,
+                        #backend_marker,
+                    >,
+                >,
+            >();
+            let __gom_federation_loaded = __gom_federation_loader
+                .load_one(::graphql_orm::graphql::loaders::FederationEntityKey {
+                    key: #loader_identity,
+                    columns: vec![#(#key_columns),*],
+                    key_part_kinds: vec![#(#key_part_kinds),*],
+                    values: __gom_federation_values,
+                    representation: ::graphql_orm::graphql::loaders::RelationKey::from_projected_parts(
+                        __gom_federation_parts, &[#(#key_part_kinds),*],
+                    ),
+                    auth_context: auth_context.clone(),
+                })
+                .await
+                .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?;
+
+            let mut entity = __gom_federation_loaded.flatten();
+
+            if let Some(ref loaded) = entity {
+                if !db.can_read_row(
+                    Some(ctx),
+                    #entity_name_lit,
+                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
+                    loaded as &(dyn ::std::any::Any + Send + Sync),
+                ).await? {
+                    return Ok(None);
+                }
+            }
+
+            let _ = pool;
+            #relation_preload_single
+
+            Ok(entity)
+        }
+    }
+}
+
+/// Local binding for one decoded `NodeId` key part.
+pub(crate) fn node_id_part_ident(index: usize) -> syn::Ident {
+    quote::format_ident!("__gom_node_part_{index}")
+}
+
 /// Record the declared key count so `GraphQLEntity` can require this derive.
 ///
 /// This is emitted whether or not the rest of the operations derive succeeds.
@@ -483,13 +636,125 @@ pub(crate) fn federation_key_witness_impl(
     struct_name: &syn::Ident,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let metadata = crate::entity::parse_entity_metadata(attrs)?;
-    if metadata.federation_keys.is_empty() {
+    let count = metadata.federation_keys.len() + usize::from(metadata.node_id.is_some());
+    if count == 0 {
         return Ok(quote! {});
     }
-    let count = metadata.federation_keys.len();
     Ok(quote! {
         impl ::graphql_orm::graphql::federation::GeneratedFederationEntityKeys for #struct_name {
             const FEDERATION_KEY_COUNT: usize = #count;
         }
     })
+}
+
+/// One primary-key part of a `node_id` entity's global identity, in
+/// primary-key order.
+pub(crate) struct NodeIdPart {
+    pub(crate) ident: syn::Ident,
+    pub(crate) rust_type: syn::Type,
+    pub(crate) kind: RelationValueKind,
+    pub(crate) quoted_column: String,
+}
+
+/// Validate a `node_id` declaration and return its key parts.
+///
+/// A `NodeId` discloses every primary-key value, so the same rules as a
+/// `federation_key` apply: persisted, readable, non-null scalar columns with no
+/// field-level read policy. Float keys are refused because `serde_json` and
+/// `JSON.stringify` spell some floats differently, which would give a client a
+/// different identity than the server for the same row.
+pub(crate) fn resolve_node_id_parts(
+    struct_name: &syn::Ident,
+    entity_meta: &EntityMetadata,
+    primary_key_fields: &[crate::operations::PrimaryKeyField],
+    backend: BackendKind,
+) -> syn::Result<Option<Vec<NodeIdPart>>> {
+    let Some(span) = entity_meta.node_id else {
+        return Ok(None);
+    };
+    let mut parts = Vec::new();
+    for field in primary_key_fields {
+        let name = &field.graphql_name;
+        let meta = &field.meta;
+        if meta.is_private || !meta.read || meta.input_only || meta.read_policy.is_some() {
+            return Err(syn::Error::new(
+                span,
+                format!(
+                    "node_id on `{struct_name}` discloses primary-key field `{name}`, which is not readable by every caller; a NodeId may only encode exported fields without a field-level read policy"
+                ),
+            ));
+        }
+        let kind = match classify_relation_value_type(&field.field_type) {
+            Some((_, true)) => {
+                return Err(syn::Error::new(
+                    span,
+                    format!("node_id on `{struct_name}`: primary-key field `{name}` is nullable"),
+                ));
+            }
+            Some((RelationValueKind::Float, false)) | None => {
+                return Err(syn::Error::new(
+                    span,
+                    format!(
+                        "node_id on `{struct_name}`: primary-key field `{name}` must be a String, UUID, integer or boolean; float keys have no portable JSON spelling"
+                    ),
+                ));
+            }
+            Some((kind, false)) => kind,
+        };
+        let column = field
+            .meta
+            .db_column
+            .clone()
+            .unwrap_or_else(|| field.rust_name.clone());
+        parts.push(NodeIdPart {
+            ident: field.field_name.clone(),
+            rust_type: field.field_type.clone(),
+            kind,
+            quoted_column: backend_render_identifier_path(backend, &column),
+        });
+    }
+    Ok(Some(parts))
+}
+
+/// The JSON wire value of one key part, from an expression of its Rust type.
+pub(crate) fn node_id_json_part(
+    kind: RelationValueKind,
+    value: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    match kind {
+        RelationValueKind::String => {
+            quote! { ::graphql_orm::serde_json::Value::String(::std::clone::Clone::clone(&#value)) }
+        }
+        RelationValueKind::Uuid => {
+            quote! { ::graphql_orm::serde_json::Value::String(::std::string::ToString::to_string(&#value)) }
+        }
+        RelationValueKind::Int | RelationValueKind::Float => {
+            quote! { ::graphql_orm::serde_json::Value::from(#value) }
+        }
+        RelationValueKind::Bool => quote! { ::graphql_orm::serde_json::Value::Bool(#value) },
+    }
+}
+
+/// The `NodeId` field method for the entity's GraphQL object.
+pub(crate) fn node_id_field_tokens(
+    struct_name_str: &str,
+    parts: &[NodeIdPart],
+) -> proc_macro2::TokenStream {
+    let values = parts.iter().map(|part| {
+        let ident = &part.ident;
+        node_id_json_part(part.kind, quote! { self.#ident })
+    });
+    let description = format!(
+        "Opaque global identity of this {struct_name_str}: base64url (no padding) of the compact JSON array of its type name and complete primary key."
+    );
+    quote! {
+        #[doc = #description]
+        #[graphql(name = "NodeId")]
+        async fn __gom_node_id(&self) -> ::graphql_orm::async_graphql::Result<::graphql_orm::async_graphql::ID> {
+            Ok(::graphql_orm::graphql::federation::encode_node_id(
+                #struct_name_str,
+                vec![#(#values),*],
+            ))
+        }
+    }
 }

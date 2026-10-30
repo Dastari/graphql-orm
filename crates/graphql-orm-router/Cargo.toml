@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-router"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Federated GraphQL router for graphql-orm and project-neutral subgraphs"
@@ -18,6 +18,7 @@ auth-agql = ["dep:agql-auth"]
 [dependencies]
 agql-auth = { workspace = true, optional = true }
 arc-swap = { workspace = true }
+base64 = { workspace = true }
 cynic-parser = { workspace = true }
 # Hive 0.2.19 exchanges SDK 0.32 types with Datadog. 0.5.3 selects SDK 0.33.
 # Keep fresh consumers coherent without enabling Datadog's default features.
@@ -40,7 +41,6 @@ url = { workspace = true }
 signal-hook = { workspace = true }
 
 [dev-dependencies]
-base64 = { workspace = true }
 ntex = "=3.12.3"
 sha1 = { workspace = true }
 time = "0.3"
