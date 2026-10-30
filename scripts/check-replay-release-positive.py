@@ -16,6 +16,11 @@ def jobs(text):
             for i, match in enumerate(matches) if match.start() > text.index("jobs:\n")}
 
 
+def without_timeout(body):
+    # A job's wall-clock limit is runner capacity, not verification content.
+    return re.sub(r"(?m)^    timeout-minutes: [0-9]+\n", "", body)
+
+
 def main():
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     old = jobs(source(QUALIFIED, ".github/workflows/release.yml").decode())
@@ -24,9 +29,11 @@ def main():
             "full profile must remain the default")
     # Every original matrix command, provider enumeration, failure/skip rule,
     # permission and full publisher step is byte-identical after selection.
+    # Only the job-level timeout may differ.
     for name in [*EXCLUDED_JOBS, "validate", "release"]:
         body = new[name].replace("    if: inputs.validation_profile == 'full'\n", "", 1)
-        require(body.rstrip() == old[name].rstrip(), f"full profile changed: {name}")
+        require(without_timeout(body).rstrip() == without_timeout(old[name]).rstrip(),
+                f"full profile changed: {name}")
     for name in ["replay-scoped-integrity", "replay-scoped-positive", "replay-scoped-validate", "release-scoped"]:
         require("if: inputs.validation_profile == 'replay-scoped-positive-v1'" in new[name],
                 "scoped selection must be explicit")
