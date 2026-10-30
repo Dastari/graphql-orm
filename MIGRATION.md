@@ -10,6 +10,111 @@ supersedes: []
 
 # Migration Guide
 
+## 0.81.0 to 0.82.0: shareable aggregate result objects
+
+The 0.82.0 candidate includes the fix originally prepared in the 0.81.2 source
+checkpoint. Generated federation SDL marks `GraphqlAggregateResultRow` and
+`GraphqlAggregateResultValue` `@shareable`, like `PageInfo`, so two subgraphs
+with aggregate-enabled entities can compose. No stored-data migration is needed.
+Subgraphs that disabled aggregates solely because those shared wrapper fields
+collided may restore their entity-level aggregate opt-in after adopting the
+qualified release. Entity read/aggregate policies and other authorization checks
+remain required; sharing the wrappers grants no data access. Current runtime and
+macros are paired at 0.82.0, not the historical source checkpoint's version.
+
+## Published agql-auth 0.24.0 selection
+
+The workspace selects published Auth `v0.24.0` instead of the full revision
+selector. Its annotated tag `f2bbce2f1ddc7f33deafa0370073b9a7e91be8d7` peels to
+the same reviewed commit `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`; Auth source
+bytes, version and behavior are unchanged. All direct hosts must select:
+
+```toml
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.24.0", version = "0.24.0" }
+```
+
+Cargo treats revision and tag selectors as different sources even at the same
+commit. Align the host, ORM, AI and router selectors, refresh their locks, and
+verify exactly one Auth source locked to the full commit above. No data/schema
+migration or new authorization grant is implied.
+
+The [official release](https://github.com/Dastari/agql-auth/releases/tag/v0.24.0)
+was published on 2026-10-28. Its `v0.24.0.json` records version `0.24.0`, the
+commit above and Auth Cargo.lock SHA-256
+`49af97991af195aeaaf9ea36c185a2981f509f877f23d83a69e8fadee10be13b`.
+The JSON SHA-256 is
+`0e803ce2ce4eaeba274e3bddc40a6415926538fdddbb0a67c11cf4505ffaed7c`, matching
+the release's `SHA256SUMS`. Retain the full locked revision and tag together in
+the eventual ORM release manifest. Auth publication does not publish this ORM
+candidate or authorize downstream adoption.
+
+## 0.81.0 to 0.82.0: exact static signed64 filters
+
+Use `#[filterable(type = "int64")]` on `i64` or `Option<i64>` fields and
+`Int64Filter` with native `i64` comparison/list operands. Existing `number` and
+`IntFilter` retain their 32-bit input contract. Upgrade ORM and macros together.
+No table or stored-value migration is required.
+
+The `Signed64` scalar accepts exact integer literals and canonical decimal
+strings in the inclusive signed64 range; output is a decimal string. SDKs must
+map it to bigint or decimal strings, never floating point. Fractions, exponents
+in strings, leading zeroes and overflow refuse. GraphQL JSON numeric variables
+must reach the parser exactly; use decimal strings in JavaScript clients.
+This is the filter operand scalar, independent of runtime `RuntimeInt64`.
+
+All nine operators are supported. Empty in/notIn lists add no constraint (the
+existing static SQL convention); comparisons and nonempty lists yield SQL UNKNOWN for NULL, including under
+NOT/OR/AND, and only the final match boundary excludes UNKNOWN.
+`isNull` composes with other operators using AND. Each list has a 256-member
+bound, checked on borrowed raw objects at actual configured operator names
+before cloning/decoding list elements, and recursively for native Rust callers.
+GraphQL singleton-list coercion remains supported. Existing query-level
+policy, depth, work and database bind budgets remain required. Generated
+metadata advertises `Signed64` operands rather than GraphQL `Int`.
+
+Generated list, keyset and authorized-scan GraphQL resolvers now check read
+policies for every field referenced by a static filter, including nested
+NOT/OR/AND, before list/count/scan SQL. This applies to all static filter
+families. A predicate cannot bypass a field policy by selecting only another
+field in the response. Providers receive the original public field identity
+and policy key with no row (`record = None`), and must authorize that field's
+use in a predicate; row and selected-field authorization remain independent.
+Previously accepted filtered reads may now return forbidden or a missing-policy
+error. No additional client scope or read authority is implied.
+
+## 0.81.0 to 0.82.0: generated cross-crate upward Changed hooks
+
+Public generated entities can now be the target of `propagate_change = "up"`
+across Rust crate boundaries. Upgrade ORM and macros together. Generated
+`__gom_propagation_key`, queue and propagation-driver hooks share the visibility
+of the existing complete subscription key hook. They are hidden implementation
+interfaces for trusted generated host code; callers must not construct events
+from client input. No GraphQL operation, write permission or subscriber authority
+is introduced. Repository-only entity hooks remain private, so they cannot be
+cross-crate subscription targets. Public read-only entities retain their existing
+read-only mutation and Changed restrictions.
+
+The bridge retains transaction-bound target lookup, complete keys, provenance,
+visited identities, hop/fanout limits and commit-before-emission. Propagated
+GraphQL delivery additionally enforces each source/hop's own generated Changed
+authentication mode, operation scopes and assurance coordinate, independently
+of the root subscriber's requirements. Entity/row/selected-field/tuple authority
+continues to be checked. Operation authority is rechecked after awaited row
+checks and in the final proof after payload serialization. Existing subscriptions
+whose principals lack a source/hop requirement now suppress those invalidations.
+
+`SubscriptionEventSource::new` and `new_relation` now require a generated
+source-operation authorization callback. This trusted-host constructor change
+is deliberate: a row-policy callback cannot stand in for operation authority.
+`assurance::enforce_operation_assurance(ctx, kind, field_name)` supports explicit
+coordinates; `enforce_resolver_assurance` delegates to it for the current field.
+No subscriber policy is evaluated inside transaction target materialization. Raw observer events do not enter that
+trusted delivery channel. Existing overflow behavior is unchanged; this change
+does not implement coalescing, durable replay or continuity signals.
+Generated updates still propagate from the post-update row only. This release
+does not establish invalidation of both former and new parents after a relation
+moves; stale provenance is still suppressed rather than authorized by an old edge.
+
 ## 0.81.0 to 0.81.1: post-commit record release
 
 No change is required. `RuntimeReadAuthority` gains `release_mutation_result`, whose default
@@ -111,14 +216,15 @@ schema behavior remain available under their documented flags. See the
 All direct Auth consumers must also replace the old `v0.23.0` selector with:
 
 ```toml
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0" }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.24.0", version = "0.24.0" }
 ```
 
 Use this exact selector across ORM, AI, router and your host. Mixing a tag,
 revision or path source creates incompatible Auth type universes even when
 names match. Refresh all consumer lockfiles and inspect `cargo tree -d` and
-`cargo metadata --locked` for exactly one Auth source. This revision is
-reviewed merged source, not a published 0.24 release claim. Old clients passing
+`cargo metadata --locked` for exactly one Auth source. The tag peels to reviewed
+commit `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`; see the
+[published selection](#published-agql-auth-0240-selection). Old clients passing
 Auth 0.23 types to ORM/AI/router need to rebuild against this identity.
 
 No data migration is required. The explicit GraphQL feature change itself

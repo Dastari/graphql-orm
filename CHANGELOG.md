@@ -16,7 +16,34 @@ for historical context.
 
 ## Unreleased
 
-Companion runtime/macros version: **0.81.1**.
+Companion runtime/macros version: **0.82.0**.
+
+- Include the shareable aggregate-result fix from the 0.81.2 source checkpoint:
+  generated federation SDL marks `GraphqlAggregateResultRow` and
+  `GraphqlAggregateResultValue` `@shareable`, as `PageInfo` already is. This lets
+  two aggregate-enabled subgraphs compose without duplicate wrapper-field
+  ownership errors. The SDL regression and two-subgraph aggregate fixture are
+  included; no stored-data migration or aggregate-policy change is required.
+
+- Select published Auth `v0.24.0` instead of its full revision selector. The tag
+  peels to the same `1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd` source; align
+  direct host selectors to retain one Auth type universe. See the
+  [selection migration](MIGRATION.md#published-agql-auth-0240-selection).
+
+- ORM/macros 0.82.0 add opt-in exact static signed64 filters (`int64`,
+  `Int64Filter`, `Signed64`) with canonical metadata, bounded lists and exact SQL
+  bindings/matching with SQL three-valued NULL composition and predecode list
+  admission. Existing 32-bit filters remain unchanged.
+- Generated GraphQL list (including composite keys), keyset and authorized-scan
+  reads preflight the read policies of all static predicate fields before SQL,
+  including recursive predicates whose protected fields are absent from the
+  response selection. Hosts must authorize predicate intent without a row.
+
+- ORM/macros 0.82.0 allow generated upward Changed propagation between public
+  entities in different Rust crates, retaining trusted provenance and subscriber
+  authorization. Enforce each source/hop's own Changed auth mode, scopes and
+  explicit assurance coordinate at current/final release. Repository-only hooks
+  remain private.
 
 - Add `RuntimeReadAuthority::release_mutation_result` and `RuntimeMutationRelease` (`Release`, `Withhold`), so a host can withhold a committed mutation's record that the caller may not view: the payload is `{"record": null}` with no error, and no record value, projected host object or relation is serialized. The default releases exactly when `authorize_mutation_result` succeeds, so existing hosts are unchanged. See [post-commit record release](docs/reference/graphql-orm/runtime-graphql.md). Additive; no migration.
 

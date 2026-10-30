@@ -2159,6 +2159,15 @@ fn generate_graphql_operations_unfiltered(
         };
     let subscription_key_method = quote! {
         #[doc(hidden)]
+        fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
+            -> ::graphql_orm::async_graphql::Result<()> {
+            let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+            #subscription_scope_enforcement
+            ::graphql_orm::graphql::assurance::enforce_operation_assurance(
+                ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription, #subscription_name,
+            )
+        }
+        #[doc(hidden)]
         #subscription_key_visibility fn __gom_subscription_key_values(entity: &Self) -> Vec<::graphql_orm::graphql::orm::SqlValue> {
             let mut bind_values = Vec::new();
             #(#subscription_key_binds)*
@@ -2233,15 +2242,18 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     };
+    // These are generated host-to-host hooks, like SubscriptionEvent::new.
+    // Public entity expansions may cross Rust crates. Keep repository-only
+    // entity hooks private; visibility grants no subscriber release authority.
     let propagated_subscription_emitter = quote! {
         #[doc(hidden)]
-        pub(crate) fn __gom_propagation_key(entity: &Self) -> #key_type {
+        #subscription_key_visibility fn __gom_propagation_key(entity: &Self) -> #key_type {
             #propagation_entity_key
         }
 
         #[doc(hidden)]
         #[allow(clippy::too_many_arguments, unused_variables)]
-        pub(crate) fn __gom_queue_propagated_changed_event(
+        #subscription_key_visibility fn __gom_queue_propagated_changed_event(
             hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
             action: ::graphql_orm::graphql::orm::ChangeAction,
             id: #key_type,
@@ -2309,7 +2321,7 @@ fn generate_graphql_operations_unfiltered(
                         next_path.push(#relation_name.to_string());
                         let mut next_provenance = provenance.to_vec();
                         next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
-                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*],
+                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*], Self::__gom_authorize_changed_operation,
                         ));
                         let dedupe_key = ::graphql_orm::serde_json::to_string(&(
                             <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
@@ -4934,6 +4946,22 @@ fn generate_graphql_operations_unfiltered(
             .fetch_authorized_keyset(db, Some(ctx), auth, page).await?
         }
     };
+    // Filtering reveals field information even when the response selects only
+    // unrelated fields. Authorize original recursive predicate intent before
+    // any list/count/scan SQL, using the same public identities as field reads.
+    let filter_read_authorization = quote! {
+        if let Some(filter) = where_input.as_ref() {
+            for field_name in ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter) {
+                let field = <#struct_name as ::graphql_orm::graphql::orm::Entity>::repository_field_policies()
+                    .iter()
+                    .find(|field| field.api_name == field_name)
+                    .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
+                db.ensure_readable_field(
+                    ctx, #entity_name_lit, field.api_name, field.read_policy, None,
+                ).await?;
+            }
+        }
+    };
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
             #[doc = #keyset_operation_description]
@@ -4953,6 +4981,7 @@ fn generate_graphql_operations_unfiltered(
                 )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
+                #filter_read_authorization
                 let filter = where_input.unwrap_or_default();
                 #runtime_keyset_prepare
                 let connection = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
@@ -4976,6 +5005,7 @@ fn generate_graphql_operations_unfiltered(
                 )?;
                 let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                 let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>();
+                #filter_read_authorization
                 let result = ::graphql_orm::graphql::orm::EntityQuery::<#struct_name, #backend_marker>::new()
                     .filter_with_entity_matching(&where_input.unwrap_or_default())
                     .fetch_authorized_scan(db, Some(ctx), auth, page).await?;
@@ -5391,6 +5421,8 @@ fn generate_graphql_operations_unfiltered(
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
                                 Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                             };
                             match authorize_current().await {
@@ -5429,7 +5461,7 @@ fn generate_graphql_operations_unfiltered(
 
                 #[doc(hidden)]
                 #[allow(clippy::too_many_arguments)]
-                pub(crate) fn __gom_propagate_changed_event<'a>(
+                #subscription_key_visibility fn __gom_propagate_changed_event<'a>(
                     hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                     action: ::graphql_orm::graphql::orm::ChangeAction,
                     entity: &'a Self,
@@ -7122,6 +7154,8 @@ fn generate_graphql_operations_unfiltered(
                                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                                 #subscription_scope_enforcement
                                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
                                 Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                             };
                             match authorize_current().await {
@@ -7154,7 +7188,7 @@ fn generate_graphql_operations_unfiltered(
     let generated_propagation_driver = quote! {
             #[doc(hidden)]
             #[allow(clippy::too_many_arguments)]
-            pub(crate) fn __gom_propagate_changed_event<'a>(
+            #subscription_key_visibility fn __gom_propagate_changed_event<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 action: ::graphql_orm::graphql::orm::ChangeAction,
                 entity: &'a Self,
@@ -7299,6 +7333,7 @@ fn generate_graphql_operations_unfiltered(
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                     ).await?;
 
+                    #filter_read_authorization
                     let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                     if let Some(ref filter) = where_input {
@@ -7674,6 +7709,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlQuery,
                 ).await?;
 
+                #filter_read_authorization
                 let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                 if let Some(ref filter) = where_input {

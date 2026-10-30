@@ -10,6 +10,21 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.82.0 includes shareable aggregate result objects in federation SDL,
+allowing two aggregate-enabled subgraphs to compose. No stored-data migration or
+aggregate-policy change is required. See the
+[aggregate migration](../../MIGRATION.md#0810-to-0820-shareable-aggregate-result-objects).
+
+Version 0.82.0 adds opt-in `int64` static filters with native `i64` operands,
+`Signed64` wire coercion and exact typed metadata. Existing `number` filters
+remain 32-bit. See the [signed64 migration](../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters).
+
+Version 0.82.0 allows generated upward Changed hooks to cross Rust crate
+boundaries for public entities. Repository-only hooks remain private; current
+subscriber operation authority is checked independently at every source/hop,
+including after serialization. Transaction/provenance semantics are retained. See the
+[cross-crate migration](../../MIGRATION.md#0810-to-0820-generated-cross-crate-upward-changed-hooks).
+
 Version 0.81.1 adds `RuntimeReadAuthority::release_mutation_result`, which lets a host
 withhold a committed mutation's record (`record: null`, no error) from a caller who may
 not view it. The default keeps the previous behaviour; no migration is needed.
@@ -175,11 +190,11 @@ resource ownership, deleted-preimage and commit fences remain host-owned. No
 generated code, SDL or schema migration is added. See
 [the bridge guide](../../docs/reference/graphql-orm/agql-auth-bridge.md).
 
-The current workspace selects reviewed merged Auth 0.24.0 at full revision
-`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. This is provisional Git source,
-not a claim of a published Auth release. Direct Auth consumers must select the
-same revision and refresh their locks to one source; see the
-[workspace migration](../../MIGRATION.md#0780-to-0790-explicit-graphql-features).
+The current workspace selects published Auth `v0.24.0`, peeled to
+`1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd`. Direct Auth consumers must select
+that same tag and refresh their locks to one source; matching the commit alone
+does not unify revision and tag selectors. See the
+[published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
 
 
 Version 0.52.0 adds explicitly selected native Rust 1.98.1 owned replay evidence.

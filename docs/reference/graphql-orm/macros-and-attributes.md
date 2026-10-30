@@ -573,3 +573,10 @@ generated writes, including an RFC3339 String mapped to physical `updated_at`.
 The opt-in changes input/automatic-write behavior, not column types or defaults.
 See the [migration contract](../../../MIGRATION.md#0570-to-0580-public-host-owned-timestamps)
 and [repository example](repository-only-entities.md).
+
+### Exact signed64 static filters
+
+`#[filterable(type = "int64")]` requires `i64` or `Option<i64>` and generates
+`Int64Filter`. See the [migration contract](../../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters)
+for coercion, SDK mappings, null/empty-list semantics and finite list bounds.
+`number` continues to select the existing `IntFilter`.

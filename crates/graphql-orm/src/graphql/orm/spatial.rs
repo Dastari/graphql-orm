@@ -349,6 +349,69 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
     true
 }
 
+/// Evaluate exact signed64 operands without narrowing. Empty lists are no-ops.
+pub fn int64_filter_matches(
+    value: Option<i64>,
+    filter: &crate::graphql::filters::Int64Filter,
+) -> Option<bool> {
+    if filter.validate().is_err() {
+        return Some(false);
+    }
+    if let Some(is_null) = filter.is_null {
+        if value.is_none() != is_null {
+            return Some(false);
+        }
+    }
+    let Some(value) = value else {
+        let has_comparison = filter.eq.is_some()
+            || filter.ne.is_some()
+            || filter.lt.is_some()
+            || filter.lte.is_some()
+            || filter.gt.is_some()
+            || filter.gte.is_some()
+            || filter.in_list.as_ref().is_some_and(|v| !v.is_empty())
+            || filter.not_in.as_ref().is_some_and(|v| !v.is_empty());
+        // isNull was evaluated first: a definite FALSE dominates UNKNOWN
+        // within this atom's conjunction, exactly as SQL AND does.
+        return if has_comparison { None } else { Some(true) };
+    };
+
+    if filter.eq.is_some_and(|expected| value != expected) {
+        return Some(false);
+    }
+    if filter.ne.is_some_and(|expected| value == expected) {
+        return Some(false);
+    }
+    if filter.lt.is_some_and(|expected| value >= expected) {
+        return Some(false);
+    }
+    if filter.lte.is_some_and(|expected| value > expected) {
+        return Some(false);
+    }
+    if filter.gt.is_some_and(|expected| value <= expected) {
+        return Some(false);
+    }
+    if filter.gte.is_some_and(|expected| value < expected) {
+        return Some(false);
+    }
+    if filter
+        .in_list
+        .as_ref()
+        .is_some_and(|list| !list.is_empty() && !list.iter().any(|candidate| value == *candidate))
+    {
+        return Some(false);
+    }
+    if filter
+        .not_in
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|candidate| value == *candidate))
+    {
+        return Some(false);
+    }
+
+    Some(true)
+}
+
 /// Evaluate a UUID filter in memory for fallback query paths.
 pub fn uuid_filter_matches(
     value: Option<uuid::Uuid>,

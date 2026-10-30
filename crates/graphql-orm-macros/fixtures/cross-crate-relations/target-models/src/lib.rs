@@ -54,3 +54,205 @@ where
         B::try_get_string(row, "id")
     }
 }
+
+pub mod propagation {
+    pub use cross_crate_ancestor_models::*;
+    use graphql_orm::prelude::*;
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        async_graphql::SimpleObject,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+    )]
+    #[graphql(complex)]
+    #[cfg_attr(
+        feature = "sqlite",
+        graphql_entity(
+            backend = "sqlite",
+            table = "up_middles",
+            plural = "UpMiddles",
+            default_sort = "id ASC"
+        )
+    )]
+    #[cfg_attr(
+        feature = "postgres",
+        graphql_entity(
+            backend = "postgres",
+            table = "up_middles",
+            plural = "UpMiddles",
+            default_sort = "id ASC"
+        )
+    )]
+    #[cfg_attr(
+        feature = "mssql",
+        graphql_entity(
+            backend = "mssql",
+            table = "up_middles",
+            plural = "UpMiddles",
+            default_sort = "id ASC"
+        )
+    )]
+    #[graphql_orm(operation_authorization(categories = ["subscription"], all_scopes = ["up.middle"]))]
+    pub struct UpMiddle {
+        #[primary_key]
+        #[sortable]
+        #[graphql_orm(auto_generated = false)]
+        pub id: String,
+        pub tenant: String,
+        pub root_id: String,
+        #[graphql(skip)]
+        #[relation(target = "UpRoot", from = ["root_id", "tenant"], to = ["id", "tenant"], propagate_change = "up", emit_fk = false)]
+        pub root: Option<UpRoot>,
+    }
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        async_graphql::SimpleObject,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+    )]
+    #[graphql(complex)]
+    #[cfg_attr(
+        feature = "sqlite",
+        graphql_entity(
+            backend = "sqlite",
+            table = "required_middles",
+            plural = "RequiredMiddleRows",
+            auth = "required",
+            default_sort = "id ASC"
+        )
+    )]
+    #[cfg_attr(
+        feature = "postgres",
+        graphql_entity(
+            backend = "postgres",
+            table = "required_middles",
+            plural = "RequiredMiddleRows",
+            auth = "required",
+            default_sort = "id ASC"
+        )
+    )]
+    #[cfg_attr(
+        feature = "mssql",
+        graphql_entity(
+            backend = "mssql",
+            table = "required_middles",
+            plural = "RequiredMiddleRows",
+            auth = "required",
+            default_sort = "id ASC"
+        )
+    )]
+    pub struct RequiredMiddle {
+        #[primary_key]
+        #[sortable]
+        #[graphql_orm(auto_generated = false)]
+        pub id: String,
+        pub tenant: String,
+        pub parent_id: String,
+        #[graphql(skip)]
+        #[relation(target = "AuthRoot", from = ["parent_id", "tenant"], to = ["id", "tenant"], propagate_change = "up", emit_fk = false)]
+        pub parent: Option<AuthRoot>,
+    }
+
+    #[derive(
+        GraphQLEntity,
+        GraphQLOperations,
+        GraphQLRelations,
+        async_graphql::SimpleObject,
+        serde::Serialize,
+        serde::Deserialize,
+        Clone,
+        Debug,
+    )]
+    #[graphql(complex)]
+    #[cfg_attr(
+        feature = "sqlite",
+        graphql_entity(
+            backend = "sqlite",
+            table = "optional_middles",
+            plural = "OptionalMiddleRows",
+            auth = "optional",
+            default_sort = "id ASC"
+        )
+    )]
+    #[cfg_attr(
+        feature = "postgres",
+        graphql_entity(
+            backend = "postgres",
+            table = "optional_middles",
+            plural = "OptionalMiddleRows",
+            auth = "optional",
+            default_sort = "id ASC"
+        )
+    )]
+    #[cfg_attr(
+        feature = "mssql",
+        graphql_entity(
+            backend = "mssql",
+            table = "optional_middles",
+            plural = "OptionalMiddleRows",
+            auth = "optional",
+            default_sort = "id ASC"
+        )
+    )]
+    pub struct OptionalMiddle {
+        #[primary_key]
+        #[sortable]
+        #[graphql_orm(auto_generated = false)]
+        pub id: String,
+        pub tenant: String,
+        pub parent_id: String,
+        #[graphql(skip)]
+        #[relation(target = "AuthRoot", from = ["parent_id", "tenant"], to = ["id", "tenant"], propagate_change = "up", emit_fk = false)]
+        pub parent: Option<AuthRoot>,
+    }
+
+    // RelationLoader uses this row identity; current relation and policy checks remain separate.
+    impl<B: OrmBackend> graphql_orm::graphql::loaders::BatchLoadEntity<B> for UpMiddle
+    where
+        UpMiddle: FromSqlRow<B>,
+    {
+        fn batch_column() -> &'static str {
+            "id"
+        }
+
+        fn batch_key_from_row(row: &B::Row) -> graphql_orm::Result<String> {
+            B::try_get_string(row, "id")
+        }
+    }
+
+    // RelationLoader uses this row identity; current relation and policy checks remain separate.
+    impl<B: OrmBackend> graphql_orm::graphql::loaders::BatchLoadEntity<B> for RequiredMiddle
+    where
+        RequiredMiddle: FromSqlRow<B>,
+    {
+        fn batch_column() -> &'static str {
+            "id"
+        }
+
+        fn batch_key_from_row(row: &B::Row) -> graphql_orm::Result<String> {
+            B::try_get_string(row, "id")
+        }
+    }
+
+    // RelationLoader uses this row identity; current relation and policy checks remain separate.
+    impl<B: OrmBackend> graphql_orm::graphql::loaders::BatchLoadEntity<B> for OptionalMiddle
+    where
+        OptionalMiddle: FromSqlRow<B>,
+    {
+        fn batch_column() -> &'static str {
+            "id"
+        }
+
+        fn batch_key_from_row(row: &B::Row) -> graphql_orm::Result<String> {
+            B::try_get_string(row, "id")
+        }
+    }
+}

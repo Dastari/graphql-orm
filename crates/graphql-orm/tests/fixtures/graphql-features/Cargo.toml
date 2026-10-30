@@ -29,7 +29,7 @@ async-graphql = { version = "7", default-features = false }
 graphql-orm = { path = "../../..", default-features = false, optional = true }
 graphql-orm-ai = { path = "../../../../graphql-orm-ai", default-features = false, optional = true }
 graphql-orm-ai-tool-profiles = { path = "../../../../graphql-orm-ai-tool-profiles", optional = true }
-agql-auth = { git = "https://github.com/Dastari/agql-auth.git", rev = "1f4b4bfb6d052d04e6c80b80cb7aa3d0c2ebaacd", version = "0.24.0", optional = true }
+agql-auth = { git = "https://github.com/Dastari/agql-auth.git", tag = "v0.24.0", version = "0.24.0", optional = true }
 graphql-orm-router = { path = "../../../../graphql-orm-router", optional = true }
 tempfile = { version = "3", optional = true }
 

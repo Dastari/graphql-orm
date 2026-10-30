@@ -26,7 +26,8 @@ pub struct CallerScopes(pub Vec<String>);
     plural = "Zones",
     default_sort = "name ASC",
     read_policy = "zone.read",
-    federation_key
+    federation_key,
+    aggregate = true
 )]
 pub struct Zone {
     #[primary_key]

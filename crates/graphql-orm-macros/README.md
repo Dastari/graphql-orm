@@ -10,11 +10,24 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.82.0 also pairs with the runtime's shareable aggregate result objects.
+The aggregate fix does not change macro generation. See the
+[aggregate migration](../../MIGRATION.md#0810-to-0820-shareable-aggregate-result-objects).
+
+Version 0.82.0 adds opt-in `int64` static filters with native `i64` operands,
+`Signed64` wire coercion and exact typed metadata. Existing `number` filters
+remain 32-bit. See the [signed64 migration](../../MIGRATION.md#0810-to-0820-exact-static-signed64-filters).
+
+Version 0.82.0 allows generated upward Changed hooks to cross Rust crate
+boundaries for public entities. Repository-only hooks remain private; current
+subscriber operation authority is checked independently at every source/hop,
+including after serialization. Transaction/provenance semantics are retained. See the
+[cross-crate migration](../../MIGRATION.md#0810-to-0820-generated-cross-crate-upward-changed-hooks).
+
 Version 0.81.1 is the companion of the runtime's post-commit record release; the macros
 themselves are unchanged.
 
-Version 0.81.0 is the companion of the runtime's actor stamps; the macros themselves
-are unchanged.
+Version 0.81.0 remains paired with the runtime actor-stamp contract.
 
 Version 0.80.0 emits canonical typed filter contracts for the actual static
 filter implementations, including `notIn`, similarity, date structures and
