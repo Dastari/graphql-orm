@@ -3,12 +3,20 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-22
+last_reviewed: 2026-10-30
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.7.0 to 0.8.0: opt-in global node lookup
+
+No change is required. To serve `node(NodeId)` and `nodes(NodeIds)`, opt subgraph entities in with
+`#[graphql_entity(node_id)]` (graphql-orm 0.86.0) and enable the router lookup with
+`RouterConfig::with_node_lookup(NodeLookupConfig::new())` or `"nodeLookup": {}` in the file
+configuration. Rename any configured subgraph called `graphql-orm-node`, which is now reserved.
+Do not hand-write `interface Node`, `implements Node` or `node` resolvers in subgraphs.
 
 ## 0.6.7 to 0.7.0: canonical Auth 0.24 types
 

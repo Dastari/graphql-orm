@@ -3,12 +3,32 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-22
+last_reviewed: 2026-10-30
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.8.0 (unreleased)
+
+- Add the opt-in router-hosted global node lookup: `RouterConfig::with_node_lookup(NodeLookupConfig)`
+  and the file option `nodeLookup: { maxNodes }`. Composition finds every subgraph object type with
+  `NodeId: ID!` and a resolvable `@key(fields: "NodeId")`. It then contributes a reserved subgraph,
+  `graphql-orm-node` (`NODE_SUBGRAPH_NAME`), which owns `interface Node @key(fields: "NodeId")`,
+  `Query.node(NodeId: ID!): Node` and `Query.nodes(NodeIds: [ID!]!): [Node]!`, with a
+  `resolvable: false` stub per implementing type. The router answers that subgraph in-process. It
+  decodes only the typename and returns `{ __typename, NodeId }`; the planner fetches every other
+  field from the owning subgraph through its `NodeId` key, batched into one `_entities` fetch per
+  subgraph. Unknown, non-composed or malformed identities return `null`. `nodes` refuses more than
+  `max_nodes` identities (default `DEFAULT_MAX_NODES`, 100; valid 1–10000) with `INVALID_INPUT`.
+  ([#260](https://github.com/Dastari/graphql-orm/issues/260))
+- In an authenticated graph, the router owns the authorization metadata of `node` and `nodes`:
+  `Authenticated`, because they release only an identity the caller supplied. Authorization of
+  every record stays with the owning subgraph.
+- Additive. Without `with_node_lookup`, or with it but no `NodeId` key in any subgraph, the composed
+  graph, its fingerprint and routing are unchanged. A configured subgraph may not be named
+  `graphql-orm-node`.
 
 ## 0.7.0 (unreleased)
 

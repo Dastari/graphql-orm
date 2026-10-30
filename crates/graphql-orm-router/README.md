@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-22
+last_reviewed: 2026-10-30
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -15,6 +15,13 @@ The current workspace selects published Auth `v0.24.0`, peeled to
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
+
+Version `0.8.0` adds the opt-in router-hosted global node lookup,
+`node(NodeId)` and `nodes(NodeIds)` (`RouterConfig::with_node_lookup`). The
+router composes and serves a `Node` entity interface in-process for every
+subgraph type with a resolvable `@key(fields: "NodeId")`; see the
+[configuration reference](docs/configuration.md#node-lookup). Graphs that do not
+opt in are unchanged.
 
 Version `0.7.0` adopts that Auth identity across its public constructor inputs.
 Hosts must rebuild with the identical Auth selector; see

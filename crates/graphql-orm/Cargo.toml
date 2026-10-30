@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm"
-version = "0.85.0"
+version = "0.86.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -39,7 +39,7 @@ mssql = [
   "tokio/net",
   "tokio/rt",
 ]
-runtime-graphql = ["async-graphql/dynamic-schema", "dep:base64", "dep:async-trait"]
+runtime-graphql = ["async-graphql/dynamic-schema", "dep:async-trait"]
 change-journal = []
 owned-planning-replay = []
 auth-agql = ["dep:agql-auth", "dep:async-trait"]
@@ -61,7 +61,7 @@ field-case-lower = ["graphql-orm-macros/field-case-lower"]
 field-case-upper = ["graphql-orm-macros/field-case-upper"]
 
 [dependencies]
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 async-trait = { version = "0.1", optional = true }
 chacha20poly1305 = "0.10"
 convert_case = { workspace = true }
@@ -73,7 +73,7 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.85.0", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.86.0", default-features = false }
 graphql-orm-operation-catalog = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { version = "1", features = ["derive"] }

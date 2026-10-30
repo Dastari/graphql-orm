@@ -34,7 +34,7 @@ run_sqlite() {
     --test runtime_graphql_formats \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test managed_version --test keyed_changed_subscriptions --locked
+    --test managed_version --test keyed_changed_subscriptions --test node_ids --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
   cargo test --manifest-path \
@@ -84,6 +84,7 @@ run_postgres_legacy() {
     --test keyed_changed_subscriptions \
     --test managed_version \
     --test mutation_context_reads \
+    --test node_ids \
     --test nullable_update_clear \
     --test owned_postgres_lifecycle \
     --test portable_primitives_postgres \
@@ -102,11 +103,15 @@ run_postgres_legacy() {
     --test trusted_internal_writes \
     --test uuid_contract \
     -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+    --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
 }
 
 run_mssql() {
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_integration --test managed_version --test keyed_changed_subscriptions --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_integration --test managed_version --test keyed_changed_subscriptions --test node_ids --locked -- --ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite \
+    --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }
 
 run_ai_postgres() {

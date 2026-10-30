@@ -13,6 +13,7 @@ use url::Url;
 use crate::{
     AuthenticationProvider, ExactScopeMatcher, NetworkPolicy, RouterError, RouterErrorKind,
     ScopeMatcher,
+    node_lookup::{NODE_SUBGRAPH_NAME, NodeLookupConfig},
 };
 
 const DEFAULT_MAX_SDL_BYTES: usize = 2 * 1024 * 1024;
@@ -69,6 +70,7 @@ pub struct RouterConfig {
     pub(crate) public_request_timeout: Duration,
     pub(crate) subgraph_request_timeout: Duration,
     pub(crate) max_subgraph_connections_per_host: usize,
+    pub(crate) node_lookup: Option<NodeLookupConfig>,
 }
 
 /// Fluent engine-neutral router builder.
@@ -87,6 +89,7 @@ impl RouterConfig {
             anonymous_development_mode: false,
             forwarded_headers: BTreeSet::new(),
             subgraphs: Vec::new(),
+            node_lookup: None,
             schema_fetch_timeout: DEFAULT_SCHEMA_FETCH_TIMEOUT,
             max_sdl_bytes: DEFAULT_MAX_SDL_BYTES,
             schema_poll_interval: DEFAULT_SCHEMA_POLL_INTERVAL,
@@ -242,6 +245,19 @@ impl RouterConfig {
         self
     }
 
+    /// Enables the router-hosted `node(NodeId)` and `nodes(NodeIds)` lookup.
+    ///
+    /// Composition adds a router-hosted subgraph that owns
+    /// `interface Node @key(fields: "NodeId")` whenever a subgraph type
+    /// declares `NodeId: ID!` with a resolvable `@key(fields: "NodeId")`, and
+    /// the router answers that subgraph in-process. Without such a type the
+    /// composed graph is unchanged.
+    #[must_use]
+    pub fn with_node_lookup(mut self, node_lookup: NodeLookupConfig) -> Self {
+        self.node_lookup = Some(node_lookup);
+        self
+    }
+
     /// Sets the connection-pool bound applied to each downstream host.
     #[must_use]
     pub fn with_max_subgraph_connections_per_host(mut self, maximum: usize) -> Self {
@@ -320,6 +336,26 @@ impl RouterConfig {
             ));
         }
         validate_graphql_path(&self.graphql_path)?;
+        if let Some(node_lookup) = &self.node_lookup
+            && !(1..=10_000).contains(&node_lookup.max_nodes)
+        {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                "node lookup maximum NodeIds must be between 1 and 10000",
+            ));
+        }
+        if self
+            .subgraphs
+            .iter()
+            .any(|subgraph| subgraph.name == NODE_SUBGRAPH_NAME)
+        {
+            return Err(RouterError::new(
+                RouterErrorKind::InvalidConfiguration,
+                format!(
+                    "subgraph name `{NODE_SUBGRAPH_NAME}` is reserved for the router-hosted node lookup"
+                ),
+            ));
+        }
         if self.subgraphs.is_empty() {
             return Err(RouterError::new(
                 RouterErrorKind::InvalidConfiguration,
@@ -1253,6 +1289,32 @@ mod tests {
                 "http://products.test/graphql",
                 "http://products.test/sdl",
             ))
+    }
+
+    #[test]
+    fn node_lookup_reserves_its_subgraph_name_and_bounds_its_list() {
+        assert!(
+            base()
+                .with_node_lookup(NodeLookupConfig::new())
+                .validate()
+                .is_ok()
+        );
+        for max_nodes in [0, 10_001] {
+            let error = base()
+                .with_node_lookup(NodeLookupConfig::new().with_max_nodes(max_nodes))
+                .validate()
+                .unwrap_err();
+            assert_eq!(error.kind(), RouterErrorKind::InvalidConfiguration);
+        }
+        let error = base()
+            .with_subgraph(StaticSubgraph::new(
+                NODE_SUBGRAPH_NAME,
+                "http://node.test/graphql",
+                "http://node.test/sdl",
+            ))
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("reserved"), "{error}");
     }
 
     #[test]

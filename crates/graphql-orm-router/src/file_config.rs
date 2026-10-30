@@ -12,9 +12,9 @@ use agql_auth::{HierarchicalScopeMatch, HierarchicalScopeOptions};
 use crate::AgqlScopeMatcher;
 use crate::{
     AdminConfig, ExactScopeMatcher, JwksAuthenticationConfig, JwksAuthenticationProvider,
-    LegacyScopeClaims, NetworkCidr, NetworkPolicy, RequestLimits, RoleScopeCatalogueConfig,
-    RouterConfig, RouterError, RouterErrorKind, RouterLogLevel, RouterTelemetryConfig,
-    StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
+    LegacyScopeClaims, NetworkCidr, NetworkPolicy, NodeLookupConfig, RequestLimits,
+    RoleScopeCatalogueConfig, RouterConfig, RouterError, RouterErrorKind, RouterLogLevel,
+    RouterTelemetryConfig, StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -51,6 +51,7 @@ pub struct RouterFileConfig {
     public_request_timeout_ms: Option<u64>,
     subgraph_request_timeout_ms: Option<u64>,
     max_subgraph_connections_per_host: Option<usize>,
+    node_lookup: Option<FileNodeLookup>,
 }
 
 impl RouterFileConfig {
@@ -230,6 +231,13 @@ impl RouterFileConfig {
         }
         if let Some(milliseconds) = self.subgraph_request_timeout_ms {
             config = config.with_subgraph_request_timeout(Duration::from_millis(milliseconds));
+        }
+        if let Some(node_lookup) = self.node_lookup {
+            let mut lookup = NodeLookupConfig::new();
+            if let Some(maximum) = node_lookup.max_nodes {
+                lookup = lookup.with_max_nodes(maximum);
+            }
+            config = config.with_node_lookup(lookup);
         }
         if let Some(maximum) = self.max_subgraph_connections_per_host {
             config = config.with_max_subgraph_connections_per_host(maximum);
@@ -517,6 +525,13 @@ struct FileSubgraph {
     subscription_websocket_path: Option<String>,
     #[serde(default)]
     schema_headers_from_env: BTreeMap<String, String>,
+}
+
+/// Opt-in router-hosted `node(NodeId)` lookup.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FileNodeLookup {
+    max_nodes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -822,6 +837,7 @@ mod tests {
         "publicRequestTimeoutMs": 45000,
         "subgraphRequestTimeoutMs": 5000,
         "maxSubgraphConnectionsPerHost": 75,
+        "nodeLookup": {"maxNodes": 50},
         "requestLimits": {"maxDepth": 12},
         "subscriptions": {"maxConnectionAttemptsPerSecond": 55},
         "telemetry": {"logLevel": "warn", "prometheus": {"port": 4900}}
@@ -846,6 +862,10 @@ mod tests {
         assert_eq!(config.public_request_timeout, Duration::from_secs(45));
         assert_eq!(config.subgraph_request_timeout, Duration::from_secs(5));
         assert_eq!(config.max_subgraph_connections_per_host, 75);
+        assert_eq!(
+            config.node_lookup,
+            Some(NodeLookupConfig::new().with_max_nodes(50))
+        );
         assert_eq!(
             config
                 .subscriptions

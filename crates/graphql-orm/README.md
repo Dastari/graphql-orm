@@ -3,12 +3,16 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-29
+last_reviewed: 2026-10-30
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.86.0 adds the opt-in global record identity `#[graphql_entity(node_id)]` (`NodeId: ID!`
+plus a resolvable `@key(fields: "NodeId")`), which graphql-orm-router 0.8.0 serves through
+`node(NodeId)` and `nodes(NodeIds)`. No migration is needed.
 
 Version 0.85.0 adds an optional `Keys` list to generated `<Entity>Changed` subscriptions, bounded
 by `Database::subscription_key_limit()` (default 500). No migration is needed.

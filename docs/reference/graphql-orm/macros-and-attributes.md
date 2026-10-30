@@ -61,6 +61,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
 | `federation_key` | marker, or `(fields = ["GraphQLField", …], assume_unique = bool)` | repeatable; rejected on `repository_entity` and schema-only entities |
+| `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only and `#[graphql(complex)]` entities and on float, nullable or read-policy primary-key fields |
 
 The bare `federation_key` keys on the primary key in declaration order.
 `fields` names exported GraphQL fields, which must be readable, non-null,

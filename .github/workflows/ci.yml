@@ -101,10 +101,14 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - run: cargo check -p graphql-orm --no-default-features --features postgres
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
-      - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions and keyed subscriptions
+      - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions, keyed subscriptions and node ids
         env:
           CARGO_BUILD_JOBS: "1"
-        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test keyed_changed_subscriptions -- --include-ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test keyed_changed_subscriptions --test node_ids -- --include-ignored --test-threads=1
+      - name: Execute the global node lookup through the router on owned PostgreSQL
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
       - name: Execute runtime strings and binding identity on owned PostgreSQL
         env:
           CARGO_BUILD_JOBS: "2"
@@ -180,7 +184,7 @@ jobs:
   sqlserver-security:
     name: Owned SQL Server transport and transaction checks
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
     steps:
@@ -188,7 +192,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Verify TLS, writes, and retained query notifications on owned servers
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications --test managed_version --test keyed_changed_subscriptions -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications --test managed_version --test keyed_changed_subscriptions --test node_ids -- --ignored --test-threads=1
+      - name: Execute the global node lookup through the router on owned servers
+        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 
   orm-text-group-pages:
     runs-on: ubuntu-latest

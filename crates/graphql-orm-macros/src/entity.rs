@@ -48,6 +48,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) compose_complex_object: bool,
     /// Declared Apollo Federation v2 entity keys, in declaration order.
     pub(crate) federation_keys: Vec<FederationKeyMetadata>,
+    /// `node_id`: generate the global `NodeId` field and its resolvable `@key`.
+    pub(crate) node_id: Option<proc_macro2::Span>,
 }
 
 /// One declared `@key` for a resolvable Federation entity.
@@ -341,6 +343,17 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                         ));
                     }
                     metadata.upsert = Some(cols);
+                } else if meta.path.is_ident("node_id") {
+                    if attribute_name == "repository_entity" {
+                        return Err(syn::Error::new(
+                            meta.path.span(),
+                            "node_id requires a GraphQL entity; repository-only entities have no GraphQL object to identify",
+                        ));
+                    }
+                    if metadata.node_id.is_some() {
+                        return Err(syn::Error::new(meta.path.span(), "duplicate node_id"));
+                    }
+                    metadata.node_id = Some(meta.path.span());
                 } else if meta.path.is_ident("federation_key") {
                     if attribute_name == "repository_entity" {
                         return Err(syn::Error::new(
@@ -2928,7 +2941,7 @@ pub(crate) fn federation_key_witness_tokens(
     struct_name: &syn::Ident,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let metadata = parse_entity_metadata(attrs)?;
-    if metadata.federation_keys.is_empty() {
+    if metadata.federation_keys.is_empty() && metadata.node_id.is_none() {
         return Ok(quote! {});
     }
     let witness = syn::Ident::new(
@@ -3048,6 +3061,12 @@ fn generate_entity_impl(
         return Err(syn::Error::new_spanned(
             input,
             "typed projections require GraphQLEntity; schema-only entities do not generate read APIs",
+        ));
+    }
+    if let (true, Some(span)) = (schema_only, entity_meta.node_id) {
+        return Err(syn::Error::new(
+            span,
+            "node_id requires GraphQLEntity and GraphQLOperations; a schema-only entity has no GraphQL object to resolve",
         ));
     }
     if schema_only && !entity_meta.federation_keys.is_empty() {
@@ -4866,6 +4885,33 @@ fn generate_entity_impl(
             }
         })
         .collect();
+
+    if let (true, Some(span)) = (legacy_graphql_complex, entity_meta.node_id) {
+        return Err(syn::Error::new(
+            span,
+            "node_id requires the generated GraphQL object; it cannot add the NodeId field to a `#[graphql(complex)]` SimpleObject entity",
+        ));
+    }
+    if !schema_only
+        && !legacy_graphql_complex
+        && let Ok(primary_key_fields) = crate::operations::collect_primary_key_fields(
+            struct_name,
+            fields,
+            graphql_rename_fields,
+            serde_rename_all,
+        )
+        && let Ok(Some(parts)) = crate::federation::resolve_node_id_parts(
+            struct_name,
+            &entity_meta,
+            &primary_key_fields,
+            backend,
+        )
+    {
+        object_field_methods.push(crate::federation::node_id_field_tokens(
+            &struct_name_str,
+            &parts,
+        ));
+    }
 
     let object_impl = if schema_only || legacy_graphql_complex {
         quote! {}

@@ -3,7 +3,7 @@ title: graphql-orm-router configuration reference
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-08
+last_reviewed: 2026-10-30
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -75,9 +75,35 @@ an unbounded value.
 | `subscriptions` | Disabled; enabling it requires authentication. |
 | `admin` | Disabled; enabling it requires authentication and a distinct listener. |
 | `telemetry` | JSON/info logs; metrics exporter disabled. |
+| `nodeLookup` | Disabled. `{}` enables the router-hosted node lookup; `maxNodes` defaults to 100, valid range 1–10000. |
 
 Durations must be nonzero. Values over their hard safety ceilings fail before
 binding.
+
+## Node lookup
+
+`nodeLookup` (programmatically `RouterConfig::with_node_lookup(NodeLookupConfig)`)
+adds `Query.node(NodeId: ID!): Node` and `Query.nodes(NodeIds: [ID!]!): [Node]!`.
+Each candidate graph is scanned for object types with `NodeId: ID!` and a
+resolvable `@key(fields: "NodeId")`, which graphql-orm generates for
+`#[graphql_entity(node_id)]`. When at least one exists, the router adds the
+reserved subgraph `graphql-orm-node` to the same atomic candidate. That subgraph
+owns `interface Node @key(fields: "NodeId")` and has one
+`@key(fields: "NodeId", resolvable: false)` stub per type. It is never contacted
+over the network: the router answers its fetches in-process from the graph each
+request is pinned to.
+
+The router decodes only the typename and returns `{ __typename, NodeId }`. The
+planner fetches every other field from the owning subgraph through `_entities`,
+one fetch per subgraph for any number of identities. The router authorizes no
+record: an unreadable row is `null` exactly like a missing one. A malformed
+identity, or one whose typename is not a composed `Node` type, is `null`. A
+`nodes` list longer than `maxNodes` fails with `INVALID_INPUT`. With
+authentication, `node` and `nodes` require an authenticated caller.
+
+Subgraphs must not declare `interface Node` themselves: `graphql-composition`
+0.12.2 requires every subgraph that defines it to define every implementation.
+`@interfaceObject` is not used.
 
 ## Authentication
 

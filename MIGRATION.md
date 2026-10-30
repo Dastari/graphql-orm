@@ -3,12 +3,21 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-29
+last_reviewed: 2026-10-30
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.85.0 to 0.86.0: global NodeId and router node lookup
+
+No change is required. To give an entity a global identity, add `node_id` to its
+`#[graphql_entity(...)]`. Its primary-key fields must be non-null, readable String, UUID, integer
+or boolean fields without a field-level read policy, and the entity must use the generated GraphQL
+object (not `#[graphql(complex)]`). Enable the lookup in graphql-orm-router 0.8.0 with
+`RouterConfig::with_node_lookup(NodeLookupConfig::new())`. Do not hand-write `NodeId` fields,
+`interface Node` or `node` resolvers in services.
 
 ## 0.84.0 to 0.85.0: keyed Changed subscriptions
 

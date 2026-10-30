@@ -742,12 +742,12 @@ struct ResolvedUpsertConfig {
 }
 
 #[derive(Clone)]
-struct PrimaryKeyField {
-    field_name: syn::Ident,
-    field_type: syn::Type,
-    meta: FieldMetadata,
-    rust_name: String,
-    graphql_name: String,
+pub(crate) struct PrimaryKeyField {
+    pub(crate) field_name: syn::Ident,
+    pub(crate) field_type: syn::Type,
+    pub(crate) meta: FieldMetadata,
+    pub(crate) rust_name: String,
+    pub(crate) graphql_name: String,
 }
 
 fn create_input_visibility(meta: &FieldMetadata, rust_name: &str, auto_generated_pk: bool) -> bool {
@@ -757,7 +757,7 @@ fn create_input_visibility(meta: &FieldMetadata, rust_name: &str, auto_generated
     include_in_create && (!meta.skip_input || meta.input_only)
 }
 
-fn collect_primary_key_fields(
+pub(crate) fn collect_primary_key_fields(
     struct_name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<Field, syn::token::Comma>,
     graphql_rename_fields: Option<&str>,
@@ -7152,6 +7152,47 @@ fn generate_graphql_operations_unfiltered(
         &federation_keys,
         &federation_scope_enforcements,
     );
+    let node_id_entity_resolver = match crate::federation::resolve_node_id_parts(
+        struct_name,
+        &entity_meta,
+        &primary_key_fields,
+        backend,
+    )? {
+        Some(parts) => {
+            let mut arguments = Vec::new();
+            for (index, (field, part)) in primary_key_fields.iter().zip(&parts).enumerate() {
+                let ident = crate::federation::node_id_part_ident(index);
+                let mut names = vec![field.graphql_name.clone()];
+                for (rust_name, argument_name) in &single_read_argument_names {
+                    if rust_name == &field.rust_name && !names.contains(argument_name) {
+                        names.push(argument_name.clone());
+                    }
+                }
+                for name in names {
+                    arguments.push(ScopeTemplateArgumentSpec::scalar(
+                        name,
+                        ident.clone(),
+                        part.rust_type.clone(),
+                    ));
+                }
+            }
+            let scope_enforcement = scope_enforcement_tokens(
+                "single_read",
+                operation_authorizations.get("single_read"),
+                &arguments,
+            )?;
+            crate::federation::node_id_entity_resolver_tokens(
+                struct_name,
+                &entity_name_lit,
+                &backend_marker,
+                &resolver_auth_mode,
+                &relation_preload_single,
+                &parts,
+                &scope_enforcement,
+            )
+        }
+        None => quote! {},
+    };
     if let Some(shapes) = &entity_meta.query_shapes {
         for shape in shapes {
             let available = match shape.as_str() {
@@ -7620,6 +7661,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 #federation_entity_resolvers
+                #node_id_entity_resolver
             }
 
             impl #struct_name {
@@ -7996,6 +8038,7 @@ fn generate_graphql_operations_unfiltered(
             }
 
             #federation_entity_resolvers
+                #node_id_entity_resolver
         }
 
         // ============================================================================

@@ -4,13 +4,21 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["sqlite"]
+sqlite = ["zones-subgraph/sqlite", "readings-subgraph/sqlite", "fixture-database/sqlite"]
+postgres = ["zones-subgraph/postgres", "readings-subgraph/postgres", "fixture-database/postgres"]
+mssql = ["zones-subgraph/mssql", "readings-subgraph/mssql", "fixture-database/mssql"]
+
 [dependencies]
 
 [dev-dependencies]
+base64 = "0.22"
+fixture-database = { path = "../fixture-database", default-features = false }
 graphql-orm-router = { path = "../../../../../graphql-orm-router" }
 ntex = "=3.12.3"
-readings-subgraph = { path = "../readings-subgraph" }
+readings-subgraph = { path = "../readings-subgraph", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["http2", "json", "rustls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-zones-subgraph = { path = "../zones-subgraph" }
+zones-subgraph = { path = "../zones-subgraph", default-features = false }

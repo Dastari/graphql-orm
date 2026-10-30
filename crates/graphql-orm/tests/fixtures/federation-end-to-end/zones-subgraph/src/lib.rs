@@ -13,6 +13,9 @@ use graphql_orm::prelude::*;
 /// The scope a caller must present for any read of this subgraph.
 pub const READ_SCOPE: &str = "zones.read";
 
+/// A zone no caller may read; its absence must look exactly like a missing zone.
+pub const HIDDEN_ZONE: &str = "zone-hidden";
+
 /// The scopes the router forwarded, as request data the policy can read.
 #[derive(Clone, Debug, Default)]
 pub struct CallerScopes(pub Vec<String>);
@@ -20,14 +23,45 @@ pub struct CallerScopes(pub Vec<String>);
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
 )]
-#[graphql_entity(
-    backend = "sqlite",
-    table = "zones",
-    plural = "Zones",
-    default_sort = "name ASC",
-    read_policy = "zone.read",
-    federation_key,
-    aggregate = true
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "zones",
+        plural = "Zones",
+        default_sort = "name ASC",
+        read_policy = "zone.read",
+        federation_key,
+        node_id,
+        aggregate = true
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "zones",
+        plural = "Zones",
+        default_sort = "name ASC",
+        read_policy = "zone.read",
+        federation_key,
+        node_id,
+        aggregate = true
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        schema_policy = "external_read_only",
+        table = "zones",
+        plural = "Zones",
+        default_sort = "name ASC",
+        read_policy = "zone.read",
+        federation_key,
+        node_id,
+        aggregate = true
+    )
 )]
 pub struct Zone {
     #[primary_key]
@@ -38,8 +72,22 @@ pub struct Zone {
     pub name: String,
 }
 
+#[cfg(feature = "sqlite")]
 schema_roots! {
     backend: "sqlite",
+    query_custom_ops: [],
+    entities: [Zone],
+}
+#[cfg(feature = "postgres")]
+schema_roots! {
+    backend: "postgres",
+    query_custom_ops: [],
+    entities: [Zone],
+}
+#[cfg(feature = "mssql")]
+schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [Zone],
 }
@@ -95,7 +143,9 @@ impl RowPolicy for ScopedRowPolicy {
         Box::pin(async move {
             Ok(entity == "Zone"
                 && policy_key == Some("zone.read")
-                && row.is::<Zone>()
+                && row
+                    .downcast_ref::<Zone>()
+                    .is_some_and(|zone| zone.id != HIDDEN_ZONE)
                 && ctx
                     .and_then(|ctx| ctx.data_opt::<CallerScopes>())
                     .is_some_and(|scopes| scopes.0.iter().any(|scope| scope == READ_SCOPE)))
@@ -130,28 +180,23 @@ pub fn statement_count() -> usize {
 }
 
 async fn seeded_database() -> graphql_orm::db::Database {
-    let database = graphql_orm::db::Database::connect_sqlite("sqlite::memory:")
-        .await
-        .expect("open the zones fixture database");
-    let pool = database.pool();
-    graphql_orm::sqlx::query("CREATE TABLE zones (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
-        .execute(pool)
-        .await
-        .expect("create the zones table");
+    let text = fixture_database::text_type();
+    let mut statements = vec![format!(
+        "CREATE TABLE zones (id {text} NOT NULL PRIMARY KEY, name {text} NOT NULL)"
+    )];
     for (id, name) in [
         ("zone-north", "north"),
         ("zone-south", "south"),
         ("zone-east", "east"),
+        (HIDDEN_ZONE, "hidden"),
     ] {
-        graphql_orm::sqlx::query("INSERT INTO zones (id, name) VALUES (?1, ?2)")
-            .bind(id)
-            .bind(name)
-            .execute(pool)
-            .await
-            .expect("seed a zone");
+        statements.push(format!(
+            "INSERT INTO zones (id, name) VALUES ('{id}', '{name}')"
+        ));
     }
+    let database = fixture_database::seeded("zones", &statements).await;
     let mut database =
-        graphql_orm::db::Database::with_entity_policy(pool.clone(), ScopedEntityPolicy);
+        graphql_orm::db::Database::with_entity_policy(database.pool().clone(), ScopedEntityPolicy);
     database.set_row_policy(ScopedRowPolicy);
     database
 }
