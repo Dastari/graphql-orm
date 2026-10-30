@@ -120,8 +120,12 @@ impl<B: OrmBackend> std::fmt::Debug for SubscriptionEventSource<B> {
 }
 impl<B: OrmBackend> SubscriptionEventSource<B> {
     /// Constructed by generated propagation code from a complete typed key.
-    pub fn new<T>(keys: Vec<SqlValue>, relation: &'static str, source_field: &'static str,
-        operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>) -> Self
+    pub fn new<T>(
+        keys: Vec<SqlValue>,
+        relation: &'static str,
+        source_field: &'static str,
+        operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>,
+    ) -> Self
     where
         T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
     {
@@ -262,7 +266,9 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
         }
         // Every typed row/relation check can await. Recheck all operation
         // requirements after the final await, not just the last source.
-        for source in &self.sources { (source.operation_authority)(ctx)?; }
+        for source in &self.sources {
+            (source.operation_authority)(ctx)?;
+        }
         Ok(())
     }
 }
