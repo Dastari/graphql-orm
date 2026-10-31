@@ -3,7 +3,7 @@ title: Owned runtime migration targets
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-29
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -19,6 +19,9 @@ are later capabilities. No feature beyond the selected database backend is requi
 The optional default-off [owned planning replay](owned-planning-replay.md)
 capability can separately retain complete sensitive planning evidence and verify
 it offline. Ordinary planning requires no replay feature or consent token.
+
+Collections with search get managed search storage, readiness and a resumable backfill through
+`apply_runtime_migration` and `backfill_runtime_search`; see [runtime search](runtime-search.md).
 
 ## Public host flow
 

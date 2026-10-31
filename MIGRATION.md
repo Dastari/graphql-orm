@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.88.0 to 0.89.0: full-text search on runtime collections
+
+- Add `search: None` to `RuntimeCollection` struct literals, and `score: None` to hand-built `RuntimeEdge` values. Existing runtime schemas keep their bytes, fingerprints, SDL and plans.
+- Matches on `RuntimeSchemaDiagnosticCode`, `RuntimeMigrationDiagnosticCode` or `RuntimeQueryErrorCode` gain new variants.
+- `RuntimeSchema::from_static_entities` now converts static entities with search instead of refusing them.
+- To use runtime search, declare `RuntimeCollection::search`, plan the migration, and apply it with `apply_runtime_migration`. That backfills existing rows, unless you defer the backfill to a `backfill_runtime_search` job. Allow the `"search"` filter operation in your `RuntimeReadAuthority` for every searchable field the caller may read.
+
 ## 0.87.0 to 0.88.0: Changed stream continuity
 
 - **Clients.** A generated `Changed` subscription can now end with one error, whose `extensions.code` is `SUBSCRIPTION_CONTINUITY_LOST` (the subscriber fell behind) or `SUBSCRIPTION_SOURCE_CLOSED` (the channel closed). Handle either by subscribing again, then refetching the state you show. Clients that treated the stream as endless see it complete after the error.

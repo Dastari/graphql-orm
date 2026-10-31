@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.119.0 to 0.120.0: ORM 0.89.0
+
+Select AI 0.120.0 with ORM 0.89.0 from one reviewed revision. Code that builds
+`RuntimeCollection` with a struct literal adds `search: None`. No configuration,
+schema or provider change is required.
+
 ## 0.118.0 to 0.119.0: operation catalogue 0.7.0
 
 Select AI 0.119.0 with ORM 0.87.0, catalogue 0.7.0 and profiles 0.20.0 from

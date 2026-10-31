@@ -61,6 +61,7 @@ fn collection(id: &str, name: &str) -> RuntimeCollection {
         composite_unique: vec![],
         default_order: vec![],
         label_fields: Vec::new(),
+        search: None,
     }
 }
 fn join(

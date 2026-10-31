@@ -425,6 +425,7 @@ mod tests {
                 composite_unique: vec![],
                 default_order: vec![],
                 label_fields: Vec::new(),
+                search: None,
             }],
         }
         .validate()

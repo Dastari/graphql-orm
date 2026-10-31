@@ -72,6 +72,7 @@ fn collection(id: &str, type_name: &str, fields: Vec<RuntimeField>) -> RuntimeCo
         composite_unique: vec![],
         default_order: vec![],
         label_fields: Vec::new(),
+        search: None,
     }
 }
 /// Notes carry both timestamps, a set-null parent and many-to-many tags.

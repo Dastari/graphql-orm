@@ -99,6 +99,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     direction: RuntimeOrderDirection::Asc,
                 }],
                 label_fields: Vec::new(),
+                search: None,
             },
             RuntimeCollection {
                 classification: None,
@@ -139,6 +140,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     direction: RuntimeOrderDirection::Asc,
                 }],
                 label_fields: Vec::new(),
+                search: None,
             },
             RuntimeCollection {
                 description: None,
@@ -163,6 +165,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                     direction: RuntimeOrderDirection::Asc,
                 }],
                 label_fields: Vec::new(),
+                search: None,
             },
         ],
     }

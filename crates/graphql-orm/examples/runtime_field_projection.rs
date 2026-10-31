@@ -129,6 +129,7 @@ mod example {
                 composite_unique: vec![],
                 default_order: vec![],
                 label_fields: Vec::new(),
+                search: None,
             }],
         };
         let schema = Arc::new(definition.validate()?);

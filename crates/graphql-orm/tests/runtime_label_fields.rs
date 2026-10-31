@@ -67,6 +67,7 @@ fn schema(labels: &[&str]) -> RuntimeSchema {
                 .iter()
                 .map(|name| fid(&format!("f_{name}")))
                 .collect(),
+            search: None,
         }],
     }
 }

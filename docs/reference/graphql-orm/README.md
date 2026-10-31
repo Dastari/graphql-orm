@@ -3,7 +3,7 @@ title: GraphQL ORM runtime reference index
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -68,3 +68,4 @@ guidance for the core ORM package.
 - [Backup runtime boundary](backup-runtime.md)
 
 - [Runtime GraphQL reads and checked composition](runtime-graphql.md)
+- [Full-text search on runtime collections](runtime-search.md)

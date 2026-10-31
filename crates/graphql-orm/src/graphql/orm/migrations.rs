@@ -1854,8 +1854,15 @@ fn search_index_config_json(index: &SearchIndexModel) -> String {
         })
         .collect::<Vec<_>>()
         .join(",");
+    // A readiness-tracked index starts `building`; its backfill marks it
+    // `ready`. Untracked (static) indexes keep their exact earlier JSON.
+    let readiness = if index.readiness_tracked {
+        ",\"readiness\":\"building\""
+    } else {
+        ""
+    };
     format!(
-        "{{\"name\":\"{}\",\"table\":\"{}\",\"entity\":\"{}\",\"primary_key\":\"{}\",\"strategy\":\"{}\",\"language\":\"{}\",\"tokenizer\":\"{}\",\"min_token_len\":{},\"fallback_enabled\":{},\"fields\":[{}],\"json_paths\":[{}],\"relations\":[{}]}}",
+        "{{\"name\":\"{}\",\"table\":\"{}\",\"entity\":\"{}\",\"primary_key\":\"{}\",\"strategy\":\"{}\",\"language\":\"{}\",\"tokenizer\":\"{}\",\"min_token_len\":{},\"fallback_enabled\":{},\"fields\":[{}],\"json_paths\":[{}],\"relations\":[{}]{readiness}}}",
         index.name.replace('"', "\\\""),
         index.table_name.replace('"', "\\\""),
         index.entity_name.replace('"', "\\\""),
@@ -2140,6 +2147,7 @@ fn parse_search_index_config(config_json: &str) -> Option<SearchIndexModel> {
         fields,
         json_paths,
         relations,
+        readiness_tracked: value.get("readiness").is_some(),
     })
 }
 

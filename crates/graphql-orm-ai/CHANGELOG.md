@@ -10,7 +10,12 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.119.0
+## Unreleased - 0.120.0
+
+- Adopt ORM 0.89.0, whose `RuntimeCollection` gains the optional `search`
+  member. AI capabilities, persistence and provider behaviour are unchanged.
+
+## 0.119.0 (unreleased)
 
 - Adopt operation catalogue 0.7.0, profiles 0.20.0 and ORM 0.87.0. The
   catalogue's new optional `GraphqlEntitySemanticMetadata::record_version`

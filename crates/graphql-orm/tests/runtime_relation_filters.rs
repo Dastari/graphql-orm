@@ -68,6 +68,7 @@ fn collection(id: &str, name: &str, plural: &str, fields: Vec<RuntimeField>) -> 
         composite_unique: vec![],
         default_order: vec![],
         label_fields: Vec::new(),
+        search: None,
     }
 }
 fn relation(id: &str, target: &str, pairs: &[(&str, &str)], many: bool) -> RuntimeRelation {
