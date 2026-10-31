@@ -1694,7 +1694,7 @@ fn generate_graphql_operations_unfiltered(
             #[doc(hidden)]
             pub(crate) fn __gom_require_managed_version_headroom(entity: &Self) -> ::graphql_orm::Result<()> {
                 if entity.#version_ident >= i64::MAX {
-                    return Err(Self::__gom_runtime_error("managed version cannot advance past i64::MAX"));
+                    return Err(::graphql_orm::sqlx::Error::Protocol("managed version cannot advance past i64::MAX".to_string()));
                 }
                 Ok(())
             }
@@ -1707,7 +1707,7 @@ fn generate_graphql_operations_unfiltered(
                 if let Some(before) = before
                     && before.#version_ident.checked_add(1) != Some(after.#version_ident)
                 {
-                    return Err(Self::__gom_runtime_error("managed version did not advance"));
+                    return Err(::graphql_orm::sqlx::Error::Protocol("managed version did not advance".to_string()));
                 }
                 Ok(())
             }

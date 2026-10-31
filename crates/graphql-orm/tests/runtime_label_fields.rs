@@ -246,6 +246,7 @@ fn semantic_catalogue_validates_label_fields() {
             .into_iter()
             .collect(),
         label_fields: labels.iter().map(|name| name.to_string()).collect(),
+        record_version: None,
     };
     let author = GraphqlEntitySemanticMetadata {
         entity_name: "Author".into(),
@@ -253,6 +254,7 @@ fn semantic_catalogue_validates_label_fields() {
         default_classification: GraphqlSemanticClassification::Internal,
         fields: Box::new([]),
         label_fields: Vec::new(),
+        record_version: None,
     };
     let compose = |labels: &[&str]| {
         GraphqlSemanticCatalog::compose_descriptors([entity(labels), author.clone()], [])

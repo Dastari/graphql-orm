@@ -3,12 +3,18 @@ title: "graphql-orm-ai-tool-profiles changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-10-31
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Changelog
+
+## 0.20.0 (unreleased)
+
+- Adopt operation catalogue 0.7.0. Its optional
+  `GraphqlEntitySemanticMetadata::record_version` member does not change profile
+  compilation, capabilities or fingerprints.
 
 ## 0.19.0 (unreleased)
 

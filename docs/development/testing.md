@@ -3,7 +3,7 @@ title: "Testing and verification"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -56,6 +56,22 @@ cargo tree -p graphql-orm --locked --no-default-features --features sqlite
 cargo tree -p graphql-orm --locked --no-default-features --features postgres
 cargo tree -p graphql-orm --locked --no-default-features --features mssql
 cargo tree --duplicates --workspace --locked
+```
+
+## GraphQL case features
+
+Tests that build GraphQL documents spell names through
+`crates/graphql-orm/tests/support/graphql_case.rs`. Its `resolver_name`,
+`argument_name` and `field_name` take the default camelCase spelling, and apply
+the same `convert_case` conversion the derive macros use for the enabled
+`resolver-case-*`, `argument-case-*` or `field-case-*` feature. Fixed wire names
+such as `NodeId` and `RecordVersion` are written literally. The CI
+`orm-case-features` job runs `managed_version`, `keyed_changed_subscriptions`,
+`node_ids`, `grouped_aggregates` and `record_version_ui` with all three
+snake-case features:
+
+```sh
+cargo test -p graphql-orm --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui
 ```
 
 ## Required authorization and privacy regressions

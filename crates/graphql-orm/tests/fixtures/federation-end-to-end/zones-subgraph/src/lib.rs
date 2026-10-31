@@ -70,6 +70,10 @@ pub struct Zone {
     #[filterable(type = "string")]
     #[sortable]
     pub name: String,
+
+    /// Served by the router as the fixed `RecordVersion` field as well.
+    #[graphql_orm(version = "managed", default = "0")]
+    pub row_version: i64,
 }
 
 #[cfg(feature = "sqlite")]
@@ -182,16 +186,16 @@ pub fn statement_count() -> usize {
 async fn seeded_database() -> graphql_orm::db::Database {
     let text = fixture_database::text_type();
     let mut statements = vec![format!(
-        "CREATE TABLE zones (id {text} NOT NULL PRIMARY KEY, name {text} NOT NULL)"
+        "CREATE TABLE zones (id {text} NOT NULL PRIMARY KEY, name {text} NOT NULL, row_version BIGINT NOT NULL DEFAULT 0)"
     )];
-    for (id, name) in [
-        ("zone-north", "north"),
-        ("zone-south", "south"),
-        ("zone-east", "east"),
-        (HIDDEN_ZONE, "hidden"),
+    for (id, name, version) in [
+        ("zone-north", "north", 3),
+        ("zone-south", "south", 1),
+        ("zone-east", "east", 0),
+        (HIDDEN_ZONE, "hidden", 0),
     ] {
         statements.push(format!(
-            "INSERT INTO zones (id, name) VALUES ('{id}', '{name}')"
+            "INSERT INTO zones (id, name, row_version) VALUES ('{id}', '{name}', {version})"
         ));
     }
     let database = fixture_database::seeded("zones", &statements).await;

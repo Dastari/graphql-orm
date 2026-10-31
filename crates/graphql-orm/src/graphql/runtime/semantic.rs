@@ -324,6 +324,7 @@ impl RuntimeGraphqlModule {
                             .map(|f| f.api_name.clone())
                             .collect()
                     },
+                    record_version: None,
                 }
             })
             .collect()

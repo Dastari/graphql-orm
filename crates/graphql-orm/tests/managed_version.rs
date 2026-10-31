@@ -16,6 +16,10 @@
 use graphql_orm::async_graphql::Request;
 use graphql_orm::prelude::*;
 
+#[path = "support/graphql_case.rs"]
+mod graphql_case;
+use graphql_case::{argument_name, field_name, resolver_name};
+
 #[cfg(feature = "mssql")]
 #[path = "support/owned_mssql.rs"]
 mod owned_mssql;
@@ -25,30 +29,6 @@ mod owned_mssql;
 mod owned_postgres;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "resolver-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "argument-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "field-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
@@ -379,7 +359,7 @@ fn error_code(response: &async_graphql::Response) -> Option<String> {
 
 /// A GraphQL mutation that applied: no errors, and no payload-level error.
 fn applied(response: &async_graphql::Response, field: &str) -> bool {
-    let success = field_name("success", "Success");
+    let success = field_name("success");
     response.errors.is_empty()
         && response
             .data
@@ -390,12 +370,12 @@ fn applied(response: &async_graphql::Response, field: &str) -> bool {
 }
 
 fn update_mutation(id: &str, new_status: &str, expected: Option<i64>) -> String {
-    let update = resolver_name("updateManagedTicket", "UpdateManagedTicket");
-    let id_arg = argument_name("id", "Id");
-    let input = argument_name("input", "Input");
-    let expected_arg = argument_name("expectedVersion", "ExpectedVersion");
-    let status_field = field_name("status", "Status");
-    let success = field_name("success", "Success");
+    let update = resolver_name("updateManagedTicket");
+    let id_arg = argument_name("id");
+    let input = argument_name("input");
+    let expected_arg = argument_name("expectedVersion");
+    let status_field = field_name("status");
+    let success = field_name("success");
     let expected = expected
         .map(|version| format!(", {expected_arg}: {version}"))
         .unwrap_or_default();
@@ -441,11 +421,11 @@ async fn update_where_advances_every_matched_row_once(db: &Database) -> TestResu
     assert_eq!(stored_version(db, "t-3").await, 1);
 
     // Generated GraphQL updateMany takes the same path.
-    let update_many = resolver_name("updateManagedTickets", "UpdateManagedTickets");
-    let where_arg = argument_name("where", "Where");
-    let input = argument_name("input", "Input");
-    let status_field = field_name("status", "Status");
-    let eq = field_name("eq", "Eq");
+    let update_many = resolver_name("updateManagedTickets");
+    let where_arg = argument_name("where");
+    let input = argument_name("input");
+    let status_field = field_name("status");
+    let eq = field_name("eq");
     let response = graphql(
         db,
         format!(
@@ -527,11 +507,11 @@ async fn upsert_update_branch_advances_and_insert_branch_starts_at_default(
     assert_eq!(updated.row_version, 1);
 
     // The generated GraphQL upsert shares the managed update branch.
-    let upsert = resolver_name("upsertManagedTicket", "UpsertManagedTicket");
-    let input = argument_name("input", "Input");
-    let id_field = field_name("id", "Id");
-    let reference_field = field_name("reference", "Reference");
-    let status_field = field_name("status", "Status");
+    let upsert = resolver_name("upsertManagedTicket");
+    let input = argument_name("input");
+    let id_field = field_name("id");
+    let reference_field = field_name("reference");
+    let status_field = field_name("status");
     let response = graphql(
         db,
         format!(
@@ -658,14 +638,14 @@ async fn advancing_past_i64_max_is_refused_on_every_path(db: &Database) -> TestR
         .await?,
         ConditionalUpdateOutcome::Conflict
     ));
-    let update = resolver_name("updateManagedTicket", "UpdateManagedTicket");
+    let update = resolver_name("updateManagedTicket");
     let response = graphql(db, update_mutation("t-1", "assigned", None)).await;
     assert!(!applied(&response, update), "GraphQL update: {response:?}");
-    let upsert = resolver_name("upsertManagedTicket", "UpsertManagedTicket");
-    let input = argument_name("input", "Input");
-    let id_field = field_name("id", "Id");
-    let reference_field = field_name("reference", "Reference");
-    let status_field = field_name("status", "Status");
+    let upsert = resolver_name("upsertManagedTicket");
+    let input = argument_name("input");
+    let id_field = field_name("id");
+    let reference_field = field_name("reference");
+    let status_field = field_name("status");
     let response = graphql(
         db,
         format!(
@@ -741,10 +721,10 @@ async fn advancing_past_i64_max_is_refused_on_every_path(db: &Database) -> TestR
 
 async fn graphql_update_and_delete_honour_expected_version(db: &Database) -> TestResult {
     ManagedTicket::insert(db, create("t-1")).await?;
-    let delete = resolver_name("deleteManagedTicket", "DeleteManagedTicket");
-    let id_arg = argument_name("id", "Id");
-    let expected = argument_name("expectedVersion", "ExpectedVersion");
-    let success = field_name("success", "Success");
+    let delete = resolver_name("deleteManagedTicket");
+    let id_arg = argument_name("id");
+    let expected = argument_name("expectedVersion");
+    let success = field_name("success");
 
     let stale = graphql(db, update_mutation("t-1", "stale", Some(5))).await;
     assert_eq!(stale.errors.len(), 1, "{stale:?}");
@@ -920,7 +900,7 @@ async fn cas_only_version_is_unchanged_by_ordinary_writes(db: &Database) -> Test
 
     // Only the managed entity's update and delete accept ExpectedVersion.
     let sdl = schema_builder(db.clone()).finish().sdl();
-    let expected = argument_name("expectedVersion", "ExpectedVersion");
+    let expected = argument_name("expectedVersion");
     for line in sdl.lines() {
         if line.contains("CasOnlyJob") {
             assert!(!line.contains(expected), "{line}");
@@ -931,6 +911,88 @@ async fn cas_only_version_is_unchanged_by_ordinary_writes(db: &Database) -> Test
         .filter(|line| line.contains(expected))
         .collect::<Vec<_>>();
     assert_eq!(managed.len(), 2, "{managed:#?}");
+    Ok(())
+}
+
+/// The SDL block of one object type.
+fn object_block<'a>(sdl: &'a str, type_name: &str) -> &'a str {
+    let start = sdl
+        .find(&format!("type {type_name} "))
+        .unwrap_or_else(|| panic!("type {type_name} in SDL"));
+    let end = sdl[start..].find("\n}").expect("type block end") + start;
+    &sdl[start..end]
+}
+
+async fn record_version_is_served_under_its_fixed_name(db: &Database) -> TestResult {
+    use graphql_orm::graphql::orm::{GraphqlRecordVersionMode, RECORD_VERSION_FIELD};
+    let row_version = field_name("rowVersion");
+
+    // SDL: managed entities gain the fixed name beside their own field; the
+    // CAS-only entity does not.
+    let sdl = schema_builder(db.clone()).finish().sdl();
+    let managed = object_block(&sdl, "ManagedTicket");
+    assert!(managed.contains("\tRecordVersion: Int!"), "{managed}");
+    assert!(
+        managed.contains(&format!("\t{row_version}: Int!")),
+        "{managed}"
+    );
+    let cas_only = object_block(&sdl, "CasOnlyJob");
+    assert!(!cas_only.contains(RECORD_VERSION_FIELD), "{cas_only}");
+    assert_eq!(ManagedTicket::managed_version_field(), Some(row_version));
+    assert_eq!(CasOnlyJob::managed_version_field(), None);
+
+    // Catalogue: the declared field and who advances it.
+    let managed = ManagedTicket::graphql_semantic_metadata()
+        .and_then(|entity| entity.record_version.as_ref())
+        .expect("managed record version metadata");
+    assert_eq!(managed.field, row_version);
+    assert_eq!(managed.mode, GraphqlRecordVersionMode::Managed);
+    let cas_only = CasOnlyJob::graphql_semantic_metadata()
+        .and_then(|entity| entity.record_version.as_ref())
+        .expect("CAS-only record version metadata");
+    assert_eq!(cas_only.field, field_name("version"));
+    assert_eq!(cas_only.mode, GraphqlRecordVersionMode::Cas);
+
+    // Query: both names resolve the advanced value.
+    ManagedTicket::insert(db, create("t-1")).await?;
+    ManagedTicket::update_by_id(db, &"t-1".to_string(), status("assigned")).await?;
+    let ticket = resolver_name("managedTicket");
+    let id = argument_name("id");
+    let response = graphql(
+        db,
+        format!(r#"{{ {ticket}({id}: "t-1") {{ RecordVersion {row_version} }} }}"#),
+    )
+    .await;
+    assert!(response.errors.is_empty(), "{response:?}");
+    let json = response.data.into_json()?;
+    assert_eq!(json[ticket]["RecordVersion"], 1);
+    assert_eq!(json[ticket][row_version], 1);
+
+    // Subscription: a Changed payload may select the fixed name.
+    let changed = resolver_name("managedTicketChanged");
+    let entity = field_name("managedTicket");
+    let mut stream = schema_builder(db.clone())
+        .finish()
+        .execute_stream(Request::new(format!(
+            "subscription {{ {changed} {{ {entity} {{ RecordVersion }} }} }}"
+        )));
+    graphql_orm::futures::future::poll_fn(|cx| {
+        use graphql_orm::futures::StreamExt;
+        match stream.poll_next_unpin(cx) {
+            std::task::Poll::Pending => std::task::Poll::Ready(()),
+            std::task::Poll::Ready(other) => panic!("subscription was not admitted: {other:?}"),
+        }
+    })
+    .await;
+    ManagedTicket::update_by_id(db, &"t-1".to_string(), status("closed")).await?;
+    let event = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        graphql_orm::futures::StreamExt::next(&mut stream),
+    )
+    .await?
+    .expect("subscription event");
+    assert!(event.errors.is_empty(), "{event:?}");
+    assert_eq!(event.data.into_json()?[changed][entity]["RecordVersion"], 2);
     Ok(())
 }
 
@@ -1073,5 +1135,6 @@ scenarios![
     exactly_one_concurrent_writer_wins_under_expected_version,
     cas_only_version_is_unchanged_by_ordinary_writes,
     compare_and_swap_advances_a_managed_version_exactly_once,
+    record_version_is_served_under_its_fixed_name,
     key_based_repository_writes_advance,
 ];

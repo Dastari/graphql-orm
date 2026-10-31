@@ -3,12 +3,19 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.86.0 to 0.87.0: RecordVersion and catalogue record versions
+
+- **SDL.** Entities with `#[graphql_orm(version = "managed")]` gain the read-only `RecordVersion: Int!` field. Clients that generate code from the SDL see one new field per managed-version type.
+- **Name collision.** An entity that already exposes a field named `RecordVersion` next to a managed version no longer compiles. Rename that field.
+- **Legacy `#[graphql(complex)]` entities.** They keep their own `SimpleObject` and do not gain the field. Add `RecordVersion` in their `ComplexObject` if clients need it.
+- **graphql-orm-operation-catalog 0.7.0.** Code that builds `GraphqlEntitySemanticMetadata` with a struct literal must add `record_version: None`, or the version metadata. Wire payloads without the member are unchanged.
 
 ## 0.85.0 to 0.86.0: global NodeId and router node lookup
 

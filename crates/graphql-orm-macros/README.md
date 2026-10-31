@@ -3,12 +3,15 @@ title: "graphql-orm-macros"
 kind: reference
 status: active
 owner: graphql-orm-macros-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm-macros`
+
+Version 0.87.0 generates the fixed `RecordVersion` field for managed record versions and emits
+`record_version` semantic metadata for managed and CAS-only versions.
 
 Version 0.86.0 generates the `NodeId` field and its resolvable `@key(fields: "NodeId")` entity
 resolver for `#[graphql_entity(node_id)]`.

@@ -3,14 +3,21 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
 
-## Unreleased - 0.118.0
+## Unreleased - 0.119.0
+
+- Adopt operation catalogue 0.7.0, profiles 0.20.0 and ORM 0.87.0. The
+  catalogue's new optional `GraphqlEntitySemanticMetadata::record_version`
+  member is the only change; AI capabilities, persistence and provider behaviour
+  are unchanged.
+
+## 0.118.0 (unreleased)
 
 - Adopt the breaking public type closure as AI 0.118.0 with profiles 0.19.0,
   catalog 0.6.0 and ORM 0.80.0. Require typed filter contracts/wire 3 and rebuild

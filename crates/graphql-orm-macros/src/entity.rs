@@ -776,6 +776,10 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
 /// server, so generated names that would exceed it are shortened here.
 const MAX_GENERATED_IDENTIFIER_BYTES: usize = 63;
 
+/// Fixed GraphQL name under which a managed record version is also served;
+/// mirrors `graphql_orm::graphql::orm::RECORD_VERSION_FIELD`.
+const RECORD_VERSION_FIELD: &str = "RecordVersion";
+
 /// Bounds a generated physical identifier to 63 bytes.
 ///
 /// Names that already fit are returned unchanged. Longer names keep a 46-byte
@@ -3366,9 +3370,13 @@ fn generate_entity_impl(
     let mut order_by_graphql_names = std::collections::BTreeSet::new();
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
+    // GraphQL name of the managed record version field, also served as
+    // `RecordVersion`; none for CAS-only versions and unversioned entities.
+    let mut managed_version_api_name: Option<String> = None;
     let mut repository_field_policy_defs = Vec::new();
     let mut subscription_field_policy_arms = Vec::new();
     let mut semantic_field_defs = Vec::new();
+    let mut semantic_record_version = quote! { None };
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
@@ -3423,6 +3431,28 @@ fn generate_entity_impl(
         subscription_field_policy_arms.push(quote! {
             #subscription_api_name => Some((#subscription_api_name, #subscription_allowed, #subscription_read_policy)),
         });
+        if subscription_api_name == RECORD_VERSION_FIELD
+            && parsed_fields
+                .iter()
+                .any(|parsed| parsed.meta.managed_version)
+        {
+            return Err(syn::Error::new(
+                field.span(),
+                "this entity has a managed record version, which is also served as the generated `RecordVersion` field; rename this field",
+            ));
+        }
+        if field_meta.managed_version
+            && field_meta.read
+            && !field_meta.is_private
+            && !field_meta.input_only
+            && !field_meta.graphql_skip
+            && !has_repository_entity_attribute(&input.attrs)
+        {
+            managed_version_api_name = Some(subscription_api_name.clone());
+            subscription_field_policy_arms.push(quote! {
+                #RECORD_VERSION_FIELD => Some((#subscription_api_name, #subscription_allowed, #subscription_read_policy)),
+            });
+        }
 
         // Skip relation fields for column list
         if field_meta.is_relation || field_meta.skip_db {
@@ -3869,6 +3899,19 @@ fn generate_entity_impl(
             };
             let has_field_policy = field_meta.read_policy.is_some();
             let sortable = field_meta.sortable && field_meta.order;
+            if field_meta.is_version {
+                let mode = if field_meta.managed_version {
+                    quote! { ::graphql_orm::graphql::orm::GraphqlRecordVersionMode::Managed }
+                } else {
+                    quote! { ::graphql_orm::graphql::orm::GraphqlRecordVersionMode::Cas }
+                };
+                semantic_record_version = quote! {
+                    Some(::graphql_orm::graphql::orm::GraphqlRecordVersionMetadata {
+                        field: ::std::string::ToString::to_string(#graphql_name),
+                        mode: #mode,
+                    })
+                };
+            }
             semantic_field_defs.push(quote! {
                 ::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata {
                     field_name: ::std::string::ToString::to_string(#graphql_name),
@@ -4612,6 +4655,24 @@ fn generate_entity_impl(
                     #return_expr
                 }
             });
+            if managed_version_api_name.as_deref() == Some(graphql_name.as_str()) {
+                let record_version_description = format!(
+                    "Managed record version of this {struct_name}: the value of `{graphql_name}`, advanced by every generated write."
+                );
+                object_field_methods.push(quote! {
+                    #[doc = #record_version_description]
+                    #[graphql(name = "RecordVersion")]
+                    async fn __gom_record_version(
+                        &self,
+                        ctx: &::graphql_orm::async_graphql::Context<'_>,
+                    ) -> ::graphql_orm::async_graphql::Result<#return_type> {
+                        let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                        #subscribe_check
+                        #policy_check
+                        #return_expr
+                    }
+                });
+            }
         }
 
         // Generate FromSqlRow field assignment
@@ -4913,6 +4974,10 @@ fn generate_entity_impl(
         ));
     }
 
+    let managed_version_field_tokens = match &managed_version_api_name {
+        Some(name) if !schema_only && !legacy_graphql_complex => quote! { Some(#name) },
+        _ => quote! { None },
+    };
     let object_impl = if schema_only || legacy_graphql_complex {
         quote! {}
     } else {
@@ -5016,6 +5081,7 @@ fn generate_entity_impl(
                             default_classification: #entity_classification_tokens,
                             fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
                             label_fields: ::std::vec::Vec::new(),
+                            record_version: None,
                         }
                     }))
                 }
@@ -5494,6 +5560,10 @@ fn generate_entity_impl(
                 #struct_name_str
             }
 
+            fn managed_version_field() -> Option<&'static str> {
+                #managed_version_field_tokens
+            }
+
             fn metadata() -> &'static ::graphql_orm::graphql::orm::EntityMetadata {
                 static METADATA: ::std::sync::OnceLock<::graphql_orm::graphql::orm::EntityMetadata> =
                     ::std::sync::OnceLock::new();
@@ -5522,6 +5592,7 @@ fn generate_entity_impl(
                         default_classification: #entity_classification_tokens,
                         fields: vec![#(#semantic_field_defs),*].into_boxed_slice(),
                         label_fields: ::std::vec::Vec::new(),
+                        record_version: #semantic_record_version,
                     }
                 }))
             }

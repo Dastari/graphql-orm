@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,17 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+Companion runtime/macros version: **0.87.0**. Operation catalogue: **0.7.0**.
+
+- Entities with a managed record version (`#[graphql_orm(version = "managed")]`) also serve it as a read-only `RecordVersion: Int!` field. The name is fixed: it does not follow the `field-case-*` features, so a client recognises each type's record version from the SDL or introspection alone. It resolves the declared field's value and applies that field's read policy and subscription availability. Generated `Changed` payloads may select it. CAS-only `version` fields get no `RecordVersion`. See [managed versions](docs/reference/graphql-orm/macros-and-attributes.md#managed-versions). ([#264](https://github.com/Dastari/graphql-orm/issues/264))
+- Add `graphql_orm::graphql::orm::RECORD_VERSION_FIELD` and `Entity::managed_version_field()`, which returns the declared field's GraphQL name for a managed version, and none otherwise.
+- A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile error.
+- graphql-orm-operation-catalog 0.7.0 adds `GraphqlEntitySemanticMetadata::record_version: Option<GraphqlRecordVersionMetadata>`. It holds the declared field's wire name and a `GraphqlRecordVersionMode` of `managed` or `cas`, and is validated to name a scalar field of the entity. It is omitted from the wire and fingerprint when absent, so semantic wire 3 is unchanged. Struct literals must add the member. graphql-orm-ai-tool-profiles 0.20.0 and graphql-orm-ai 0.119.0 adopt catalogue 0.7.0.
+- Entities without a managed version keep unchanged SDL. Catalogues without versions keep unchanged payloads and fingerprints.
+- Fix: an entity with a managed version on a read-only generated surface, for example SQL Server `schema_policy = "external_read_only"`, no longer fails to compile with a missing `__gom_runtime_error`. This was broken since 0.84.0.
+
+## 0.86.0 (unreleased)
 
 Companion runtime/macros version: **0.86.0**. Router: **0.8.0**.
 

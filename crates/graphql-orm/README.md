@@ -3,12 +3,16 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.87.0 serves every managed record version as the fixed `RecordVersion: Int!` field as
+well, and records record versions in the semantic catalogue (graphql-orm-operation-catalog 0.7.0).
+See the [migration notes](../../MIGRATION.md#0860-to-0870-recordversion-and-catalogue-record-versions).
 
 Version 0.86.0 adds the opt-in global record identity `#[graphql_entity(node_id)]` (`NodeId: ID!`
 plus a resolvable `@key(fields: "NodeId")`), which graphql-orm-router 0.8.0 serves through

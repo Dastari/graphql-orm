@@ -6587,6 +6587,7 @@ mod tests {
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Mutation,
@@ -6652,6 +6653,7 @@ mod tests {
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
@@ -6715,6 +6717,7 @@ mod tests {
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("recordId"), scalar("subject")].into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Subscription,

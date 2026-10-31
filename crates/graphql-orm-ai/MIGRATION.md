@@ -3,12 +3,19 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-16
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.118.0 to 0.119.0: operation catalogue 0.7.0
+
+Select AI 0.119.0 with ORM 0.87.0, catalogue 0.7.0 and profiles 0.20.0 from
+one reviewed revision. Code that builds `GraphqlEntitySemanticMetadata` with a
+struct literal adds `record_version: None`. No configuration, schema or
+provider change is required.
 
 ## 0.116.0 to 0.118.0: canonical filter contract type identity
 

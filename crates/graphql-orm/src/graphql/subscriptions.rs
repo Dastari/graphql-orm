@@ -666,7 +666,7 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
             ctx,
             &selected.node.selection_set.node,
         ) {
-            let name = field.node.name.node.as_str();
+            let name = persisted_field_name::<T>(field.node.name.node.as_str());
             if name == "__typename" {
                 continue;
             }
@@ -679,6 +679,15 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
         }
     }
     Ok(())
+}
+
+/// The persisted field behind a selected name: the fixed record version name
+/// stands for the declared managed version field.
+fn persisted_field_name<T: Entity>(name: &str) -> &str {
+    match T::managed_version_field() {
+        Some(field) if name == crate::graphql::orm::RECORD_VERSION_FIELD => field,
+        _ => name,
+    }
 }
 
 /// Preflight selected event identifiers and entity scalars before any metadata.
@@ -706,20 +715,19 @@ where
                 ctx,
                 &selected.node.selection_set.node,
             ) {
-                if scalar.node.name.node.as_str() == "__typename" {
+                let name = persisted_field_name::<T>(scalar.node.name.node.as_str());
+                if name == "__typename" {
                     continue;
                 }
                 // Nested relation/custom resolvers can fail after outer metadata
                 // has been written. Only persisted scalar snapshots are proved here.
                 if !scalar.node.selection_set.node.items.is_empty()
-                    || !T::columns()
-                        .iter()
-                        .any(|column| column.api_name == scalar.node.name.node.as_str())
+                    || !T::columns().iter().any(|column| column.api_name == name)
                 {
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
                 let scalar_ctx = field_ctx.with_field(scalar);
-                check_field::<T, B>(db, &scalar_ctx, row, scalar.node.name.node.as_str()).await?;
+                check_field::<T, B>(db, &scalar_ctx, row, name).await?;
             }
         }
     }

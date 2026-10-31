@@ -16,6 +16,10 @@
 
 use graphql_orm::prelude::*;
 
+#[path = "support/graphql_case.rs"]
+mod graphql_case;
+use graphql_case::{argument_name, field_name, resolver_name};
+
 #[cfg(feature = "mssql")]
 #[path = "support/owned_mssql.rs"]
 mod owned_mssql;
@@ -25,30 +29,6 @@ mod owned_mssql;
 mod owned_postgres;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "resolver-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "argument-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "field-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
 
 macro_rules! node_entity {
     ($name:ident, $table:literal, $plural:literal, [$($extra:tt)*], { $($body:tt)* }) => {
@@ -460,32 +440,28 @@ fn entities_query(representations: &[(&str, &str)], fragments: &str) -> String {
 
 async fn stored_rows_carry_the_shared_encoding(db: &Database) -> TestResult {
     seed(db).await?;
-    let id = argument_name("id", "Id");
-    let site = argument_name("site", "Site");
-    let name = argument_name("name", "Name");
+    let id = argument_name("id");
+    let site = argument_name("site");
+    let name = argument_name("name");
     let reads = [
+        (resolver_name("ticket"), format!("{id}: 42"), TICKET_42),
         (
-            resolver_name("ticket", "Ticket"),
-            format!("{id}: 42"),
-            TICKET_42,
-        ),
-        (
-            resolver_name("note", "Note"),
+            resolver_name("note"),
             format!("{id}: {}", string_literal("ünïcødé ✓")),
             NOTE_UNICODE,
         ),
         (
-            resolver_name("quote", "Quote"),
+            resolver_name("quote"),
             format!("{id}: {}", string_literal(QUOTE_ID)),
             QUOTE_ESCAPES,
         ),
         (
-            resolver_name("fameDevice", "FameDevice"),
+            resolver_name("fameDevice"),
             format!("{id}: {}", string_literal(DEVICE)),
             DEVICE_UUID,
         ),
         (
-            resolver_name("managedSlot", "ManagedSlot"),
+            resolver_name("managedSlot"),
             format!(r#"{site}: "north", {name}: "a""#),
             SLOT_NORTH_A,
         ),
@@ -499,8 +475,8 @@ async fn stored_rows_carry_the_shared_encoding(db: &Database) -> TestResult {
 
 async fn node_ids_resolve_through_entities(db: &Database) -> TestResult {
     seed(db).await?;
-    let title = field_name("title", "Title");
-    let site = field_name("site", "Site");
+    let title = field_name("title");
+    let site = field_name("site");
     let fragments = format!(
         "__typename ... on Ticket {{ NodeId {title} }} ... on Note {{ NodeId {title} }} \
          ... on Quote {{ {title} }} ... on FameDevice {{ {title} }} ... on ManagedSlot {{ {site} {title} }}"
@@ -544,7 +520,7 @@ async fn node_ids_resolve_through_entities(db: &Database) -> TestResult {
 
 async fn malformed_mismatched_missing_and_denied_ids_are_all_null(db: &Database) -> TestResult {
     seed(db).await?;
-    let title = field_name("title", "Title");
+    let title = field_name("title");
     let encode = |typename: &str, part: serde_json::Value| {
         graphql_orm::graphql::federation::encode_node_id(typename, vec![part]).0
     };
@@ -585,7 +561,7 @@ async fn malformed_mismatched_missing_and_denied_ids_are_all_null(db: &Database)
 
 async fn one_type_resolves_in_one_statement(db: &Database) -> TestResult {
     seed(db).await?;
-    let title = field_name("title", "Title");
+    let title = field_name("title");
     let seven =
         graphql_orm::graphql::federation::encode_node_id("Ticket", vec![serde_json::json!(7)]);
     let query = entities_query(

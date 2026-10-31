@@ -5567,6 +5567,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let mut name = scalar_field(
             "name",
@@ -5653,6 +5654,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let read = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
@@ -5712,6 +5714,7 @@ mod tests {
             )]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         });
         let generated = GeneratedGraphqlOperationDescriptor::generated(
             "tests::Parent",
@@ -6148,6 +6151,7 @@ mod tests {
                 default_classification: GraphqlSemanticClassification::Internal,
                 fields: fields.into_boxed_slice(),
                 label_fields: Vec::new(),
+                record_version: None,
             });
         }
         let operation = GraphqlSemanticOperationDescriptor::custom(
@@ -6559,6 +6563,7 @@ mod tests {
                 default_classification: GraphqlSemanticClassification::Internal,
                 fields: fields.into_boxed_slice(),
                 label_fields: Vec::new(),
+                record_version: None,
             };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
@@ -6836,6 +6841,7 @@ mod tests {
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
                 label_fields: Vec::new(),
+                record_version: None,
             });
         }
         let semantics = input_collision_recompose(semantics);
@@ -6968,6 +6974,7 @@ mod tests {
                     default_classification: GraphqlSemanticClassification::Internal,
                     fields: fields.into_boxed_slice(),
                     label_fields: Vec::new(),
+                    record_version: None,
                 }
             };
             let argument =
@@ -7301,6 +7308,7 @@ mod tests {
                     default_classification: GraphqlSemanticClassification::Internal,
                     fields: vec![id, private, name].into_boxed_slice(),
                     label_fields: Vec::new(),
+                    record_version: None,
                 }],
                 &GraphqlOperationCatalog::compose(std::iter::empty()),
                 [operation],
@@ -7517,6 +7525,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
                 label_fields: Vec::new(),
+                record_version: None,
             }],
             &GraphqlOperationCatalog::compose(std::iter::empty()),
             [operation],
@@ -7943,6 +7952,7 @@ mod tests {
                 default_classification: GraphqlSemanticClassification::Internal,
                 fields: fields.into_boxed_slice(),
                 label_fields: Vec::new(),
+                record_version: None,
             }],
             &GraphqlOperationCatalog::compose(std::iter::empty()),
             [operation],
@@ -8065,6 +8075,7 @@ mod tests {
                 ]
                 .into_boxed_slice(),
                 label_fields: Vec::new(),
+                record_version: None,
             }],
             &GraphqlOperationCatalog::compose(std::iter::empty()),
             [operation],
@@ -8993,6 +9004,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         });
         base.entities.push(GraphqlEntitySemanticMetadata {
             entity_name: "SearchResult".to_owned(),
@@ -9052,6 +9064,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         });
         base.entities.push(GraphqlEntitySemanticMetadata {
             entity_name: "SearchPayload".to_owned(),
@@ -9122,6 +9135,7 @@ mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         });
         let search = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,

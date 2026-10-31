@@ -399,6 +399,7 @@ pub(crate) fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStrea
                     default_classification: #classification_tokens,
                     fields: vec![#(#field_tokens),*].into_boxed_slice(),
                     label_fields: ::std::vec::Vec::new(),
+                    record_version: None,
                 })
             }
         }

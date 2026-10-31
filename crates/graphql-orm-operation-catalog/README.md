@@ -3,12 +3,19 @@ title: "graphql-orm-operation-catalog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-21
+last_reviewed: 2026-10-31
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # `graphql-orm-operation-catalog`
+
+Version 0.7.0 adds `GraphqlEntitySemanticMetadata::record_version`, the field
+carrying the entity's optimistic-concurrency record version and its
+`GraphqlRecordVersionMode` (`managed` or `cas`). It is validated to name a
+scalar field of the entity and omitted from the wire and fingerprint when
+absent, so semantic wire 3 is unchanged. Struct literals must add the member;
+see the [migration guide](../../MIGRATION.md#0860-to-0870-recordversion-and-catalogue-record-versions).
 
 Version 0.6.0 adds `GraphqlSemanticFieldMetadata::filter_input` and semantic
 catalogue wire version 3. `GraphqlSemanticFilterInputMetadata` declares exact
@@ -51,7 +58,7 @@ relationship cycles, remain in the canonical GraphQL catalogue with
 
 ```toml
 [dependencies]
-graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.6.0" }
+graphql-orm-operation-catalog = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.0" }
 serde_json = "1"
 ```
 

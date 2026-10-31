@@ -4043,6 +4043,7 @@ mod tests {
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("id"), scalar("name")].into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Subscription,

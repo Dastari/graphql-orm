@@ -458,6 +458,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "cross-crate-ancestor-models"
+version = "0.0.0"
+dependencies = [
+ "async-graphql",
+ "graphql-orm",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "cross-crate-source-models"
 version = "0.0.0"
 dependencies = [
@@ -465,17 +476,6 @@ dependencies = [
  "cross-crate-target-models",
  "graphql-orm",
  "libsqlite3-sys",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "cross-crate-ancestor-models"
-version = "0.0.0"
-dependencies = [
- "async-graphql",
- "graphql-orm",
  "serde",
  "serde_json",
  "tokio",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.86.0"
+version = "0.87.0"
 dependencies = [
  "async-graphql",
  "base64",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.86.0"
+version = "0.87.0"
 dependencies = [
  "convert_case",
  "proc-macro2",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
