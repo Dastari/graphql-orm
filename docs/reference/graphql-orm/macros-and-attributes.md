@@ -709,9 +709,16 @@ policy-suppressed and propagated subscriptions all behave the same way:
 - Over graphql-transport-ws, and through graphql-orm-router, the client receives a `next` frame
   whose payload is `{"data": null, "errors": [{..., "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}}]}`,
   followed by `complete` for the same id. There is no protocol `error` frame.
-- After either error, subscribe again first, then refetch the state the client shows. Events
-  committed between the refetch and the new subscription then still arrive. Drop duplicates by
-  record version (`RecordVersion`).
+- After either error, subscribe again first, then refetch the state the client shows. The error
+  message says the same. Events committed between the new subscription and the refetch then still
+  arrive. Refetching first would miss any write that lands before the new subscription starts.
+  Drop duplicates by record version (`RecordVersion`).
+- The capacity is per entity type and shared by every subscriber of that type. One bulk write of
+  more rows than the capacity, such as an import or a sync, can make every subscriber of the type
+  lag at once. All of them then end with `SUBSCRIPTION_CONTINUITY_LOST` and resync together. That
+  is correct, but a host with bulk writers should either raise `event_channel_capacity` above its
+  largest burst or expect every subscriber to resync. Clients should add jitter to their
+  resubscribe and refetch so they don't all arrive at the same moment.
 - A subscriber whose authority is revoked mid-stream still has its events skipped silently.
   [#276](https://github.com/Dastari/graphql-orm/issues/276) tracks ending the stream instead.
 - The `GraphQLOperations` resolver method returns

@@ -736,7 +736,7 @@ where
 
 /// `extensions.code` of the error that ends a generated `Changed` stream whose
 /// subscriber fell further behind than the event channel holds. The client
-/// must refetch the state it shows; events were missed.
+/// must subscribe again, then refetch the state it shows; events were missed.
 pub const SUBSCRIPTION_CONTINUITY_LOST: &str = "SUBSCRIPTION_CONTINUITY_LOST";
 
 /// `extensions.code` of the error that ends a generated `Changed` stream whose
@@ -771,14 +771,14 @@ where
             Some(Err(BroadcastStreamRecvError::Lagged(_))) => Some((
                 Err(subscription_end(
                     SUBSCRIPTION_CONTINUITY_LOST,
-                    "subscription lost event continuity; refetch, then subscribe again",
+                    "subscription lost event continuity; subscribe again, then refetch",
                 )),
                 None,
             )),
             None => Some((
                 Err(subscription_end(
                     SUBSCRIPTION_SOURCE_CLOSED,
-                    "subscription event source closed; refetch, then subscribe again",
+                    "subscription event source closed; subscribe again, then refetch",
                 )),
                 None,
             )),

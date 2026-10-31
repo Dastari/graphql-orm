@@ -554,7 +554,7 @@ fn handle_upstream_websocket(mut stream: TcpStream, request: &str) -> std::io::R
                                 "payload": {
                                     "data": null,
                                     "errors": [{
-                                        "message": "subscription lost event continuity; refetch, then subscribe again",
+                                        "message": "subscription lost event continuity; subscribe again, then refetch",
                                         "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}
                                     }]
                                 }
