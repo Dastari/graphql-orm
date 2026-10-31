@@ -369,6 +369,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         composite_unique: vec![],
         default_order: vec![order("fld_customer_created_at", RuntimeOrderDirection::Asc)],
         label_fields: Vec::new(),
+        search: None,
     };
 
     let contact_details = RuntimeCollection {
@@ -426,6 +427,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         ]],
         default_order: vec![order("fld_contact_id", RuntimeOrderDirection::Asc)],
         label_fields: Vec::new(),
+        search: None,
     };
 
     let customer_notes = RuntimeCollection {
@@ -479,6 +481,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         composite_unique: vec![],
         default_order: vec![order("fld_note_seq", RuntimeOrderDirection::Asc)],
         label_fields: Vec::new(),
+        search: None,
     };
 
     let note_attachments = RuntimeCollection {
@@ -535,6 +538,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
         composite_unique: vec![],
         default_order: vec![order("fld_attach_id", RuntimeOrderDirection::Asc)],
         label_fields: Vec::new(),
+        search: None,
     };
 
     RuntimeSchema {
@@ -653,6 +657,7 @@ fn owned_schema_survives_source_value_drop_and_serde_round_trip() {
             composite_unique: vec![],
             default_order: vec![],
             label_fields: Vec::new(),
+            search: None,
         });
         drop(source_table);
         schema.validate().expect("valid")

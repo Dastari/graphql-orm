@@ -48,6 +48,12 @@ pub enum RuntimeMigrationDiagnosticCode {
     PolicyDenied,
     /// The reviewed live baseline or plan integrity no longer matches.
     BaselineMismatch,
+    /// A search declaration names a PostgreSQL text search configuration that
+    /// does not exist in `pg_ts_config`.
+    UnknownSearchLanguage,
+    /// A search backfill was requested for a collection without search, or
+    /// whose search storage does not exist.
+    SearchNotDeclared,
 }
 
 /// A structured diagnostic identifies schema members without including default values or SQL.
@@ -386,7 +392,18 @@ impl ValidatedRuntimeSchema {
                         }
                     })
                     .collect(),
-                search_indexes: vec![],
+                search_indexes: collection
+                    .search
+                    .as_ref()
+                    .map(|search| {
+                        vec![runtime_search_index(
+                            collection,
+                            search,
+                            &column_name,
+                            B::DIALECT,
+                        )]
+                    })
+                    .unwrap_or_default(),
                 append_only: collection.append_only,
                 retention_purge: collection.retention_purge,
                 check_constraints: vec![],
@@ -567,6 +584,100 @@ impl ValidatedRuntimeSchema {
         Ok(target)
     }
 }
+/// The search storage model of one runtime collection, named like a static
+/// entity's so the existing renderers, introspection and drift detection apply.
+fn runtime_search_index(
+    collection: &RuntimeCollection,
+    search: &RuntimeSearch,
+    column_name: &dyn Fn(&FieldId) -> String,
+    backend: DatabaseBackend,
+) -> SearchIndexModel {
+    let weight = |weight: RuntimeSearchWeight| match weight {
+        RuntimeSearchWeight::A => SearchWeight::A,
+        RuntimeSearchWeight::B => SearchWeight::B,
+        RuntimeSearchWeight::C => SearchWeight::C,
+        RuntimeSearchWeight::D => SearchWeight::D,
+    };
+    let field_name = |id: &FieldId| {
+        collection
+            .fields
+            .iter()
+            .find(|field| &field.id == id)
+            .map(|field| field.api_name.clone())
+            .unwrap_or_default()
+    };
+    let tokenizer = match (search.effective_tokenizer(), search.remove_diacritics) {
+        (RuntimeSearchTokenizer::Unicode61, true) => "unicode61 remove_diacritics 2",
+        (RuntimeSearchTokenizer::Unicode61, false) => "unicode61",
+        (RuntimeSearchTokenizer::Porter, _) => "porter unicode61",
+        (RuntimeSearchTokenizer::Ascii, _) => "ascii",
+    };
+    SearchIndexModel {
+        name: bounded_search_identifier(format!(
+            "idx_gom_search_{}_vector",
+            collection.physical_table.replace('.', "_")
+        )),
+        table_name: collection.physical_table.clone(),
+        entity_name: collection.api_type_name.clone(),
+        primary_key: column_name(&collection.primary_key[0]),
+        strategy: match backend {
+            DatabaseBackend::Postgres => SearchIndexStrategy::PostgresTsvector,
+            _ => SearchIndexStrategy::SqliteFts5,
+        },
+        language: search.effective_language().to_string(),
+        tokenizer: tokenizer.to_string(),
+        min_token_len: usize::from(search.effective_min_token_len()),
+        // Runtime search is native only; it never degrades to fallback scoring.
+        fallback_enabled: false,
+        fields: search
+            .fields
+            .iter()
+            .filter(|entry| entry.json_path.is_none())
+            .map(|entry| SearchFieldModel {
+                field_name: field_name(&entry.field),
+                column_name: column_name(&entry.field),
+                weight: weight(entry.weight),
+                alias: None,
+                policy: None,
+            })
+            .collect(),
+        json_paths: search
+            .fields
+            .iter()
+            .filter_map(|entry| {
+                Some(SearchJsonPathModel {
+                    field_name: field_name(&entry.field),
+                    column_name: column_name(&entry.field),
+                    path: entry.json_path.clone()?,
+                    weight: weight(entry.weight),
+                    policy: None,
+                })
+            })
+            .collect(),
+        relations: Vec::new(),
+        readiness_tracked: true,
+    }
+}
+
+/// The macros' generated-identifier bound: at most 63 bytes, with a stable
+/// FNV-1a suffix when the full name is longer.
+fn bounded_search_identifier(full: String) -> String {
+    const MAX: usize = 63;
+    if full.len() <= MAX {
+        return full;
+    }
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in full.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let mut prefix_len = MAX - 17;
+    while !full.is_char_boundary(prefix_len) {
+        prefix_len -= 1;
+    }
+    format!("{}_{hash:016x}", &full[..prefix_len])
+}
+
 fn runtime_sql_type(backend: DatabaseBackend, kind: RuntimeValueKind) -> String {
     // SQLite stores the scaled mantissa with INTEGER affinity (the name contains
     // `INT`). Carrying precision and scale in the declared type makes a
@@ -1181,6 +1292,7 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
             return Err(rejection(RuntimeMigrationDiagnosticCode::LimitExceeded).into());
         }
         B::validate_owned_dependencies(self.database.pool(), ownership).await?;
+        self.check_search_languages(target).await?;
         let current = B::introspect_owned(self.database.pool()).await?;
         validate_owned_effects(
             B::DIALECT,
@@ -1267,6 +1379,91 @@ impl<'db, B: RuntimeMigrationBackend> SchemaManager<'db, B> {
         }
         B::apply_owned(self.database.pool(), plan, &options).await
     }
+    /// Refuse, before any DDL is planned, a runtime search declaration whose
+    /// PostgreSQL text search configuration does not exist.
+    async fn check_search_languages(
+        &self,
+        target: &OwnedSchemaModel,
+    ) -> Result<(), RuntimeMigrationError> {
+        if B::DIALECT != DatabaseBackend::Postgres {
+            return Ok(());
+        }
+        let mut diagnostics = Vec::new();
+        let mut checked = BTreeSet::new();
+        for table in target.tables() {
+            for index in table
+                .search_indexes
+                .iter()
+                .filter(|index| index.readiness_tracked)
+            {
+                if !checked.insert(index.language.clone()) {
+                    continue;
+                }
+                let rows = B::fetch_rows(
+                    self.database.pool(),
+                    "SELECT 1 AS present FROM pg_ts_config WHERE cfgname = $1",
+                    &[SqlValue::String(index.language.clone())],
+                )
+                .await
+                .map_err(RuntimeMigrationError::Database)?;
+                if rows.is_empty() {
+                    diagnostics.push(RuntimeMigrationDiagnostic {
+                        code: RuntimeMigrationDiagnosticCode::UnknownSearchLanguage,
+                        collection: CollectionId::new(table.table_name.clone()).ok(),
+                        subject: Some(index.language.clone()),
+                    });
+                }
+            }
+        }
+        if diagnostics.is_empty() {
+            Ok(())
+        } else {
+            Err(RuntimeMigrationError::Diagnostics(
+                RuntimeMigrationDiagnostics(diagnostics),
+            ))
+        }
+    }
+
+    /// Apply a runtime migration plan, then index existing rows of every
+    /// runtime collection whose search storage is still `building`, unless
+    /// `search.defer_backfill` leaves that to a host-run
+    /// [`backfill_runtime_search`](Self::backfill_runtime_search) job.
+    ///
+    /// Until its backfill completes, a collection's `search` argument is
+    /// refused with `SEARCH_INDEX_NOT_READY`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the plan's application error, or a backfill error after the
+    /// plan itself was applied.
+    pub async fn apply_runtime_migration(
+        &self,
+        plan: &OwnedPlannedMigration,
+        schema: &ValidatedRuntimeSchema,
+        options: ApplyOptions,
+        search: super::runtime_search::RuntimeSearchApplyOptions,
+    ) -> Result<AppliedMigrationReport, RuntimeMigrationError>
+    where
+        B: super::RuntimeMutationBackend,
+    {
+        let report = self.apply_owned_migration(plan, options).await?;
+        if report.dry_run || search.defer_backfill {
+            return Ok(report);
+        }
+        for collection in schema
+            .schema()
+            .collections
+            .iter()
+            .filter(|collection| collection.search.is_some())
+        {
+            if !self.runtime_search_ready(schema, &collection.id).await? {
+                self.backfill_runtime_search(schema, &collection.id, search.backfill)
+                    .await?;
+            }
+        }
+        Ok(report)
+    }
+
     /// Verify complete composed incoming dependencies for later single-record runtime writes.
     pub async fn runtime_mutation_environment(
         &self,

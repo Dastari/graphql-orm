@@ -38,6 +38,8 @@ pub(super) struct Plan {
     pub where_value: Option<Value>,
     /// Relation filter occurrences awaiting target-layer authorization, in order.
     pub relation_sites: Vec<RelationSite>,
+    /// The validated `search` argument of a root list.
+    pub search: Option<RuntimeSearchRequest>,
 }
 impl Plan {
     pub fn relations(&self) -> Vec<RuntimeRelationHandle> {
@@ -245,6 +247,62 @@ impl Planner<'_> {
         }
         let requested_order = input.clone();
         let order_was_supplied = args.get("orderBy").is_some_and(|v| v != &Value::Null);
+        let search = match args.get("search").filter(|v| *v != &Value::Null) {
+            None => None,
+            // Only root lists of searchable collections declare the argument.
+            Some(_) if relation.is_some() || c.search.is_none() => return Err(invalid()),
+            Some(Value::Object(values)) => {
+                let member = |name: &str| {
+                    values
+                        .get(super::schema::search_member(name).as_str())
+                        .filter(|v| *v != &Value::Null)
+                };
+                let query = match member("query") {
+                    Some(Value::String(query)) => query.clone(),
+                    _ => return Err(invalid()),
+                };
+                let mode = match member("mode").map(enum_text).transpose()? {
+                    None | Some("PLAIN") => crate::graphql::filters::SearchMode::Plain,
+                    Some("PHRASE") => crate::graphql::filters::SearchMode::Phrase,
+                    Some("WEB") => crate::graphql::filters::SearchMode::Web,
+                    Some("PREFIX") => crate::graphql::filters::SearchMode::Prefix,
+                    Some(_) => return Err(invalid()),
+                };
+                let min_score = match member("minScore") {
+                    None => None,
+                    Some(Value::Number(score)) => Some(score.as_f64().ok_or_else(invalid)?),
+                    Some(_) => return Err(invalid()),
+                };
+                let search = module
+                    .schema
+                    .runtime_search_request(
+                        &collection,
+                        crate::graphql::filters::SearchInput {
+                            query,
+                            mode: Some(mode),
+                            min_score,
+                        },
+                        // An explicit orderBy wins; relevance then only filters.
+                        !order_was_supplied,
+                        module.options.search_limits,
+                    )
+                    .map_err(query_error)?;
+                // Searching reads every searchable field: each is one filter
+                // operation the host authorizes, so an unreadable field can
+                // neither match nor rank a row.
+                for entry in &c.search.as_ref().expect("checked above").fields {
+                    filter_intent.operations.push((
+                        module
+                            .schema
+                            .resolve_field(&collection, &entry.field)
+                            .map_err(record_error)?,
+                        "search",
+                    ));
+                }
+                Some(search)
+            }
+            Some(_) => return Err(invalid()),
+        };
         let order = module
             .schema
             .runtime_order(
@@ -444,6 +502,7 @@ impl Planner<'_> {
             projected: projected_fields,
             where_value,
             relation_sites,
+            search,
         })
     }
     /// Validate a projected field's object subselection; returns selected field names.
@@ -1111,6 +1170,7 @@ mod checked_compatibility_tests {
                 composite_unique: vec![],
                 default_order: vec![],
                 label_fields: Vec::new(),
+                search: None,
             }],
         }
         .validate()

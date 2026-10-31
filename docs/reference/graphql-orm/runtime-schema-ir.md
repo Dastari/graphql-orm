@@ -3,7 +3,7 @@ title: "Owned runtime schema IR"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-29
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -432,9 +432,11 @@ Static append-only entities declared with `retention_purge = "..."` convert with
 fingerprints. The policy key itself is deliberately not part of structural IR because policy
 providers are host runtime behavior, not database shape.
 
-Declarations using capabilities the IR does not represent yet are reported as
-`UnsupportedCapability` diagnostics instead of being silently dropped: spatial columns, full-text
-search, partial/GiST indexes, and check constraints. Backup ordering, policy hook names, and
+A static full-text search index converts to `RuntimeCollection::search`; see
+[runtime search](runtime-search.md). Declarations using capabilities the IR does not represent yet
+are reported as `UnsupportedCapability` diagnostics instead of being silently dropped: spatial
+columns, relation-sourced or policy-gated search fields, the fallback search strategy,
+partial/GiST indexes, and check constraints. Backup ordering, policy hook names, and
 relation change propagation are also deliberately deferred; they are host/back-end concerns that
 later slices may add.
 

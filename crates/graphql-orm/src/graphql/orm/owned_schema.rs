@@ -951,6 +951,7 @@ impl From<&EntityMetadata> for OwnedTableModel {
                                 policy: relation.policy.map(str::to_string),
                             })
                             .collect(),
+                        readiness_tracked: false,
                     }]
                 })
                 .unwrap_or_default(),

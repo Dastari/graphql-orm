@@ -63,7 +63,71 @@ pub(super) fn type_ref(ty: &str) -> TypeRef {
         TypeRef::named(ty)
     }
 }
-pub(super) fn root_field(name: &str, object: &str) -> Field {
+/// A search member name in the configured field case, like the static
+/// `SearchInput` and search edges.
+pub(crate) fn search_member(camel: &str) -> String {
+    use convert_case::{Case, Casing};
+    let case = if cfg!(feature = "field-case-pascal") {
+        Case::Pascal
+    } else if cfg!(feature = "field-case-snake") {
+        Case::Snake
+    } else if cfg!(feature = "field-case-screaming-snake") {
+        Case::UpperSnake
+    } else if cfg!(feature = "field-case-lower") {
+        Case::Flat
+    } else if cfg!(feature = "field-case-upper") {
+        Case::UpperFlat
+    } else {
+        return camel.to_owned();
+    };
+    camel.to_case(case)
+}
+
+/// `RuntimeSearchInput` and `RuntimeSearchMode`, registered once when any
+/// collection declares search.
+pub(super) fn search_helpers() -> Vec<Type> {
+    vec![
+        Enum::new("RuntimeSearchMode")
+            .description("How a search query is interpreted")
+            .item(EnumItem::new("PLAIN").description("Plain words, matched as terms"))
+            .item(EnumItem::new("PHRASE").description("One phrase"))
+            .item(
+                EnumItem::new("WEB").description("Web-search syntax where the backend supports it"),
+            )
+            .item(EnumItem::new("PREFIX").description("Each word as a prefix"))
+            .into(),
+        InputObject::new("RuntimeSearchInput")
+            .description("Full-text search of one collection")
+            .field(
+                InputValue::new(search_member("query"), TypeRef::named_nn("String"))
+                    .description("Search text"),
+            )
+            .field(
+                InputValue::new(search_member("mode"), TypeRef::named("RuntimeSearchMode"))
+                    .description("Query interpretation; PLAIN by default"),
+            )
+            .field(
+                InputValue::new(search_member("minScore"), TypeRef::named("Float"))
+                    .description("Drop matches whose relevance score is lower"),
+            )
+            .into(),
+    ]
+}
+
+pub(super) fn root_field(name: &str, object: &str, search: bool) -> Field {
+    let field = root_list_field(name, object);
+    if search {
+        field.argument(
+            InputValue::new("search", TypeRef::named("RuntimeSearchInput")).description(
+                "Restrict to records matching this full-text search; ordered by relevance unless orderBy is given",
+            ),
+        )
+    } else {
+        field
+    }
+}
+
+fn root_list_field(name: &str, object: &str) -> Field {
     page_args(
         Field::new(
             name,
@@ -354,14 +418,23 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
                         .description("Placement of null values"),
                 )
                 .into(),
-            Object::new(format!("{name}Edge"))
-                .description(format!("One {name} record in a page"))
-                .field(
-                    output("cursor", TypeRef::named_nn("String"))
-                        .description("Opaque cursor of this record"),
-                )
-                .field(output("node", TypeRef::named_nn(&name)).description("The record"))
-                .into(),
+            {
+                let edge = Object::new(format!("{name}Edge"))
+                    .description(format!("One {name} record in a page"))
+                    .field(
+                        output("cursor", TypeRef::named_nn("String"))
+                            .description("Opaque cursor of this record"),
+                    )
+                    .field(output("node", TypeRef::named_nn(&name)).description("The record"));
+                if c.search.is_some() {
+                    edge.field(output(&search_member("score"), TypeRef::named("Float")).description(
+                        "Relevance to the search argument; null without one. Comparable only within one backend",
+                    ))
+                } else {
+                    edge
+                }
+                .into()
+            },
             Object::new(format!("{name}Connection"))
                 .description(format!("A page of {name} records"))
                 .field(

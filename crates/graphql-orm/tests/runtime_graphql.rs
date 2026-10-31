@@ -165,6 +165,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         composite_unique: vec![],
         default_order: vec![],
         label_fields: Vec::new(),
+        search: None,
     };
     let mut child = RuntimeCollection {
         description: None,
@@ -187,6 +188,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         composite_unique: vec![],
         default_order: vec![],
         label_fields: Vec::new(),
+        search: None,
     };
     child.relations.push(RuntimeRelation {
         description: None,

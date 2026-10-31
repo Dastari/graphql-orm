@@ -8,8 +8,9 @@
 //! The IR deliberately covers structural schema semantics only in this slice: collections,
 //! fields, primary keys, relations with ordered key pairs, secondary/unique indexes, composite
 //! unique groups, defaults, and deterministic ordering. Schema-bound query execution and owned migration planning reuse this IR;
-//! opt-in dynamic GraphQL registration remains a later slice. Spatial columns,
-//! full-text search, partial/GiST indexes, check constraints, backup ordering, policy hook
+//! opt-in dynamic GraphQL registration remains a later slice. Full-text search is
+//! represented by [`RuntimeCollection::search`]. Spatial columns, relation-sourced or
+//! policy-gated search fields, partial/GiST indexes, check constraints, backup ordering, policy hook
 //! names, and relation change propagation are deliberately not represented yet; conversion
 //! reports them as [`RuntimeSchemaDiagnosticCode::UnsupportedCapability`] instead of silently
 //! degrading a declaration.
@@ -501,10 +502,123 @@ pub struct RuntimeCollection {
     /// declared label; omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_fields: Vec<FieldId>,
+    /// Optional full-text search declaration. Structural: it determines search
+    /// storage, so it is part of both fingerprints when present. Omitted when
+    /// absent, so schemas without search keep their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<RuntimeSearch>,
 }
 
 /// Maximum ordered label fields of one runtime collection.
 pub const RUNTIME_MAX_LABEL_FIELDS: usize = 4;
+
+/// Maximum searchable entries of one runtime collection.
+pub const RUNTIME_MAX_SEARCH_FIELDS: usize = 32;
+
+/// Relative weight of one searchable field; A ranks highest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RuntimeSearchWeight {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl RuntimeSearchWeight {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+            Self::D => "D",
+        }
+    }
+}
+
+/// SQLite FTS5 tokenizer of a runtime search index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSearchTokenizer {
+    /// `unicode61`, the default.
+    Unicode61,
+    /// `porter unicode61`: English stemming over unicode61.
+    Porter,
+    /// `ascii`.
+    Ascii,
+}
+
+impl RuntimeSearchTokenizer {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unicode61 => "unicode61",
+            Self::Porter => "porter",
+            Self::Ascii => "ascii",
+        }
+    }
+}
+
+/// One searchable field of a runtime collection.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSearchField {
+    /// A `String` or `Json` field of the same collection.
+    pub field: FieldId,
+    pub weight: RuntimeSearchWeight,
+    /// Required for a JSON field and refused for a string field: the portable
+    /// search JSON path (`$.a.b`, `$.a[*].b`) whose string leaves are indexed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_path: Option<String>,
+}
+
+/// Full-text search declaration of one runtime collection.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeSearch {
+    /// Searchable entries, one to [`RUNTIME_MAX_SEARCH_FIELDS`], each a distinct
+    /// field and path.
+    pub fields: Vec<RuntimeSearchField>,
+    /// PostgreSQL text search configuration; `english` when absent. A lowercase
+    /// identifier of at most 63 bytes. Migration planning on PostgreSQL also
+    /// requires it to exist in `pg_ts_config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// SQLite FTS5 tokenizer; `unicode61` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer: Option<RuntimeSearchTokenizer>,
+    /// Fold accents so `Maori` matches `Māori` (`remove_diacritics 2`). Only
+    /// valid with the `unicode61` tokenizer. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remove_diacritics: bool,
+    /// Shortest indexed and queried token, 1 to 16; 2 when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_token_len: Option<u8>,
+}
+
+impl RuntimeSearch {
+    /// The effective PostgreSQL text search configuration.
+    pub fn effective_language(&self) -> &str {
+        self.language.as_deref().unwrap_or("english")
+    }
+
+    /// The effective SQLite tokenizer.
+    pub fn effective_tokenizer(&self) -> RuntimeSearchTokenizer {
+        self.tokenizer.unwrap_or(RuntimeSearchTokenizer::Unicode61)
+    }
+
+    /// The effective minimum token length.
+    pub fn effective_min_token_len(&self) -> u8 {
+        self.min_token_len.unwrap_or(2)
+    }
+}
+
+fn valid_search_language(language: &str) -> bool {
+    !language.is_empty()
+        && language.len() <= 63
+        && language.starts_with(|c: char| c.is_ascii_lowercase())
+        && language
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
 
 /// The serialized IR format version this crate reads and writes.
 pub const RUNTIME_SCHEMA_FORMAT_VERSION: u32 = 1;
@@ -586,6 +700,15 @@ pub enum RuntimeSchemaDiagnosticCode {
     /// is not nullable, is generated, has a default, is a primary-key member, or
     /// also declares an automatic timestamp.
     InvalidAutoActor,
+    /// A search entry names a field that is not `String` or `Json`, gives a JSON
+    /// field no path or a string field one, uses an invalid path, or repeats a
+    /// field and path.
+    InvalidSearchField,
+    /// A search declaration has no entries, more than
+    /// [`RUNTIME_MAX_SEARCH_FIELDS`], an invalid language, `remove_diacritics`
+    /// with a tokenizer other than `unicode61`, a minimum token length outside
+    /// 1 to 16, or belongs to a collection with a composite primary key.
+    InvalidSearchConfiguration,
 }
 
 impl RuntimeSchemaDiagnosticCode {
@@ -623,6 +746,8 @@ impl RuntimeSchemaDiagnosticCode {
             Self::InvalidJoinTable => "invalid_join_table",
             Self::InvalidAutoTimestamp => "invalid_auto_timestamp",
             Self::InvalidAutoActor => "invalid_auto_actor",
+            Self::InvalidSearchField => "invalid_search_field",
+            Self::InvalidSearchConfiguration => "invalid_search_configuration",
         }
     }
 }
@@ -1743,6 +1868,21 @@ impl RuntimeSchema {
                 }
             }
 
+            // Full-text search.
+            if let Some(search) = &collection.search {
+                validate_search(search, own_fields, cid, &mut diagnostics);
+                // Search documents are keyed by one primary-key value, as for static
+                // entities.
+                if collection.primary_key.len() != 1 {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::InvalidSearchConfiguration,
+                        "search requires a single-column primary key".to_string(),
+                        cid,
+                        None,
+                    ));
+                }
+            }
+
             // Default ordering.
             for term in &collection.default_order {
                 if !own_fields.contains_key(&term.field) {
@@ -2266,8 +2406,245 @@ impl ValidatedRuntimeSchema {
                     .join(",");
                 out.push_str(&format!("  default_order|{order}\n"));
             }
+            // Present only when declared, so earlier bytes are unchanged. Paths
+            // are JSON-string framed because they may contain delimiters.
+            if let Some(search) = &collection.search {
+                out.push_str(&format!(
+                    "  search|language={}|tokenizer={}|remove_diacritics={}|min_token_len={}\n",
+                    search.effective_language(),
+                    search.effective_tokenizer().as_str(),
+                    search.remove_diacritics,
+                    search.effective_min_token_len(),
+                ));
+                for entry in &search.fields {
+                    out.push_str(&format!(
+                        "  search_field|{}|weight={}|path={}\n",
+                        field_ref(cid, &entry.field),
+                        entry.weight.as_str(),
+                        serde_json::to_string(&entry.json_path).expect("strings always serialize"),
+                    ));
+                }
+            }
         }
         out
+    }
+}
+
+/// Map a static `SearchIndexDef` to the IR, refusing what runtime search does
+/// not represent with a precise diagnostic.
+fn static_search(
+    definition: &super::core::SearchIndexDef,
+    cid: &CollectionId,
+    diagnostics: &mut Vec<RuntimeSchemaDiagnostic>,
+) -> Option<RuntimeSearch> {
+    use super::core::{SearchIndexStrategy, SearchWeight};
+    let refuse =
+        |message: &str, subject: Option<&str>, diagnostics: &mut Vec<RuntimeSchemaDiagnostic>| {
+            diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                message.to_string(),
+                cid,
+                subject,
+            ));
+        };
+    let before = diagnostics.len();
+    if !matches!(
+        definition.strategy,
+        SearchIndexStrategy::PostgresTsvector | SearchIndexStrategy::SqliteFts5
+    ) {
+        refuse(
+            "runtime search supports only native SQLite FTS5 and PostgreSQL tsvector storage",
+            None,
+            diagnostics,
+        );
+    }
+    for relation in definition.relations {
+        refuse(
+            "relation-sourced search fields are not represented in the runtime IR",
+            Some(relation.relation_field),
+            diagnostics,
+        );
+    }
+    let (tokenizer, remove_diacritics) = match definition.tokenizer {
+        "unicode61" => (None, false),
+        "unicode61 remove_diacritics 2" => (None, true),
+        "porter" | "porter unicode61" => (Some(RuntimeSearchTokenizer::Porter), false),
+        "ascii" => (Some(RuntimeSearchTokenizer::Ascii), false),
+        _ => {
+            refuse(
+                "this search tokenizer is not represented in the runtime IR",
+                None,
+                diagnostics,
+            );
+            (None, false)
+        }
+    };
+    let weight = |weight: SearchWeight| match weight {
+        SearchWeight::A => RuntimeSearchWeight::A,
+        SearchWeight::B => RuntimeSearchWeight::B,
+        SearchWeight::C => RuntimeSearchWeight::C,
+        SearchWeight::D => RuntimeSearchWeight::D,
+    };
+    let field = |column: &str, diagnostics: &mut Vec<RuntimeSchemaDiagnostic>| {
+        FieldId::new(format!("{}.{column}", definition.table_name))
+            .map_err(|diagnostic| diagnostics.push(diagnostic))
+            .ok()
+    };
+    let mut fields = Vec::new();
+    for source in definition.fields {
+        if source.policy.is_some() {
+            refuse(
+                "per-field search policies are not represented in the runtime IR",
+                Some(source.column_name),
+                diagnostics,
+            );
+        }
+        if let Some(id) = field(source.column_name, diagnostics) {
+            fields.push(RuntimeSearchField {
+                field: id,
+                weight: weight(source.weight),
+                json_path: None,
+            });
+        }
+    }
+    for source in definition.json_paths {
+        if source.policy.is_some() {
+            refuse(
+                "per-field search policies are not represented in the runtime IR",
+                Some(source.column_name),
+                diagnostics,
+            );
+        }
+        if let Some(id) = field(source.column_name, diagnostics) {
+            fields.push(RuntimeSearchField {
+                field: id,
+                weight: weight(source.weight),
+                json_path: Some(source.path.to_string()),
+            });
+        }
+    }
+    (diagnostics.len() == before).then(|| RuntimeSearch {
+        fields,
+        language: (definition.language != "english").then(|| definition.language.to_string()),
+        tokenizer,
+        remove_diacritics,
+        min_token_len: (definition.min_token_len != 2)
+            .then(|| u8::try_from(definition.min_token_len).unwrap_or(u8::MAX)),
+    })
+}
+
+fn validate_search(
+    search: &RuntimeSearch,
+    own_fields: &BTreeMap<&FieldId, &RuntimeField>,
+    cid: &CollectionId,
+    diagnostics: &mut Vec<RuntimeSchemaDiagnostic>,
+) {
+    let configuration = |message: String, diagnostics: &mut Vec<RuntimeSchemaDiagnostic>| {
+        diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+            RuntimeSchemaDiagnosticCode::InvalidSearchConfiguration,
+            message,
+            cid,
+            None,
+        ));
+    };
+    if search.fields.is_empty() {
+        configuration("search declares no fields".to_string(), diagnostics);
+    }
+    if search.fields.len() > RUNTIME_MAX_SEARCH_FIELDS {
+        configuration(
+            format!("search declares more than {RUNTIME_MAX_SEARCH_FIELDS} fields"),
+            diagnostics,
+        );
+    }
+    if search
+        .language
+        .as_deref()
+        .is_some_and(|language| !valid_search_language(language))
+    {
+        configuration(
+            "search language must be a lowercase identifier of at most 63 bytes".to_string(),
+            diagnostics,
+        );
+    }
+    if search.remove_diacritics && search.effective_tokenizer() != RuntimeSearchTokenizer::Unicode61
+    {
+        configuration(
+            "remove_diacritics requires the unicode61 tokenizer".to_string(),
+            diagnostics,
+        );
+    }
+    if search
+        .min_token_len
+        .is_some_and(|length| !(1..=16).contains(&length))
+    {
+        configuration(
+            "search min_token_len must be between 1 and 16".to_string(),
+            diagnostics,
+        );
+    }
+    let mut entries = BTreeSet::new();
+    for entry in &search.fields {
+        let subject = Some(entry.field.as_str());
+        let field_problem = |message: String, diagnostics: &mut Vec<RuntimeSchemaDiagnostic>| {
+            diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                RuntimeSchemaDiagnosticCode::InvalidSearchField,
+                message,
+                cid,
+                subject,
+            ));
+        };
+        match own_fields.get(&entry.field) {
+            None => diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                RuntimeSchemaDiagnosticCode::UnknownFieldReference,
+                format!("search references unknown field `{}`", entry.field),
+                cid,
+                subject,
+            )),
+            Some(field) => match (field.value_kind, entry.json_path.as_deref()) {
+                (RuntimeValueKind::String, None) => {}
+                (RuntimeValueKind::String, Some(_)) => field_problem(
+                    format!(
+                        "search field `{}` is a string and takes no json_path",
+                        entry.field
+                    ),
+                    diagnostics,
+                ),
+                (RuntimeValueKind::Json, None) => field_problem(
+                    format!(
+                        "search field `{}` is JSON and requires a json_path",
+                        entry.field
+                    ),
+                    diagnostics,
+                ),
+                (RuntimeValueKind::Json, Some(path)) => {
+                    if let Err(problem) = super::search::validate_search_json_path(path) {
+                        field_problem(
+                            format!(
+                                "search json_path of `{}` is invalid: {problem}",
+                                entry.field
+                            ),
+                            diagnostics,
+                        );
+                    }
+                }
+                _ => field_problem(
+                    format!(
+                        "search field `{}` must be a String or Json field",
+                        entry.field
+                    ),
+                    diagnostics,
+                ),
+            },
+        }
+        if !entries.insert((&entry.field, entry.json_path.as_deref())) {
+            field_problem(
+                format!(
+                    "search lists field `{}` and its path more than once",
+                    entry.field
+                ),
+                diagnostics,
+            );
+        }
     }
 }
 
@@ -2371,15 +2748,6 @@ impl RuntimeSchema {
                 }
             };
 
-            if entity.search.is_some() {
-                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
-                    RuntimeSchemaDiagnosticCode::UnsupportedCapability,
-                    "full-text search indexes are not represented in the runtime IR yet"
-                        .to_string(),
-                    &cid,
-                    None,
-                ));
-            }
             // Fail closed on semantics the IR does not represent: authorization policy hooks,
             // backup enablement/ordering, and non-managed schema ownership. Dropping these
             // silently would let a structural fingerprint claim equivalence between schemas
@@ -2433,11 +2801,13 @@ impl RuntimeSchema {
                         continue;
                     }
                 };
-                if field.spatial.is_some() || field.search.is_some() {
+                // A searchable column's search metadata is represented by the
+                // collection's `search`, mapped from the entity's search index.
+                if field.spatial.is_some() {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::UnsupportedCapability,
                         format!(
-                            "column `{}` uses spatial/search metadata not represented in the runtime IR yet",
+                            "column `{}` uses spatial metadata not represented in the runtime IR yet",
                             field.name
                         ),
                         &cid,
@@ -2694,6 +3064,10 @@ impl RuntimeSchema {
                 }
             };
 
+            let search = entity
+                .search
+                .and_then(|definition| static_search(definition, &cid, &mut diagnostics));
+
             collections.push(RuntimeCollection {
                 description: None,
                 classification: None,
@@ -2710,6 +3084,7 @@ impl RuntimeSchema {
                 composite_unique,
                 default_order,
                 label_fields: Vec::new(),
+                search,
             });
         }
 

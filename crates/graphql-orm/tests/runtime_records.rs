@@ -117,6 +117,7 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                     direction: RuntimeOrderDirection::Asc,
                 }],
                 label_fields: Vec::new(),
+                search: None,
             },
             RuntimeCollection {
                 description: None,
@@ -137,6 +138,7 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                     direction: RuntimeOrderDirection::Asc,
                 }],
                 label_fields: Vec::new(),
+                search: None,
             },
         ],
     }

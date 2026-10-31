@@ -34,6 +34,15 @@ mod runtime_record;
 mod runtime_relation;
 mod runtime_schema;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+mod runtime_search;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+#[doc(hidden)]
+pub use runtime_search::runtime_search_storage_ready;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+pub use runtime_search::{
+    RuntimeSearchApplyOptions, RuntimeSearchBackfillOptions, RuntimeSearchBackfillProgress,
+};
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 mod runtime_transaction;
 mod scalar_policy;
 mod schema_manager;

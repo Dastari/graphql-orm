@@ -3,7 +3,7 @@ title: Runtime GraphQL reads and checked composition
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-29
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -45,6 +45,9 @@ used. Built-in `@skip` and `@include` remain supported, including variable input
 `limit_directives` bounds directives per field and cannot relax the installed
 selection budget. Host extensions and checked subscription roots remain supported,
 with collision checks and mandatory authorization/resource guards intact.
+
+A collection that declares search also gets an optional `search` argument on its root list and a
+nullable `score` on its edges; see [runtime search](runtime-search.md).
 
 ## Host integration
 

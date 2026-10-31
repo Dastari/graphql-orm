@@ -10,8 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.88.0 generates `Changed` subscription streams of `Result` items that end with one
-continuity error when a subscriber falls behind or the channel closes.
+Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
+is unchanged.
 
 Version 0.87.0 generates the fixed `RecordVersion` field for managed record versions and emits
 `record_version` semantic metadata for managed and CAS-only versions.

@@ -3681,6 +3681,10 @@ pub struct SearchIndexModel {
     pub fields: Vec<SearchFieldModel>,
     pub json_paths: Vec<SearchJsonPathModel>,
     pub relations: Vec<SearchRelationFieldModel>,
+    /// The index records `building`/`ready` readiness in its metadata row and
+    /// is searchable only once ready. Runtime collections track readiness;
+    /// static entities do not.
+    pub readiness_tracked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

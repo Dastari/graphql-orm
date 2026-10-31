@@ -66,6 +66,7 @@ fn collection(id: &str, type_name: &str, fields: Vec<RuntimeField>) -> RuntimeCo
         composite_unique: vec![],
         default_order: vec![],
         label_fields: Vec::new(),
+        search: None,
     }
 }
 fn set_null(id: &str, api: &str, target: &str, source: &str, target_key: &str) -> RuntimeRelation {
