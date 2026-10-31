@@ -105,6 +105,23 @@ own reviewed `Cargo.lock`; generate or update that lock explicitly before
 running its parent driver. Include this lock when collecting fixture dependency
 evidence.
 
+Every fixture driver builds its workspace into one shared `target/fixtures`
+directory, so dependency builds that fixture lockfiles have in common compile
+once per run. Run fixture workspaces by hand with
+`--target-dir target/fixtures` as well; without it Cargo writes a `target/`
+directory inside the fixture's source tree.
+
+CI and release validation run the ORM lanes as three parallel jobs: `orm`
+(the default package suite, the router-protocol and case-feature contract
+tests, Clippy and Rustdoc), `orm-runtime-graphql` (runtime GraphQL on owned
+SQLite and PostgreSQL, and the SQL Server refusal) and `orm-backends` (the
+PostgreSQL and SQL Server lanes, owned fixtures and the consumer examples). In
+the release workflow, `scripts/check-replay-release-positive.py` requires the
+three jobs together to run exactly the commands of the qualified single ORM
+job. The one intended difference is that the SQLite migration API fixture now
+runs only through the default suite's `migration_api_compatibility_fixture`
+driver, which ran the same command.
+
 The existing `sqlserver-security` job separately executes the ignored owned TLS,
 writable-transaction and query-notification tests. Release security jobs depend
 on the protected `guard`; the aggregate `validate` gate requires them before

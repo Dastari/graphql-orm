@@ -4,8 +4,9 @@ fn external_repository_aggregate_consumer_requires_no_direct_graphql_dependency(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/repository-aggregate-consumer/Cargo.toml"
     );
-    let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/repository-aggregate-consumer");
+    // Every fixture workspace builds into one shared directory, so dependency
+    // builds they have in common are compiled once.
+    let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let lane = if cfg!(feature = "sqlite") {
         "sqlite"

@@ -30,7 +30,7 @@ COMPILERS = {
 GATES = ["replay-scoped-integrity", "replay-scoped-positive"]
 EXCLUDED_JOBS = [
     "workspace-integrity", "neutral-packages", "s3-security", "orm",
-    "orm-security-sqlite", "orm-security-portable", "sqlserver-security",
+    "orm-runtime-graphql", "orm-backends", "orm-security-sqlite", "orm-security-portable", "sqlserver-security",
     "ai-provider-matrix", "ai-provider-lanes", "ai-graphql-naming",
     "ai-postgres-parity", "alternate-features", "router", "router-msrv",
 ]

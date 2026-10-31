@@ -21,6 +21,49 @@ def without_timeout(body):
     return re.sub(r"(?m)^    timeout-minutes: [0-9]+\n", "", body)
 
 
+# The qualified single ORM job now runs as these parallel jobs (#269).
+ORM_JOBS = ["orm", "orm-runtime-graphql", "orm-backends"]
+FIXTURE_MANIFEST = "--manifest-path crates/graphql-orm/tests/fixtures/"
+
+
+def setup_steps(body):
+    body = re.sub(r"(?m)^ *#.*\n", "", body)
+    return body[body.index("    steps:\n"):body.index("      - name: ")]
+
+
+def orm_commands(body):
+    """Each command line of the job's run blocks, with explicit fixture output."""
+    lines = []
+    for block in re.findall(r"(?m)^        run: \|\n((?:          .*\n)+)", body):
+        for line in block.splitlines():
+            line = line.strip()
+            # Fixture workspaces build into the shared fixture target directory
+            # instead of the source tree; the verified command is unchanged.
+            line = re.sub(r"(" + re.escape(FIXTURE_MANIFEST) + r"[^ ]+) --target-dir target/fixtures",
+                          r"\1", line)
+            lines.append(line)
+    return lines
+
+
+def check_orm_split(old, new):
+    qualified = old["orm"]
+    for name in ORM_JOBS:
+        require(setup_steps(new[name]) == setup_steps(qualified), f"ORM job setup changed: {name}")
+        require("    needs: guard\n" in new[name], f"ORM job dependency changed: {name}")
+    split = [line for name in ORM_JOBS for line in orm_commands(new[name])]
+    expected = orm_commands(qualified)
+    # The SQLite migration API fixture command is byte-identical to the one the
+    # default suite's migration_api_compatibility_fixture runner executes.
+    expected[expected.index("for backend in sqlite postgres mssql; do")] = "for backend in postgres mssql; do"
+    require(sorted(split) == sorted(expected), "ORM lane commands changed by the split")
+    for line in [line for name in ORM_JOBS for line in new[name].splitlines()
+                 if FIXTURE_MANIFEST in line and line.strip().startswith("cargo ")]:
+        require("--target-dir target/fixtures" in line, "fixture command builds into the source tree")
+    require("CARGO_BUILD_JOBS" not in new["orm"] and "CARGO_BUILD_JOBS" not in new["orm-backends"]
+            and new["orm-runtime-graphql"].count('CARGO_BUILD_JOBS: "2"') == 1,
+            "ORM lane build parallelism changed")
+
+
 def main():
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     old = jobs(source(QUALIFIED, ".github/workflows/release.yml").decode())
@@ -29,11 +72,18 @@ def main():
             "full profile must remain the default")
     # Every original matrix command, provider enumeration, failure/skip rule,
     # permission and full publisher step is byte-identical after selection.
-    # Only the job-level timeout may differ.
-    for name in [*EXCLUDED_JOBS, "validate", "release"]:
+    # Only the job-level timeout may differ, and the qualified ORM job is split
+    # into parallel jobs that together run the same commands.
+    for name in [*(job for job in EXCLUDED_JOBS if job not in ORM_JOBS), "release"]:
         body = new[name].replace("    if: inputs.validation_profile == 'full'\n", "", 1)
         require(without_timeout(body).rstrip() == without_timeout(old[name]).rstrip(),
                 f"full profile changed: {name}")
+    check_orm_split(old, new)
+    validate = new["validate"].replace("    if: inputs.validation_profile == 'full'\n", "", 1)
+    lanes = re.findall(r"(?m)^      - ([a-z0-9-]+)\n", validate[validate.index("    needs:\n"):validate.index("    runs-on:")])
+    require(sorted(lanes) == sorted(["guard", *EXCLUDED_JOBS]), "validation must need every full lane")
+    require(validate[validate.index("    runs-on:"):].rstrip()
+            == old["validate"][old["validate"].index("    runs-on:"):].rstrip(), "full profile changed: validate")
     for name in ["replay-scoped-integrity", "replay-scoped-positive", "replay-scoped-validate", "release-scoped"]:
         require("if: inputs.validation_profile == 'replay-scoped-positive-v1'" in new[name],
                 "scoped selection must be explicit")
@@ -78,7 +128,7 @@ def main():
             and contracts == sorted(contracts, key=lambda row: row["name"]), "contract order changed")
     replay = [row for row in contracts if row["name"].startswith("graphql-orm-owned-planning-replay-")]
     require(len(replay) == 3, "both explicit recipes and format must remain recorded")
-    print("Positive release conformance: 16 original full jobs preserved; 4 explicit scoped jobs; deterministic manifest and three replay contract rows.")
+    print("Positive release conformance: 15 original full jobs preserved and the ORM job split with identical commands; 4 explicit scoped jobs; deterministic manifest and three replay contract rows.")
 
 
 if __name__ == "__main__":

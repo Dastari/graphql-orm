@@ -192,11 +192,36 @@ jobs:
         run: cargo check -p graphql-orm-backup --locked --features graphql-orm-storage/s3
 
   orm:
+    # The ORM lanes run as three parallel jobs, orm, orm-runtime-graphql and
+    # orm-backends. Together they run every command of the single job they
+    # replaced; scripts/check-replay-release-positive.py enforces this.
     if: inputs.validation_profile == 'full'
-    name: ORM backend lanes
+    name: ORM default suite, Clippy and Rustdoc
     needs: guard
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Verify the ORM default suite, Clippy and Rustdoc
+        run: |
+          cargo test -p graphql-orm --locked
+          cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract --locked
+          cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features --locked
+          cargo clippy -p graphql-orm --all-targets --locked -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps --locked
+
+  orm-runtime-graphql:
+    if: inputs.validation_profile == 'full'
+    name: ORM runtime GraphQL on owned backends
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -212,30 +237,44 @@ jobs:
           cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql,runtime-graphql --test runtime_graphql_unsupported
-      - name: Verify ORM backend lanes
+
+  orm-backends:
+    if: inputs.validation_profile == 'full'
+    name: ORM PostgreSQL and SQL Server lanes
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.target_ref }}
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      # Fixture workspaces build into the shared target/fixtures directory used
+      # by the fixture runner tests, never into the source tree. The default
+      # suite's migration_api_compatibility_fixture already runs the SQLite
+      # migration API fixture, so only PostgreSQL and SQL Server run here.
+      - name: Verify ORM PostgreSQL and SQL Server lanes
         run: |
-          cargo test -p graphql-orm --locked
-          cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract --locked
-          cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features --locked
           cargo check -p graphql-orm --no-default-features --features postgres --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --locked
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql --test runtime_migrations_unsupported
-          for backend in sqlite postgres mssql; do
-            cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --locked --no-default-features --features "$backend"
+          for backend in postgres mssql; do
+            cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features "$backend"
           done
           cargo test -p graphql-orm --no-default-features --features postgres --test projection_visibility --test cross_crate_relations_fixture --test repository_counts --locked
           cargo test -p graphql-orm --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --locked -- --ignored --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_strings -- --include-ignored --test-threads=1
-          cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
-          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example runtime_strings
-          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example policy_projections
-          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example complete_events
-          cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test portable_groups --test host_timestamps -- --ignored --test-threads=1
+          cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
+          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example runtime_strings
+          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example policy_projections
+          cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example complete_events
+          cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test portable_groups --test host_timestamps -- --ignored --test-threads=1
           cargo check -p graphql-orm --no-default-features --features mssql --locked
           cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir --locked
-          cargo clippy -p graphql-orm --all-targets --locked -- -D warnings
-          RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps --locked
 
   orm-security-sqlite:
     if: inputs.validation_profile == 'full'
@@ -464,6 +503,8 @@ jobs:
       - neutral-packages
       - s3-security
       - orm
+      - orm-runtime-graphql
+      - orm-backends
       - orm-security-sqlite
       - orm-security-portable
       - sqlserver-security

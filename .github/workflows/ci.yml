@@ -88,8 +88,13 @@ jobs:
       - name: Compile the backup adapter with the storage S3 provider
         run: cargo check -p graphql-orm-backup --locked --features graphql-orm-storage/s3
 
+  # The ORM lanes run as three parallel jobs: the default suite with Clippy
+  # and Rustdoc, runtime GraphQL on owned backends, and the PostgreSQL and SQL
+  # Server lanes.
   orm:
+    name: ORM default suite, Clippy and Rustdoc
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
@@ -99,6 +104,39 @@ jobs:
       - run: cargo test -p graphql-orm
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
+      - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
+
+  orm-runtime-graphql:
+    name: ORM runtime GraphQL on owned backends
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Execute opt-in runtime GraphQL reads and mutations on owned backends
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features mssql,runtime-graphql --test runtime_graphql_unsupported
+
+  # Fixture workspaces build into the shared target/fixtures directory used by
+  # the fixture runner tests, never into the source tree.
+  orm-backends:
+    name: ORM PostgreSQL and SQL Server lanes
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo check -p graphql-orm --no-default-features --features postgres
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
       - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions, keyed subscriptions and node ids
@@ -116,36 +154,27 @@ jobs:
       - name: Execute the private runtime string consumer on owned PostgreSQL
         env:
           CARGO_BUILD_JOBS: "2"
-        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test runtime_strings -- --ignored --test-threads=1
       - name: Execute the private runtime string consumer on owned SQLite
-        run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example runtime_strings
-      - name: Execute opt-in runtime GraphQL reads and mutations on owned backends
-        env:
-          CARGO_BUILD_JOBS: "2"
-        run: |
-          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations -- --test-threads=1
-          cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1
-          cargo test -p graphql-orm --locked --no-default-features --features mssql,runtime-graphql --test runtime_graphql_unsupported
+        run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example runtime_strings
       - name: Execute owned runtime migration preservation and compatibility
         run: |
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql --test runtime_migrations_unsupported
-          for backend in sqlite postgres mssql; do
-            cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --locked --no-default-features --features "$backend"
+          for backend in postgres mssql; do
+            cargo test --manifest-path crates/graphql-orm/tests/fixtures/migration-api-compatibility/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features "$backend"
           done
       - name: Execute host timestamps on owned PostgreSQL
         run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - name: Execute the private PostgreSQL host timestamp consumer
-        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test host_timestamps -- --ignored --test-threads=1
       - run: cargo check -p graphql-orm --no-default-features --features mssql
       - run: cargo test -p graphql-orm --no-default-features --features mssql --test federation_entity_keys_mssql --test runtime_records --test query_ir
-      - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
-      - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
   orm-security-sqlite:
     name: Current authority and subscription privacy (SQLite)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "1"
     steps:
