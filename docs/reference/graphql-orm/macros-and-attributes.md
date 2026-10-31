@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -622,6 +622,36 @@ use it to order writes: a result carrying an older version never replaces a newe
 
 A bare `#[graphql_orm(version)]` keeps its compare-and-swap-only behaviour. Switching an existing
 field to `managed` changes no column or default, so no migration is planned.
+
+### `RecordVersion`
+
+A managed entity also serves its version as a read-only `RecordVersion: Int!` field, so a client
+can recognise each type's record version from the SDL, or from introspection through
+graphql-orm-router, without per-type configuration:
+
+```graphql
+type Ticket {
+  id: ID!
+  rowVersion: Int!
+  RecordVersion: Int!
+}
+```
+
+- The name is always `RecordVersion` (`graphql_orm::graphql::orm::RECORD_VERSION_FIELD`); it does
+  not follow the `field-case-*` features. The declared field keeps its own name.
+- It resolves the declared field's value and applies the same field read policy and subscription
+  availability. Generated `Changed` payloads may select it.
+- It has no column and no input, filter, order or aggregate entry.
+- CAS-only `version` fields, repository-only and schema-only entities, and legacy
+  `#[graphql(complex)]` entities do not get it. Add it to a complex entity's `ComplexObject` by
+  hand if clients need it.
+- A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile
+  error.
+
+`Entity::managed_version_field()` returns the declared field's GraphQL name. The semantic catalogue
+records both kinds of version in `GraphqlEntitySemanticMetadata::record_version`, which holds the
+declared field and a mode of `managed` or `cas`. It is omitted when the entity has no version
+field.
 
 ## Generated `Changed` subscriptions
 

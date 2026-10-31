@@ -202,6 +202,39 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
     assert_eq!(nodes[1]["node"]["zone"]["name"], "south");
     assert_eq!(nodes[2]["node"]["zone"]["name"], "east");
 
+    // A managed record version reaches the router's schema and its joined
+    // results under the fixed `RecordVersion` name.
+    let zone_type = post(
+        &client,
+        &router,
+        Some(zones_subgraph::READ_SCOPE),
+        r#"{ __type(name: "Zone") { fields { name type { kind ofType { name } } } } }"#,
+    )
+    .await;
+    let fields = zone_type["data"]["__type"]["fields"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the router introspects Zone: {zone_type}"));
+    let record_version = fields
+        .iter()
+        .find(|field| field["name"] == "RecordVersion")
+        .unwrap_or_else(|| panic!("the router serves Zone.RecordVersion: {zone_type}"));
+    assert_eq!(record_version["type"]["kind"], "NON_NULL");
+    assert_eq!(record_version["type"]["ofType"]["name"], "Int");
+    let versions = post(
+        &client,
+        &router,
+        Some(zones_subgraph::READ_SCOPE),
+        "{ readings { edges { node { zone { RecordVersion } } } } }",
+    )
+    .await;
+    let versions = versions["data"]["readings"]["edges"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the joined record versions resolve: {versions}"))
+        .iter()
+        .map(|edge| edge["node"]["zone"]["RecordVersion"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(versions, [3, 1, 0]);
+
     // (d) Three joined representations cost the zones subgraph one statement.
     //
     // The ORM statement counter is process-global and both subgraphs share this

@@ -3,29 +3,9 @@
 use graphql_orm::prelude::*;
 use graphql_orm::rust_decimal::Decimal;
 
-fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "resolver-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "argument-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "field-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
+#[path = "support/graphql_case.rs"]
+mod graphql_case;
+use graphql_case::{argument_name, field_name, resolver_name};
 
 /// Work records used to prove database-side grouped aggregation.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -298,13 +278,13 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
     let sdl = schema.sdl();
     let expected_enum = format!(
         "enum AggregateWorkRecordAggregateField {{\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n\t{}\n}}",
-        field_name("id", "Id"),
-        field_name("team", "Team"),
-        field_name("category", "Category"),
-        field_name("units", "Units"),
-        field_name("hours", "Hours"),
-        field_name("amount", "Amount"),
-        field_name("adjustment", "Adjustment"),
+        field_name("id"),
+        field_name("team"),
+        field_name("category"),
+        field_name("units"),
+        field_name("hours"),
+        field_name("amount"),
+        field_name("adjustment"),
     );
     assert!(
         sdl.contains(&expected_enum),
@@ -317,24 +297,23 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
     assert_eq!(descriptor.kind(), GraphqlOperationKind::Query);
     assert_eq!(descriptor.arguments().len(), 4);
     assert!(sdl.contains(descriptor.field_name()), "{sdl}");
-    let root = resolver_name(
-        "aggregateWorkRecordsAggregate",
-        "AggregateWorkRecordsAggregate",
-    );
-    let group_by = argument_name("groupBy", "GroupBy");
-    let metrics = argument_name("metrics", "Metrics");
-    let group_limit = argument_name("groupLimit", "GroupLimit");
-    let team = field_name("team", "Team");
-    let units = field_name("units", "Units");
-    let groups = field_name("groups", "Groups");
-    let field = field_name("field", "Field");
-    let kind = field_name("kind", "Kind");
-    let value = field_name("value", "Value");
-    let operator = field_name("operator", "Operator");
+    let root = resolver_name("aggregateWorkRecordsAggregate");
+    let group_by = argument_name("groupBy");
+    let metrics = argument_name("metrics");
+    let group_limit = argument_name("groupLimit");
+    let team = field_name("team");
+    let units = field_name("units");
+    let groups = field_name("groups");
+    let field = field_name("field");
+    let kind = field_name("kind");
+    let value = field_name("value");
+    let operator = field_name("operator");
+    // `metrics` is both the argument and the result field; each follows its own case.
+    let metrics_field = field_name("metrics");
     let query = format!(
         "{{ {root}({group_by}: [{team}], {metrics}: [{{{operator}: COUNT}}, \
          {{{operator}: SUM, {field}: {units}}}], {group_limit}: 10) \
-         {{ {groups} {{ {field} {kind} {value} }} {metrics} \
+         {{ {groups} {{ {field} {kind} {value} }} {metrics_field} \
          {{ {field} {operator} {kind} {value} }} }} }}"
     );
     let response = schema.execute(query).await;
@@ -345,7 +324,7 @@ async fn aggregate_root_is_opt_in_and_catalogued() -> graphql_orm::Result<()> {
         .expect("aggregate response should serialize");
     let row = &data[root][0];
     assert_eq!(row[groups][0][value], "alpha");
-    assert_eq!(row[metrics][0][value], "1");
-    assert_eq!(row[metrics][1][value], "3");
+    assert_eq!(row[metrics_field][0][value], "1");
+    assert_eq!(row[metrics_field][1][value], "3");
     Ok(())
 }

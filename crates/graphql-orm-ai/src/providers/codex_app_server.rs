@@ -9129,6 +9129,7 @@ pub(crate) mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let parent = GraphqlEntitySemanticMetadata {
             entity_name: "Parent".to_owned(),
@@ -9177,6 +9178,7 @@ pub(crate) mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,
@@ -9294,6 +9296,7 @@ pub(crate) mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let mutation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Mutation,
@@ -9362,6 +9365,7 @@ pub(crate) mod tests {
             ]
             .into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let subscription = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Subscription,

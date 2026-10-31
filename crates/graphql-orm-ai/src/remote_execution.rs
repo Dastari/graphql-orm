@@ -1399,6 +1399,7 @@ mod tests {
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![scalar("recordId", "ID"), scalar("subject", "String")].into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let operation = GraphqlSemanticOperationDescriptor::custom(
             GraphqlOperationKind::Query,

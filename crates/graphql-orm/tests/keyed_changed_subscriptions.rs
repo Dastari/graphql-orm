@@ -16,6 +16,10 @@ use graphql_orm::prelude::*;
 use std::task::Poll;
 use tokio::time::{Duration, timeout};
 
+#[path = "support/graphql_case.rs"]
+mod graphql_case;
+use graphql_case::{argument_name, field_name, resolver_name};
+
 #[cfg(feature = "mssql")]
 #[path = "support/owned_mssql.rs"]
 mod owned_mssql;
@@ -25,30 +29,6 @@ mod owned_mssql;
 mod owned_postgres;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-fn resolver_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "resolver-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn argument_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "argument-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
-
-fn field_name(camel: &'static str, pascal: &'static str) -> &'static str {
-    if cfg!(feature = "field-case-pascal") {
-        pascal
-    } else {
-        camel
-    }
-}
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(
@@ -352,18 +332,18 @@ async fn touch(db: &Database, id: &str, label: &str) -> graphql_orm::Result<()> 
 }
 
 fn parent_subscription(arguments: &str) -> String {
-    let changed = resolver_name("keyedParentChanged", "KeyedParentChanged");
-    let id = field_name("id", "Id");
-    let change_kind = field_name("changeKind", "ChangeKind");
-    let entity = field_name("keyedParent", "KeyedParent");
-    let label = field_name("label", "Label");
+    let changed = resolver_name("keyedParentChanged");
+    let id = field_name("id");
+    let change_kind = field_name("changeKind");
+    let entity = field_name("keyedParent");
+    let label = field_name("label");
     format!(
         "subscription {{ {changed}{arguments} {{ {id} {change_kind} {entity} {{ {label} }} }} }}"
     )
 }
 
 fn keys_argument(keys: &[&str]) -> String {
-    let keys_arg = argument_name("keys", "Keys");
+    let keys_arg = argument_name("keys");
     let list = keys
         .iter()
         .map(|key| format!("\"{key}\""))
@@ -415,11 +395,11 @@ async fn next_event(stream: &mut Events, changed: &str) -> serde_json::Value {
 }
 
 fn parent_changed() -> &'static str {
-    resolver_name("keyedParentChanged", "KeyedParentChanged")
+    resolver_name("keyedParentChanged")
 }
 
 fn id_of(event: &serde_json::Value) -> String {
-    event[field_name("id", "Id")]
+    event[field_name("id")]
         .as_str()
         .expect("event id")
         .to_string()
@@ -458,7 +438,7 @@ async fn one_key_matches_like_key(db: &Database) -> TestResult {
     let event = next_event(&mut stream, parent_changed()).await;
     assert_eq!(id_of(&event), "p1");
     assert_eq!(
-        event[field_name("keyedParent", "KeyedParent")][field_name("label", "Label")],
+        event[field_name("keyedParent")][field_name("label")],
         "inside"
     );
     Ok(())
@@ -527,8 +507,8 @@ async fn the_maximum_is_accepted_and_one_more_is_refused(db: &Database) -> TestR
 }
 
 async fn key_and_keys_together_are_refused(db: &Database) -> TestResult {
-    let key_arg = argument_name("key", "Key");
-    let keys_arg = argument_name("keys", "Keys");
+    let key_arg = argument_name("key");
+    let keys_arg = argument_name("keys");
     let mut stream = open(
         db,
         parent_subscription(&format!(r#"({key_arg}: "p1", {keys_arg}: ["p1"])"#)),
@@ -597,7 +577,7 @@ async fn propagated_parent_events_match_the_parents_key(db: &Database) -> TestRe
     }
     let event = next_event(&mut stream, parent_changed()).await;
     assert_eq!(id_of(&event), "p1");
-    assert_eq!(event[field_name("changeKind", "ChangeKind")], "PROPAGATED");
+    assert_eq!(event[field_name("changeKind")], "PROPAGATED");
     Ok(())
 }
 
@@ -614,11 +594,11 @@ async fn composite_keys_match_on_the_complete_key(db: &Database) -> TestResult {
         )
         .await?;
     }
-    let changed = resolver_name("keyedSlotChanged", "KeyedSlotChanged");
-    let keys_arg = argument_name("keys", "Keys");
-    let key_field = field_name("key", "Key");
-    let site_field = field_name("site", "Site");
-    let name_field = field_name("name", "Name");
+    let changed = resolver_name("keyedSlotChanged");
+    let keys_arg = argument_name("keys");
+    let key_field = field_name("key");
+    let site_field = field_name("site");
+    let name_field = field_name("name");
     // Each part of a composite key also appears in another, unlisted key.
     let mut stream = open(
         db,
@@ -671,7 +651,7 @@ async fn unkeyed_subscriptions_are_unchanged(db: &Database) -> TestResult {
     );
 
     let sdl = schema_builder(db.clone()).finish().sdl();
-    let keys_arg = argument_name("keys", "Keys");
+    let keys_arg = argument_name("keys");
     // The argument block of `name(...)` in the subscription root, whatever its layout.
     let arguments = |name: &str| {
         let start = sdl
@@ -685,7 +665,7 @@ async fn unkeyed_subscriptions_are_unchanged(db: &Database) -> TestResult {
         single.contains(&format!("{keys_arg}: [String!]")),
         "{single}"
     );
-    let composite = arguments(resolver_name("keyedSlotChanged", "KeyedSlotChanged"));
+    let composite = arguments(resolver_name("keyedSlotChanged"));
     assert!(
         composite.contains(&format!("{keys_arg}: [KeyedSlotKeyInput!]")),
         "{composite}"

@@ -781,6 +781,33 @@ pub struct GraphqlEntitySemanticMetadata {
     /// entity declares no label; omitted from the wire and fingerprint then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_fields: Vec<String>,
+    /// The entity's record version field, if it declares one. Omitted from the
+    /// wire and fingerprint when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_version: Option<GraphqlRecordVersionMetadata>,
+}
+
+/// The field that carries an entity's optimistic-concurrency record version.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GraphqlRecordVersionMetadata {
+    /// Exact public GraphQL name of the declared version field, after field
+    /// case selection. It names a non-list scalar field of the same entity.
+    pub field: String,
+    /// Who advances the version.
+    pub mode: GraphqlRecordVersionMode,
+}
+
+/// Who advances an entity's record version.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GraphqlRecordVersionMode {
+    /// Every generated write advances the version, and the entity also serves
+    /// it as the fixed `RecordVersion` field.
+    Managed,
+    /// The version is only compared by `expectedVersion`; the application
+    /// writes it.
+    Cas,
 }
 
 /// Durability advertised by one semantically described subscription.
@@ -1576,6 +1603,24 @@ fn validate_entity(entity: &GraphqlEntitySemanticMetadata) -> Result<(), Graphql
             return Err(GraphqlSemanticError::new("semantic label field is invalid"));
         }
     }
+    if let Some(version) = &entity.record_version {
+        let eligible = entity.fields.iter().any(|field| {
+            field.field_name == version.field
+                && field.relationship.is_none()
+                && matches!(
+                    field.type_ref,
+                    GraphqlSemanticTypeRef::Named {
+                        kind: GraphqlSemanticTypeKind::Scalar,
+                        ..
+                    }
+                )
+        });
+        if !eligible {
+            return Err(GraphqlSemanticError::new(
+                "semantic record version field is invalid",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -2173,6 +2218,7 @@ mod filter_contract_tests {
             default_classification: GraphqlSemanticClassification::Internal,
             fields: vec![field].into_boxed_slice(),
             label_fields: Vec::new(),
+            record_version: None,
         };
         let catalog = GraphqlSemanticCatalog::compose_descriptors([entity], []).unwrap();
         let payload = catalog.extension_payload().unwrap();
@@ -2193,5 +2239,60 @@ mod filter_contract_tests {
         forged["entities"][0]["fields"][0]["filter_input"]["operators"][0]["graphql_name"] =
             serde_json::json!("privateId");
         assert!(GraphqlSemanticCatalog::from_extension_payload(forged).is_err());
+    }
+
+    #[test]
+    fn record_version_is_omitted_when_absent_and_must_name_a_scalar_field() {
+        let field = |name: &str, scalar: &str| GraphqlSemanticFieldMetadata {
+            field_name: name.into(),
+            description: "Public field.".into(),
+            type_ref: filter_scalar(scalar, false),
+            selectable: true,
+            filter_operators: vec![GraphqlSemanticFilterOperator::Equal],
+            filter_input: Some(eq_input()),
+            sortable: false,
+            groupable: false,
+            aggregate_operators: Vec::new(),
+            aggregate_value_kind: None,
+            relationship: None,
+            classification: GraphqlSemanticClassification::Internal,
+            export: GraphqlSemanticExport::Exportable,
+            has_field_policy: false,
+        };
+        let entity = |record_version| GraphqlEntitySemanticMetadata {
+            entity_name: "Record".into(),
+            description: "Public record.".into(),
+            default_classification: GraphqlSemanticClassification::Internal,
+            fields: vec![field("id", "String"), field("rowVersion", "Int")].into_boxed_slice(),
+            label_fields: Vec::new(),
+            record_version,
+        };
+        let unversioned = GraphqlSemanticCatalog::compose_descriptors([entity(None)], []).unwrap();
+        let payload = unversioned.extension_payload().unwrap();
+        assert!(payload["entities"][0].get("record_version").is_none());
+
+        let managed = GraphqlRecordVersionMetadata {
+            field: "rowVersion".into(),
+            mode: GraphqlRecordVersionMode::Managed,
+        };
+        let versioned =
+            GraphqlSemanticCatalog::compose_descriptors([entity(Some(managed.clone()))], [])
+                .unwrap();
+        let payload = versioned.extension_payload().unwrap();
+        assert_eq!(
+            payload["entities"][0]["record_version"],
+            serde_json::json!({"field": "rowVersion", "mode": "managed"})
+        );
+        assert_eq!(
+            GraphqlSemanticCatalog::from_extension_payload(payload).unwrap(),
+            versioned
+        );
+        assert_ne!(versioned.fingerprint, unversioned.fingerprint);
+
+        let missing = GraphqlRecordVersionMetadata {
+            field: "absent".into(),
+            ..managed
+        };
+        assert!(GraphqlSemanticCatalog::compose_descriptors([entity(Some(missing))], []).is_err());
     }
 }

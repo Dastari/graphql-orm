@@ -3,12 +3,19 @@ title: "graphql-orm-ai-tool-profiles migration guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-10-31
 review_by: 2027-02-11
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.19.0 to 0.20.0: operation catalogue 0.7.0
+
+Adopt profiles 0.20.0 with operation catalogue 0.7.0 from one reviewed
+revision. Code that builds `GraphqlEntitySemanticMetadata` with a struct literal
+adds `record_version: None`. Profiles, capabilities and fingerprints are
+unchanged.
 
 ## 0.17.0 to 0.19.0: typed filter authority and semantic input ownership
 

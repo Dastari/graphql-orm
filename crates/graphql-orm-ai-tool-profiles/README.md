@@ -3,7 +3,7 @@ title: "graphql-orm-ai-tool-profiles"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-02
+last_reviewed: 2026-10-31
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -19,6 +19,9 @@ be used without selecting the `graphql-orm-ai` persistence runtime.
 It does not enable resolvers, mint authority, perform introspection, execute
 GraphQL, grant provider egress, or make a generated resolver an AI tool. Those
 are separate runtime decisions and must remain default-deny.
+
+Version 0.20.0 adopts operation catalogue 0.7.0, whose optional entity
+`record_version` metadata does not change profile compilation.
 
 Version 0.19.0 requires operation catalog 0.6.0 and validated wire-3 producer
 filter contracts. One proof checks exact canonical operator names, operand
@@ -81,7 +84,7 @@ authorization policies. No downstream catalogue filtering is needed.
 
 ```toml
 [dependencies]
-graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.19.0" }
+graphql-orm-ai-tool-profiles = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.20.0" }
 serde_json = "1"
 ```
 

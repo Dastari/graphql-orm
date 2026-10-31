@@ -286,6 +286,18 @@ jobs:
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --lib --test projection_visibility -- -D warnings
           done
 
+  # The suites that spell names through tests/support/graphql_case.rs, under
+  # every snake-case feature together (#267).
+  orm-case-features:
+    name: ORM snake-case naming
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui
+
   companions:
     runs-on: ubuntu-latest
     steps:

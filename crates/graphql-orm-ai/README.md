@@ -3,12 +3,16 @@ title: "graphql-orm-ai"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-17
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-ai
+
+Version `0.119.0` adopts operation catalogue 0.7.0 (optional entity record
+version metadata), profiles 0.20.0 and ORM 0.87.0. No AI behaviour changes; see
+[MIGRATION.md](MIGRATION.md).
 
 Version `0.118.0` adopts profiles 0.19.0, operation catalog 0.6.0 and ORM
 0.80.0 as one public type universe. Filter capabilities require canonical typed
@@ -254,7 +258,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.118.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.119.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

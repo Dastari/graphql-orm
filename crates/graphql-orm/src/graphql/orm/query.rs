@@ -66,9 +66,23 @@ pub struct RepositoryFieldPolicyDef {
     pub sensitive: bool,
 }
 
+/// Fixed GraphQL name of the read-only field that every entity with a managed
+/// record version exposes. It never follows the selected field case, so a
+/// client recognises a type's record version by this name alone.
+pub const RECORD_VERSION_FIELD: &str = "RecordVersion";
+
 pub trait Entity: DatabaseEntity + DatabaseSchema + EntityRelations + DatabaseSearchSchema {
     fn entity_name() -> &'static str;
     fn metadata() -> &'static EntityMetadata;
+
+    /// Public field name of the entity's managed record version, if it has one.
+    ///
+    /// Generated entities with `#[graphql_orm(version = "managed")]` return the
+    /// declared field's GraphQL name; the same value is also exposed as
+    /// [`RECORD_VERSION_FIELD`]. CAS-only versions return none.
+    fn managed_version_field() -> Option<&'static str> {
+        None
+    }
 
     /// Returns optional public semantic descriptions emitted by the derive.
     /// Handwritten implementations remain source-compatible and return none.
