@@ -23,6 +23,7 @@ Companion runtime/macros version: **0.87.0**. Operation catalogue: **0.7.0**.
 - A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile error.
 - graphql-orm-operation-catalog 0.7.0 adds `GraphqlEntitySemanticMetadata::record_version: Option<GraphqlRecordVersionMetadata>`. It holds the declared field's wire name and a `GraphqlRecordVersionMode` of `managed` or `cas`, and is validated to name a scalar field of the entity. It is omitted from the wire and fingerprint when absent, so semantic wire 3 is unchanged. Struct literals must add the member. graphql-orm-ai-tool-profiles 0.20.0 and graphql-orm-ai 0.119.0 adopt catalogue 0.7.0.
 - Entities without a managed version keep unchanged SDL. Catalogues without versions keep unchanged payloads and fingerprints.
+- Fix: an entity with a managed version on a read-only generated surface, for example SQL Server `schema_policy = "external_read_only"`, no longer fails to compile with a missing `__gom_runtime_error`. This was broken since 0.84.0.
 
 ## 0.86.0 (unreleased)
 
