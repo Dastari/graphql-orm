@@ -31,7 +31,7 @@ RuntimeCollection {
         ],
         language: None,          // PostgreSQL text search configuration; "english"
         tokenizer: None,         // SQLite: Unicode61 (default), Porter or Ascii
-        remove_diacritics: true, // "Maori" matches "Māori"; unicode61 only
+        remove_diacritics: true, // "Maori" matches "Māori" on every backend; unicode61 only
         min_token_len: None,     // 1..=16; 2
     }),
 }
@@ -157,6 +157,8 @@ Searching reads every searchable field.
 | `remove_diacritics` | the `unicode61 remove_diacritics 2` tokenizer. Without it, the default `unicode61` tokenizer still folds most Latin diacritics (its `remove_diacritics 1` mode), so `maori` matches `Māori` either way | documents and queries folded by the ORM (canonical decomposition, combining marks removed); no `unaccent` extension needed. Without it, accents are kept |
 | Language | ignored | text search configuration, checked at plan time |
 
+- **`remove_diacritics: true`** behaves the same on both backends: matching ignores accents.
+- **`remove_diacritics: false`** is only guaranteed to keep accents on PostgreSQL. On SQLite it still matches most accented and plain forms, as the table shows. This is a known backend difference.
 - **Scores aren't comparable across backends.** Ordering is promised only within one backend.
 - **SQLite's `bm25`** depends on corpus statistics, so relevance-ordered pages can shift if documents change between page requests.
 - **`PHRASE` and `PREFIX` syntax** follows each engine.
