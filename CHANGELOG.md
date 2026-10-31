@@ -16,6 +16,16 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.88.0**. Router: **0.8.1**.
+
+- Generated `<Entity>Changed` subscriptions no longer skip events silently when a subscriber falls behind. Continuity is checked at the event channel, before any `Key`, `Keys`, `Actions`, row-policy or provenance filter. A subscriber that fell further behind than the channel holds receives one error with `extensions.code` `SUBSCRIPTION_CONTINUITY_LOST`, and its stream ends. A closed channel ends the stream with `SUBSCRIPTION_SOURCE_CLOSED`. The error carries no skipped count, key or payload. Through graphql-orm-router, the client receives a `next` frame carrying the error, then `complete`. Clients subscribe again, then refetch. See [delivery and continuity](docs/reference/graphql-orm/macros-and-attributes.md#delivery-and-continuity). ([#225](https://github.com/Dastari/graphql-orm/issues/225))
+- Add `graphql_orm::graphql::subscriptions::{SUBSCRIPTION_CONTINUITY_LOST, SUBSCRIPTION_SOURCE_CLOSED}`, the public `DEFAULT_EVENT_CHANNEL_CAPACITY` (256), `Database::event_channel_capacity`, `Database::set_event_channel_capacity` and `DatabaseBuilder::event_channel_capacity`.
+- Breaking for Rust callers: generated subscription resolver methods return `Stream<Item = async_graphql::Result<ChangedPayload<_>>>` instead of `Stream<Item = ChangedPayload<_>>`. The GraphQL SDL is unchanged.
+- graphql-orm-router 0.8.1 adds a test of the frames a client receives when a subgraph subscription ends with an error item; router behaviour is unchanged.
+- Mid-stream authority revocation is still skipped silently; [#276](https://github.com/Dastari/graphql-orm/issues/276) tracks ending the stream instead.
+
+## 0.87.0 (unreleased)
+
 Companion runtime/macros version: **0.87.0**. Operation catalogue: **0.7.0**.
 
 - Entities with a managed record version (`#[graphql_orm(version = "managed")]`) also serve it as a read-only `RecordVersion: Int!` field. The name is fixed: it does not follow the `field-case-*` features, so a client recognises each type's record version from the SDL or introspection alone. It resolves the declared field's value and applies that field's read policy and subscription availability. Generated `Changed` payloads may select it. CAS-only `version` fields get no `RecordVersion`. See [managed versions](docs/reference/graphql-orm/macros-and-attributes.md#managed-versions). ([#264](https://github.com/Dastari/graphql-orm/issues/264))

@@ -684,6 +684,43 @@ the new `Keys` and then close the old subscription, debouncing rapid changes. Wh
 an event for a key in both sets can arrive twice; drop the duplicate by record version (see
 [managed versions](#managed-versions)). Refetch the records that were added, because events
 written before the new subscription started are not replayed.
-Unkeyed subscriptions, and subscriptions that pass only `Key`, behave as before. Generated
-broadcast subscriptions are best effort: lag and continuity signalling is tracked separately in
-[#225](https://github.com/Dastari/graphql-orm/issues/225).
+Unkeyed subscriptions, and subscriptions that pass only `Key`, behave as before.
+
+### Delivery and continuity
+
+Generated `Changed` subscriptions are process-local and best effort. Each event is delivered at
+most once, nothing is persisted, and nothing is replayed after a reconnect. Each entity type has
+one bounded broadcast channel. Its capacity, `Database::event_channel_capacity()`, defaults to
+`DEFAULT_EVENT_CHANNEL_CAPACITY` (256) events. Change it with `set_event_channel_capacity` or the
+builder's `event_channel_capacity`, before the first subscription or event.
+
+A subscriber never silently misses events. Continuity is checked at the channel, before the key,
+`Keys`, `Actions`, row-policy and provenance filters. So keyed, unkeyed, action-filtered,
+policy-suppressed and propagated subscriptions all behave the same way:
+
+| What happened | The stream yields | Then |
+| --- | --- | --- |
+| The subscriber fell further behind than the channel holds | one error with `extensions.code` `SUBSCRIPTION_CONTINUITY_LOST` | ends |
+| The channel closed, for example because `register_event_sender` replaced it | one error with `extensions.code` `SUBSCRIPTION_SOURCE_CLOSED` | ends |
+
+- The error carries no skipped count, key or payload. It reveals only that the process-local
+  channel overflowed or closed while this subscription was open, and never how many events were
+  hidden from the subscriber.
+- Over graphql-transport-ws, and through graphql-orm-router, the client receives a `next` frame
+  whose payload is `{"data": null, "errors": [{..., "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}}]}`,
+  followed by `complete` for the same id. There is no protocol `error` frame.
+- After either error, subscribe again first, then refetch the state the client shows. The error
+  message says the same. Events committed between the new subscription and the refetch then still
+  arrive. Refetching first would miss any write that lands before the new subscription starts.
+  Drop duplicates by record version (`RecordVersion`).
+- The capacity is per entity type and shared by every subscriber of that type. One bulk write of
+  more rows than the capacity, such as an import or a sync, can make every subscriber of the type
+  lag at once. All of them then end with `SUBSCRIPTION_CONTINUITY_LOST` and resync together. That
+  is correct, but a host with bulk writers should either raise `event_channel_capacity` above its
+  largest burst or expect every subscriber to resync. Clients should add jitter to their
+  resubscribe and refetch so they don't all arrive at the same moment.
+- A subscriber whose authority is revoked mid-stream still has its events skipped silently.
+  [#276](https://github.com/Dastari/graphql-orm/issues/276) tracks ending the stream instead.
+- The `GraphQLOperations` resolver method returns
+  `Stream<Item = async_graphql::Result<ChangedPayload<_>>>`. The SDL type of the subscription field
+  is unchanged.

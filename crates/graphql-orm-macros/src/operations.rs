@@ -5488,7 +5488,7 @@ fn generate_graphql_operations_unfiltered(
                     #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
                     #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: Option<#key_type>,
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
-                ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>> {
+                ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                     use ::graphql_orm::futures::StreamExt;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #subscription_scope_enforcement
@@ -5520,68 +5520,75 @@ fn generate_graphql_operations_unfiltered(
                     let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
-                    Ok(::graphql_orm::tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
+                    Ok(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
                         let key = key.clone();
                         let keys = keys.clone();
                         async move {
-                            let witness = result.ok()?;
-                            let event = witness.event.as_ref();
-                            if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
-                            if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
-                            if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
-                            if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
-                            let authorize_current = || async {
-                                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                #subscription_scope_enforcement
-                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
-                                if witness.trusted_delete
-                                    && event.entity.as_ref().is_some_and(|entity|
-                                        ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_subscription_key_values(entity))
-                                        != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                    ) { return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
-                                let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
-                                let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
-                                    .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
-                                if key.is_some() || keys.is_some() {
-                                    ::graphql_orm::graphql::subscriptions::authorize_subscription_keys::<#struct_name, #backend_marker>(&db, ctx, &row).await?;
-                                }
-                                ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
-                                // Query and field-policy awaits must not outlive current authority.
-                                db.ensure_entity_access(Some(ctx), #entity_name_lit,
-                                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await?;
-                                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                #subscription_scope_enforcement
-                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
-                                #struct_name::__gom_authorize_changed_operation(ctx)?;
-                                Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
+                            let witness = match result {
+                                Ok(witness) => witness,
+                                // Lost continuity or a closed event source: one error, then the stream ends.
+                                Err(error) => return Some(Err(error)),
                             };
-                            match authorize_current().await {
-                                Ok(row) => {
-                                    let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_event {
-                                        action: event.action,
-                                        change_kind: event.change_kind,
-                                        id: event.id.clone(),
-                                        source_entity: event.source_entity.clone(),
-                                        source_id: event.source_id.clone(),
-                                        path: event.path.clone(),
-                                        entity: Some(row),
-                                    }, ctx).await?;
-                                    // Successful serialization can itself await or revoke authority.
-                                    // Recheck the complete current release contract before yielding.
-                                    match authorize_current().await {
-                                        Ok(_) => Some(prepared),
-                                        Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
+                                let event = witness.event.as_ref();
+                                if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
+                                if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
+                                if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
+                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
+                                if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
+                                let authorize_current = || async {
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    #subscription_scope_enforcement
+                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                    if witness.trusted_delete
+                                        && event.entity.as_ref().is_some_and(|entity|
+                                            ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_subscription_key_values(entity))
+                                            != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
+                                        ) { return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
+                                    let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
+                                    let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
+                                        .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
+                                    if key.is_some() || keys.is_some() {
+                                        ::graphql_orm::graphql::subscriptions::authorize_subscription_keys::<#struct_name, #backend_marker>(&db, ctx, &row).await?;
                                     }
-                                },
-                                Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
-                            }
+                                    ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
+                                    // Query and field-policy awaits must not outlive current authority.
+                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
+                                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await?;
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    #subscription_scope_enforcement
+                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                    #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                    Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
+                                };
+                                match authorize_current().await {
+                                    Ok(row) => {
+                                        let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_event {
+                                            action: event.action,
+                                            change_kind: event.change_kind,
+                                            id: event.id.clone(),
+                                            source_entity: event.source_entity.clone(),
+                                            source_id: event.source_id.clone(),
+                                            path: event.path.clone(),
+                                            entity: Some(row),
+                                        }, ctx).await?;
+                                        // Successful serialization can itself await or revoke authority.
+                                        // Recheck the complete current release contract before yielding.
+                                        match authorize_current().await {
+                                            Ok(_) => Some(prepared),
+                                            Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                                        }
+                                    },
+                                    Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                                }
+                            }.await;
+                            delivered.map(Ok)
                         }
                     }))
                 }
@@ -7279,7 +7286,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #filter_arg_name, desc = #filter_arg_description)] _filter: Option<::graphql_orm::graphql::orm::SubscriptionFilterInput>,
                 #[graphql(name = #subscription_key_arg_name, desc = "Exact complete primary key to observe")] key: Option<#key_type>,
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
-            ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>> {
+            ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                 use ::graphql_orm::futures::StreamExt;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #subscription_scope_enforcement
@@ -7312,69 +7319,76 @@ fn generate_graphql_operations_unfiltered(
                 let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
-                    Ok(::graphql_orm::tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |result| {
+                    Ok(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
                         let key = key.clone();
                         let keys = keys.clone();
                         async move {
-                            let witness = result.ok()?;
-                            let event = witness.event.as_ref();
-                            if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
-                            if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
-                            if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
-                            if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
-                            let authorize_current = || async {
-                                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                #subscription_scope_enforcement
-                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
-                                if witness.trusted_delete
-                                    && event.entity.as_ref().is_some_and(|entity|
-                                        ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_subscription_key_values(entity))
-                                        != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                    ) { return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
-                                let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
-                                let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
-                                    .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
-                                if key.is_some() || keys.is_some() {
-                                    ::graphql_orm::graphql::subscriptions::authorize_subscription_keys::<#struct_name, #backend_marker>(&db, ctx, &row).await?;
-                                }
-                                ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
-                                // Query and field-policy awaits must not outlive current authority.
-                                db.ensure_entity_access(Some(ctx), #entity_name_lit,
-                                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await?;
-                                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                #subscription_scope_enforcement
-                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
-                                witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
-                                #struct_name::__gom_authorize_changed_operation(ctx)?;
-                                Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
+                            let witness = match result {
+                                Ok(witness) => witness,
+                                // Lost continuity or a closed event source: one error, then the stream ends.
+                                Err(error) => return Some(Err(error)),
                             };
-                            match authorize_current().await {
-                                Ok(row) => {
-                                    let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_event {
-                                        action: event.action,
-                                        change_kind: event.change_kind,
-                                        id: event.id.clone(),
-                                        #subscription_release_key_field
-                                        source_entity: event.source_entity.clone(),
-                                        source_id: event.source_id.clone(),
-                                        path: event.path.clone(),
-                                        entity: Some(row),
-                                    }, ctx).await?;
-                                    // Successful serialization can itself await or revoke authority.
-                                    // Recheck the complete current release contract before yielding.
-                                    match authorize_current().await {
-                                        Ok(_) => Some(prepared),
-                                        Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
+                                let event = witness.event.as_ref();
+                                if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
+                                if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
+                                if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
+                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
+                                if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
+                                let authorize_current = || async {
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    #subscription_scope_enforcement
+                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                    if witness.trusted_delete
+                                        && event.entity.as_ref().is_some_and(|entity|
+                                            ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_subscription_key_values(entity))
+                                            != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
+                                        ) { return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()); }
+                                    let preimage = if witness.trusted_delete && event.action == ::graphql_orm::graphql::orm::ChangeAction::Deleted { event.entity.as_ref() } else { None };
+                                    let row = ::graphql_orm::graphql::subscriptions::authorize_subscription_row::<#struct_name, #backend_marker>(&db, ctx, &witness.keys, preimage).await?
+                                        .ok_or_else(|| ::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error())?;
+                                    if key.is_some() || keys.is_some() {
+                                        ::graphql_orm::graphql::subscriptions::authorize_subscription_keys::<#struct_name, #backend_marker>(&db, ctx, &row).await?;
                                     }
-                                },
-                                Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
-                            }
+                                    ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
+                                    // Query and field-policy awaits must not outlive current authority.
+                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
+                                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await?;
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    #subscription_scope_enforcement
+                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
+                                    #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                    Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
+                                };
+                                match authorize_current().await {
+                                    Ok(row) => {
+                                        let prepared = ::graphql_orm::graphql::subscriptions::ChangedPayload::prepare(#changed_event {
+                                            action: event.action,
+                                            change_kind: event.change_kind,
+                                            id: event.id.clone(),
+                                            #subscription_release_key_field
+                                            source_entity: event.source_entity.clone(),
+                                            source_id: event.source_id.clone(),
+                                            path: event.path.clone(),
+                                            entity: Some(row),
+                                        }, ctx).await?;
+                                        // Successful serialization can itself await or revoke authority.
+                                        // Recheck the complete current release contract before yielding.
+                                        match authorize_current().await {
+                                            Ok(_) => Some(prepared),
+                                            Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                                        }
+                                    },
+                                    Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
+                                }
+                            }.await;
+                            delivered.map(Ok)
                         }
                     }))
             }

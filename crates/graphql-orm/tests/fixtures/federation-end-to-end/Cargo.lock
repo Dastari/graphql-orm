@@ -2500,7 +2500,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.87.0"
+version = "0.88.0"
 dependencies = [
  "async-graphql",
  "base64 0.22.1",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.87.0"
+version = "0.88.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -2548,7 +2548,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",

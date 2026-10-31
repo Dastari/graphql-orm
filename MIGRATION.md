@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.87.0 to 0.88.0: Changed stream continuity
+
+- **Clients.** A generated `Changed` subscription can now end with one error, whose `extensions.code` is `SUBSCRIPTION_CONTINUITY_LOST` (the subscriber fell behind) or `SUBSCRIPTION_SOURCE_CLOSED` (the channel closed). Handle either by subscribing again, then refetching the state you show. Clients that treated the stream as endless see it complete after the error.
+- **Rust code that calls a generated subscription resolver method directly.** The stream item is now `async_graphql::Result<ChangedPayload<_>>`; match on `Ok` for events. Schemas built with `schema_builder` need no change.
+- **Capacity.** To change how far a subscriber may fall behind, call `Database::set_event_channel_capacity` before the first subscription or event. The default remains 256.
+
 ## 0.86.0 to 0.87.0: RecordVersion and catalogue record versions
 
 - **SDL.** Entities with `#[graphql_orm(version = "managed")]` gain the read-only `RecordVersion: Int!` field. Clients that generate code from the SDL see one new field per managed-version type.

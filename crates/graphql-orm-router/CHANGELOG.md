@@ -3,12 +3,20 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.8.1 (unreleased)
+
+- Test the frames a client receives when a subgraph subscription yields an
+  error item and then ends: one `next` frame carrying the error, then
+  `complete`, and no protocol `error` frame. This pins the shape generated ORM
+  `Changed` streams rely on for `SUBSCRIPTION_CONTINUITY_LOST`. Router code and
+  behaviour are unchanged.
 
 ## 0.8.0 (unreleased)
 
