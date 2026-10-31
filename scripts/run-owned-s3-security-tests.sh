@@ -29,3 +29,5 @@ run_owned_test() {
 
 run_owned_test s3_integration single_attempt_delete_does_not_replay_after_lost_response_and_replacement
 run_owned_test s3_https_transport owned_https_transport_fixture --ignored
+# Resumable multipart conformance on a test-owned, digest-pinned S3 server.
+run_owned_test s3_multipart owned_s3_passes_the_multipart_conformance_suite --ignored

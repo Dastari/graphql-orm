@@ -3,7 +3,7 @@ title: "Development"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -62,6 +62,28 @@ cargo test -p graphql-orm-storage --features s3 --no-default-features --test s3_
 
 Use a dedicated throwaway bucket or prefix. The test writes and deletes objects
 under a generated prefix.
+
+## Multipart conformance
+
+`tests/support/multipart_conformance.rs` is one scenario suite run against every
+multipart provider: three parts with a ranged read-back, resume from a
+persisted handle in a fresh instance, part retry, missing and mismatched
+receipts, double abort, stale-upload listing and cleanup, an `if_not_exists`
+conflict, part-size and part-number boundaries, concurrent uploads of one part
+and completion racing an abort. Local storage runs it by default:
+
+```bash
+cargo test -p graphql-orm-storage --test local_multipart
+```
+
+The S3 run starts its own digest-pinned RustFS container with random
+credentials on a loopback port, creates its bucket and removes the container. It
+refuses ambient `S3_TEST_*` configuration, and `scripts/run-owned-s3-security-tests.sh`
+runs it in CI and release validation:
+
+```bash
+cargo test -p graphql-orm-storage --no-default-features --features s3 --test s3_multipart -- --ignored
+```
 
 ## Managed SMB fixture ownership
 

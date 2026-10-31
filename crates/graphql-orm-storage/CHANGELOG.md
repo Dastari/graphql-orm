@@ -3,12 +3,43 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.8.0 (unreleased)
+
+- Add resumable multipart uploads: `MultipartBlobStore` with
+  `start_multipart`, `upload_part`, `list_parts`, `complete_multipart`,
+  `abort_multipart`, `list_incomplete_multipart` and `multipart_limits`.
+  `MultipartUploadHandle` and `PartReceipt` are serializable and carry no
+  credentials. See [multipart uploads](docs/multipart.md).
+- `complete_multipart` returns `MultipartCompleteOutcome { size_bytes,
+  sha256_hex: Option<String> }`. Local storage fills the digest; S3 returns none
+  and never reads the object back, because integrity rests on the per-part
+  SHA-256 checksums and the exact receipt list. Add the default
+  `BlobStore::compute_blob_sha256` to hash an object later.
+- A retried completion reports success when it can verify that its own object
+  is published. On S3 that means the size plus the multipart ETag; on local
+  storage, after a crash that left the staged parts, the size plus the SHA-256.
+- `LocalStorageBackend` stages fsynced parts under
+  `.graphql-orm-storage/multipart/`, and publishes the object atomically under an
+  advisory per-upload lock. `S3StorageBackend` uses the native multipart calls
+  with per-part SHA-256 checksums and a single-attempt conditional completion.
+  SMB and Azure don't implement it.
+- Add `BlobStore::as_multipart` (default none), `StorageService::multipart`,
+  `LocalStorageBackend::with_multipart_max_part_size` and
+  `S3StorageBackend::with_multipart_max_part_size`.
+- Breaking: add `StorageError::Multipart { key, kind: MultipartErrorKind }`.
+  `StorageBackend` now derives `Hash`. The `s3` feature adds the `base64` and
+  `md-5` dependencies, both already in the lockfile. Default features are unchanged.
+- Fix: S3 `list_blobs_page` with an empty prefix now lists only
+  `key_prefix/`, and drops keys outside it. Before, `key_prefix = "proj"` also
+  listed `project2/...`.
+- `put_blob`, `put_object_stream` and `MultipartWriter` are unchanged.
 
 ## 0.7.5 - 2026-10-18
 

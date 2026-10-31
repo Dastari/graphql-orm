@@ -104,6 +104,15 @@ pub enum StorageError {
         condition: String,
     },
 
+    /// A multipart upload operation was refused.
+    #[error("multipart upload refused for {key}: {kind}")]
+    Multipart {
+        /// Blob key of the upload.
+        key: String,
+        /// Why the operation was refused.
+        kind: crate::MultipartErrorKind,
+    },
+
     /// A local filesystem object path did not have a writable parent directory.
     #[error("local storage path has no parent: {path:?}")]
     MissingParent {
@@ -136,6 +145,7 @@ impl StorageError {
             | Self::InvalidStorageKey { .. }
             | Self::MissingBlob { .. }
             | Self::PreconditionFailed { .. }
+            | Self::Multipart { .. }
             | Self::MissingParent { .. } => false,
         }
     }

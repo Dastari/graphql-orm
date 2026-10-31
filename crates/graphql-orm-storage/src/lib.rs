@@ -39,9 +39,14 @@ mod error;
 mod key;
 #[cfg(feature = "local")]
 mod local;
+#[cfg(feature = "local")]
+mod local_multipart;
+mod multipart;
 mod object;
 #[cfg(feature = "s3")]
 mod s3;
+#[cfg(feature = "s3")]
+mod s3_multipart;
 mod service;
 #[cfg(feature = "smb")]
 mod smb;
@@ -59,6 +64,11 @@ pub use error::{StorageError, StorageProviderErrorKind};
 pub use key::{build_storage_key, file_extension};
 #[cfg(feature = "local")]
 pub use local::LocalStorageBackend;
+pub use multipart::{
+    IncompleteMultipartPage, IncompleteMultipartUpload, MULTIPART_MAX_PART_NUMBER,
+    MultipartBlobStore, MultipartCompleteOutcome, MultipartErrorKind, MultipartLimits,
+    MultipartStartOptions, MultipartUploadHandle, PartReceipt,
+};
 pub use object::{
     StorageObjectBody, StorageObjectStream, StoragePutRequest, StoragePutStreamRequest,
     StoredObject,

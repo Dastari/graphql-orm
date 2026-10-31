@@ -305,6 +305,41 @@ pub trait BlobStore: Send + Sync {
     /// Returns [`StorageError`] when the key is invalid or the provider cannot
     /// delete the blob.
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError>;
+
+    /// Streams an existing blob and returns its size and SHA-256.
+    ///
+    /// Use it to verify an object whose write did not report a digest, such as
+    /// an S3 multipart object, for example from a background job. It reads the
+    /// whole object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the key is invalid, the blob is missing or
+    /// the provider cannot read it.
+    async fn compute_blob_sha256(&self, key: &str) -> Result<BlobWriteOutcome, StorageError> {
+        use futures_util::StreamExt;
+        use sha2::Digest;
+        let mut stream = self.get_blob(key).await?.body.into_inner();
+        let mut hasher = sha2::Sha256::new();
+        let mut size_bytes = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            size_bytes = size_bytes.saturating_add(chunk.len() as u64);
+            hasher.update(&chunk);
+        }
+        Ok(BlobWriteOutcome {
+            size_bytes,
+            sha256_hex: format!("{:x}", hasher.finalize()),
+        })
+    }
+
+    /// Returns this provider's resumable multipart uploads, if it supports them.
+    ///
+    /// The default returns none. Providers that implement
+    /// [`MultipartBlobStore`](crate::MultipartBlobStore) return themselves.
+    fn as_multipart(&self) -> Option<&dyn crate::MultipartBlobStore> {
+        None
+    }
 }
 
 fn ranged_storage_stream(body: StorageByteStream, skip: u64, length: u64) -> StorageByteStream {
@@ -391,7 +426,7 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[cfg(any(feature = "local", feature = "smb"))]
+#[cfg(any(feature = "local", feature = "s3", feature = "smb"))]
 pub(crate) fn validate_blob_prefix(prefix: &str) -> Result<(), StorageError> {
     if prefix.is_empty() {
         Ok(())

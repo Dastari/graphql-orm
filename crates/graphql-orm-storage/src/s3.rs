@@ -58,8 +58,9 @@ impl fmt::Debug for S3StorageConfig {
 /// S3-compatible storage backend.
 #[derive(Clone, Debug)]
 pub struct S3StorageBackend {
-    config: S3StorageConfig,
-    client: Client,
+    pub(crate) config: S3StorageConfig,
+    pub(crate) client: Client,
+    pub(crate) multipart_max_part_size: u64,
 }
 
 impl S3StorageBackend {
@@ -83,7 +84,22 @@ impl S3StorageBackend {
         Self {
             config,
             client: Client::from_conf(s3_config),
+            multipart_max_part_size: crate::s3_multipart::DEFAULT_MAX_PART_SIZE,
         }
+    }
+
+    /// Sets the largest accepted multipart part, between 5 MiB and 5 GiB.
+    ///
+    /// Each in-flight [`upload_part`](crate::MultipartBlobStore::upload_part)
+    /// holds up to this many bytes in memory, because S3 requires the part
+    /// length before the body. The default is 64 MiB.
+    #[must_use]
+    pub fn with_multipart_max_part_size(mut self, bytes: u64) -> Self {
+        self.multipart_max_part_size = bytes.clamp(
+            crate::s3_multipart::MIN_PART_SIZE,
+            crate::s3_multipart::MAX_PART_SIZE,
+        );
+        self
     }
 
     /// Returns the backend configuration.
@@ -92,7 +108,7 @@ impl S3StorageBackend {
         &self.config
     }
 
-    fn provider_key(&self, key: &str) -> Result<String, StorageError> {
+    pub(crate) fn provider_key(&self, key: &str) -> Result<String, StorageError> {
         validate_blob_key(key)?;
         let Some(prefix) = self.config.key_prefix.as_deref() else {
             return Ok(key.to_string());
@@ -105,16 +121,43 @@ impl S3StorageBackend {
         Ok(format!("{prefix}/{key}"))
     }
 
-    fn strip_provider_prefix(&self, provider_key: &str) -> String {
-        let Some(prefix) = self.config.key_prefix.as_deref() else {
-            return provider_key.to_string();
-        };
-        let prefix = prefix.trim_matches('/');
+    /// The backend key for a provider key, or none when the provider key lies
+    /// outside this backend's `key_prefix`, for example another prefix sharing
+    /// the bucket.
+    pub(crate) fn strip_provider_prefix(&self, provider_key: &str) -> Option<String> {
+        let prefix = self
+            .config
+            .key_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_matches('/'))
+            .unwrap_or_default();
+        if prefix.is_empty() {
+            return Some(provider_key.to_string());
+        }
         provider_key
             .strip_prefix(prefix)
             .and_then(|key| key.strip_prefix('/'))
-            .unwrap_or(provider_key)
-            .to_string()
+            .map(ToString::to_string)
+    }
+
+    /// The provider prefix for listing backend keys that start with `prefix`.
+    /// An empty prefix lists exactly this backend's `key_prefix/` namespace, so
+    /// `proj` never matches `project2/...`.
+    pub(crate) fn listing_prefix(&self, prefix: &str) -> Result<String, StorageError> {
+        if !prefix.is_empty() {
+            return self.provider_key(prefix);
+        }
+        let key_prefix = self
+            .config
+            .key_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_matches('/'))
+            .unwrap_or_default();
+        Ok(if key_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{key_prefix}/")
+        })
     }
 
     async fn put_blob_inner(
@@ -329,6 +372,10 @@ impl BlobStore for S3StorageBackend {
         StorageBackend::S3
     }
 
+    fn as_multipart(&self) -> Option<&dyn crate::MultipartBlobStore> {
+        Some(self)
+    }
+
     async fn put_blob(
         &self,
         key: &str,
@@ -503,16 +550,7 @@ impl BlobStore for S3StorageBackend {
             });
         }
 
-        let provider_prefix = if prefix.is_empty() {
-            self.config
-                .key_prefix
-                .as_deref()
-                .map(|prefix| prefix.trim_matches('/'))
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            self.provider_key(prefix)?
-        };
+        let provider_prefix = self.listing_prefix(prefix)?;
 
         let output = self
             .client
@@ -529,7 +567,7 @@ impl BlobStore for S3StorageBackend {
             .contents()
             .iter()
             .filter_map(|object| object.key())
-            .map(|key| self.strip_provider_prefix(key))
+            .filter_map(|key| self.strip_provider_prefix(key))
             .filter(|key| !key.is_empty())
             .collect();
 
@@ -633,7 +671,7 @@ fn is_precondition_error(err: &StorageError) -> bool {
         || message.contains("code: 412")
 }
 
-fn map_s3_error<E>(err: aws_sdk_s3::error::SdkError<E>) -> StorageError
+pub(crate) fn map_s3_error<E>(err: aws_sdk_s3::error::SdkError<E>) -> StorageError
 where
     E: fmt::Debug,
 {

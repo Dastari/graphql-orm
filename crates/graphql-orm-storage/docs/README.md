@@ -3,7 +3,7 @@ title: "graphql-orm-storage documentation"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,7 @@ Start with the package [README](../README.md).
 ## How-to
 
 - [Use the streaming APIs](streaming.md).
+- [Upload resumable multipart objects](multipart.md).
 - [Record or play large objects](recording-streams.md).
 - [Connect native SMB2/SMB3](native-smb.md).
 - [Adapt storage for backup](backup-integration.md).

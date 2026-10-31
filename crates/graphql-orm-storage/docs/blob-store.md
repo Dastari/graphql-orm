@@ -3,7 +3,7 @@ title: "BlobStore"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -153,6 +153,16 @@ providers. Callers can use `StorageError::is_retryable()` to decide whether a
 failed operation is worth retrying. Local filesystem IO errors are treated as
 retryable; invalid keys, missing blobs, unsupported backends, and failed
 preconditions are permanent.
+
+`StorageError::Multipart { key, kind }` reports a refused multipart operation
+(unknown upload, backend mismatch, part number, part size or receipt mismatch).
+It is permanent. See [multipart uploads](multipart.md).
+
+## Multipart uploads
+
+`BlobStore::as_multipart()` returns the provider's `MultipartBlobStore`, or none.
+Local and S3 storage implement it; SMB and Azure do not. See
+[resumable multipart uploads](multipart.md).
 
 ## Relationship To ObjectStorage
 
