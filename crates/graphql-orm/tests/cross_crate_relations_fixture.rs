@@ -12,8 +12,12 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
     } else {
         "sqlite"
     };
+    // Every fixture workspace builds into one shared directory, so dependency
+    // builds they have in common are compiled once.
+    let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
     let status = std::process::Command::new(cargo)
         .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_TARGET_DIR", target_dir)
         .args([
             "test",
             "--manifest-path",

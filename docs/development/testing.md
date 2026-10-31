@@ -111,16 +111,24 @@ once per run. Run fixture workspaces by hand with
 `--target-dir target/fixtures` as well; without it Cargo writes a `target/`
 directory inside the fixture's source tree.
 
-CI and release validation run the ORM lanes as three parallel jobs: `orm`
-(the default package suite, the router-protocol and case-feature contract
-tests, Clippy and Rustdoc), `orm-runtime-graphql` (runtime GraphQL on owned
-SQLite and PostgreSQL, and the SQL Server refusal) and `orm-backends` (the
-PostgreSQL and SQL Server lanes, owned fixtures and the consumer examples). In
-the release workflow, `scripts/check-replay-release-positive.py` requires the
-three jobs together to run exactly the commands of the qualified single ORM
-job. The one intended difference is that the SQLite migration API fixture now
-runs only through the default suite's `migration_api_compatibility_fixture`
-driver, which ran the same command.
+Release validation runs the ORM lanes as three parallel jobs: `orm` (the
+default package suite, the router-protocol and case-feature contract tests,
+Clippy and Rustdoc), `orm-runtime-graphql` (runtime GraphQL on owned SQLite and
+PostgreSQL, and the SQL Server refusal) and `orm-backends` (the PostgreSQL and
+SQL Server lanes, owned fixtures and the consumer examples).
+`scripts/check-replay-release-positive.py` requires the three jobs together to
+run exactly the commands of the qualified single ORM job. The one intended
+difference is that the SQLite migration API fixture now runs only through the
+default suite's `migration_api_compatibility_fixture` driver, which ran the
+same command.
+
+CI runs the same three jobs, and also moves the fixture runner tests into a
+fourth parallel job, `orm-fixtures`. There, `orm` runs the default suite with
+`--exact --skip` for each fixture runner test, and `orm-fixtures` runs those
+runner binaries. `scripts/check-ci-orm-split.py`, run by `workspace-integrity`,
+requires the skip list to be exactly the non-ignored tests of the binaries
+`orm-fixtures` runs, and no other test to share one of those names. A local
+`cargo test -p graphql-orm` still runs everything.
 
 The existing `sqlserver-security` job separately executes the ignored owned TLS,
 writable-transaction and query-notification tests. Release security jobs depend

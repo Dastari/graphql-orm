@@ -47,6 +47,7 @@ jobs:
         run: |
           python3 scripts/check-release-state.py
           scripts/check-release-manifest.sh
+          python3 scripts/check-ci-orm-split.py
           python3 scripts/test-router-notices.py
       - name: Check PR documentation impact
         if: github.event_name == 'pull_request'
@@ -88,9 +89,9 @@ jobs:
       - name: Compile the backup adapter with the storage S3 provider
         run: cargo check -p graphql-orm-backup --locked --features graphql-orm-storage/s3
 
-  # The ORM lanes run as three parallel jobs: the default suite with Clippy
-  # and Rustdoc, runtime GraphQL on owned backends, and the PostgreSQL and SQL
-  # Server lanes.
+  # The ORM lanes run as four parallel jobs: the default suite with Clippy and
+  # Rustdoc, the fixture workspaces it drives, runtime GraphQL on owned
+  # backends, and the PostgreSQL and SQL Server lanes.
   orm:
     name: ORM default suite, Clippy and Rustdoc
     runs-on: ubuntu-latest
@@ -101,11 +102,23 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm
+      # The fixture runner tests run in orm-fixtures; scripts/check-ci-orm-split.py
+      # requires this list to be exactly the tests those binaries define.
+      - run: cargo test -p graphql-orm -- --exact --skip sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip direct_host_dependency_resolves_one_exact_agql_auth_universe --skip generated_relationships_execute_across_real_crate_boundaries --skip two_orm_subgraphs_compose_and_join_through_the_router --skip external_legacy_migration_surface_compiles --skip pascal_relationship_semantics_compile_as_a_complete_query_capability --skip external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
+
+  orm-fixtures:
+    name: ORM fixture workspaces
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test -p graphql-orm --test backend_coexistence_fixture --test cross_crate_relations_fixture --test federation_end_to_end_fixture --test migration_api_compatibility_fixture --test relationship_capability_fixture --test repository_aggregate_consumer_fixture
 
   orm-runtime-graphql:
     name: ORM runtime GraphQL on owned backends
@@ -237,7 +250,7 @@ jobs:
       - name: Execute complete SQLite groups and authorized aggregates
         run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --lib --test complete_group_pages --test portable_group_pages --test grouped_aggregates
       - name: Execute the dependency-minimal private repository example
-        run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example complete_events
+        run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example complete_events
       - name: Verify unsupported profiles before pool I/O
         run: |
           cargo test -p graphql-orm --locked --no-default-features --features postgres --lib
@@ -245,14 +258,14 @@ jobs:
       - name: Execute existing aggregates on a test-owned PostgreSQL container
         run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test grouped_aggregates_postgres --test portable_group_pages -- --ignored --test-threads=1
       - name: Execute the private PostgreSQL consumer without query SQL
-        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features postgres --test portable_groups -- --ignored --test-threads=1
+        run: cargo test --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features postgres --test portable_groups -- --ignored --test-threads=1
       - name: Check explicit backend Clippy and Rustdoc lanes
         run: |
           for backend in sqlite postgres mssql; do
             cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --lib --test complete_group_pages --test portable_group_pages --test complete_group_pages_unsupported -- -D warnings
             RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --no-deps
           done
-          cargo clippy --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --all-targets -- -D warnings
+          cargo clippy --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --all-targets -- -D warnings
 
   orm-policy-projections:
     runs-on: ubuntu-latest
@@ -266,7 +279,7 @@ jobs:
       - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test projection_visibility --test read_projections
       - name: Execute projection authorization on a test-owned PostgreSQL container
         run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test projection_visibility
-      - run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --locked --no-default-features --features sqlite --example policy_projections
+      - run: cargo run --manifest-path crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml --target-dir target/fixtures --locked --no-default-features --features sqlite --example policy_projections
       - name: Check explicit backend lanes
         run: |
           for backend in sqlite postgres mssql; do
