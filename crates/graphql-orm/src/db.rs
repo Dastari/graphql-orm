@@ -16,9 +16,14 @@ pub mod mssql;
 #[derive(Default)]
 struct EventSenders {
     senders: RwLock<HashMap<TypeId, Box<dyn Any + Send + Sync>>>,
+    /// Capacity of channels created from now on; zero means the default.
+    capacity: std::sync::atomic::AtomicUsize,
 }
 
-const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Events a generated `Changed` subscriber may fall behind before its stream
+/// ends with `SUBSCRIPTION_CONTINUITY_LOST`. See
+/// [`Database::set_event_channel_capacity`].
+pub const DEFAULT_EVENT_CHANNEL_CAPACITY: usize = 256;
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 tokio::task_local! {
@@ -353,6 +358,32 @@ impl<B: OrmBackend> Database<B> {
         self
     }
 
+    /// Return the capacity of each per-entity event channel created from now on:
+    /// how many events a generated `Changed` subscriber may fall behind before
+    /// its stream ends with `SUBSCRIPTION_CONTINUITY_LOST`. Defaults to
+    /// [`DEFAULT_EVENT_CHANNEL_CAPACITY`].
+    pub fn event_channel_capacity(&self) -> usize {
+        match self
+            .event_senders
+            .capacity
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => DEFAULT_EVENT_CHANNEL_CAPACITY,
+            capacity => capacity,
+        }
+    }
+
+    /// Set the event channel capacity for this database and every clone of it.
+    ///
+    /// It applies to channels created afterwards, so set it before the first
+    /// subscription or event. A zero capacity selects the default. Memory is
+    /// bounded by the capacity times the size of one event, per entity type.
+    pub fn set_event_channel_capacity(&self, capacity: usize) {
+        self.event_senders
+            .capacity
+            .store(capacity, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Return the maximum length of the `Keys` list a generated `<Entity>Changed`
     /// subscription accepts. A longer list is refused with `INVALID_INPUT` at
     /// admission. Defaults to [`DEFAULT_SUBSCRIPTION_KEY_LIMIT`].
@@ -533,7 +564,7 @@ impl<B: OrmBackend> Database<B> {
             return sender.clone();
         }
 
-        let (sender, _) = tokio::sync::broadcast::channel(DEFAULT_EVENT_CHANNEL_CAPACITY);
+        let (sender, _) = tokio::sync::broadcast::channel(self.event_channel_capacity());
         senders.insert(TypeId::of::<T>(), Box::new(sender.clone()));
         sender
     }
@@ -1733,6 +1764,12 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Set the maximum `Keys` list length for generated `Changed` subscriptions.
     pub fn subscription_key_limit(mut self, limit: usize) -> Self {
         self.database.subscription_key_limit = limit;
+        self
+    }
+
+    /// Set the event channel capacity; see [`Database::set_event_channel_capacity`].
+    pub fn event_channel_capacity(self, capacity: usize) -> Self {
+        self.database.set_event_channel_capacity(capacity);
         self
     }
 

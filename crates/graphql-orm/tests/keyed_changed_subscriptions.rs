@@ -673,6 +673,129 @@ async fn unkeyed_subscriptions_are_unchanged(db: &Database) -> TestResult {
     Ok(())
 }
 
+/// The next item must be the one sanitized error that ends the stream.
+async fn ends_with(stream: &mut Events, code: &str) {
+    let response = timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("an item within the timeout")
+        .expect("the error item before the end");
+    assert_eq!(response.errors.len(), 1, "{response:?}");
+    let error = &response.errors[0];
+    assert_eq!(
+        error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some(format!("\"{code}\"").as_str()),
+        "{response:?}"
+    );
+    // No skipped count, identifier or payload.
+    assert!(
+        !error.message.chars().any(|c| c.is_ascii_digit()),
+        "{}",
+        error.message
+    );
+    assert!(response.data.into_json().is_ok_and(|data| data.is_null()));
+    assert!(
+        timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream ends")
+            .is_none(),
+        "the stream continued after the error"
+    );
+}
+
+async fn a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters(
+    db: &Database,
+) -> TestResult {
+    use graphql_orm::graphql::subscriptions::SUBSCRIPTION_CONTINUITY_LOST;
+    parent(db, "p1", "alice").await?;
+    parent(db, "p2", "alice").await?;
+    let filter = argument_name("filter");
+    let actions = field_name("actions");
+    let key = argument_name("key");
+    let mut streams = vec![
+        ("unkeyed", open(db, parent_subscription(""), "alice")),
+        (
+            "key",
+            open(
+                db,
+                parent_subscription(&format!("({key}: \"p1\")")),
+                "alice",
+            ),
+        ),
+        (
+            "keys",
+            open(db, parent_subscription(&keys_argument(&["p1"])), "alice"),
+        ),
+        (
+            "actions",
+            open(
+                db,
+                parent_subscription(&format!("({filter}: {{ {actions}: [DELETED] }})")),
+                "alice",
+            ),
+        ),
+        // Every event is hidden from this subscriber by the row policy.
+        ("policy-hidden", open(db, parent_subscription(""), "bob")),
+        // Only propagated events reach this subscriber.
+        (
+            "propagated",
+            open(db, parent_subscription(&keys_argument(&["p2"])), "alice"),
+        ),
+    ];
+    for (_, stream) in &mut streams {
+        admitted(stream).await;
+    }
+    // Without polling, commit more events than the channel holds.
+    let overflow = db.event_channel_capacity() + 1;
+    for index in 0..overflow {
+        if index % 2 == 0 {
+            touch(db, "p1", &format!("update {index}")).await?;
+        } else {
+            KeyedChild::insert(
+                db,
+                CreateKeyedChildInput {
+                    id: format!("c{index}"),
+                    parent_id: "p2".to_string(),
+                    body: "child".to_string(),
+                },
+            )
+            .await?;
+        }
+    }
+    for (name, stream) in &mut streams {
+        println!("lag scenario: {name}");
+        ends_with(stream, SUBSCRIPTION_CONTINUITY_LOST).await;
+    }
+    Ok(())
+}
+
+async fn a_replaced_event_channel_ends_its_subscribers(db: &Database) -> TestResult {
+    use graphql_orm::graphql::subscriptions::{SUBSCRIPTION_SOURCE_CLOSED, SubscriptionEvent};
+    parent(db, "p1", "alice").await?;
+    let mut stream = open(db, parent_subscription(""), "alice");
+    admitted(&mut stream).await;
+    touch(db, "p1", "before").await?;
+    let event = next_event(&mut stream, parent_changed()).await;
+    assert_eq!(id_of(&event), "p1");
+    // Replacing the channel drops its only sender.
+    let (sender, _) = tokio::sync::broadcast::channel::<
+        SubscriptionEvent<KeyedParentChangedEvent, DefaultBackend>,
+    >(8);
+    db.register_event_sender(sender);
+    ends_with(&mut stream, SUBSCRIPTION_SOURCE_CLOSED).await;
+    // A new subscription uses the new channel.
+    let mut fresh = open(db, parent_subscription(""), "alice");
+    admitted(&mut fresh).await;
+    touch(db, "p1", "after").await?;
+    let event = next_event(&mut fresh, parent_changed()).await;
+    assert_eq!(id_of(&event), "p1");
+    Ok(())
+}
+
 macro_rules! scenarios {
     ($($scenario:ident),* $(,)?) => {
         #[cfg(feature = "sqlite")]
@@ -714,4 +837,6 @@ scenarios![
     propagated_parent_events_match_the_parents_key,
     composite_keys_match_on_the_complete_key,
     unkeyed_subscriptions_are_unchanged,
+    a_lagging_subscriber_gets_one_continuity_error_whatever_it_filters,
+    a_replaced_event_channel_ends_its_subscribers,
 ];

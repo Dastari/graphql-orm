@@ -3,12 +3,16 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-30
+last_reviewed: 2026-10-31
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.8.0 to 0.8.1: subscription error frame test
+
+No change is required. The release adds a test only.
 
 ## 0.7.0 to 0.8.0: opt-in global node lookup
 

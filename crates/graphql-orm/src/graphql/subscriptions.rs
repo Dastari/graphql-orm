@@ -733,3 +733,55 @@ where
     }
     Ok(())
 }
+
+/// `extensions.code` of the error that ends a generated `Changed` stream whose
+/// subscriber fell further behind than the event channel holds. The client
+/// must refetch the state it shows; events were missed.
+pub const SUBSCRIPTION_CONTINUITY_LOST: &str = "SUBSCRIPTION_CONTINUITY_LOST";
+
+/// `extensions.code` of the error that ends a generated `Changed` stream whose
+/// event source closed, for example because the channel was replaced.
+pub const SUBSCRIPTION_SOURCE_CLOSED: &str = "SUBSCRIPTION_SOURCE_CLOSED";
+
+fn subscription_end(code: &'static str, message: &'static str) -> async_graphql::Error {
+    use async_graphql::ErrorExtensions;
+    async_graphql::Error::new(message).extend_with(|_, extensions| extensions.set("code", code))
+}
+
+/// Events of one generated subscription's channel, checked for continuity
+/// before any filter.
+///
+/// Every event is passed on in order. When the subscriber fell behind and the
+/// channel dropped events, or the channel closed, the stream yields exactly one
+/// error and ends. The error carries no count, identifier or payload, so it
+/// reveals nothing about the events this subscriber may not see.
+#[doc(hidden)]
+pub fn continuity_events<T>(
+    receiver: tokio::sync::broadcast::Receiver<T>,
+) -> impl futures::Stream<Item = async_graphql::Result<T>> + Send + 'static
+where
+    T: Clone + Send + 'static,
+{
+    use futures::StreamExt;
+    use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
+    futures::stream::unfold(Some(BroadcastStream::new(receiver)), |events| async move {
+        let mut events = events?;
+        match events.next().await {
+            Some(Ok(event)) => Some((Ok(event), Some(events))),
+            Some(Err(BroadcastStreamRecvError::Lagged(_))) => Some((
+                Err(subscription_end(
+                    SUBSCRIPTION_CONTINUITY_LOST,
+                    "subscription lost event continuity; refetch, then subscribe again",
+                )),
+                None,
+            )),
+            None => Some((
+                Err(subscription_end(
+                    SUBSCRIPTION_SOURCE_CLOSED,
+                    "subscription event source closed; refetch, then subscribe again",
+                )),
+                None,
+            )),
+        }
+    })
+}

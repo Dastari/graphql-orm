@@ -29,7 +29,8 @@ use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const SDL: &str = "type Query { hello: String! } type Subscription { tick: String! }";
+const SDL: &str =
+    "type Query { hello: String! } type Subscription { tick: String! ended: String! }";
 const RSA_PRIVATE_KEY: &str = include_str!("fixtures/test-rsa-private.pem");
 const TOKEN_ISSUER: &str = "https://binary-smoke.test";
 const TOKEN_AUDIENCE: &str = "graphql-router";
@@ -142,6 +143,24 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     assert_eq!(event["id"], "smoke");
     assert_eq!(event["type"], "next");
     assert_eq!(event["payload"]["data"]["tick"], "world");
+
+    // A subgraph stream that ends with an error item reaches the client as a
+    // `next` frame carrying the error, then `complete`; never an `error` frame.
+    websocket.send_json(&json!({
+        "id": "lost",
+        "type": "subscribe",
+        "payload": {"query": "subscription { ended }"}
+    }));
+    let lost = websocket.next_json();
+    assert_eq!(lost["id"], "lost", "{lost}");
+    assert_eq!(lost["type"], "next", "{lost}");
+    assert_eq!(
+        lost["payload"]["errors"][0]["extensions"]["code"], "SUBSCRIPTION_CONTINUITY_LOST",
+        "{lost}"
+    );
+    let completed = websocket.next_json();
+    assert_eq!(completed["id"], "lost", "{completed}");
+    assert_eq!(completed["type"], "complete", "{completed}");
     websocket.close();
 
     let signal = Command::new("kill")
@@ -320,6 +339,12 @@ fn descriptor_document(address: SocketAddr) -> Vec<u8> {
             OperationDescriptor {
                 root_type: RootOperationType::Subscription,
                 field_name: "tick".to_owned(),
+                arguments: Vec::<ArgumentDescriptor>::new(),
+                authorization: AuthorizationRequirement::Authenticated,
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Subscription,
+                field_name: "ended".to_owned(),
                 arguments: Vec::<ArgumentDescriptor>::new(),
                 authorization: AuthorizationRequirement::Authenticated,
             },
@@ -513,6 +538,37 @@ fn handle_upstream_websocket(mut stream: TcpStream, request: &str) -> std::io::R
                         serde_json::to_string(&json!({"type": "connection_ack"}))?.as_bytes(),
                         false,
                     )?,
+                    Some("subscribe")
+                        if message["payload"]["query"]
+                            .as_str()
+                            .is_some_and(|query| query.contains("ended")) =>
+                    {
+                        // The frames an ORM subgraph sends when a generated
+                        // Changed stream loses continuity: one item whose
+                        // response carries the error, then the end of the stream.
+                        let id = message["id"].clone();
+                        for event in [
+                            json!({
+                                "id": id,
+                                "type": "next",
+                                "payload": {
+                                    "data": null,
+                                    "errors": [{
+                                        "message": "subscription lost event continuity; refetch, then subscribe again",
+                                        "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}
+                                    }]
+                                }
+                            }),
+                            json!({"id": id, "type": "complete"}),
+                        ] {
+                            write_websocket_frame(
+                                &mut stream,
+                                0x1,
+                                serde_json::to_string(&event)?.as_bytes(),
+                                false,
+                            )?;
+                        }
+                    }
                     Some("subscribe") => {
                         let id = message["id"].as_str().unwrap_or("smoke");
                         let event = json!({
