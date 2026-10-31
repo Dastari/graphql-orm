@@ -3,7 +3,7 @@ use std::str::FromStr;
 use crate::StorageError;
 
 /// Storage provider identifiers understood by this crate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum StorageBackend {
     /// Local filesystem object storage.

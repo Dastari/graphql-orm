@@ -3,7 +3,7 @@ title: "graphql-orm-storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -22,6 +22,12 @@ The local backend requires a trusted, exclusively managed filesystem root and
 restrictive permissions. See the [local filesystem trust boundary](docs/blob-store.md#local-filesystem-trust-boundary)
 before using local directories or OS-mounted shares.
 
+Version 0.8.0 adds resumable multipart uploads: `MultipartBlobStore` on local
+and S3 storage, with persistable handles and receipts, list, complete and abort.
+SMB and Azure return `UnsupportedOperation`. `StorageError` gains the
+`Multipart` variant. See [multipart uploads](docs/multipart.md) and the
+[migration guide](MIGRATION.md).
+
 Version 0.7.5 retains the SMB 0.10.2 dependency family with a narrow,
 owner-local directory-stream backport. See the [native SMB reference](docs/native-smb.md#client-selection)
 and [migration guide](MIGRATION.md) before updating a consuming lockfile.
@@ -37,13 +43,13 @@ resolved dependency graph.
 
 ```toml
 [dependencies]
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.5" }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.8.0" }
 ```
 
 For S3-compatible storage without the default local backend:
 
 ```toml
-graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.7.5", default-features = false, features = ["s3"] }
+graphql-orm-storage = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.8.0", default-features = false, features = ["s3"] }
 ```
 
 ## Five-minute local start
@@ -81,9 +87,9 @@ and needs streaming, ranges, conditional writes, copy, or paging.
 
 | Feature | Default | Provider | Notes |
 | --- | --- | --- | --- |
-| `local` | Yes | `LocalStorageBackend` | Baseline filesystem provider. |
-| `s3` | No | `S3StorageBackend` | S3-compatible endpoints, including path-style MinIO setups. |
-| `smb` | No | `SmbStorageBackend` | Native SMB2/SMB3; credentials are runtime-only. |
+| `local` | Yes | `LocalStorageBackend` | Baseline filesystem provider. Resumable multipart uploads. |
+| `s3` | No | `S3StorageBackend` | S3-compatible endpoints, including path-style MinIO setups. Resumable multipart uploads. |
+| `smb` | No | `SmbStorageBackend` | Native SMB2/SMB3; credentials are runtime-only. No multipart uploads. |
 | `azure` | No | `AzureBlobStorageConfig` | Explicit placeholder; returns `UnsupportedBackend`. |
 
 There is no implicit credential lookup. Keep S3 and SMB secrets out of config
@@ -103,7 +109,7 @@ use atomic `put_blob_if_not_exists` for locks and deduplication.
 ## Further reading
 
 - [Documentation index](docs/README.md)
-- [Usage](docs/usage.md), [streaming](docs/streaming.md), and [large-object recording](docs/recording-streams.md)
+- [Usage](docs/usage.md), [streaming](docs/streaming.md), [resumable multipart uploads](docs/multipart.md), and [large-object recording](docs/recording-streams.md)
 - [Native SMB setup and safety](docs/native-smb.md)
 - [Backup integration](docs/backup-integration.md)
 - [Migration guide](MIGRATION.md) and [changelog](CHANGELOG.md)

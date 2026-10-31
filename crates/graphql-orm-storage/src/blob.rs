@@ -305,6 +305,14 @@ pub trait BlobStore: Send + Sync {
     /// Returns [`StorageError`] when the key is invalid or the provider cannot
     /// delete the blob.
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError>;
+
+    /// Returns this provider's resumable multipart uploads, if it supports them.
+    ///
+    /// The default returns none. Providers that implement
+    /// [`MultipartBlobStore`](crate::MultipartBlobStore) return themselves.
+    fn as_multipart(&self) -> Option<&dyn crate::MultipartBlobStore> {
+        None
+    }
 }
 
 fn ranged_storage_stream(body: StorageByteStream, skip: u64, length: u64) -> StorageByteStream {
@@ -391,7 +399,7 @@ pub fn validate_blob_key(key: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[cfg(any(feature = "local", feature = "smb"))]
+#[cfg(any(feature = "local", feature = "s3", feature = "smb"))]
 pub(crate) fn validate_blob_prefix(prefix: &str) -> Result<(), StorageError> {
     if prefix.is_empty() {
         Ok(())

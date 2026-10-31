@@ -20,7 +20,7 @@ use crate::{
     validate_blob_key, validate_object_bucket,
 };
 
-const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
+pub(crate) const INTERNAL_STORAGE_DIR: &str = ".graphql-orm-storage";
 const OBJECT_METADATA_DIR: &str = "object-metadata";
 
 /// Local filesystem object storage backend.
@@ -33,13 +33,33 @@ const OBJECT_METADATA_DIR: &str = "object-metadata";
 #[derive(Clone, Debug)]
 pub struct LocalStorageBackend {
     root: PathBuf,
+    multipart_max_part_size: u64,
 }
 
 impl LocalStorageBackend {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Creates a local storage backend rooted at the given directory.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            multipart_max_part_size: crate::local_multipart::DEFAULT_MAX_PART_SIZE,
+        }
+    }
+
+    /// Sets the largest accepted multipart part, at most 5 GiB (the default).
+    #[must_use]
+    pub fn with_multipart_max_part_size(mut self, bytes: u64) -> Self {
+        self.multipart_max_part_size =
+            bytes.clamp(1, crate::local_multipart::DEFAULT_MAX_PART_SIZE);
+        self
+    }
+
+    pub(crate) fn multipart_max_part_size(&self) -> u64 {
+        self.multipart_max_part_size
     }
 
     /// Removes stale temporary upload files under the local storage root.
@@ -86,7 +106,7 @@ impl LocalStorageBackend {
         Ok(removed)
     }
 
-    fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
+    pub(crate) fn path_for(&self, key: &str) -> Result<PathBuf, StorageError> {
         validate_blob_key(key)?;
         Ok(self.root.join(Path::new(key)))
     }
@@ -127,6 +147,10 @@ impl BlobStore for LocalStorageBackend {
 
     fn backend(&self) -> StorageBackend {
         StorageBackend::Local
+    }
+
+    fn as_multipart(&self) -> Option<&dyn crate::MultipartBlobStore> {
+        Some(self)
     }
 
     async fn put_blob(
@@ -717,7 +741,7 @@ impl LocalStorageBackend {
     }
 }
 
-async fn create_parent_dir(path: &Path) -> Result<(), StorageError> {
+pub(crate) async fn create_parent_dir(path: &Path) -> Result<(), StorageError> {
     let parent = path
         .parent()
         .ok_or_else(|| StorageError::MissingParent { path: path.into() })?;
@@ -726,7 +750,7 @@ async fn create_parent_dir(path: &Path) -> Result<(), StorageError> {
         .map_err(|source| StorageError::io(parent, source))
 }
 
-fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageError> {
+pub(crate) fn temp_path_for(path: &Path, key: &str) -> Result<PathBuf, StorageError> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())

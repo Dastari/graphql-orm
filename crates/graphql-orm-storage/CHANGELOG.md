@@ -3,12 +3,32 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.8.0 (unreleased)
+
+- Add resumable multipart uploads: `MultipartBlobStore` with
+  `start_multipart`, `upload_part`, `list_parts`, `complete_multipart`,
+  `abort_multipart`, `list_incomplete_multipart` and `multipart_limits`.
+  `MultipartUploadHandle` and `PartReceipt` are serializable and carry no
+  credentials. See [multipart uploads](docs/multipart.md).
+- `LocalStorageBackend` stages fsynced parts under
+  `.graphql-orm-storage/multipart/`, and publishes the object atomically under an
+  advisory per-upload lock. `S3StorageBackend` uses the native multipart calls
+  with per-part SHA-256 checksums and a single-attempt conditional completion.
+  SMB and Azure don't implement it.
+- Add `BlobStore::as_multipart` (default none), `StorageService::multipart`,
+  `LocalStorageBackend::with_multipart_max_part_size` and
+  `S3StorageBackend::with_multipart_max_part_size`.
+- Breaking: add `StorageError::Multipart { key, kind: MultipartErrorKind }`.
+  `StorageBackend` now derives `Hash`. The `s3` feature adds the `base64`
+  dependency. Default features are unchanged.
+- `put_blob`, `put_object_stream` and `MultipartWriter` are unchanged.
 
 ## 0.7.5 - 2026-10-18
 

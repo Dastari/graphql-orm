@@ -5,9 +5,10 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    BlobMetadata, BlobPutOptions, BlobStore, StorageBackend, StorageByteStream, StorageError,
-    StorageObjectBody, StorageObjectStream, StoragePutRequest, StoragePutStreamRequest,
-    StoredObject, build_storage_key, collect_storage_stream, file_extension,
+    BlobMetadata, BlobPutOptions, BlobStore, MultipartBlobStore, StorageBackend, StorageByteStream,
+    StorageError, StorageObjectBody, StorageObjectStream, StoragePutRequest,
+    StoragePutStreamRequest, StoredObject, build_storage_key, collect_storage_stream,
+    file_extension,
 };
 
 /// Provider implementation contract for object storage backends.
@@ -56,6 +57,20 @@ impl StorageService {
     #[must_use]
     pub fn backend(&self) -> StorageBackend {
         self.backend.backend()
+    }
+
+    /// Returns the backend's resumable multipart uploads.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::UnsupportedOperation`] when the backend does not
+    /// implement [`MultipartBlobStore`]; only local and S3 storage do.
+    pub fn multipart(&self) -> Result<&dyn MultipartBlobStore, StorageError> {
+        self.backend
+            .as_multipart()
+            .ok_or_else(|| StorageError::UnsupportedOperation {
+                operation: "resumable multipart upload".to_string(),
+            })
     }
 
     /// Stores bytes and returns provider-neutral object metadata.

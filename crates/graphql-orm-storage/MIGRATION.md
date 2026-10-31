@@ -3,12 +3,22 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.7.5 to 0.8.0: resumable multipart uploads
+
+- Exhaustive matches on `StorageError` must handle the new `Multipart` variant.
+  No other existing API changes.
+- Use multipart through `LocalStorageBackend` or `S3StorageBackend` directly,
+  through `BlobStore::as_multipart()`, or through `StorageService::multipart()`.
+- Local staging lives under the existing internal `.graphql-orm-storage`
+  directory. Don't write blobs whose keys start with `.graphql-orm-storage/`.
+- No object format, key, schema or persisted-data migration is required.
 
 ## 0.7.4 to 0.7.5: maintained protocol-validation package identity
 
