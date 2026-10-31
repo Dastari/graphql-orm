@@ -116,7 +116,16 @@ async fn three_parts_complete_and_read_back(make: &Make, prefix: &str, part_size
         .await
         .expect("complete");
     assert_eq!(outcome.size_bytes, expected.len() as u64);
-    assert_eq!(outcome.sha256_hex, sha256_hex(&expected));
+    // Local storage hashes while assembling; S3 reports no whole-object digest.
+    if let Some(digest) = &outcome.sha256_hex {
+        assert_eq!(digest, &sha256_hex(&expected));
+    }
+    let computed = store
+        .compute_blob_sha256(&key)
+        .await
+        .expect("hash the object");
+    assert_eq!(computed.size_bytes, expected.len() as u64);
+    assert_eq!(computed.sha256_hex, sha256_hex(&expected));
     assert_eq!(read(store.as_ref(), &key).await, expected);
     let start = part_size as u64 - 10;
     let ranged = collect_storage_stream(
@@ -304,6 +313,8 @@ async fn stale_uploads_are_listed_and_cleaned(make: &Make, prefix: &str) {
     assert!(page.uploads.is_empty(), "{page:?}");
 }
 
+/// Mandatory on every provider: a conditional completion against an object
+/// published meanwhile must fail loudly and never overwrite it.
 async fn if_not_exists_conflicts_at_completion(make: &Make, prefix: &str, part_size: usize) {
     let store = make();
     let key = format!("{prefix}/exclusive.bin");

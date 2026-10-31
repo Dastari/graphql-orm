@@ -118,3 +118,62 @@ async fn storage_service_exposes_multipart_only_where_supported() {
         .expect("start");
     multipart.abort_multipart(&handle).await.expect("abort");
 }
+
+#[tokio::test]
+async fn a_retry_after_a_crash_past_publishing_recognises_its_own_object() {
+    let temp = TempDir::new().expect("temp dir");
+    let store = backend(temp.path());
+    let start = |store: &LocalStorageBackend, key: &'static str| {
+        let store = store.clone();
+        async move {
+            store
+                .start_multipart(
+                    key,
+                    MultipartStartOptions {
+                        if_not_exists: true,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("start")
+        }
+    };
+    let handle = start(&store, "scans/a.tar").await;
+    let (first, body) = part(1, PART);
+    let one = store.upload_part(&handle, 1, body).await.expect("part one");
+    let (last, body) = part(2, 77);
+    let two = store.upload_part(&handle, 2, body).await.expect("part two");
+    // The crash happened after the object was published and before the staged
+    // parts were removed.
+    let mut published = first.clone();
+    published.extend(&last);
+    std::fs::create_dir_all(temp.path().join("scans")).expect("dir");
+    std::fs::write(temp.path().join("scans/a.tar"), &published).expect("publish");
+    let outcome = store
+        .complete_multipart(&handle, &[one, two])
+        .await
+        .expect("the retry recognises its own object");
+    assert_eq!(outcome.size_bytes, published.len() as u64);
+    assert_eq!(
+        outcome.sha256_hex.as_deref(),
+        Some(graphql_orm_storage::sha256_hex(&published).as_str())
+    );
+    assert!(
+        store.list_parts(&handle).await.is_err(),
+        "the staged parts are removed"
+    );
+
+    // A different object at the key is still a conflict.
+    let other = start(&store, "scans/b.tar").await;
+    let (_, body) = part(3, 10);
+    let receipt = store.upload_part(&other, 1, body).await.expect("part");
+    std::fs::write(temp.path().join("scans/b.tar"), b"someone else").expect("publish");
+    assert!(matches!(
+        store.complete_multipart(&other, &[receipt]).await,
+        Err(graphql_orm_storage::StorageError::PreconditionFailed { .. })
+    ));
+    assert_eq!(
+        store.list_parts(&other).await.expect("parts remain").len(),
+        1
+    );
+}

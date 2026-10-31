@@ -17,6 +17,14 @@ supersedes: []
   `abort_multipart`, `list_incomplete_multipart` and `multipart_limits`.
   `MultipartUploadHandle` and `PartReceipt` are serializable and carry no
   credentials. See [multipart uploads](docs/multipart.md).
+- `complete_multipart` returns `MultipartCompleteOutcome { size_bytes,
+  sha256_hex: Option<String> }`. Local storage fills the digest; S3 returns none
+  and never reads the object back, because integrity rests on the per-part
+  SHA-256 checksums and the exact receipt list. Add the default
+  `BlobStore::compute_blob_sha256` to hash an object later.
+- A retried completion reports success when it can verify that its own object
+  is published. On S3 that means the size plus the multipart ETag; on local
+  storage, after a crash that left the staged parts, the size plus the SHA-256.
 - `LocalStorageBackend` stages fsynced parts under
   `.graphql-orm-storage/multipart/`, and publishes the object atomically under an
   advisory per-upload lock. `S3StorageBackend` uses the native multipart calls
@@ -26,8 +34,11 @@ supersedes: []
   `LocalStorageBackend::with_multipart_max_part_size` and
   `S3StorageBackend::with_multipart_max_part_size`.
 - Breaking: add `StorageError::Multipart { key, kind: MultipartErrorKind }`.
-  `StorageBackend` now derives `Hash`. The `s3` feature adds the `base64`
-  dependency. Default features are unchanged.
+  `StorageBackend` now derives `Hash`. The `s3` feature adds the `base64` and
+  `md-5` dependencies, both already in the lockfile. Default features are unchanged.
+- Fix: S3 `list_blobs_page` with an empty prefix now lists only
+  `key_prefix/`, and drops keys outside it. Before, `key_prefix = "proj"` also
+  listed `project2/...`.
 - `put_blob`, `put_object_stream` and `MultipartWriter` are unchanged.
 
 ## 0.7.5 - 2026-10-18

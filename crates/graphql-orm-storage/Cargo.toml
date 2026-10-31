@@ -10,7 +10,7 @@ publish = false
 [features]
 default = ["local"]
 local = ["dep:serde_json", "dep:tokio", "dep:tokio-util"]
-s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:base64", "dep:tokio", "dep:tokio-util"]
+s3 = ["dep:aws-credential-types", "dep:aws-sdk-s3", "dep:base64", "dep:md-5", "dep:tokio", "dep:tokio-util"]
 smb = [
     "dep:picky",
     "dep:picky-krb",
@@ -34,6 +34,7 @@ aws-sdk-s3 = { version = "1.144.0", default-features = false, features = ["sigv4
 bytes = "1"
 futures-core = "0.3"
 futures-util = "0.3"
+md-5 = { version = "0.10", optional = true }
 picky = { version = "=7.0.0-rc.15", optional = true, default-features = false }
 picky-krb = { version = "=0.11.1", optional = true }
 serde = { version = "1", features = ["derive"] }

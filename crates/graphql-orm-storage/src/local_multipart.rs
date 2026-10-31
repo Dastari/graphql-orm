@@ -30,8 +30,9 @@ use crate::local::{INTERNAL_STORAGE_DIR, LocalStorageBackend, temp_path_for};
 use crate::multipart::{check_handle, check_part_number, multipart_error, verify_receipts};
 use crate::{
     BlobWriteOutcome, IncompleteMultipartPage, IncompleteMultipartUpload, MultipartBlobStore,
-    MultipartErrorKind, MultipartLimits, MultipartStartOptions, MultipartUploadHandle, PartReceipt,
-    StorageBackend, StorageByteStream, StorageError, validate_blob_key,
+    MultipartCompleteOutcome, MultipartErrorKind, MultipartLimits, MultipartStartOptions,
+    MultipartUploadHandle, PartReceipt, StorageBackend, StorageByteStream, StorageError,
+    validate_blob_key,
 };
 
 const MULTIPART_DIR: &str = "multipart";
@@ -201,6 +202,23 @@ fn read_stored_parts(dir: &Path) -> Result<Vec<StoredPart>, StorageError> {
     Ok(parts)
 }
 
+/// Size and lowercase hex SHA-256 of an existing file.
+fn file_digest(path: &Path) -> Result<(u64, String), StorageError> {
+    let mut input = File::open(path).map_err(io(path))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = input.read(&mut buffer).map_err(io(path))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    Ok((size, format!("{:x}", hasher.finalize())))
+}
+
 /// Stream a part into `path`, hashing it and refusing it once it exceeds `max`.
 async fn write_part(
     key: &str,
@@ -357,7 +375,7 @@ impl MultipartBlobStore for LocalStorageBackend {
         &self,
         handle: &MultipartUploadHandle,
         parts: &[PartReceipt],
-    ) -> Result<BlobWriteOutcome, StorageError> {
+    ) -> Result<MultipartCompleteOutcome, StorageError> {
         let (dir, lock) = self.upload_paths(handle)?;
         let target = self.path_for(&handle.key)?;
         let key = handle.key.clone();
@@ -426,11 +444,19 @@ impl MultipartBlobStore for LocalStorageBackend {
             let published = if manifest.if_not_exists || handle_condition {
                 match std::fs::hard_link(&temp, &target) {
                     Ok(()) => Ok(()),
+                    // A completion that crashed after publishing left these
+                    // staged parts behind. Its retry finds its own object: that
+                    // is success, recognised by an identical size and digest.
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        Err(StorageError::PreconditionFailed {
-                            key: key.clone(),
-                            condition: "object already exists".to_string(),
-                        })
+                        if file_digest(&target)? == (outcome.size_bytes, outcome.sha256_hex.clone())
+                        {
+                            Ok(())
+                        } else {
+                            Err(StorageError::PreconditionFailed {
+                                key: key.clone(),
+                                condition: "object already exists".to_string(),
+                            })
+                        }
                     }
                     Err(source) => Err(StorageError::io(&target, source)),
                 }
@@ -447,7 +473,10 @@ impl MultipartBlobStore for LocalStorageBackend {
         })
         .await?;
         let _ = tokio::fs::remove_file(&lock_path).await;
-        Ok(outcome)
+        Ok(MultipartCompleteOutcome {
+            size_bytes: outcome.size_bytes,
+            sha256_hex: Some(outcome.sha256_hex),
+        })
     }
 
     async fn abort_multipart(&self, handle: &MultipartUploadHandle) -> Result<(), StorageError> {

@@ -3204,6 +3204,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "md-5 0.10.6",
  "picky",
  "picky-krb",
  "secrecy",

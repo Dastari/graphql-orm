@@ -21,8 +21,8 @@ use time::OffsetDateTime;
 use crate::multipart::{check_handle, check_part_number, multipart_error, verify_receipts};
 use crate::s3::{S3StorageBackend, map_s3_error};
 use crate::{
-    BlobStore, BlobWriteOutcome, IncompleteMultipartPage, IncompleteMultipartUpload,
-    MultipartBlobStore, MultipartErrorKind, MultipartLimits, MultipartStartOptions,
+    IncompleteMultipartPage, IncompleteMultipartUpload, MultipartBlobStore,
+    MultipartCompleteOutcome, MultipartErrorKind, MultipartLimits, MultipartStartOptions,
     MultipartUploadHandle, PartReceipt, StorageBackend, StorageByteStream, StorageError,
     validate_blob_key,
 };
@@ -34,12 +34,37 @@ pub(crate) const MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 /// Largest part accepted by default; it is buffered once per in-flight part.
 pub(crate) const DEFAULT_MAX_PART_SIZE: u64 = 64 * 1024 * 1024;
 
-fn sha256_base64(hex: &str) -> String {
-    let bytes = (0..hex.len())
-        .step_by(2)
-        .filter_map(|index| u8::from_str_radix(&hex[index..index + 2], 16).ok())
-        .collect::<Vec<_>>();
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+/// Decode lowercase or uppercase hex, or none for any other input.
+fn hex_bytes(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    hex.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+        .collect()
+}
+
+/// Base64 of a hex SHA-256. Receipts are validated before they get here, so a
+/// malformed digest only ever yields none.
+fn sha256_base64(hex: &str) -> Option<String> {
+    hex_bytes(hex)
+        .filter(|bytes| bytes.len() == 32)
+        .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// The ETag an MD5-ETag provider gives the object assembled from `parts`:
+/// the MD5 of the concatenated part MD5s, then `-` and the part count. None when
+/// a part tag is not an MD5.
+fn multipart_etag(parts: &[PartReceipt]) -> Option<String> {
+    let mut digests = Vec::with_capacity(parts.len() * 16);
+    for part in parts {
+        let md5 =
+            hex_bytes(part.provider_tag.trim_matches('"')).filter(|bytes| bytes.len() == 16)?;
+        digests.extend(md5);
+    }
+    let digest = md5::Md5::digest(&digests);
+    Some(format!("\"{digest:x}-{}\"", parts.len()))
 }
 
 fn sha256_hex_from_base64(encoded: &str) -> Option<String> {
@@ -62,9 +87,10 @@ where
         .raw_response()
         .map(|response| response.status().as_u16());
     match (code, status) {
-        (Some("NoSuchUpload"), _) | (_, Some(404)) => {
-            multipart_error(key, MultipartErrorKind::UnknownUpload)
-        }
+        // Only the upload itself being gone is an unknown upload. Any other 404,
+        // such as NoSuchBucket or a wrong endpoint, is a provider error, so an
+        // abort against misconfigured storage fails instead of "succeeding".
+        (Some("NoSuchUpload"), _) => multipart_error(key, MultipartErrorKind::UnknownUpload),
         (Some("EntityTooSmall"), _) => multipart_error(key, MultipartErrorKind::PartTooSmall),
         (Some("EntityTooLarge"), _) => multipart_error(key, MultipartErrorKind::PartTooLarge),
         (Some("InvalidPart" | "InvalidPartOrder" | "BadDigest" | "InvalidDigest"), _) => {
@@ -79,6 +105,64 @@ where
 }
 
 impl S3StorageBackend {
+    /// A completion found the upload gone, as a retry after a lost completion
+    /// response does. It succeeded only if `key` now holds exactly these parts;
+    /// otherwise the upload is unknown.
+    async fn recognise_completed(
+        &self,
+        key: &str,
+        parts: &[PartReceipt],
+    ) -> Result<MultipartCompleteOutcome, StorageError> {
+        // The receipts must still be well formed on their own.
+        verify_receipts(key, parts, parts, self.limits())?;
+        let size_bytes = parts.iter().map(|part| part.size_bytes).sum();
+        if self.holds_completed_parts(key, parts, size_bytes).await? {
+            Ok(MultipartCompleteOutcome {
+                size_bytes,
+                sha256_hex: None,
+            })
+        } else {
+            Err(multipart_error(key, MultipartErrorKind::UnknownUpload))
+        }
+    }
+
+    /// Whether `key` holds the object assembled from exactly `parts`: its size
+    /// is their total and its ETag is their multipart ETag. Providers whose
+    /// part ETags are not MD5s cannot be checked, and report false.
+    async fn holds_completed_parts(
+        &self,
+        key: &str,
+        parts: &[PartReceipt],
+        size_bytes: u64,
+    ) -> Result<bool, StorageError> {
+        let Some(expected) = multipart_etag(parts) else {
+            return Ok(false);
+        };
+        let output = match self
+            .client
+            .head_object()
+            .bucket(&self.config.bucket)
+            .key(self.provider_key(key)?)
+            .send()
+            .await
+        {
+            Ok(output) => output,
+            Err(error)
+                if error
+                    .raw_response()
+                    .is_some_and(|response| response.status().as_u16() == 404) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(map_s3_error(error)),
+        };
+        Ok(output
+            .content_length()
+            .and_then(|length| u64::try_from(length).ok())
+            == Some(size_bytes)
+            && output.e_tag() == Some(expected.as_str()))
+    }
+
     fn limits(&self) -> MultipartLimits {
         MultipartLimits::new(
             MIN_PART_SIZE,
@@ -207,7 +291,7 @@ impl MultipartBlobStore for S3StorageBackend {
             .key(&provider_key)
             .upload_id(&handle.upload_id)
             .part_number(i32::try_from(part_number).unwrap_or(i32::MAX))
-            .checksum_sha256(sha256_base64(&sha256))
+            .set_checksum_sha256(sha256_base64(&sha256))
             .body(ByteStream::from(buffer.freeze()))
             .send()
             .await
@@ -242,10 +326,17 @@ impl MultipartBlobStore for S3StorageBackend {
         &self,
         handle: &MultipartUploadHandle,
         parts: &[PartReceipt],
-    ) -> Result<BlobWriteOutcome, StorageError> {
+    ) -> Result<MultipartCompleteOutcome, StorageError> {
         check_handle(handle, StorageBackend::S3)?;
         let provider_key = self.provider_key(&handle.key)?;
-        let stored = self.stored_parts(handle, &provider_key).await?;
+        let stored = match self.stored_parts(handle, &provider_key).await {
+            Ok(stored) => stored,
+            Err(StorageError::Multipart {
+                kind: MultipartErrorKind::UnknownUpload,
+                ..
+            }) => return self.recognise_completed(&handle.key, parts).await,
+            Err(error) => return Err(error),
+        };
         verify_receipts(&handle.key, &stored, parts, self.limits())?;
         let completed = CompletedMultipartUpload::builder()
             .set_parts(Some(
@@ -257,9 +348,7 @@ impl MultipartBlobStore for S3StorageBackend {
                         CompletedPart::builder()
                             .part_number(i32::try_from(part.part_number).unwrap_or(i32::MAX))
                             .e_tag(&part.provider_tag)
-                            .set_checksum_sha256(
-                                (!part.sha256.is_empty()).then(|| sha256_base64(&part.sha256)),
-                            )
+                            .set_checksum_sha256(sha256_base64(&part.sha256))
                             .build()
                     })
                     .collect(),
@@ -279,28 +368,24 @@ impl MultipartBlobStore for S3StorageBackend {
         };
         // One attempt: a lost response must not be replayed against an upload
         // that may already have become the object.
-        request
+        let sent = request
             .customize()
             .config_override(S3ConfigBuilder::new().retry_config(RetryConfig::disabled()))
             .send()
             .await
-            .map_err(|error| multipart_s3_error(&handle.key, error))?;
-
-        // S3 reports no whole-object SHA-256 for multipart objects, so read the
-        // published object back once to return a verified digest.
-        let blob = self.get_blob(&handle.key).await?;
-        let mut stream = blob.body.into_inner();
-        let mut hasher = Sha256::new();
-        let mut size_bytes = 0_u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            size_bytes += chunk.len() as u64;
-            hasher.update(&chunk);
+            .map_err(|error| multipart_s3_error(&handle.key, error));
+        let size_bytes = parts.iter().map(|part| part.size_bytes).sum();
+        match sent {
+            Ok(_) => Ok(MultipartCompleteOutcome {
+                size_bytes,
+                sha256_hex: None,
+            }),
+            Err(StorageError::Multipart {
+                kind: MultipartErrorKind::UnknownUpload,
+                ..
+            }) => self.recognise_completed(&handle.key, parts).await,
+            Err(error) => Err(error),
         }
-        Ok(BlobWriteOutcome {
-            size_bytes,
-            sha256_hex: format!("{:x}", hasher.finalize()),
-        })
     }
 
     async fn abort_multipart(&self, handle: &MultipartUploadHandle) -> Result<(), StorageError> {
@@ -343,16 +428,7 @@ impl MultipartBlobStore for S3StorageBackend {
             }
             None => (None, None),
         };
-        let provider_prefix = if prefix.is_empty() {
-            self.config
-                .key_prefix
-                .as_deref()
-                .map(|prefix| prefix.trim_matches('/'))
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            self.provider_key(prefix)?
-        };
+        let provider_prefix = self.listing_prefix(prefix)?;
         let output = self
             .client
             .list_multipart_uploads()
@@ -369,7 +445,11 @@ impl MultipartBlobStore for S3StorageBackend {
             let (Some(provider_key), Some(upload_id)) = (upload.key(), upload.upload_id()) else {
                 continue;
             };
-            let key = self.strip_provider_prefix(provider_key);
+            // An upload outside this backend's key prefix, such as another
+            // prefix sharing the bucket, is never reported.
+            let Some(key) = self.strip_provider_prefix(provider_key) else {
+                continue;
+            };
             if !key.starts_with(prefix) || validate_blob_key(&key).is_err() {
                 continue;
             }

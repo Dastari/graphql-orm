@@ -66,8 +66,8 @@ pub use key::{build_storage_key, file_extension};
 pub use local::LocalStorageBackend;
 pub use multipart::{
     IncompleteMultipartPage, IncompleteMultipartUpload, MULTIPART_MAX_PART_NUMBER,
-    MultipartBlobStore, MultipartErrorKind, MultipartLimits, MultipartStartOptions,
-    MultipartUploadHandle, PartReceipt,
+    MultipartBlobStore, MultipartCompleteOutcome, MultipartErrorKind, MultipartLimits,
+    MultipartStartOptions, MultipartUploadHandle, PartReceipt,
 };
 pub use object::{
     StorageObjectBody, StorageObjectStream, StoragePutRequest, StoragePutStreamRequest,

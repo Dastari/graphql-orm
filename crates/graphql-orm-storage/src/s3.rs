@@ -121,16 +121,43 @@ impl S3StorageBackend {
         Ok(format!("{prefix}/{key}"))
     }
 
-    pub(crate) fn strip_provider_prefix(&self, provider_key: &str) -> String {
-        let Some(prefix) = self.config.key_prefix.as_deref() else {
-            return provider_key.to_string();
-        };
-        let prefix = prefix.trim_matches('/');
+    /// The backend key for a provider key, or none when the provider key lies
+    /// outside this backend's `key_prefix`, for example another prefix sharing
+    /// the bucket.
+    pub(crate) fn strip_provider_prefix(&self, provider_key: &str) -> Option<String> {
+        let prefix = self
+            .config
+            .key_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_matches('/'))
+            .unwrap_or_default();
+        if prefix.is_empty() {
+            return Some(provider_key.to_string());
+        }
         provider_key
             .strip_prefix(prefix)
             .and_then(|key| key.strip_prefix('/'))
-            .unwrap_or(provider_key)
-            .to_string()
+            .map(ToString::to_string)
+    }
+
+    /// The provider prefix for listing backend keys that start with `prefix`.
+    /// An empty prefix lists exactly this backend's `key_prefix/` namespace, so
+    /// `proj` never matches `project2/...`.
+    pub(crate) fn listing_prefix(&self, prefix: &str) -> Result<String, StorageError> {
+        if !prefix.is_empty() {
+            return self.provider_key(prefix);
+        }
+        let key_prefix = self
+            .config
+            .key_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_matches('/'))
+            .unwrap_or_default();
+        Ok(if key_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{key_prefix}/")
+        })
     }
 
     async fn put_blob_inner(
@@ -523,16 +550,7 @@ impl BlobStore for S3StorageBackend {
             });
         }
 
-        let provider_prefix = if prefix.is_empty() {
-            self.config
-                .key_prefix
-                .as_deref()
-                .map(|prefix| prefix.trim_matches('/'))
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            self.provider_key(prefix)?
-        };
+        let provider_prefix = self.listing_prefix(prefix)?;
 
         let output = self
             .client
@@ -549,7 +567,7 @@ impl BlobStore for S3StorageBackend {
             .contents()
             .iter()
             .filter_map(|object| object.key())
-            .map(|key| self.strip_provider_prefix(key))
+            .filter_map(|key| self.strip_provider_prefix(key))
             .filter(|key| !key.is_empty())
             .collect();
 

@@ -15,8 +15,12 @@ mod multipart_conformance;
 
 use std::{process::Command, sync::Arc, time::Duration};
 
-use graphql_orm_storage::{MultipartBlobStore, S3StorageBackend, S3StorageConfig};
-use multipart_conformance::Make;
+use graphql_orm_storage::{
+    BlobPutOptions, BlobStore, MultipartBlobStore, MultipartErrorKind, MultipartStartOptions,
+    MultipartUploadHandle, S3StorageBackend, S3StorageConfig, StorageBackend, StorageByteStream,
+    StorageError,
+};
+use multipart_conformance::{Make, part};
 use uuid::Uuid;
 
 /// RustFS, an Apache-2.0 S3-compatible server, pinned by digest.
@@ -144,5 +148,125 @@ async fn owned_s3_passes_the_multipart_conformance_suite() {
             S3StorageBackend::new(config.clone()).with_multipart_max_part_size(PART as u64 + 1024),
         ) as Arc<dyn MultipartBlobStore>
     });
-    multipart_conformance::run_all(make, "uploads", PART).await;
+    multipart_conformance::run_all(make.clone(), "uploads", PART).await;
+    a_retry_after_a_lost_completion_response_recognises_the_object(&make).await;
+    misconfigured_storage_is_never_an_unknown_upload(&server.config).await;
+    key_prefixes_sharing_a_bucket_stay_apart(&server.config).await;
+}
+
+async fn a_retry_after_a_lost_completion_response_recognises_the_object(make: &Make) {
+    let store = make();
+    let key = "uploads/lost-response.bin";
+    let handle = store
+        .start_multipart(key, MultipartStartOptions::default())
+        .await
+        .expect("start");
+    let (_, body) = part(1, PART);
+    let one = store.upload_part(&handle, 1, body).await.expect("part one");
+    let (_, body) = part(2, 10);
+    let two = store.upload_part(&handle, 2, body).await.expect("part two");
+    let receipts = [one, two];
+    let first = store
+        .complete_multipart(&handle, &receipts)
+        .await
+        .expect("complete");
+    assert_eq!(first.sha256_hex, None);
+    // The response was lost; the caller retries with the same receipts.
+    let retried = make()
+        .complete_multipart(&handle, &receipts)
+        .await
+        .expect("the retry recognises the published object");
+    assert_eq!(retried.size_bytes, first.size_bytes);
+    // Receipts that don't describe the published object stay unknown.
+    let mut other = receipts.clone();
+    other[1].size_bytes += 1;
+    assert!(matches!(
+        store.complete_multipart(&handle, &other).await,
+        Err(StorageError::Multipart {
+            kind: MultipartErrorKind::UnknownUpload,
+            ..
+        })
+    ));
+    store.delete_blob(key).await.expect("cleanup");
+}
+
+async fn misconfigured_storage_is_never_an_unknown_upload(config: &S3StorageConfig) {
+    let store = S3StorageBackend::new(S3StorageConfig {
+        bucket: format!("{}-missing", config.bucket),
+        ..config.clone()
+    });
+    let handle = MultipartUploadHandle {
+        backend: StorageBackend::S3,
+        key: "uploads/a.bin".into(),
+        upload_id: "an-upload".into(),
+        if_not_exists: false,
+    };
+    let aborted = store.abort_multipart(&handle).await;
+    assert!(
+        aborted.is_err() && !matches!(aborted, Err(StorageError::Multipart { .. })),
+        "aborting against a missing bucket must fail: {aborted:?}"
+    );
+    assert!(!matches!(
+        store.list_parts(&handle).await,
+        Ok(_) | Err(StorageError::Multipart { .. })
+    ));
+}
+
+async fn key_prefixes_sharing_a_bucket_stay_apart(config: &S3StorageConfig) {
+    let tenant = |prefix: &str| {
+        S3StorageBackend::new(S3StorageConfig {
+            key_prefix: Some(prefix.to_string()),
+            ..config.clone()
+        })
+    };
+    let (proj, project2) = (tenant("proj"), tenant("project2"));
+    let mine = proj
+        .start_multipart("mine.bin", MultipartStartOptions::default())
+        .await
+        .expect("start");
+    let theirs = project2
+        .start_multipart("theirs.bin", MultipartStartOptions::default())
+        .await
+        .expect("start");
+    proj.put_blob(
+        "mine.txt",
+        StorageByteStream::from_bytes(&b"mine"[..]),
+        BlobPutOptions::default(),
+    )
+    .await
+    .expect("put");
+    project2
+        .put_blob(
+            "theirs.txt",
+            StorageByteStream::from_bytes(&b"theirs"[..]),
+            BlobPutOptions::default(),
+        )
+        .await
+        .expect("put");
+
+    let uploads = proj
+        .list_incomplete_multipart("", None, 100)
+        .await
+        .expect("list uploads");
+    let keys = uploads
+        .uploads
+        .iter()
+        .map(|upload| upload.handle.key.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(keys, ["mine.bin"]);
+    let blobs = proj
+        .list_blobs_page("", None, 100)
+        .await
+        .expect("list blobs");
+    assert_eq!(blobs.keys, ["mine.txt"]);
+    let blobs = project2
+        .list_blobs_page("", None, 100)
+        .await
+        .expect("list blobs");
+    assert_eq!(blobs.keys, ["theirs.txt"]);
+
+    proj.abort_multipart(&mine).await.expect("abort");
+    project2.abort_multipart(&theirs).await.expect("abort");
+    proj.delete_blob("mine.txt").await.expect("cleanup");
+    project2.delete_blob("theirs.txt").await.expect("cleanup");
 }

@@ -306,6 +306,33 @@ pub trait BlobStore: Send + Sync {
     /// delete the blob.
     async fn delete_blob(&self, key: &str) -> Result<(), StorageError>;
 
+    /// Streams an existing blob and returns its size and SHA-256.
+    ///
+    /// Use it to verify an object whose write did not report a digest, such as
+    /// an S3 multipart object, for example from a background job. It reads the
+    /// whole object.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the key is invalid, the blob is missing or
+    /// the provider cannot read it.
+    async fn compute_blob_sha256(&self, key: &str) -> Result<BlobWriteOutcome, StorageError> {
+        use futures_util::StreamExt;
+        use sha2::Digest;
+        let mut stream = self.get_blob(key).await?.body.into_inner();
+        let mut hasher = sha2::Sha256::new();
+        let mut size_bytes = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            size_bytes = size_bytes.saturating_add(chunk.len() as u64);
+            hasher.update(&chunk);
+        }
+        Ok(BlobWriteOutcome {
+            size_bytes,
+            sha256_hex: format!("{:x}", hasher.finalize()),
+        })
+    }
+
     /// Returns this provider's resumable multipart uploads, if it supports them.
     ///
     /// The default returns none. Providers that implement

@@ -10,9 +10,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::{
-    BlobPutOptions, BlobStore, BlobWriteOutcome, StorageBackend, StorageByteStream, StorageError,
-};
+use crate::{BlobPutOptions, BlobStore, StorageBackend, StorageByteStream, StorageError};
 
 /// Highest part number a multipart upload accepts. Part numbers start at 1.
 pub const MULTIPART_MAX_PART_NUMBER: u32 = 10_000;
@@ -67,6 +65,20 @@ pub struct PartReceipt {
     pub sha256: String,
     /// Provider part identity: the S3 ETag, or the SHA-256 for local storage.
     pub provider_tag: String,
+}
+
+/// The object a successful completion published.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MultipartCompleteOutcome {
+    /// Object length in bytes: the total of the completed parts.
+    pub size_bytes: u64,
+    /// Lowercase hex SHA-256 of the whole object, when the backend computed it
+    /// while assembling the object. Local storage always reports it. S3 reports
+    /// none: its integrity rests on the per-part SHA-256 checksums the provider
+    /// verified and on the exact receipt list. Use
+    /// [`BlobStore::compute_blob_sha256`] to hash the object later.
+    pub sha256_hex: Option<String>,
 }
 
 /// Part size and count limits of one backend.
@@ -259,7 +271,7 @@ pub trait MultipartBlobStore: BlobStore {
         &self,
         handle: &MultipartUploadHandle,
         parts: &[PartReceipt],
-    ) -> Result<BlobWriteOutcome, StorageError>;
+    ) -> Result<MultipartCompleteOutcome, StorageError>;
 
     /// Removes every stored part. Succeeds for an upload that is unknown,
     /// already aborted, completed or expired.
@@ -345,6 +357,15 @@ pub(crate) fn verify_receipts(
     if given.is_empty() || given.len() != stored.len() {
         return Err(mismatch());
     }
+    // A caller's digest is either absent or exactly one SHA-256 in lowercase
+    // hex. It may be sent to the provider unchecked when a listing reports no
+    // checksum, so anything else is refused here.
+    if given
+        .iter()
+        .any(|part| !(part.sha256.is_empty() || is_sha256_hex(&part.sha256)))
+    {
+        return Err(mismatch());
+    }
     if given
         .windows(2)
         .any(|pair| pair[0].part_number >= pair[1].part_number)
@@ -371,6 +392,14 @@ pub(crate) fn verify_receipts(
     Ok(())
 }
 
+#[cfg(any(feature = "local", feature = "s3"))]
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 #[cfg(all(test, any(feature = "local", feature = "s3")))]
 mod tests {
     use super::*;
@@ -379,7 +408,7 @@ mod tests {
         PartReceipt {
             part_number,
             size_bytes,
-            sha256: format!("sha-{part_number}"),
+            sha256: format!("{part_number:064x}"),
             provider_tag: format!("tag-{part_number}"),
         }
     }
@@ -421,6 +450,42 @@ mod tests {
     }
 
     #[test]
+    fn malformed_receipt_digests_are_mismatches_not_panics() {
+        let limits = MultipartLimits::new(1, 100, 10);
+        let stored = [PartReceipt {
+            part_number: 1,
+            size_bytes: 5,
+            sha256: String::new(),
+            provider_tag: "tag".into(),
+        }];
+        let malformed = [
+            "abc".to_string(),
+            "é".repeat(32),
+            "A".repeat(64),
+            "g".repeat(64),
+            "a".repeat(63),
+        ];
+        for sha256 in malformed {
+            let given = [PartReceipt {
+                sha256,
+                ..stored[0].clone()
+            }];
+            assert!(matches!(
+                verify_receipts("k", &stored, &given, limits),
+                Err(StorageError::Multipart {
+                    kind: MultipartErrorKind::ReceiptMismatch,
+                    ..
+                })
+            ));
+        }
+        let given = [PartReceipt {
+            sha256: "a".repeat(64),
+            ..stored[0].clone()
+        }];
+        verify_receipts("k", &stored, &given, limits).unwrap();
+    }
+
+    #[test]
     fn handle_and_receipt_wire_forms_are_stable() {
         let handle = MultipartUploadHandle {
             backend: StorageBackend::S3,
@@ -443,7 +508,7 @@ mod tests {
         let receipt = receipt(1, 5);
         assert_eq!(
             serde_json::to_value(&receipt).unwrap(),
-            serde_json::json!({"part_number": 1, "size_bytes": 5, "sha256": "sha-1", "provider_tag": "tag-1"})
+            serde_json::json!({"part_number": 1, "size_bytes": 5, "sha256": format!("{:064x}", 1), "provider_tag": "tag-1"})
         );
         assert!(
             serde_json::from_value::<MultipartUploadHandle>(serde_json::json!({
