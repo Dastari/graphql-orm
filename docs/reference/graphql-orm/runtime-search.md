@@ -71,7 +71,7 @@ Search documents are keyed by one primary-key value, as for static search entiti
 
 The migration planner emits the static search storage model, so the existing renderers, introspection and drift checks apply.
 - **Adding search** is `CreateSearchIndex`.
-- **Changing** fields, weights, paths, language or tokenizer is `AlterSearchIndex`: a drop and a create, which then needs a rebuild.
+- **Changing** fields, weights, paths, language, tokenizer, `remove_diacritics` or `min_token_len` is `AlterSearchIndex`: a drop and a create. The recreated index starts `building` and needs a rebuild, which `apply_runtime_migration` runs unless it is deferred.
 - **Removing search** is `DropSearchIndex`, which drops its storage.
 - **Unknown language.** On PostgreSQL, planning checks every runtime search `language` against `pg_ts_config`. An unknown configuration fails with `UnknownSearchLanguage` before any DDL is planned.
 
@@ -102,8 +102,9 @@ let progress = db
 ```
 
 - **Batches.** Each batch is one transaction of `batch_size` rows, 500 by default, ordered by primary key.
-  - On PostgreSQL the batch locks its rows with `FOR UPDATE` while it writes their documents, so a concurrent writer either waits for the batch or wrote its own document first. SQLite serialises writers.
-  - Writes during a backfill maintain their own documents, so the result is consistent either way.
+  - On PostgreSQL the batch locks its rows with `FOR UPDATE` while it writes their documents. A concurrent writer of one of those rows waits for the batch instead of racing it. Runtime writes are serializable, so the writer then usually fails as retryable (`TransactionError::Retryable`) with nothing written, and the host's ordinary retry succeeds. SQLite serialises writers.
+  - Writes during a backfill maintain their own documents, so no document is left stale either way.
+- **Failures.** A batch that fails partway through rolls back as a whole: its documents are discarded, the resume point does not advance, and the index stays `building`.
 - **Resuming.** Progress is recorded after every batch. A backfill stopped by a crash, a cancellation or `max_batches` resumes where it stopped, and the index stays `building` until a call finishes it.
 - **Fencing.** `max_batches` bounds one call, so a host can run a large backfill as its own fenced job.
 - **Generic apply.** `apply_owned_migration` alone leaves new search storage `building`, which fails safe: search stays refused until a backfill runs.
@@ -153,12 +154,19 @@ Searching reads every searchable field.
 | --- | --- | --- |
 | Storage | FTS5 table `__graphql_orm_fts_<table>` | `__graphql_orm_search_<table>` with weighted `tsvector` and GIN |
 | Score | `bm25` with weights 1.0/0.7/0.4/0.1, negated so higher is better | `ts_rank_cd` |
-| `remove_diacritics` | the `unicode61 remove_diacritics 2` tokenizer | documents and queries folded by the ORM (canonical decomposition, combining marks removed); no `unaccent` extension needed |
+| `remove_diacritics` | the `unicode61 remove_diacritics 2` tokenizer. Without it, the default `unicode61` tokenizer still folds most Latin diacritics (its `remove_diacritics 1` mode), so `maori` matches `Māori` either way | documents and queries folded by the ORM (canonical decomposition, combining marks removed); no `unaccent` extension needed. Without it, accents are kept |
 | Language | ignored | text search configuration, checked at plan time |
 
 - **Scores aren't comparable across backends.** Ordering is promised only within one backend.
 - **SQLite's `bm25`** depends on corpus statistics, so relevance-ordered pages can shift if documents change between page requests.
 - **`PHRASE` and `PREFIX` syntax** follows each engine.
+
+## Backup and restore
+
+graphql-orm-backup snapshots only the static entities the host passes to it.
+- **Not in its snapshots:** runtime collection tables and every search table: `__graphql_orm_search_metadata`, `__graphql_orm_fts_<table>` and `__graphql_orm_search_<table>`. A graphql-orm-backup restore therefore never writes a runtime index or its readiness.
+- **Whole-database copies** taken from one consistent snapshot (`pg_dump`, the SQLite backup API) contain rows, documents and readiness from the same instant, so a restored index is `ready` only with documents that match its rows.
+- **Restoring runtime rows any other way**, for example a row-level import into a database whose index is already `ready`, does not update documents or reset readiness. Until [#280](https://github.com/Dastari/graphql-orm/issues/280) adds a reset, rebuild the index explicitly: migrate the collection without search, then with search again, so the index is recreated `building` and backfilled.
 
 ## Not included
 

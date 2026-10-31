@@ -65,6 +65,11 @@ fn field(name: &str, kind: RuntimeValueKind) -> RuntimeField {
 }
 
 fn definition() -> RuntimeSchema {
+    tokenized(false, None)
+}
+
+/// The searchable definition with the given document tokenization.
+fn tokenized(remove_diacritics: bool, min_token_len: Option<u8>) -> RuntimeSchema {
     let entry = |name: &str, weight| RuntimeSearchField {
         field: fid(&format!("records.{name}")),
         weight,
@@ -100,8 +105,8 @@ fn definition() -> RuntimeSchema {
                 ],
                 language: None,
                 tokenizer: None,
-                remove_diacritics: false,
-                min_token_len: None,
+                remove_diacritics,
+                min_token_len,
             }),
         }],
     }
@@ -321,6 +326,191 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
         Some("\"authorization_denied\""),
         "{denied:?}"
     );
+    #[cfg(feature = "postgres")]
+    drop(owned);
+}
+
+/// Plan the migration to `schema` and apply it with the backfill left to the
+/// host, returning the plan.
+async fn migrate_deferred(
+    database: &Database<Backend>,
+    version: &str,
+    schema: &ValidatedRuntimeSchema,
+) -> OwnedPlannedMigration {
+    let target = schema
+        .physical_schema::<Backend>(Default::default())
+        .unwrap();
+    let ownership = ManagedTableSet::new(["gql_search_records".into()]).unwrap();
+    let plan = database
+        .schema()
+        .plan_owned_migration(
+            version,
+            "search",
+            &target,
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await
+        .unwrap();
+    database
+        .schema()
+        .apply_runtime_migration(
+            &plan,
+            schema,
+            ApplyOptions::default(),
+            RuntimeSearchApplyOptions::deferred(),
+        )
+        .await
+        .unwrap();
+    plan
+}
+
+/// Whether the plan recreates search storage, which then needs a rebuild.
+fn rebuilds_search(plan: &OwnedPlannedMigration) -> bool {
+    plan.steps()
+        .iter()
+        .any(|step| step.reason().contains("requires an explicit rebuild"))
+}
+
+/// Search `records` for `term` through runtime GraphQL, returning the matching
+/// ids or the error code.
+async fn search_ids(
+    database: &Database<Backend>,
+    schema: &Arc<ValidatedRuntimeSchema>,
+    term: &str,
+) -> Result<Vec<String>, String> {
+    let module = RuntimeGraphqlModule::compile(
+        schema.clone(),
+        RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected),
+    )
+    .unwrap();
+    let api = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let authority = Arc::new(Authority {
+        deny_body_search: AtomicBool::new(false),
+        saw_search: AtomicBool::new(false),
+    });
+    let query = format!(
+        "{{ records(search: {{ {}: \"{term}\" }}, orderBy: [{{ field: id, direction: ASC }}]) {{ edges {{ node {{ id }} }} }} }}",
+        member("query")
+    );
+    let response = api
+        .execute(
+            Request::new(query).data(RuntimeGraphqlRequest::<Backend>::new(
+                schema.fingerprint(),
+                authority,
+                None,
+                RuntimeGraphqlLimits::default(),
+            )),
+        )
+        .await;
+    if let Some(error) = response.errors.first() {
+        return Err(error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .unwrap_or_else(|| error.message.clone()));
+    }
+    Ok(response.data.into_json().unwrap()["records"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|edge| edge["node"]["id"].as_str().unwrap().to_owned())
+        .collect())
+}
+
+#[tokio::test]
+async fn changing_document_tokenization_rebuilds_the_index() {
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("runtime-search-rebuild").unwrap();
+    #[cfg(feature = "postgres")]
+    let database = Database::<Backend>::connect_postgres(&owned.url)
+        .await
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    let database = Database::<Backend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+
+    let plain = Arc::new(definition().validate().unwrap());
+    migrate_deferred(&database, "init", &plain).await;
+    graphql_orm::sqlx::query(
+        "INSERT INTO gql_search_records (id, tenant, title, body) VALUES \
+         (1, 'north', 'Te Reo Māori', 'language'), \
+         (2, 'north', 'Maori carving', 'art')",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    assert!(
+        database
+            .schema()
+            .backfill_runtime_search(
+                &plain,
+                &CollectionId::new("records").unwrap(),
+                Default::default()
+            )
+            .await
+            .unwrap()
+            .ready
+    );
+    // PostgreSQL keeps accents without `remove_diacritics`. SQLite's default
+    // `unicode61` tokenizer already folds most of them.
+    #[cfg(feature = "postgres")]
+    assert_eq!(search_ids(&database, &plain, "maori").await.unwrap(), ["2"]);
+
+    // Both settings change how documents or queries are tokenized, so each is
+    // a recreation that needs a rebuild, like fields, weights and language.
+    let target = |schema: &ValidatedRuntimeSchema| {
+        schema
+            .physical_schema::<Backend>(Default::default())
+            .unwrap()
+    };
+    let ownership = ManagedTableSet::new(["gql_search_records".into()]).unwrap();
+    let shorter = tokenized(false, Some(3)).validate().unwrap();
+    let plan = database
+        .schema()
+        .plan_owned_migration(
+            "shorter",
+            "search",
+            &target(&shorter),
+            &ownership,
+            PlanOptions::strict(),
+        )
+        .await
+        .unwrap();
+    assert!(rebuilds_search(&plan), "min_token_len plans a rebuild");
+
+    let folded = Arc::new(tokenized(true, None).validate().unwrap());
+    let plan = migrate_deferred(&database, "folded", &folded).await;
+    assert!(rebuilds_search(&plan), "remove_diacritics plans a rebuild");
+    // The recreated index is building, so search is refused until the rebuild.
+    assert_eq!(
+        search_ids(&database, &folded, "maori").await,
+        Err("\"search_index_not_ready\"".to_owned())
+    );
+    let progress = database
+        .schema()
+        .backfill_runtime_search(
+            &folded,
+            &CollectionId::new("records").unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((progress.processed, progress.ready), (2, true));
+    for term in ["maori", "Māori", "MĀORI"] {
+        assert_eq!(
+            search_ids(&database, &folded, term).await.unwrap(),
+            ["1", "2"],
+            "{term}"
+        );
+    }
     #[cfg(feature = "postgres")]
     drop(owned);
 }

@@ -419,6 +419,10 @@ impl Harness {
     }
 
     async fn retitle(&self, id: i64, title: &str) {
+        self.try_retitle(id, title).await.unwrap();
+    }
+
+    async fn try_retitle(&self, id: i64, title: &str) -> Result<(), TransactionError> {
         let update = self
             .schema()
             .runtime_update_request(
@@ -429,7 +433,190 @@ impl Harness {
                 Default::default(),
             )
             .unwrap();
-        self.run(update).await.unwrap();
+        self.run(update).await.map(drop)
+    }
+
+    async fn try_backfill(
+        &self,
+        options: RuntimeSearchBackfillOptions,
+    ) -> Result<RuntimeSearchBackfillProgress, RuntimeMigrationError> {
+        self.db
+            .schema()
+            .backfill_runtime_search(self.schema(), &self.records(), options)
+            .await
+    }
+
+    /// The index's metadata, including its readiness and resume point.
+    async fn metadata(&self) -> serde_json::Value {
+        #[cfg(feature = "sqlite")]
+        let sql = "SELECT config_json AS c FROM __graphql_orm_search_metadata WHERE table_name = ?";
+        #[cfg(feature = "postgres")]
+        let sql = "SELECT config_json::text AS c FROM __graphql_orm_search_metadata WHERE table_name = $1";
+        let rows = Backend::fetch_rows(
+            self.db.pool(),
+            sql,
+            &[SqlValue::String("search_records".into())],
+        )
+        .await
+        .unwrap();
+        serde_json::from_str(&Backend::try_get_string(&rows[0], "c").unwrap()).unwrap()
+    }
+
+    async fn execute(&self, sql: &str) {
+        <Backend as WriteBackend>::execute_with_binds(self.db.pool(), sql, &[])
+            .await
+            .unwrap();
+    }
+}
+
+/// A batch that fails partway through rolls back as a whole: its earlier
+/// documents are not kept, the resume point does not advance and the index
+/// stays `building`. Resuming after the fault indexes the rest.
+#[tokio::test]
+async fn a_failure_inside_a_batch_rolls_it_back_and_keeps_the_resume_point() {
+    let mut harness = Harness::with_schema(with_search(false, None)).await;
+    for id in 1..=5 {
+        harness
+            .create(id, &format!("title {id}"), "body", "summary")
+            .await
+            .unwrap();
+    }
+    harness
+        .migrate(definition(), RuntimeSearchApplyOptions::deferred())
+        .await;
+    // Fail the document write of row 4, the second row of the second batch.
+    #[cfg(feature = "sqlite")]
+    harness
+        .execute(
+            "CREATE TRIGGER gom_test_fault BEFORE INSERT ON __graphql_orm_fts_search_records_content \
+             WHEN NEW.c0 = '4' BEGIN SELECT RAISE(ABORT, 'injected fault'); END",
+        )
+        .await;
+    #[cfg(feature = "postgres")]
+    {
+        harness
+            .execute(
+                "CREATE FUNCTION gom_test_fault() RETURNS trigger LANGUAGE plpgsql AS $$ \
+                 BEGIN IF NEW.entity_pk = '4' THEN RAISE EXCEPTION 'injected fault'; END IF; \
+                 RETURN NEW; END $$",
+            )
+            .await;
+        harness
+            .execute(
+                "CREATE TRIGGER gom_test_fault BEFORE INSERT ON __graphql_orm_search_search_records \
+                 FOR EACH ROW EXECUTE FUNCTION gom_test_fault()",
+            )
+            .await;
+    }
+
+    let options = RuntimeSearchBackfillOptions::default().with_batch_size(2);
+    assert!(harness.try_backfill(options).await.is_err());
+    assert!(harness.document(1).await.is_some() && harness.document(2).await.is_some());
+    assert!(
+        harness.document(3).await.is_none(),
+        "row 3 was written in the failed batch and rolled back with it"
+    );
+    let metadata = harness.metadata().await;
+    assert_eq!(metadata["readiness"], "building");
+    assert_eq!(metadata["backfill_after"], "2", "{metadata}");
+    assert!(!harness.ready().await);
+
+    #[cfg(feature = "sqlite")]
+    harness.execute("DROP TRIGGER gom_test_fault").await;
+    #[cfg(feature = "postgres")]
+    harness
+        .execute("DROP TRIGGER gom_test_fault ON __graphql_orm_search_search_records")
+        .await;
+    let resumed = harness.backfill(options).await;
+    assert_eq!((resumed.processed, resumed.ready), (3, true));
+    for id in 1..=5 {
+        assert!(harness.document(id).await.is_some(), "{id}");
+    }
+    assert!(harness.metadata().await.get("backfill_after").is_none());
+}
+
+/// Wait until some session of this database matches `condition` in
+/// `pg_stat_activity`.
+#[cfg(feature = "postgres")]
+async fn wait_for_session(harness: &Harness, condition: &str) {
+    let sql = format!(
+        "SELECT COUNT(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND {condition}"
+    );
+    for _ in 0..500 {
+        let rows = Backend::fetch_rows(harness.db.pool(), &sql, &[])
+            .await
+            .unwrap();
+        if Backend::try_get_i64(&rows[0], "n").unwrap() > 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("no session matched {condition}");
+}
+
+/// A writer that runs while a batch holds its rows waits for the batch instead
+/// of racing it. Runtime writes are serializable, so the waiting writer then
+/// fails as retryable with nothing written, and the host's retry writes the
+/// row and its document. No document is ever left stale.
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_writer_concurrent_with_a_running_batch_waits_and_leaves_no_stale_document() {
+    let mut harness = Harness::with_schema(with_search(false, None)).await;
+    for id in 1..=3 {
+        harness
+            .create(id, &format!("title {id}"), "body", "summary")
+            .await
+            .unwrap();
+    }
+    harness
+        .migrate(definition(), RuntimeSearchApplyOptions::deferred())
+        .await;
+    // Hold the batch open after it has read and locked rows 1 to 3: it pauses
+    // while writing the first document.
+    harness
+        .execute(
+            "CREATE FUNCTION gom_test_pause() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN IF NEW.entity_pk = '1' THEN PERFORM pg_sleep(2); END IF; \
+             RETURN NEW; END $$",
+        )
+        .await;
+    harness
+        .execute(
+            "CREATE TRIGGER gom_test_pause BEFORE INSERT ON __graphql_orm_search_search_records \
+             FOR EACH ROW EXECUTE FUNCTION gom_test_pause()",
+        )
+        .await;
+
+    let backfill = harness.try_backfill(RuntimeSearchBackfillOptions::default());
+    let writer = async {
+        // Start only once the batch is running, then require that the writer
+        // really waits on the batch's row lock.
+        wait_for_session(&harness, "wait_event = 'PgSleep'").await;
+        let (written, ()) = tokio::join!(
+            harness.try_retitle(2, "renamed two"),
+            wait_for_session(&harness, "wait_event_type = 'Lock'"),
+        );
+        written
+    };
+    let (progress, written) = tokio::join!(backfill, writer);
+    let progress = progress.unwrap();
+    assert!(progress.ready, "{progress:?}");
+    assert!(
+        matches!(written, Err(TransactionError::Retryable(_))),
+        "{written:?}"
+    );
+    // The batch committed the documents of the rows it read; the failed writer
+    // left both its row and its document unchanged.
+    let titles = |renamed: &'static str| [(1, "title 1"), (2, renamed), (3, "title 3")];
+    for (id, title) in titles("title 2") {
+        let (text, ..) = harness.document(id).await.expect("document");
+        assert!(text.contains(title), "{id}: {text}");
+    }
+
+    harness.try_retitle(2, "renamed two").await.unwrap();
+    for (id, title) in titles("renamed two") {
+        let (text, ..) = harness.document(id).await.expect("document");
+        assert!(text.contains(title), "{id}: {text}");
     }
 }
 
