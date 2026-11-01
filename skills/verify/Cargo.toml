@@ -1,0 +1,16 @@
+[package]
+name = "graphql-orm-usage-skill-verify"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone so it records no package source: release tag checks compare whole
+# package directories, and this crate only verifies skills/graphql-orm-usage.
+[workspace]
+
+[dependencies]
+async-graphql = { version = "7", default-features = false, features = ["dataloader", "uuid"] }
+graphql-orm = { path = "../../crates/graphql-orm", default-features = false, features = ["sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

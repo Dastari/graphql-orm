@@ -57,6 +57,10 @@ jobs:
       - run: cargo fmt --all -- --check
       - name: Check standalone relationship fixture formatting
         run: cargo fmt --manifest-path crates/graphql-orm-macros/fixtures/relationship-capability/Cargo.toml --all -- --check
+      - name: Check skill verification formatting
+        run: cargo fmt --manifest-path skills/verify/Cargo.toml --all -- --check
+      - name: Check the skill installer
+        run: scripts/test-skill-install.sh
       - run: scripts/check-workspace-dependencies.sh
       - name: Check standalone minimal GraphQL features and host opt-ins
         run: |
@@ -119,6 +123,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo test -p graphql-orm --test backend_coexistence_fixture --test cross_crate_relations_fixture --test federation_end_to_end_fixture --test migration_api_compatibility_fixture --test relationship_capability_fixture --test repository_aggregate_consumer_fixture
+      - name: Run the graphql-orm-usage skill examples and behaviour contract
+        run: cargo test --manifest-path skills/verify/Cargo.toml --target-dir target/fixtures --locked
 
   orm-runtime-graphql:
     name: ORM runtime GraphQL on owned backends

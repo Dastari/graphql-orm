@@ -3,7 +3,7 @@ title: "Strict Authorization Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -48,6 +48,12 @@ When `DeclaredPoliciesRequired` is active:
 - A field declaring `read_policy` / `write_policy` requires a field policy provider.
 - A row policy key requires a row policy provider.
 - Missing providers return `AUTHORIZATION_MISCONFIGURED` with a safe public message.
+- An entity `write_policy` is also the row policy key for updates and deletes, so those need both an
+  entity provider and a row provider.
+
+An entity that declares no policy has no such requirement: with `auth: "required"`, any authenticated
+subject can use its generated operations.
+[#287](https://github.com/Dastari/graphql-orm/issues/287) tracks requiring an explicit decision.
 
 Generated Federation entity-key resolvers check `RowPolicy::can_read_row` on
 each fetched entity, using its declared entity `read_policy` key. Subgraphs
@@ -68,6 +74,17 @@ requires the [current-authority bridge](agql-auth-bridge.md) or equivalent host
 enforcement, not merely projected roles/scopes.
 
 ## Repository / System Access
+
+Repository helpers evaluate policies with `ctx = None` and `EntityAccessSurface::Repository`, including
+when a custom resolver calls them, so a policy can't see that resolver's caller. `ScopeEntityPolicy::new`
+refuses these calls as unauthenticated. A custom resolver applies its own checks with
+`enforce_resolver_auth`, `Database::ensure_entity_access` and `Database::ensure_writable_row`, passing
+`Some(ctx)`.
+
+Writes from a mutation hook reach policies the same way, without the originating request, so
+`ScopeEntityPolicy::new` refuses them too. A policy can't distinguish hooks, workers and custom
+resolvers on this surface, and `AccessContext` reaches only repository field policies.
+[#291](https://github.com/Dastari/graphql-orm/issues/291) tracks an explicit authority.
 
 Do not treat `None` as system authority. Use:
 

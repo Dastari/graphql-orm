@@ -3,7 +3,7 @@ title: GraphQL ORM runtime reference index
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -55,6 +55,8 @@ guidance for the core ORM package.
 - Add relations, generated CRUD, hooks, and subscriptions using
   [runtime writes and policies](runtime-and-writes.md), then review
   [strict authorization](strict-authorization.md) before exposing the schema.
+- Choose between generated operations, hooks and custom resolvers with the
+  [`graphql-orm-usage` skill](../../../skills/graphql-orm-usage/SKILL.md).
 
 ## Runtime schema APIs
 

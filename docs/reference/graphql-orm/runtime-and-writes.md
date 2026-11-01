@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-11-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -248,9 +248,48 @@ database auth contexts do not batch together. PostgreSQL settings are applied wi
 
 ## Hooks
 
-Write-capable backends can run mutation hooks around generated creates, updates, deletes, and upserts.
+Write-capable backends run mutation hooks around generated creates, updates, deletes, and upserts.
 
 Hooks are intended for application behavior such as audit rows, validation, downstream notifications, and change journals. Keep database schema changes in the schema manager instead of mutation hooks.
+
+One `MutationHook` is installed per `Database`, with `set_mutation_hook`, and receives every entity's
+events. `on_mutation` gets the GraphQL context if there is one, a transaction-bound `MutationContext`,
+and a `MutationEvent` holding `phase`, `action`, `entity_name`, `id`, `changes` and the typed rows from
+`event.before::<T>()` and `event.after::<T>()`.
+
+A generated write runs in this order, after its entity and row policy checks:
+
+1. `WriteInputTransform`, for creates, updates and upserts. Deletes have no transform.
+2. The `Before` hook, inside the transaction.
+3. The write.
+4. The `After` hook, inside the transaction.
+5. Commit. An error from either hook rolls back instead.
+6. Queued `Changed` events.
+7. Actions registered with `MutationContext::defer`, in order.
+
+Deferred actions run only after a successful commit, and they're awaited before the write returns, so
+a slow action delays the response. They run at most once and aren't persisted: a crash after commit
+loses them. A failure doesn't fail the committed write; it goes to the `PostCommitErrorHandler` from
+`set_post_commit_error_handler`, or to stderr if none is installed.
+
+| Write path | Hooks | GraphQL context in the hook | `Changed` |
+| --- | --- | --- | --- |
+| Generated GraphQL mutation, including bulk | Per row | Yes | Yes |
+| Repository helpers, including `insert_many`, `update_where`, `delete_where`, `delete_all`, `replace_all`, `upsert` and `compare_and_swap` | Per row | No | Yes |
+| `Database::transaction` | Per row | No | After commit |
+| Through `MutationContext` in a hook | Per row | No | After commit |
+| Database foreign-key actions, raw SQL, and any other write outside the ORM | No | | No |
+
+Field validators and `WriteInputTransform` differ by path. `Entity::insert` runs the transform twice
+and a bulk update runs it once, passing only the first matched row as the existing row, as tracked in
+[#284](https://github.com/Dastari/graphql-orm/issues/284). A transform must be idempotent and must not
+validate a bulk update against the existing row.
+
+A hook sees the event, not the mutation's arguments. Generated mutations have no typed transient input;
+[#221](https://github.com/Dastari/graphql-orm/issues/221) tracks that capability.
+
+Runtime collections use the separate `RuntimeMutationHook`; see
+[runtime mutations](runtime-mutations.md).
 
 ## Search Document Maintenance
 
@@ -337,6 +376,15 @@ an external write made outside the ORM is not automatically observed.
 
 The runtime uses request-local event senders attached to `Database`. Subscriptions observe changes emitted by generated write paths.
 
+`#[relation(propagate_change = "up")]` also delivers a `PROPAGATED` event to the parent's `Changed`
+subscribers when a child is created or updated. Deletes are narrower:
+
+- A direct `DELETED` event reaches a GraphQL subscriber only when the host grants
+  `RowPolicy::can_read_deleted_preimage`, which denies by default. See
+  [subscription release authorization](entities-and-relations.md#subscription-release-authorization).
+- A deleted child doesn't notify its parent, because a deleted row can't prove the relation that would
+  authorize the event. [#290](https://github.com/Dastari/graphql-orm/issues/290) tracks this.
+
 ## Relation Delete Policy
 
 Relations can describe delete behavior for managed schemas and generated writes. Existing external schemas can disable physical foreign-key emission with `emit_fk = false`.
@@ -348,6 +396,13 @@ pub customer: Option<Customer>,
 ```
 
 For external schemas, `emit_fk = false` means the relation is a GraphQL/runtime mapping only. It does not claim ownership of the physical database constraint.
+
+`on_delete` selects a physical foreign-key action: `restrict` (the default), `cascade` or `set_null`.
+The database changes the dependent rows, so the ORM doesn't observe those writes. Dependent rows get no
+hooks, no `Changed` events, no managed-version advance and no search-document update
+([#283](https://github.com/Dastari/graphql-orm/issues/283)). To run dependent hooks and events, delete
+the dependents through `MutationContext` in a `Before` hook. Runtime collections can opt in to
+ORM-performed dependent changes with `RuntimeMutationRequest::with_dependent_changes`.
 
 ## Computed Fields
 

@@ -116,6 +116,9 @@ authorization](docs/architecture/authentication-and-authorization.md),
   material.
 - [Concepts](docs/architecture/system-context.md) — package boundaries,
   persistence, auth, assurance, storage, and backup design.
+- [Agent skills](skills/README.md) — install `graphql-orm-usage` so a coding agent
+  in your project chooses generated operations, hooks and relations over
+  hand-written GraphQL.
 - [Contributing and verification](docs/development/README.md) — workspace setup
   and maintainer checks.
 

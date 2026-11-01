@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,15 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+Documentation and verification only. No package version changes.
+
+- Add the `graphql-orm-usage` agent skill, which teaches a consuming project how to choose between generated operations, relations, transforms, hooks and custom resolvers, with anti-patterns and a review checklist. Install it with [`skills/install.sh`](skills/README.md#install) at the tag you pin. A standalone crate, `skills/verify`, compiles and runs every Rust block in the skill and pins the library behaviours it states.
+- Document the hook order, write-path coverage and deferred-action limits, the `WriteInputTransform` call counts, what `on_delete` does and doesn't observe, when `DELETED` reaches subscribers, the `BatchLoadEntity` requirement, and custom-root name collisions. These describe existing behaviour.
+- Correct the macro reference: `schema_policy = "external_read_only"` keeps the generated `Changed` subscription.
+- Known gaps recorded while verifying the skill: [#282](https://github.com/Dastari/graphql-orm/issues/282), [#283](https://github.com/Dastari/graphql-orm/issues/283), [#284](https://github.com/Dastari/graphql-orm/issues/284), [#285](https://github.com/Dastari/graphql-orm/issues/285), [#286](https://github.com/Dastari/graphql-orm/issues/286), [#287](https://github.com/Dastari/graphql-orm/issues/287), [#288](https://github.com/Dastari/graphql-orm/issues/288), [#289](https://github.com/Dastari/graphql-orm/issues/289), [#290](https://github.com/Dastari/graphql-orm/issues/290), [#291](https://github.com/Dastari/graphql-orm/issues/291) and [#292](https://github.com/Dastari/graphql-orm/issues/292).
+
+## 0.89.0 (unreleased)
 
 Companion runtime/macros version: **0.89.0**, after 0.88.0 ([#277](https://github.com/Dastari/graphql-orm/pull/277)). AI: **0.120.0**.
 
