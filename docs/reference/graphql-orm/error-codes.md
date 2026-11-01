@@ -3,7 +3,7 @@ title: "Public ORM Error-Code Contract"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-24
+last_reviewed: 2026-10-31
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -75,10 +75,27 @@ error source retains driver detail for trusted logging. See
 
 Runtime query validation and execution use `RuntimeQueryErrorCode`: `invalid_handle`,
 `invalid_request`, `invalid_filter`, `unsupported_operator`, `unsupported_order`,
-`unsupported_backend`, `resource_limit`, `cursor_invalid`, `cursor_schema_mismatch`, `decode`, and
-`backend_execution`. Safe formatting omits SQL, physical identifiers, bound values, cursor contents,
+`unsupported_backend`, `resource_limit`, `cursor_invalid`, `cursor_schema_mismatch`, `decode`,
+`invalid_search`, and `backend_execution`. Safe formatting omits SQL, physical identifiers, bound values, cursor contents,
 and backend detail; the standard error source remains available to trusted logs. See
 [runtime queries](runtime-queries.md).
+
+## Code case by surface
+
+The case of `extensions.code` depends on which surface produced the error, and
+the split is deliberate. Each surface keeps one case, so a client matches codes
+per surface.
+
+- **Generated (static) entity operations and subscriptions** use upper case:
+  the codes above, plus `SUBSCRIPTION_CONTINUITY_LOST` and
+  `SUBSCRIPTION_SOURCE_CLOSED` on generated `Changed` subscriptions.
+- **Runtime GraphQL** (fields installed by a `RuntimeGraphqlModule`) and the
+  runtime host APIs use lower case, for example `authorization_denied`,
+  `resource_limit`, `cursor_invalid` and `search_index_not_ready`. See
+  [runtime GraphQL](runtime-graphql.md) and [runtime search](runtime-search.md).
+
+A schema that composes both surfaces returns both cases. Clients should
+compare codes exactly, not case-insensitively.
 
 ## Before / After
 

@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm"
-version = "0.88.0"
+version = "0.89.0"
 edition = "2024"
 description = "Runtime support crate for graphql-orm-macros"
 license = "MIT"
@@ -65,6 +65,7 @@ base64 = "0.22"
 async-trait = { version = "0.1", optional = true }
 chacha20poly1305 = "0.10"
 convert_case = { workspace = true }
+unicode-normalization = "0.1"
 quick-xml = { version = "0.41", optional = true }
 agql-auth = { workspace = true, optional = true }
 async-graphql = { workspace = true, features = ["dataloader", "uuid", "decimal"] }
@@ -73,7 +74,7 @@ futures = "0.3"
 geo = { version = "0.33", optional = true, default-features = false }
 geo-types = { version = "0.7", optional = true }
 geojson = { version = "1", optional = true, default-features = true }
-graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.88.0", default-features = false }
+graphql-orm-macros = { path = "../graphql-orm-macros", version = "0.89.0", default-features = false }
 graphql-orm-operation-catalog = { workspace = true }
 rust_decimal = { workspace = true }
 serde = { version = "1", features = ["derive"] }

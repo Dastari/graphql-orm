@@ -70,6 +70,7 @@ fn definition(composite: bool) -> RuntimeSchema {
             composite_unique: vec![],
             default_order: vec![],
             label_fields: Vec::new(),
+            search: None,
         }],
     }
 }

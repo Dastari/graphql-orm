@@ -248,6 +248,7 @@ async fn all_runtime_value_kinds_match_actual_runtime_sdl() {
         description: None,
         classification: None,
         label_fields: Vec::new(),
+        search: None,
     };
     let runtime = Arc::new(
         RuntimeSchema {

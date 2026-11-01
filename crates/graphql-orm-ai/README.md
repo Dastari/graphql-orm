@@ -10,6 +10,9 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.120.0` adopts ORM 0.89.0 (runtime collection search). No AI
+behaviour changes; see [MIGRATION.md](MIGRATION.md).
+
 Version `0.119.0` adopts operation catalogue 0.7.0 (optional entity record
 version metadata), profiles 0.20.0 and ORM 0.87.0. No AI behaviour changes; see
 [MIGRATION.md](MIGRATION.md).
@@ -258,7 +261,7 @@ for AI, ORM, storage, backup, and tool-profile packages:
 
 ```toml
 [dependencies]
-graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.119.0", default-features = false, features = ["sqlite"] }
+graphql-orm-ai = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.120.0", default-features = false, features = ["sqlite"] }
 ```
 
 Exactly one persistence backend is required: `sqlite` (default), `postgres`,

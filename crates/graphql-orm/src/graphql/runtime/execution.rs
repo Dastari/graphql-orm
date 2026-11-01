@@ -20,7 +20,8 @@ pub struct RuntimeReadCheck<'a> {
     pub projection: &'a [RuntimeFieldHandle],
     pub filter: Option<&'a RuntimePredicate>,
     /// Requested field handles and operators retained before predicate constant lowering.
-    /// Names are eq/ne/lt/lte/gt/gte/contains/startsWith/endsWith/in/notIn/isNull/isNotNull.
+    /// Names are eq/ne/lt/lte/gt/gte/contains/startsWith/endsWith/in/notIn/isNull/isNotNull,
+    /// and search for each searchable field of a request with a search argument.
     pub filter_operations: Vec<(&'a RuntimeFieldHandle, &'static str)>,
     /// Distinguish client ordering from trusted effective hidden-key ordering.
     pub requested_order: &'a [RuntimeOrderInput],
@@ -480,6 +481,22 @@ impl<B: RuntimeReadBackend> Guard<B> {
                     limits.query,
                 )
                 .map_err(relation_error)?;
+            let read = match &plan.search {
+                None => read,
+                Some(search) => {
+                    // An index that is still being built would give silently
+                    // incomplete results.
+                    if !crate::graphql::orm::runtime_search_storage_ready::<B>(
+                        self.database.pool(),
+                        plan.collection.physical_table(),
+                    )
+                    .await
+                    {
+                        return Err(RuntimeGraphqlError::new("search_index_not_ready"));
+                    }
+                    read.with_search(search.clone()).map_err(query_error)?
+                }
+            };
             read.validate_graphql_backend(B::DIALECT)
                 .map_err(query_error)?;
             prepared.push(read);
@@ -801,7 +818,27 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             };
             self.reserve(token.len())?;
             cursors.push(token.clone());
-            edges.push(object([("cursor", Value::String(token)), ("node", node)]));
+            let mut edge_value = object([("cursor", Value::String(token)), ("node", node)]);
+            // A searchable collection's edges carry their score: null without
+            // a search argument.
+            if plan
+                .module
+                .schema
+                .schema()
+                .collections
+                .iter()
+                .any(|c| c.id == *plan.collection.id() && c.search.is_some())
+                && let Value::Object(map) = &mut edge_value
+            {
+                map.insert(
+                    async_graphql::Name::new(super::schema::search_member("score")),
+                    match edge.score {
+                        Some(score) => Value::from(score.0),
+                        None => Value::Null,
+                    },
+                );
+            }
+            edges.push(edge_value);
         }
         Ok(object([
             ("edges", Value::List(edges)),
@@ -977,6 +1014,7 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 .map(|e| RuntimeEdge {
                     node: e.node,
                     cursor: e.cursor,
+                    score: e.score,
                 })
                 .collect(),
             page_info: connection.page_info,

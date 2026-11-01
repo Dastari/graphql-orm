@@ -82,6 +82,7 @@ fn schema() -> ValidatedRuntimeSchema {
                 direction: RuntimeOrderDirection::Asc,
             }],
             label_fields: Vec::new(),
+            search: None,
         }],
     }
     .validate()

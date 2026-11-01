@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.88.0"
+version = "0.89.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3059,12 +3059,13 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "trybuild",
+ "unicode-normalization",
  "uuid",
 ]
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.119.0"
+version = "0.120.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3137,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.88.0"
+version = "0.89.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",

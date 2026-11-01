@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.88.0"
+version = "0.89.0"
 dependencies = [
  "async-graphql",
  "base64",
@@ -1049,6 +1049,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -1069,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.88.0"
+version = "0.89.0"
 dependencies = [
  "convert_case",
  "proc-macro2",

@@ -16,6 +16,23 @@ for historical context.
 
 ## Unreleased
 
+Companion runtime/macros version: **0.89.0**, after 0.88.0 ([#277](https://github.com/Dastari/graphql-orm/pull/277)). AI: **0.120.0**.
+
+- Runtime collections support full-text search ([#273](https://github.com/Dastari/graphql-orm/issues/273)); see [runtime search](docs/reference/graphql-orm/runtime-search.md).
+  - **IR.** `RuntimeCollection::search: Option<RuntimeSearch>` declares weighted `String` and JSON-path fields, a PostgreSQL text search configuration, a SQLite tokenizer, `remove_diacritics` and a minimum token length. It is validated with the new `InvalidSearchField` and `InvalidSearchConfiguration` diagnostics. It is structural, but schemas without it keep their exact bytes and fingerprints. `from_static_entities` now maps static search indexes, and still refuses relation-sourced or policy-gated search fields and the fallback strategy.
+  - **Migrations.** Runtime migrations create the static search storage. On PostgreSQL, planning refuses an unknown text search configuration before any DDL (`UnknownSearchLanguage`).
+  - **Readiness and backfill.** Runtime search storage records `building`/`ready` readiness in `__graphql_orm_search_metadata`. `apply_runtime_migration` backfills existing rows before returning, unless `RuntimeSearchApplyOptions::deferred()`. `backfill_runtime_search` is the resumable, batched host-run backfill: 500 rows per transaction, `FOR UPDATE` on PostgreSQL, returning progress.
+  - **Writes.** Every runtime create, update, delete and dependent write maintains the search document in the same transaction.
+  - **Runtime GraphQL.** Root lists of searchable collections take `search: RuntimeSearchInput { query, mode, minScore }`, ordered by relevance unless `orderBy` is given. Edges get a nullable `score: Float`; its name and the input's members follow the configured field case. Search is refused with `search_index_not_ready` until the index is ready. Each searchable field is reported to the host as a `"search"` filter operation. Queries are bounded by `RuntimeSearchLimits`: 256 bytes and 32 tokens by default.
+  - **Rust API.** `ValidatedRuntimeSchema::runtime_search_request`, `RuntimeReadRequest::with_search` and `RuntimeEdge::score` / `RuntimeAnchoredEdge::score`.
+- Breaking for Rust code that builds these with struct literals:
+  - `RuntimeCollection` gains `search` and `SearchIndexModel` gains `readiness_tracked`;
+  - `RuntimeEdge` and `RuntimeAnchoredEdge` gain `score`;
+  - `RuntimeSchemaDiagnosticCode`, `RuntimeMigrationDiagnosticCode` and `RuntimeQueryErrorCode` gain variants.
+- `graphql-orm` adds the `unicode-normalization` dependency, which was already in the lockfile.
+
+## 0.88.0 (unreleased)
+
 Companion runtime/macros version: **0.88.0**. Router: **0.8.1**.
 
 - Generated `<Entity>Changed` subscriptions no longer skip events silently when a subscriber falls behind. Continuity is checked at the event channel, before any `Key`, `Keys`, `Actions`, row-policy or provenance filter. A subscriber that fell further behind than the channel holds receives one error with `extensions.code` `SUBSCRIPTION_CONTINUITY_LOST`, and its stream ends. A closed channel ends the stream with `SUBSCRIPTION_SOURCE_CLOSED`. The error carries no skipped count, key or payload. Through graphql-orm-router, the client receives a `next` frame carrying the error, then `complete`. Clients subscribe again, then refetch. See [delivery and continuity](docs/reference/graphql-orm/macros-and-attributes.md#delivery-and-continuity). ([#225](https://github.com/Dastari/graphql-orm/issues/225))

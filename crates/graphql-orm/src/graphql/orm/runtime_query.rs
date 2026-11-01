@@ -35,6 +35,9 @@ pub enum RuntimeQueryErrorCode {
     CursorSchemaMismatch,
     Decode,
     BackendExecution,
+    /// The collection declares no search, or the search input is empty or
+    /// malformed.
+    InvalidSearch,
 }
 
 impl RuntimeQueryErrorCode {
@@ -51,6 +54,7 @@ impl RuntimeQueryErrorCode {
             Self::CursorSchemaMismatch => "cursor_schema_mismatch",
             Self::Decode => "decode",
             Self::BackendExecution => "backend_execution",
+            Self::InvalidSearch => "invalid_search",
         }
     }
 }
@@ -161,6 +165,103 @@ impl Default for RuntimeQueryLimits {
             max_cursor_values: 32,
         }
     }
+}
+
+/// Bounds of one runtime search input, checked before any database I/O.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RuntimeSearchLimits {
+    /// Longest accepted query text in bytes; 256 by default.
+    pub max_query_bytes: usize,
+    /// Most accepted whitespace-separated query tokens; 32 by default.
+    pub max_query_tokens: usize,
+}
+
+impl Default for RuntimeSearchLimits {
+    fn default() -> Self {
+        Self {
+            max_query_bytes: 256,
+            max_query_tokens: 32,
+        }
+    }
+}
+
+impl RuntimeSearchLimits {
+    /// Bounds with the given query byte and token limits.
+    #[must_use]
+    pub const fn new(max_query_bytes: usize, max_query_tokens: usize) -> Self {
+        Self {
+            max_query_bytes,
+            max_query_tokens,
+        }
+    }
+}
+
+/// A validated full-text search of one runtime collection.
+#[derive(Clone)]
+pub struct RuntimeSearchRequest {
+    schema: SchemaFingerprint,
+    collection: CollectionId,
+    input: crate::graphql::filters::SearchInput,
+    language: String,
+    remove_diacritics: bool,
+    min_token_len: usize,
+    key_column: String,
+    /// Order results by relevance before the read's order terms.
+    rank: bool,
+}
+
+impl fmt::Debug for RuntimeSearchRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RuntimeSearchRequest")
+            .field("collection", &self.collection)
+            .field("query", &"[redacted]")
+            .field("rank", &self.rank)
+            .finish()
+    }
+}
+
+impl RuntimeSearchRequest {
+    /// The search text, exactly as supplied.
+    pub fn query(&self) -> &str {
+        &self.input.query
+    }
+
+    /// Whether results are ordered by relevance first.
+    pub fn ranks(&self) -> bool {
+        self.rank
+    }
+
+    /// A stable digest binding a cursor to this exact search.
+    fn binding(&self) -> String {
+        let mode = self.input.mode.unwrap_or_default();
+        fnv(serde_json::to_string(&(
+            &self.input.query,
+            format!("{mode:?}"),
+            self.input.min_score.map(f64::to_bits),
+            self.rank,
+        ))
+        .expect("search inputs serialize")
+        .as_bytes())
+    }
+
+    /// The document text a search compares against, folded like the query.
+    fn query_text(&self) -> String {
+        if self.remove_diacritics {
+            fold_diacritics(&self.input.query)
+        } else {
+            self.input.query.clone()
+        }
+    }
+}
+
+/// Strip combining marks after canonical decomposition, so `Māori` reads as
+/// `Maori`.
+pub(crate) fn fold_diacritics(text: &str) -> String {
+    use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+    text.nfd()
+        .filter(|character| !is_combining_mark(*character))
+        .collect()
 }
 
 /// Frozen scalar operator set for the first runtime-query version.
@@ -524,6 +625,33 @@ pub struct RuntimeReadRequest {
     page: RuntimePageRequest,
     include_total_count: bool,
     limits: RuntimeQueryLimits,
+    search: Option<RuntimeSearchRequest>,
+}
+
+impl RuntimeReadRequest {
+    /// Restrict this read to the rows matching `search`, and order them by
+    /// relevance first when the search ranks.
+    ///
+    /// Filters, the host's grant predicate and this search are one SQL
+    /// condition, so ranking and counting only see rows the read may return.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeQueryErrorCode::InvalidHandle`] for a search of another
+    /// schema or collection.
+    pub fn with_search(mut self, search: RuntimeSearchRequest) -> Result<Self, RuntimeQueryError> {
+        if search.schema != self.schema || &search.collection != self.collection.id() {
+            return Err(RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidHandle)
+                .collection(self.collection.id()));
+        }
+        self.search = Some(search);
+        Ok(self)
+    }
+
+    /// The search of this read, if any.
+    pub fn search(&self) -> Option<&RuntimeSearchRequest> {
+        self.search.as_ref()
+    }
 }
 
 #[cfg(feature = "runtime-graphql")]
@@ -555,7 +683,16 @@ impl fmt::Debug for RuntimeReadRequest {
 pub struct RuntimeEdge {
     pub node: RuntimeRecord,
     pub cursor: String,
+    /// Relevance of this record to the read's search; none without a search.
+    /// Comparable only within one backend.
+    pub score: Option<RuntimeScore>,
 }
+
+/// A relevance score: finite, compared bit-for-bit inside one backend.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeScore(pub f64);
+
+impl Eq for RuntimeScore {}
 
 /// Complete runtime keyset page information.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -646,6 +783,63 @@ fn compare_supported(kind: RuntimeValueKind, op: RuntimeScalarOperator) -> bool 
 }
 
 impl ValidatedRuntimeSchema {
+    /// Construct a validated full-text search of `collection`.
+    ///
+    /// `rank` orders results by relevance, then by the read's order terms;
+    /// pass false when the client supplied its own order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeQueryErrorCode::InvalidSearch`] when the collection
+    /// declares no search or the query has no searchable token or a non-finite
+    /// minimum score, and [`RuntimeQueryErrorCode::ResourceLimit`] when the
+    /// query exceeds `limits`.
+    pub fn runtime_search_request(
+        &self,
+        collection: &RuntimeCollectionHandle,
+        input: crate::graphql::filters::SearchInput,
+        rank: bool,
+        limits: RuntimeSearchLimits,
+    ) -> Result<RuntimeSearchRequest, RuntimeQueryError> {
+        check_collection(self, collection)?;
+        let invalid = || {
+            RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidSearch).collection(collection.id())
+        };
+        let definition = self
+            .schema()
+            .collections
+            .iter()
+            .find(|candidate| &candidate.id == collection.id())
+            .ok_or_else(invalid)?;
+        let search = definition.search.as_ref().ok_or_else(invalid)?;
+        if input.query.len() > limits.max_query_bytes
+            || input.query.split_whitespace().count() > limits.max_query_tokens
+        {
+            return Err(limit_error(collection.id()));
+        }
+        let min_token_len = usize::from(search.effective_min_token_len());
+        if super::search::tokenize_search_text(&input.query, min_token_len).is_empty()
+            || input.min_score.is_some_and(|score| !score.is_finite())
+        {
+            return Err(invalid());
+        }
+        let key = definition
+            .fields
+            .iter()
+            .find(|field| Some(&field.id) == definition.primary_key.first())
+            .ok_or_else(invalid)?;
+        Ok(RuntimeSearchRequest {
+            schema: self.fingerprint(),
+            collection: collection.id().clone(),
+            input,
+            language: search.effective_language().to_string(),
+            remove_diacritics: search.remove_diacritics,
+            min_token_len,
+            key_column: key.physical_column.clone(),
+            rank,
+        })
+    }
+
     /// Construct a validated scalar predicate.
     pub fn runtime_compare(
         &self,
@@ -1163,6 +1357,7 @@ impl ValidatedRuntimeSchema {
             page,
             include_total_count,
             limits,
+            search: None,
         })
     }
 }
@@ -1175,6 +1370,38 @@ struct CursorEnvelope {
     order: Vec<(FieldId, RuntimeOrderDirection, RuntimeNullPlacement)>,
     values: Vec<RuntimeValue>,
     checksum: String,
+    /// Digest of the search the cursor belongs to; absent without a search, so
+    /// earlier cursors keep their exact bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search: Option<String>,
+    /// Relevance of the cursor's record when the search ranks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    score: Option<f64>,
+}
+
+/// The checksummed cursor payload; search members are appended only when
+/// present, so cursors without a search keep their exact checksum.
+fn cursor_payload(
+    version: u8,
+    schema: &SchemaFingerprint,
+    collection: &CollectionId,
+    order: &[(FieldId, RuntimeOrderDirection, RuntimeNullPlacement)],
+    values: &[RuntimeValue],
+    search: Option<&String>,
+    score: Option<f64>,
+) -> Result<Vec<u8>, serde_json::Error> {
+    match search {
+        None => serde_json::to_vec(&(version, schema, collection, order, values)),
+        Some(search) => serde_json::to_vec(&(
+            version,
+            schema,
+            collection,
+            order,
+            values,
+            search,
+            score.map(f64::to_bits),
+        )),
+    }
 }
 
 fn fnv(bytes: &[u8]) -> String {
@@ -1212,15 +1439,20 @@ fn order_signature(
 fn encode_cursor(
     request: &RuntimeReadRequest,
     values: Vec<RuntimeValue>,
+    score: Option<f64>,
 ) -> Result<String, RuntimeQueryError> {
     let signature = order_signature(&request.order);
-    let payload = serde_json::to_vec(&(
-        1u8,
+    let search = request.search.as_ref().map(RuntimeSearchRequest::binding);
+    let score = score.filter(|_| request.search.as_ref().is_some_and(|search| search.rank));
+    let payload = cursor_payload(
+        1,
         &request.schema,
         request.collection.id(),
         &signature,
         &values,
-    ))
+        search.as_ref(),
+        score,
+    )
     .map_err(|error| RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid).source(error))?;
     let envelope = CursorEnvelope {
         version: 1,
@@ -1229,6 +1461,8 @@ fn encode_cursor(
         order: signature,
         values,
         checksum: fnv(&payload),
+        search,
+        score,
     };
     let bytes = serde_json::to_vec(&envelope).map_err(|error| {
         RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid).source(error)
@@ -1242,7 +1476,7 @@ fn encode_cursor(
 fn decode_cursor(
     request: &RuntimeReadRequest,
     cursor: &str,
-) -> Result<Vec<RuntimeValue>, RuntimeQueryError> {
+) -> Result<(Vec<RuntimeValue>, Option<f64>), RuntimeQueryError> {
     if cursor.len()
         > request
             .limits
@@ -1267,13 +1501,15 @@ fn decode_cursor(
         RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid)
             .collection(request.collection.id())
     })?;
-    let payload = serde_json::to_vec(&(
+    let payload = cursor_payload(
         envelope.version,
         &envelope.schema,
         &envelope.collection,
         &envelope.order,
         &envelope.values,
-    ))
+        envelope.search.as_ref(),
+        envelope.score,
+    )
     .map_err(|_| RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid))?;
     if envelope.version != 1 || envelope.checksum != fnv(&payload) {
         return Err(RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid)
@@ -1286,6 +1522,15 @@ fn decode_cursor(
         );
     }
     let signature = order_signature(&request.order);
+    // A cursor belongs to exactly one search: no search, or this one.
+    let ranks = request.search.as_ref().is_some_and(|search| search.rank);
+    if envelope.search != request.search.as_ref().map(RuntimeSearchRequest::binding)
+        || envelope.score.is_some() != ranks
+        || envelope.score.is_some_and(|score| !score.is_finite())
+    {
+        return Err(RuntimeQueryError::new(RuntimeQueryErrorCode::CursorInvalid)
+            .collection(request.collection.id()));
+    }
     if envelope.order != signature
         || envelope.values.len() != signature.len()
         || envelope.values.len() > request.limits.max_cursor_values
@@ -1305,7 +1550,7 @@ fn decode_cursor(
             );
         }
     }
-    Ok(envelope.values)
+    Ok((envelope.values, envelope.score))
 }
 
 pub(crate) fn value_bind(value: &RuntimeValue) -> Option<SqlValue> {
@@ -1630,6 +1875,74 @@ fn cursor_compare(
     }
 }
 
+const SEARCH_ALIAS: &str = "__gom_search";
+const SEARCH_KEY: &str = "__gom_search_key";
+pub(crate) const SEARCH_SCORE: &str = "__gom_search_score";
+
+/// `JOIN (matching documents) AS __gom_search ON <key>` and its binds, for a
+/// read's table. The documents expose only their key and score, so no column
+/// of the collection is shadowed.
+fn render_search_join(
+    backend: DatabaseBackend,
+    table: &str,
+    search: &RuntimeSearchRequest,
+    values: &mut Vec<SqlValue>,
+) -> String {
+    let query = search.query_text();
+    let input = crate::graphql::filters::SearchInput {
+        query,
+        mode: search.input.mode,
+        min_score: None,
+    };
+    let documents = match backend {
+        DatabaseBackend::Postgres => {
+            let docs = super::search::search_table_name(table);
+            let mode = input.mode.unwrap_or_default();
+            let text = if mode == crate::graphql::filters::SearchMode::Prefix {
+                super::search::postgres_prefix_query(&input, search.min_token_len)
+            } else {
+                input.query.clone()
+            };
+            let bind = placeholder(backend, values.len() + 1, RuntimeValueKind::String);
+            values.push(SqlValue::String(text));
+            format!(
+                "SELECT entity_pk AS {SEARCH_KEY}, CAST(ts_rank_cd(document_vector, __gom_q) AS DOUBLE PRECISION) AS {SEARCH_SCORE} \
+                 FROM {docs}, {}('{}', {bind}) AS __gom_q WHERE document_vector @@ __gom_q",
+                super::search::postgres_tsquery_function(mode),
+                search.language.replace('\'', "''"),
+            )
+        }
+        _ => {
+            let fts = super::search::sqlite_fts_table_name(table);
+            let bind = placeholder(backend, values.len() + 1, RuntimeValueKind::String);
+            values.push(SqlValue::String(super::search::sqlite_fts_query(
+                &input,
+                search.min_token_len,
+            )));
+            format!(
+                "SELECT entity_pk AS {SEARCH_KEY}, bm25({fts}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS {SEARCH_SCORE} \
+                 FROM {fts} WHERE {fts} MATCH {bind}"
+            )
+        }
+    };
+    format!(
+        " JOIN ({documents}) AS {SEARCH_ALIAS} ON CAST({}.{} AS TEXT) = {SEARCH_ALIAS}.{SEARCH_KEY}",
+        backend.quote_identifier(table),
+        backend.quote_identifier(&search.key_column),
+    )
+}
+
+fn render_min_score(
+    backend: DatabaseBackend,
+    search: &RuntimeSearchRequest,
+    values: &mut Vec<SqlValue>,
+) -> Option<String> {
+    let min_score = search.input.min_score?;
+    let bind = placeholder(backend, values.len() + 1, RuntimeValueKind::Float);
+    values.push(SqlValue::Float(min_score));
+    Some(format!("{SEARCH_ALIAS}.{SEARCH_SCORE} >= {bind}"))
+}
+
 fn render_request(
     request: &RuntimeReadRequest,
     backend: DatabaseBackend,
@@ -1642,15 +1955,30 @@ fn render_request(
     }
     let mut values = Vec::new();
     let mut predicates = Vec::new();
+    let table = request.collection.physical_table();
+    // The join precedes the WHERE clause, so its binds come first.
+    let join = request
+        .search
+        .as_ref()
+        .map(|search| render_search_join(backend, table, search, &mut values))
+        .unwrap_or_default();
     if let Some(predicate) = &request.predicate {
         predicates.push(render_expr(backend, &predicate.expr, &mut values));
     }
+    if let Some(min_score) = request
+        .search
+        .as_ref()
+        .and_then(|search| render_min_score(backend, search, &mut values))
+    {
+        predicates.push(min_score);
+    }
+    let rank = request.search.as_ref().is_some_and(|search| search.rank);
     let (size, cursor, backward) = match &request.page {
         RuntimePageRequest::First { size, after } => (*size, after, false),
         RuntimePageRequest::Last { size, before } => (*size, before, true),
     };
     if let Some(cursor) = cursor {
-        let cursor_values = decode_cursor(request, cursor)?;
+        let (cursor_values, cursor_score) = decode_cursor(request, cursor)?;
         let filter_binds = request
             .predicate
             .as_ref()
@@ -1682,12 +2010,24 @@ fn render_request(
         } else {
             request.order.terms.clone()
         };
-        predicates.push(cursor_after_sql(
-            backend,
-            &effective,
-            &cursor_values,
-            &mut values,
-        ));
+        predicates.push(match (rank, cursor_score) {
+            // Relevance leads the keyset: a strictly lower score (higher when
+            // paging backwards), or the same score and the remaining order.
+            // Binds follow their placeholders' order in the SQL text.
+            (true, Some(score)) => {
+                let score_column = format!("{SEARCH_ALIAS}.{SEARCH_SCORE}");
+                let first = placeholder(backend, values.len() + 1, RuntimeValueKind::Float);
+                values.push(SqlValue::Float(score));
+                let second = placeholder(backend, values.len() + 1, RuntimeValueKind::Float);
+                values.push(SqlValue::Float(score));
+                let after = cursor_after_sql(backend, &effective, &cursor_values, &mut values);
+                let operator = if backward { ">" } else { "<" };
+                format!(
+                    "({score_column} {operator} {first} OR ({score_column} = {second} AND {after}))"
+                )
+            }
+            _ => cursor_after_sql(backend, &effective, &cursor_values, &mut values),
+        });
     }
     if values.len() > request.limits.max_bind_parameters {
         return Err(limit_error(request.collection.id()));
@@ -1699,9 +2039,14 @@ fn render_request(
         .map(|field| backend.quote_identifier(field.physical_column()))
         .collect::<Vec<_>>()
         .join(", ");
+    let score_column = if request.search.is_some() {
+        format!(", {SEARCH_ALIAS}.{SEARCH_SCORE} AS {SEARCH_SCORE}")
+    } else {
+        String::new()
+    };
     let mut sql = format!(
-        "SELECT {columns} FROM {}",
-        backend.quote_identifier(request.collection.physical_table())
+        "SELECT {columns}{score_column} FROM {}{join}",
+        backend.quote_identifier(table)
     );
     if !predicates.is_empty() {
         sql.push_str(" WHERE ");
@@ -1753,18 +2098,40 @@ fn render_request(
         .collect::<Vec<_>>()
         .join(", ");
     sql.push_str(" ORDER BY ");
+    if rank {
+        sql.push_str(&format!(
+            "{SEARCH_ALIAS}.{SEARCH_SCORE} {}, ",
+            if backward { "ASC" } else { "DESC" }
+        ));
+    }
     sql.push_str(&order_sql);
     sql.push_str(&format!(" LIMIT {}", size + 1));
     let count = if request.include_total_count {
         let mut count_values = Vec::new();
+        let count_join = request
+            .search
+            .as_ref()
+            .map(|search| render_search_join(backend, table, search, &mut count_values))
+            .unwrap_or_default();
         let mut count_sql = format!(
-            "SELECT COUNT(*) AS {} FROM {}",
+            "SELECT COUNT(*) AS {} FROM {}{count_join}",
             backend.quote_identifier("__graphql_orm_runtime_count"),
-            backend.quote_identifier(request.collection.physical_table())
+            backend.quote_identifier(table)
         );
+        let mut count_predicates = Vec::new();
         if let Some(predicate) = &request.predicate {
+            count_predicates.push(render_expr(backend, &predicate.expr, &mut count_values));
+        }
+        if let Some(min_score) = request
+            .search
+            .as_ref()
+            .and_then(|search| render_min_score(backend, search, &mut count_values))
+        {
+            count_predicates.push(min_score);
+        }
+        if !count_predicates.is_empty() {
             count_sql.push_str(" WHERE ");
-            count_sql.push_str(&render_expr(backend, &predicate.expr, &mut count_values));
+            count_sql.push_str(&count_predicates.join(" AND "));
         }
         if count_values.len() > request.limits.max_bind_parameters {
             return Err(limit_error(request.collection.id()));
@@ -1838,9 +2205,18 @@ where
             .into_iter()
             .take(requested)
             .map(|row| {
+                let score = request
+                    .search
+                    .as_ref()
+                    .map(|_| B::try_get_f64(&row, SEARCH_SCORE))
+                    .transpose()
+                    .map_err(|error| {
+                        RuntimeQueryError::new(RuntimeQueryErrorCode::Decode).source(error)
+                    })?;
                 request
                     .decode_projection
                     .decode_row::<B>(&row)
+                    .map(|record| (record, score))
                     .map_err(RuntimeQueryError::from)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1848,7 +2224,7 @@ where
             decoded.reverse();
         }
         let mut edges = Vec::with_capacity(decoded.len());
-        for decoded_record in decoded {
+        for (decoded_record, score) in decoded {
             let cursor_values = request
                 .order
                 .terms
@@ -1867,11 +2243,15 @@ where
                     }
                 })
                 .collect::<Result<Vec<_>, RuntimeQueryError>>()?;
-            let cursor = encode_cursor(request, cursor_values)?;
+            let cursor = encode_cursor(request, cursor_values, score)?;
             let node = decoded_record
                 .project(&request.output_projection)
                 .map_err(RuntimeQueryError::from)?;
-            edges.push(RuntimeEdge { node, cursor });
+            edges.push(RuntimeEdge {
+                node,
+                cursor,
+                score: score.map(RuntimeScore),
+            });
         }
         let start_cursor = edges.first().map(|edge| edge.cursor.clone());
         let end_cursor = edges.last().map(|edge| edge.cursor.clone());
@@ -1978,6 +2358,7 @@ mod tests {
                     direction: RuntimeOrderDirection::Asc,
                 }],
                 label_fields: Vec::new(),
+                search: None,
             }],
         }
         .validate()
@@ -2129,6 +2510,7 @@ mod tests {
                     },
                     RuntimeValue::Integer(2),
                 ],
+                None,
             )
             .unwrap();
             for backward in [false, true] {
@@ -2199,6 +2581,7 @@ mod tests {
         let cursor = encode_cursor(
             &request,
             vec![RuntimeValue::String("mid".into()), RuntimeValue::Integer(2)],
+            None,
         )
         .unwrap();
         request.page = RuntimePageRequest::first(2, Some(cursor));

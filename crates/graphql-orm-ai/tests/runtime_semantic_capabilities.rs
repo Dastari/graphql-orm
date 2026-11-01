@@ -46,6 +46,7 @@ fn collection(id: &str, name: &str, fields: Vec<RuntimeField>) -> RuntimeCollect
         description: None,
         classification: None,
         label_fields: Vec::new(),
+        search: None,
     }
 }
 

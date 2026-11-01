@@ -1285,6 +1285,12 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             .iter()
             .map(|f| actual_keys.value(f).map(|v| (f.clone(), v.clone())))
             .collect::<Result<Vec<_>, _>>()?;
+        // The search document changes in the same transaction as its row, so a
+        // failed document write fails, and rolls back, the row write.
+        if let Some(search) = &c.search {
+            self.maintain_runtime_search_document(c, search, request.action, &key)
+                .await?;
+        }
         let result = if request.action == RuntimeMutationAction::Delete {
             preimage.as_ref().ok_or_else(|| err(E::NotFound))?.clone()
         } else {
@@ -1334,6 +1340,61 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             links,
         })
     }
+    /// Upsert or delete the search document of the written row.
+    async fn maintain_runtime_search_document(
+        &mut self,
+        collection: &super::runtime_schema::RuntimeCollection,
+        search: &super::runtime_schema::RuntimeSearch,
+        action: RuntimeMutationAction,
+        key: &[(RuntimeFieldHandle, RuntimeValue)],
+    ) -> Result<(), RuntimeMutationError> {
+        use RuntimeMutationErrorCode as E;
+        let [(_, key_value)] = key else {
+            return Err(err(E::DatabaseFailed));
+        };
+        let entity_pk = super::runtime_search::search_key_text(key_value)
+            .ok_or_else(|| err(E::DatabaseFailed))?;
+        if action == RuntimeMutationAction::Delete {
+            return super::search::delete_search_document_for_table_on(
+                self,
+                &collection.physical_table,
+                &entity_pk,
+            )
+            .await
+            .map_err(database_error::<B>);
+        }
+        let mut values = Vec::new();
+        let condition = key_sql(B::DIALECT, key, &mut values);
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {condition}",
+            super::runtime_search::source_columns_sql(B::DIALECT, collection, search),
+            B::DIALECT.quote_identifier(&collection.physical_table),
+        );
+        let rows = self
+            .fetch_rows(&sql, &values)
+            .await
+            .map_err(database_error::<B>)?;
+        let [row] = rows.as_slice() else {
+            return Err(err(E::DatabaseFailed));
+        };
+        let document = super::runtime_search::document_from_row::<B>(
+            collection,
+            search,
+            row,
+            entity_pk,
+            super::runtime_search::search_key_json(key_value),
+        )
+        .map_err(database_error::<B>)?;
+        super::search::upsert_search_document_for_table_on(
+            self,
+            &collection.physical_table,
+            search.effective_language(),
+            &document,
+        )
+        .await
+        .map_err(database_error::<B>)
+    }
+
     /// Apply a prepared link mutation and authorize its unchanged source row as the result.
     async fn execute_runtime_link_write(
         &mut self,

@@ -853,6 +853,7 @@ impl Decode for Search {
             fields: self.fields.finish(),
             json_paths: self.json_paths.finish(),
             relations: self.relations.finish(),
+            readiness_tracked: false,
         }
     }
 }

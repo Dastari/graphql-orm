@@ -88,6 +88,7 @@ fn definition(extra: bool, amount_scale: u8) -> RuntimeSchema {
             description: None,
             classification: None,
             label_fields: Vec::new(),
+            search: None,
         }],
     }
 }

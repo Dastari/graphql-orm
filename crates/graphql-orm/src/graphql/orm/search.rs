@@ -1194,12 +1194,26 @@ pub async fn upsert_search_document_on<B>(
 where
     B: WriteBackend,
 {
+    upsert_search_document_for_table_on(context, index.table_name, index.language, document).await
+}
+
+/// Upsert the search document of one row of `table_name`, whose search index
+/// uses the PostgreSQL text search configuration `language`.
+pub(crate) async fn upsert_search_document_for_table_on<B>(
+    context: &mut super::MutationContext<'_, B>,
+    table_name: &str,
+    language: &str,
+    document: &SearchDocument,
+) -> crate::Result<()>
+where
+    B: WriteBackend,
+{
     match B::DIALECT {
         DatabaseBackend::Postgres => {
-            upsert_postgres_search_document_on::<B>(context, index, document).await
+            upsert_postgres_search_document_on::<B>(context, table_name, language, document).await
         }
         DatabaseBackend::Sqlite => {
-            upsert_sqlite_search_document_on::<B>(context, index, document).await
+            upsert_sqlite_search_document_on::<B>(context, table_name, document).await
         }
         DatabaseBackend::Mysql | DatabaseBackend::Mssql => Err(sqlx::Error::Protocol(format!(
             "full-text search execution is not implemented for {}",
@@ -1210,13 +1224,14 @@ where
 
 async fn upsert_postgres_search_document_on<B>(
     context: &mut super::MutationContext<'_, B>,
-    index: &SearchIndexDef,
+    table_name: &str,
+    language: &str,
     document: &SearchDocument,
 ) -> crate::Result<()>
 where
     B: WriteBackend,
 {
-    let table = search_table_name(index.table_name);
+    let table = search_table_name(table_name);
     let sql = format!(
         "INSERT INTO {table} \
          (entity_pk, entity_pk_json, document_text, document_vector, updated_at) \
@@ -1230,7 +1245,7 @@ where
          document_text = EXCLUDED.document_text, \
          document_vector = EXCLUDED.document_vector, \
          updated_at = EXCLUDED.updated_at",
-        index.language, index.language, index.language, index.language
+        language, language, language, language
     );
     let values = vec![
         SqlValue::String(document.entity_pk.clone()),
@@ -1248,13 +1263,13 @@ where
 
 async fn upsert_sqlite_search_document_on<B>(
     context: &mut super::MutationContext<'_, B>,
-    index: &SearchIndexDef,
+    table_name: &str,
     document: &SearchDocument,
 ) -> crate::Result<()>
 where
     B: WriteBackend,
 {
-    let table = sqlite_fts_table_name(index.table_name);
+    let table = sqlite_fts_table_name(table_name);
     let delete_sql = format!("DELETE FROM {table} WHERE entity_pk = ?");
     context
         .execute(&delete_sql, &[SqlValue::String(document.entity_pk.clone())])
@@ -1285,9 +1300,21 @@ pub async fn delete_search_document_on<B>(
 where
     B: WriteBackend,
 {
+    delete_search_document_for_table_on(context, index.table_name, entity_pk).await
+}
+
+/// Delete the search document of one row of `table_name`.
+pub(crate) async fn delete_search_document_for_table_on<B>(
+    context: &mut super::MutationContext<'_, B>,
+    table_name: &str,
+    entity_pk: &str,
+) -> crate::Result<()>
+where
+    B: WriteBackend,
+{
     let table = match B::DIALECT {
-        DatabaseBackend::Postgres => search_table_name(index.table_name),
-        DatabaseBackend::Sqlite => sqlite_fts_table_name(index.table_name),
+        DatabaseBackend::Postgres => search_table_name(table_name),
+        DatabaseBackend::Sqlite => sqlite_fts_table_name(table_name),
         DatabaseBackend::Mysql | DatabaseBackend::Mssql => {
             return Err(sqlx::Error::Protocol(format!(
                 "full-text search execution is not implemented for {}",

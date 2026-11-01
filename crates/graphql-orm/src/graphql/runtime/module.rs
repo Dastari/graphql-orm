@@ -21,6 +21,7 @@ pub struct RuntimeGraphqlOptions {
     pub(super) projections: BTreeMap<FieldId, super::projection::ProjectorRef>,
     pub(super) scalar_formats: Vec<(RuntimeFormatNamespace, std::ops::RangeInclusive<u16>)>,
     pub(super) relation_filters: RelationFilterOptions,
+    pub(super) search_limits: crate::graphql::orm::RuntimeSearchLimits,
 }
 /// Default bound on relation predicates in one GraphQL operation.
 pub const RUNTIME_GRAPHQL_DEFAULT_MAX_RELATION_FILTERS: usize = 16;
@@ -52,6 +53,13 @@ impl RelationFilterOptions {
     }
 }
 impl RuntimeGraphqlOptions {
+    /// Bound every `search` input: query bytes and tokens. Defaults to 256
+    /// bytes and 32 tokens.
+    pub fn with_search_limits(mut self, limits: crate::graphql::orm::RuntimeSearchLimits) -> Self {
+        self.search_limits = limits;
+        self
+    }
+
     /// Accept relation predicates on every relation: `{is, isNot}` on to-one and
     /// `{some, none, every}` on to-many relations, through generated
     /// `…ToOneFilter`/`…ToManyFilter` inputs in each `…WhereInput`. Each predicate
@@ -739,6 +747,17 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
                 self = self.register(ty)?;
             }
         }
+        let searchable = module
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .any(|c| c.search.is_some());
+        if searchable && !self.names.contains("RuntimeSearchInput") {
+            for ty in super::schema::search_helpers() {
+                self = self.register(ty)?;
+            }
+        }
         let decimal = module
             .schema
             .schema()
@@ -791,9 +810,11 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             if !self.roots.insert(root.clone()) {
                 return Err(RuntimeGraphqlError::new("name_collision").into());
             }
-            self.query = self
-                .query
-                .field(super::schema::root_field(&root, &module.object_name(c)));
+            self.query = self.query.field(super::schema::root_field(
+                &root,
+                &module.object_name(c),
+                c.search.is_some(),
+            ));
         }
         self.semantic.entities.extend(module.semantic_entities());
         self.semantic

@@ -10,9 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.88.0 ends a lagging generated `Changed` subscription with one `SUBSCRIPTION_CONTINUITY_LOST`
-error instead of skipping events, and adds a configurable event channel capacity. See the
-[migration notes](../../MIGRATION.md#0870-to-0880-changed-stream-continuity).
+Version 0.89.0 adds full-text search to runtime collections: an IR declaration, managed storage with
+readiness and a resumable backfill, write maintenance, and a ranked runtime GraphQL `search` argument.
+See [runtime search](../../docs/reference/graphql-orm/runtime-search.md).
 
 Version 0.87.0 serves every managed record version as the fixed `RecordVersion: Int!` field as
 well, and records record versions in the semantic catalogue (graphql-orm-operation-catalog 0.7.0).

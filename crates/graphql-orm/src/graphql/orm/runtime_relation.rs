@@ -185,6 +185,22 @@ pub struct RuntimeAnchoredReadRequest {
     anchors: Vec<AnchorSpec>,
 }
 
+impl RuntimeAnchoredReadRequest {
+    /// Restrict this read to rows matching `search`; see
+    /// [`RuntimeReadRequest::with_search`](super::RuntimeReadRequest::with_search).
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-handle error for a search of another collection.
+    pub fn with_search(
+        mut self,
+        search: super::RuntimeSearchRequest,
+    ) -> Result<Self, super::RuntimeQueryError> {
+        self.inner = self.inner.with_search(search)?;
+        Ok(self)
+    }
+}
+
 #[cfg(feature = "runtime-graphql")]
 impl RuntimeAnchoredReadRequest {
     pub(crate) fn validate_graphql_backend(
@@ -269,6 +285,8 @@ impl fmt::Debug for RuntimeParentAnchor {
 pub struct RuntimeAnchoredEdge {
     pub node: RuntimeRecord,
     pub cursor: String,
+    /// Relevance to the read's search; none without one.
+    pub score: Option<super::RuntimeScore>,
     anchors: Vec<RuntimeParentAnchor>,
 }
 
@@ -973,6 +991,7 @@ where
             edges.push(RuntimeAnchoredEdge {
                 node,
                 cursor: edge.cursor,
+                score: edge.score,
                 anchors,
             });
         }
@@ -1525,6 +1544,7 @@ where
                             edges.push(RuntimeEdge {
                                 node: record.project(&request.output_projection)?,
                                 cursor: encode_relation_cursor(request, anchor, cursor_values)?,
+                                score: None,
                             });
                             nested_anchors.push(record_anchors(
                                 record,
