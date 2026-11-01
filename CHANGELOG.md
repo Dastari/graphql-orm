@@ -30,6 +30,7 @@ Companion runtime/macros version: **0.89.0**, after 0.88.0 ([#277](https://githu
   - `RuntimeEdge` and `RuntimeAnchoredEdge` gain `score`;
   - `RuntimeSchemaDiagnosticCode`, `RuntimeMigrationDiagnosticCode` and `RuntimeQueryErrorCode` gain variants.
 - `graphql-orm` adds the `unicode-normalization` dependency, which was already in the lockfile.
+- Known follow-up: a row-level restore can leave a runtime search index marked `ready` with stale documents, because it does not update documents or reset readiness. Whole-database copies taken from one consistent snapshot are not affected. Until [#280](https://github.com/Dastari/graphql-orm/issues/280) adds a reset, rebuild the index by migrating the collection without search, then with search again; see [backup and restore](docs/reference/graphql-orm/runtime-search.md#backup-and-restore).
 
 ## 0.88.0 (unreleased)
 
