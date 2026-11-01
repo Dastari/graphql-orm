@@ -3,7 +3,7 @@ title: GraphQL ORM documentation index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-08-16
+last_reviewed: 2026-11-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -22,6 +22,12 @@ Build and query a small local service first.
   seed data, generated roots, Axum transport, and a smoke test.
 - [Learn index](learn/README.md) — the recommended sequence and example
   inventory.
+
+## Agent skills
+
+Working in a project that uses graphql-orm? [`graphql-orm-usage`](../skills/graphql-orm-usage/SKILL.md)
+tells a coding agent which approach to choose, what to avoid, and how to review a service. See
+[installing skills](../skills/README.md).
 
 ## How-to guides
 

@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-01
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -71,8 +71,8 @@ constraint the ORM does not declare, and is rejected when one is declared.
 Declaring a key requires `GraphQLOperations`, which owns the generated entity
 resolver. See [federation](federation.md).
 
-`schema_policy = "external_read_only"` suppresses generated mutations and
-subscriptions on every backend. MSSQL requires `external_read_only` or
+`schema_policy = "external_read_only"` suppresses generated mutations. The
+generated `Changed` subscription stays in the schema. MSSQL requires `external_read_only` or
 `external_writable`; the latter generates only capabilities implemented by the
 external-schema DML contract. Schema policy controls schema ownership, not
 application authorization. See [schema management](schema-management.md) and
@@ -113,7 +113,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated inputs; `graphql(skip)` also supports relation implementation fields |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
-| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs |
+| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `SimpleObject` entity the field stays in the object unless it also has `#[graphql(skip)]` or the entity uses `graphql_policy_object` ([#292](https://github.com/Dastari/graphql-orm/issues/292)) |
 | `#[graphql_orm(sensitive)]` | emits `Secret` plus structural `NeverExport`; it does not by itself remove the field from ordinary GraphQL |
 | `#[graphql_orm(classification = "…")]` | overrides the inherited public/internal/confidential/restricted/secret classification |
 | `#[graphql_orm(non_exportable)]` | structurally excludes the field from external-provider result projections while retaining ordinary GraphQL visibility |
@@ -216,6 +216,25 @@ Use a relation field plus `GraphQLRelations`:
 pub account: Option<Account>;
 ```
 
+An entity with generated relation fields derives `GraphQLRelations` and `SimpleObject` and declares
+`#[graphql(complex)]`; it can't use the generated object. Each relation target also needs a
+`BatchLoadEntity` implementation
+([#285](https://github.com/Dastari/graphql-orm/issues/285)). For generated relations the keys come
+from the relation, so `batch_column` and `batch_key_from_row` can name the primary key:
+
+```rust,ignore
+impl BatchLoadEntity for Account {
+    fn batch_column() -> &'static str { "id" }
+    fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
+        row.try_get("id")
+    }
+}
+```
+
+Because `node_id` and `RecordVersion` need the generated object, an entity can't currently combine
+them with generated relation fields. See [#270](https://github.com/Dastari/graphql-orm/issues/270) and
+[#288](https://github.com/Dastari/graphql-orm/issues/288).
+
 `target`, `from`, and `to` are relation metadata. `from` and `to` take either
 one string or an array of string literals for a composite key. `multiple`
 changes the relation cardinality. `emit_fk` is a boolean; `on_delete` and
@@ -267,6 +286,9 @@ impl Job {
 relations through an internal flattened object, so handwritten fields and
 batched relation resolvers share the one `async_graphql::ComplexObject` trait
 implementation required by `SimpleObject`.
+
+`compose_complex_object` still counts as `#[graphql(complex)]`, so it doesn't lift the `node_id` and
+`RecordVersion` restrictions.
 
 Polymorphic references can add one fixed discriminator condition:
 
@@ -419,12 +441,20 @@ in a legacy composition/semantic list.
 needed only by a subgraph that declares no resolvable `@key` of its own and
 participates in Federation purely through `unresolvable` reference stubs.
 
+A handwritten root with the same name as a generated operation compiles, and the generated resolver
+wins: the handwritten one never runs. The only signal is a panic from `graphql_orm_semantic_catalog()`
+for roots in a `described_*` list. [#282](https://github.com/Dastari/graphql-orm/issues/282) tracks
+rejecting the collision.
+
 `generated_mutations` defaults to `"all"`; it accepts
 `"all"`, `"none"`, `"allowlist"`, or `"denylist"`. An allowlist/denylist
 requires its matching nonempty list, and every listed entity must be in
-`entities`. External-read-only roots use empty mutation and subscription types
-regardless of requested exposure. External-writable MSSQL roots may compose
+`entities`. External-read-only roots use an empty mutation type regardless of requested
+exposure. External-writable MSSQL roots may compose
 generated DML and in-process subscriptions, but never schema-management roots.
+This setting is per entity. It removes all of that entity's generated mutations and leaves repository
+writes and `Changed` subscriptions in place. [#286](https://github.com/Dastari/graphql-orm/issues/286)
+tracks selecting individual mutation categories.
 
 `schema_roots!` also emits `graphql_orm_semantic_catalog()`. The strict,
 versioned value contains public API names, safe descriptions, typed field and
