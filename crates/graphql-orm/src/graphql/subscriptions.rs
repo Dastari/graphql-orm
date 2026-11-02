@@ -119,6 +119,16 @@ impl<B: OrmBackend> std::fmt::Debug for SubscriptionEventSource<B> {
     }
 }
 impl<B: OrmBackend> SubscriptionEventSource<B> {
+    /// Identity of one trusted provenance hop for path deduplication.
+    #[doc(hidden)]
+    pub fn propagation_identity(&self) -> (&'static str, String, &'static str) {
+        (
+            self.entity,
+            crate::graphql::orm::composite_key_id(&self.keys),
+            self.relation,
+        )
+    }
+
     /// Constructed by generated propagation code from a complete typed key.
     pub fn new<T>(
         keys: Vec<SqlValue>,

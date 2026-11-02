@@ -16,8 +16,13 @@ for historical context.
 
 ## Unreleased
 
-Documentation and verification only. No package version changes.
+ORM runtime/macros advance to **0.90.0** for breaking filter semantics.
 
+- Fix [#294](https://github.com/Dastari/graphql-orm/issues/294): generated Changed operation descriptors now append the optional configured-case `keys` argument after `filter` and `key`, with GraphQL type `[<scalar key>!]` for a single key or `[<Entity>KeyInput!]` for composite keys. The list itself is nullable. Catalogue, operation and router export fingerprints change; regenerate descriptors and remove adapters that append this argument. Served SDL is unchanged.
+- Fix [#295](https://github.com/Dastari/graphql-orm/issues/295): empty `in_list` and empty `or` match no rows across generated SQL backends, bounded writes and in-memory evaluation. Empty `not_in` remains a no-op. An OR branch with no conditions is true, including when mixed with restrictive branches; empty AND and NOT SQL behavior is unchanged.
+- Fix [#296](https://github.com/Dastari/graphql-orm/issues/296): propagated Changes retain distinct provenance paths and reauthorize each path. Relation declaration order no longer drops an authorized alternate path. Cycles are rejected within each path; existing hop and event budgets remain. Subscribers authorized for multiple paths may receive multiple events for the same target/origin pair.
+
+- Review expired documentation governance dates for the release gate and clarify that MSSQL retention remains unsupported even for external-writable entities.
 - Add the `graphql-orm-usage` agent skill, which teaches a consuming project how to choose between generated operations, relations, transforms, hooks and custom resolvers, with anti-patterns and a review checklist. Install it with [`skills/install.sh`](skills/README.md#install) at the tag you pin. A standalone crate, `skills/verify`, compiles and runs every Rust block in the skill and pins the library behaviours it states.
 - Document the hook order, write-path coverage and deferred-action limits, the `WriteInputTransform` call counts, what `on_delete` does and doesn't observe, when `DELETED` reaches subscribers, the `BatchLoadEntity` requirement, and custom-root name collisions. These describe existing behaviour.
 - Correct the macro reference: `schema_policy = "external_read_only"` keeps the generated `Changed` subscription.

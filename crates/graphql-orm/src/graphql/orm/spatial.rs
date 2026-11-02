@@ -349,12 +349,16 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
     true
 }
 
-/// Evaluate exact signed64 operands without narrowing. Empty lists are no-ops.
+/// Evaluate exact signed64 operands without narrowing. Empty inclusion is false;
+/// empty exclusion is a no-op.
 pub fn int64_filter_matches(
     value: Option<i64>,
     filter: &crate::graphql::filters::Int64Filter,
 ) -> Option<bool> {
     if filter.validate().is_err() {
+        return Some(false);
+    }
+    if filter.in_list.as_ref().is_some_and(Vec::is_empty) {
         return Some(false);
     }
     if let Some(is_null) = filter.is_null {
@@ -397,7 +401,7 @@ pub fn int64_filter_matches(
     if filter
         .in_list
         .as_ref()
-        .is_some_and(|list| !list.is_empty() && !list.iter().any(|candidate| value == *candidate))
+        .is_some_and(|list| !list.iter().any(|candidate| value == *candidate))
     {
         return Some(false);
     }

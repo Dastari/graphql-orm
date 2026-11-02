@@ -2435,6 +2435,17 @@ fn generate_graphql_operations_unfiltered(
                         let parent_id = <#target_type>::__gom_propagation_key(&parent_entity);
                         let parent_keys = <#target_type>::__gom_subscription_key_values(&parent_entity);
                         let parent_id_string = ::graphql_orm::graphql::orm::composite_key_id(&parent_keys);
+                        // Reject cycles within this path, without discarding a
+                        // different path with different authorization witnesses.
+                        if provenance.iter().any(|source| {
+                            let (entity, id, _) = source.propagation_identity();
+                            entity == <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name()
+                                && id == parent_id_string
+                        }) || (<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()
+                            == <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name()
+                            && ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_subscription_key_values(entity)) == parent_id_string) {
+                            continue;
+                        }
                         let mut next_path = path.clone();
                         next_path.push(#relation_name.to_string());
                         let mut next_provenance = provenance.to_vec();
@@ -2444,6 +2455,7 @@ fn generate_graphql_operations_unfiltered(
                         let dedupe_key = ::graphql_orm::serde_json::to_string(&(
                             <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                             parent_id_string, source_entity, source_id,
+                            next_provenance.iter().map(|source| source.propagation_identity()).collect::<Vec<_>>(),
                         )).map_err(|error| ::graphql_orm::sqlx::Error::Protocol(error.to_string()))?;
                         if visited.insert(dedupe_key) {
                             <#target_type>::__gom_queue_propagated_changed_event(hook_ctx, action, parent_id,
@@ -7033,6 +7045,10 @@ fn generate_graphql_operations_unfiltered(
                 argument_descriptor(
                     &apply_graphql_case("key", argument_case),
                     quote! { Option<#key_type> },
+                ),
+                argument_descriptor(
+                    &subscription_keys_arg_name,
+                    quote! { Option<Vec<#key_type>> },
                 ),
             ],
             quote! { #changed_event },

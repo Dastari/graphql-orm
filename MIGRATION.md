@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.89.0 to 0.90.0: restrictive empty filters and complete change provenance
+
+- **Breaking filter semantics:** an explicit empty `in_list` or `or` now matches nothing, including GraphQL empty lists and partially populated multi-field authorization filters. Omit the operator to express no restriction. Empty `not_in` remains a no-op. An empty OR branch is an unrestricted filter and makes that OR true; do not use empty branches as placeholders for restrictions. Empty AND and NOT SQL behavior is preserved.
+- **Catalogue/router:** regenerate generated Changed descriptors and their fingerprints. They now include trailing optional configured-case `keys: [<key type>!]`, matching the existing SDL. Remove downstream adapters that append `keys` before adopting this version. Single keys retain their scalar input type; composite keys use the entity key input object.
+- **Subscriptions:** distinct authorized propagation paths can produce multiple events for the same target and origin. Treat these as invalidation notifications or deduplicate after receipt if appropriate. Every path still rechecks current source, relation and target authorization.
+- No data migration is needed. No AI entities, indexes, constraints or persistent module semantics change, so `AI_SCHEMA_MODULE_VERSION` remains unchanged.
+
 ## 0.88.0 to 0.89.0: full-text search on runtime collections
 
 - Add `search: None` to `RuntimeCollection` struct literals, and `score: None` to hand-built `RuntimeEdge` values. Existing runtime schemas keep their bytes, fingerprints, SDL and plans.

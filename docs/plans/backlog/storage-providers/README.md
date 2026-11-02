@@ -3,8 +3,8 @@ title: "Storage Provider Backlog"
 kind: plan
 status: draft
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-08-01
-review_by: 2026-11-01
+last_reviewed: 2026-11-02
+review_by: 2026-12-02
 supersedes: []
 ---
 

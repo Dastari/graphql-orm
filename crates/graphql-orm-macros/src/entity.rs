@@ -5223,14 +5223,20 @@ fn generate_entity_impl(
                     let mut or_parts = Vec::new();
                     for filter in or_filters {
                         let (sub_conds, sub_vals) = filter.to_sql_conditions();
-                        if !sub_conds.is_empty() {
-                            or_parts.push(format!("({})", sub_conds.join(" AND ")));
-                            values.extend(sub_vals);
-                        }
+                        // An empty branch is true. Keep it explicit so earlier
+                        // binds retain their numbered placeholder positions.
+                        or_parts.push(if sub_conds.is_empty() {
+                            "1 = 1".to_owned()
+                        } else {
+                            format!("({})", sub_conds.join(" AND "))
+                        });
+                        values.extend(sub_vals);
                     }
-                    if !or_parts.is_empty() {
-                        conditions.push(format!("({})", or_parts.join(" OR ")));
-                    }
+                    conditions.push(if or_parts.is_empty() {
+                        "1 = 0".to_owned()
+                    } else {
+                        format!("({})", or_parts.join(" OR "))
+                    });
                 }
 
                 // Handle Not
@@ -5350,7 +5356,7 @@ fn generate_entity_impl(
                 }
 
                 if let Some(ref or_filters) = self.or {
-                    if or_filters.iter().any(|filter| !filter.__gom_is_empty()) {
+                    if or_filters.is_empty() || or_filters.iter().any(|filter| !filter.__gom_is_empty()) {
                         return false;
                     }
                 }
@@ -6243,7 +6249,9 @@ fn generate_filter_field(
                     }
                     for (list, negated) in [(&f.in_list, false), (&f.not_in, true)] {
                         if let Some(list) = list {
-                            if !list.is_empty() {
+                            if list.is_empty() && !negated {
+                                conditions.push("1 = 0".to_owned());
+                            } else if !list.is_empty() {
                                 let base = values.len() + 1;
                                 let placeholders = (0..list.len())
                                     .map(|offset| #struct_name::__gom_placeholder(base + offset))
@@ -6339,7 +6347,9 @@ fn generate_filter_field(
                         ));
                     }
                     if let Some(ref list) = f.in_list {
-                        if !list.is_empty() {
+                        if list.is_empty() {
+                            conditions.push("1 = 0".to_owned());
+                        } else {
                             let base_index = values.len() + 1;
                             let placeholders: Vec<String> = (0..list.len())
                                 .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
@@ -6396,7 +6406,14 @@ fn generate_filter_field(
                     }
                 }
             } else {
-                quote! {}
+                // Native backends do not use the SQLite residual matcher, but
+                // explicit empty inclusion is always a definite non-match.
+                quote! {
+                    if self.#filter_field_name.as_ref().is_some_and(|filter|
+                        filter.in_list.as_ref().is_some_and(Vec::is_empty)) {
+                        return Ok(Some(false));
+                    }
+                }
             };
             Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
@@ -6438,7 +6455,9 @@ fn generate_filter_field(
                         values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
                     }
                     if let Some(ref list) = f.in_list {
-                        if !list.is_empty() {
+                        if list.is_empty() {
+                            conditions.push("1 = 0".to_owned());
+                        } else {
                             let base_index = values.len() + 1;
                             let placeholders: Vec<String> = (0..list.len())
                                 .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
@@ -6485,7 +6504,14 @@ fn generate_filter_field(
                     }
                 }
             } else {
-                quote! {}
+                // Native backends do not use the SQLite residual matcher, but
+                // explicit empty inclusion is always a definite non-match.
+                quote! {
+                    if self.#filter_field_name.as_ref().is_some_and(|filter|
+                        filter.in_list.as_ref().is_some_and(Vec::is_empty)) {
+                        return Ok(Some(false));
+                    }
+                }
             };
             Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
@@ -6534,7 +6560,9 @@ fn generate_filter_field(
                         values.push(::graphql_orm::graphql::orm::SqlValue::Int(v));
                     }
                     if let Some(ref list) = f.in_list {
-                        if !list.is_empty() {
+                        if list.is_empty() {
+                            conditions.push("1 = 0".to_owned());
+                        } else {
                             let base_index = values.len() + 1;
                             let placeholders: Vec<String> = (0..list.len())
                                 .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
@@ -6584,7 +6612,14 @@ fn generate_filter_field(
                     }
                 }
             } else {
-                quote! {}
+                // Native backends do not use the SQLite residual matcher, but
+                // explicit empty inclusion is always a definite non-match.
+                quote! {
+                    if self.#filter_field_name.as_ref().is_some_and(|filter|
+                        filter.in_list.as_ref().is_some_and(Vec::is_empty)) {
+                        return Ok(Some(false));
+                    }
+                }
             };
             Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
@@ -6606,7 +6641,9 @@ fn generate_filter_field(
                         values.push(::graphql_orm::graphql::orm::SqlValue::Uuid(v));
                     }
                     if let Some(ref list) = f.in_list {
-                        if !list.is_empty() {
+                        if list.is_empty() {
+                            conditions.push("1 = 0".to_owned());
+                        } else {
                             let base_index = values.len() + 1;
                             let placeholders: Vec<String> = (0..list.len())
                                 .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
@@ -6652,7 +6689,14 @@ fn generate_filter_field(
                     }
                 }
             } else {
-                quote! {}
+                // Native backends do not use the SQLite residual matcher, but
+                // explicit empty inclusion is always a definite non-match.
+                quote! {
+                    if self.#filter_field_name.as_ref().is_some_and(|filter|
+                        filter.in_list.as_ref().is_some_and(Vec::is_empty)) {
+                        return Ok(Some(false));
+                    }
+                }
             };
             Ok((input, sql, entity_match, is_empty_check, no_spatial_check))
         }
