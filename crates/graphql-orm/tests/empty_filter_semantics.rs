@@ -268,3 +268,72 @@ async fn mssql_empty_lists_preserve_rows() -> Result<(), Box<dyn std::error::Err
     owner.cleanup()?;
     result
 }
+
+#[test]
+fn raw_expression_builder_preserves_empty_or_semantics_on_all_dialects() {
+    for backend in [
+        DatabaseBackend::Sqlite,
+        DatabaseBackend::Postgres,
+        DatabaseBackend::Mssql,
+    ] {
+        let mut index = 1;
+        let mut binds = Vec::new();
+        assert_eq!(
+            render_filter_expression(
+                backend,
+                &FilterExpression::Or(vec![]),
+                &mut index,
+                &mut binds
+            ),
+            "1 = 0"
+        );
+        assert!(binds.is_empty());
+        let expression = FilterExpression::Or(vec![
+            FilterExpression::trusted_fragment("id = ?", vec![SqlValue::String("other".into())]),
+            FilterExpression::And(vec![]),
+        ]);
+        let sql = render_filter_expression(backend, &expression, &mut index, &mut binds);
+        assert!(sql.ends_with(" OR (1 = 1)"), "{sql}");
+        assert_eq!(binds, [SqlValue::String("other".into())]);
+        assert_eq!(index, 2);
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn empty_exclusion_is_also_a_noop_for_null_residual_values() {
+    use graphql_orm::graphql::orm::spatial::{
+        int_filter_matches, int64_filter_matches, string_filter_matches, uuid_filter_matches,
+    };
+    assert!(string_filter_matches(
+        None,
+        &StringFilter {
+            not_in: Some(vec![]),
+            ..Default::default()
+        }
+    ));
+    assert!(int_filter_matches(
+        None,
+        &IntFilter {
+            not_in: Some(vec![]),
+            ..Default::default()
+        }
+    ));
+    assert_eq!(
+        int64_filter_matches(
+            None,
+            &Int64Filter {
+                not_in: Some(vec![]),
+                ..Default::default()
+            }
+        ),
+        Some(true)
+    );
+    assert!(uuid_filter_matches(
+        None,
+        &UuidFilter {
+            not_in: Some(vec![]),
+            ..Default::default()
+        }
+    ));
+}

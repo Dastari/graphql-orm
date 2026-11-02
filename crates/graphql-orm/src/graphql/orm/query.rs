@@ -504,7 +504,8 @@ pub enum FilterExpression {
     },
     /// Logical conjunction of child filters.
     And(Vec<FilterExpression>),
-    /// Logical disjunction of child filters.
+    /// Logical disjunction of child filters. An empty list is false; a child
+    /// rendering no restriction is true.
     Or(Vec<FilterExpression>),
 }
 
@@ -1801,13 +1802,23 @@ pub fn render_filter_expression(
             .map(|sql| format!("({sql})"))
             .collect::<Vec<_>>()
             .join(" AND "),
-        FilterExpression::Or(filters) => filters
-            .iter()
-            .map(|filter| render_filter_expression(dialect, filter, next_index, bind_values))
-            .filter(|sql| !sql.is_empty())
-            .map(|sql| format!("({sql})"))
-            .collect::<Vec<_>>()
-            .join(" OR "),
+        FilterExpression::Or(filters) => {
+            if filters.is_empty() {
+                return "1 = 0".to_owned();
+            }
+            filters
+                .iter()
+                .map(|filter| {
+                    let sql = render_filter_expression(dialect, filter, next_index, bind_values);
+                    if sql.is_empty() {
+                        "(1 = 1)".to_owned()
+                    } else {
+                        format!("({sql})")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        }
     }
 }
 
