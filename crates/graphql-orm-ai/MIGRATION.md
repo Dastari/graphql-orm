@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.120.0 to 0.120.1: documentation package identity
+
+No Rust API, configuration, schema, authorization or provider change is introduced. The patch records the provider-files documentation review-date update under a fresh immutable package tag. No data migration is needed; `AI_SCHEMA_MODULE_VERSION` remains unchanged. Select all workspace packages from the same published workspace release.
+
 ## 0.119.0 to 0.120.0: ORM 0.89.0
 
 Select AI 0.120.0 with ORM 0.89.0 from one reviewed revision. Code that builds

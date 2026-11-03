@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- Advance AI to **0.120.1** so its provider-files documentation update has a new immutable package identity. No AI runtime or persistence change. All other packages with existing current-version tags retain byte-identical source trees; the prepared ORM/macros 0.90.1 versions have not yet been tagged.
+
 - Refresh the lockfile/SBOM-bound router notice review for the approved Linux `auth-agql` archive: 698 dependency components and 11 exact source archives, preserving all six existing source-only notice dispositions and all existing supplemental notice hashes. New component identities since the previous review are Auth 0.24.0 and the already-adopted WebPKI/root distrust patches. No dependency, feature, runtime or schema change is introduced by this evidence refresh.
 
 ORM runtime/macros version: **0.90.1**, including the unpublished 0.90.0 changes below.
