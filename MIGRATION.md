@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.90.0 to 0.90.1: composite subscription authorization
+
+Composite-key and external-read-only Changed roots now accept `operation_authorization(categories = ["subscription"], ...)`, with the same scope enforcement and catalogue/router declarations as single-key roots. Declare the intended subscription scopes explicitly; upgrading does not infer them from read-operation scopes or replace entity/row/field policies. Generated descriptions no longer contain literal interpolation markers. No data migration is needed and the AI schema module version is unchanged.
+
+### Existing database migration versions
+
+The 0.90 series changes no schema generation, indexes, constraints, search storage, migration planner or migration-history semantics relative to 0.89.0 when entity declarations and backend configuration are unchanged. Operation authorization and resolver descriptions affect API metadata, not the persistent schema. This does not assert that an upgrade from 0.55 to 0.89 has an empty migration plan.
+
+If an older upgrade plans work under an already-recorded version, retain the existing history and keep the refusal. Inspect the complete schema/RLS plan, assess backfills and destructive steps, then apply the reviewed target under a **fresh, never-recorded forward migration version** (and fresh module version for a changed managed module). Advance the host's startup target to that new version and validate/replan before reopening traffic. Do not delete migration history, reuse a recorded version, or mark unapplied work as applied. Take and verify the deployment's backup before applying a reviewed forward plan. Unrelated pre-existing drift can still yield pending work and must be reviewed separately.
+
 ## 0.89.0 to 0.90.0: restrictive empty filters and complete change provenance
 
 - **Breaking filter semantics:** an explicit empty `in_list` or `or` now matches nothing, including GraphQL empty lists and partially populated multi-field authorization filters. Omit the operator to express no restriction. The same OR semantics apply to manually constructed `FilterExpression::Or` values. Empty `not_in` remains a no-op. An empty OR branch is an unrestricted filter and makes that OR true; do not use empty branches as placeholders for restrictions. Empty AND and NOT SQL behavior is preserved.

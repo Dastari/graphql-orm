@@ -448,3 +448,7 @@ and [upgrade guide](../../MIGRATION.md#0460-to-0470-current-authority-and-cohere
 Version 0.90.0 fixes empty-list filter semantics, generated Changed catalogue
 arguments and propagation path authorization. See the workspace
 [MIGRATION.md](../../MIGRATION.md#0890-to-0900-restrictive-empty-filters-and-complete-change-provenance) before upgrading.
+
+Version 0.90.1 permits declared subscription scopes on composite and read-only
+Changed roots and fixes generated descriptions. It adds no migration steps; see
+[the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).

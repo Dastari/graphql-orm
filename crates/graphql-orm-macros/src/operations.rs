@@ -3695,10 +3695,8 @@ fn generate_graphql_operations_unfiltered(
     generated_category_required("update_many", generates_standard_write_surface)?;
     generated_category_required("delete", generates_standard_write_surface)?;
     generated_category_required("delete_many", generates_standard_write_surface)?;
-    generated_category_required(
-        "subscription",
-        entity_meta.append_only || generates_standard_write_surface,
-    )?;
+    // Every supported entity profile emits a real Changed subscription,
+    // independently of whether it can generate standard GraphQL mutations.
     let resolver_schema_signature = generated_resolver_schema_signature(
         struct_name,
         fields,
@@ -7287,13 +7285,12 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
     let generated_subscription_surface = quote! {
-        /// Generated subscriptions for #struct_name
+        /// Generated subscriptions for this entity
         #[derive(Default)]
         pub struct #subscriptions_struct;
 
         #[::graphql_orm::async_graphql::Subscription]
         impl #subscriptions_struct {
-            /// Subscribe to #struct_name_str changes
             #[doc = #subscription_operation_description]
             #[graphql(name = #subscription_name, #subscription_requires_scopes #authenticated_directive)]
             async fn on_changed(
@@ -7777,13 +7774,13 @@ fn generate_graphql_operations_unfiltered(
         // Create/Update Input Types
         // ============================================================================
 
-        /// Input for creating a new #struct_name
+        /// Input for creating an entity.
         #[derive(Clone, Debug)]
         pub struct #create_input {
             #(#create_input_fields)*
         }
 
-        /// Input for updating an existing #struct_name
+        /// Input for updating an entity.
         #[derive(Clone, Debug, Default)]
         pub struct #update_input {
             #(#update_input_fields)*
@@ -7817,7 +7814,7 @@ fn generate_graphql_operations_unfiltered(
             }
         }
 
-        /// Result type for #struct_name mutations
+        /// Mutation result for this entity.
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject)]
         #[graphql(name = #result_type_str, rename_fields = #field_case_rule)]
         pub struct #result_type {
@@ -7840,7 +7837,7 @@ fn generate_graphql_operations_unfiltered(
 
         #upsert_result_definition
 
-        /// Event for #struct_name changes (subscriptions)
+        /// Subscription change event for this entity.
         #[derive(Debug, Clone, ::graphql_orm::async_graphql::SimpleObject, serde::Serialize, serde::Deserialize)]
         #[graphql(name = #changed_event_str, rename_fields = #field_case_rule)]
         pub struct #changed_event {
@@ -7902,7 +7899,7 @@ fn generate_graphql_operations_unfiltered(
         #aggregate_definitions
             #authorized_keyset_definitions
 
-        /// Generated queries for #struct_name
+        /// Generated queries for this entity
         #[derive(Default)]
         pub struct #queries_struct;
 
@@ -7910,7 +7907,6 @@ fn generate_graphql_operations_unfiltered(
         impl #queries_struct {
             #aggregate_query_method
 
-            /// Get a list of #plural_name with optional filtering, sorting, and pagination
             #[doc = #list_operation_description]
             #[graphql(#list_query_skip name = #list_query_name, #list_requires_scopes #authenticated_directive)]
             async fn list(
@@ -8015,7 +8011,6 @@ fn generate_graphql_operations_unfiltered(
             #search_query_method
             #keyset_graphql_method
 
-            /// Get a single #struct_name_str by ID
             #[doc = #single_operation_description]
             #[graphql(#single_query_skip name = #single_query_name, #single_read_requires_scopes #authenticated_directive)]
             async fn get_by_id(
@@ -8075,13 +8070,12 @@ fn generate_graphql_operations_unfiltered(
         // Mutation Struct
         // ============================================================================
 
-        /// Generated mutations for #struct_name
+        /// Generated mutations for this entity
         #[derive(Default)]
         pub struct #mutations_struct;
 
         #[::graphql_orm::async_graphql::Object]
         impl #mutations_struct {
-            /// Create a new #struct_name_str
             #[doc = #create_operation_description]
             #[graphql(name = #create_mutation_name, #create_requires_scopes #authenticated_directive)]
             async fn create(
@@ -8186,7 +8180,6 @@ fn generate_graphql_operations_unfiltered(
 
             #upsert_graphql_method
 
-            /// Update an existing #struct_name_str
             #[doc = #update_operation_description]
             #[graphql(name = #update_mutation_name, #update_requires_scopes #authenticated_directive)]
             async fn update(
@@ -8366,7 +8359,6 @@ fn generate_graphql_operations_unfiltered(
                 }
             }
 
-            /// Delete a #struct_name_str
             #[doc = #delete_operation_description]
             #[graphql(name = #delete_mutation_name, #delete_requires_scopes #authenticated_directive)]
             async fn delete(
@@ -8497,7 +8489,6 @@ fn generate_graphql_operations_unfiltered(
                 }
             }
 
-            /// Update multiple #plural_name matching the given Where filter
             #[doc = #update_many_operation_description]
             #[graphql(name = #update_many_mutation_name, #update_many_requires_scopes #authenticated_directive)]
             async fn update_many(
@@ -8538,7 +8529,6 @@ fn generate_graphql_operations_unfiltered(
                 }
             }
 
-            /// Delete multiple #plural_name matching the given Where filter
             #[doc = #delete_many_operation_description]
             #[graphql(name = #delete_many_mutation_name, #delete_many_requires_scopes #authenticated_directive)]
             async fn delete_many(
@@ -8588,7 +8578,7 @@ fn generate_graphql_operations_unfiltered(
         // Repository Trait Implementation
         // ============================================================================
 
-        /// Repository implementation for #struct_name
+        /// Repository implementation for this entity
         ///
         /// Provides static async methods for common database operations.
         impl #struct_name {

@@ -16,7 +16,13 @@ for historical context.
 
 ## Unreleased
 
-ORM runtime/macros advance to **0.90.0** for breaking filter semantics.
+ORM runtime/macros version: **0.90.1**, including the unpublished 0.90.0 changes below.
+
+- Fix [#298](https://github.com/Dastari/graphql-orm/issues/298): composite-key and external-read-only Changed roots accept declared subscription operation authorization, enforce its scopes, and export the requirement through catalogue, federation SDL and router descriptors. This addresses the authorization-declaration gap related to #191, not its entire qualification scope.
+- Remove unexpanded interpolation comments from generated descriptions, including literal `#struct_name_str` in Changed subscriptions. Existing interpolated operation descriptions remain canonical.
+- The 0.90 series adds no schema-generation or migration-planning changes over 0.89.0 for unchanged entity declarations. Existing older-version drift still requires reviewed pending work under a fresh migration version; see MIGRATION.md.
+
+The preceding **0.90.0** preparation introduced breaking filter semantics, included in 0.90.1.
 
 - Fix [#294](https://github.com/Dastari/graphql-orm/issues/294): generated Changed operation descriptors now append the optional configured-case `keys` argument after `filter` and `key`, with GraphQL type `[<scalar key>!]` for a single key or `[<Entity>KeyInput!]` for composite keys. The list itself is nullable. Catalogue, operation and router export fingerprints change; regenerate descriptors and remove adapters that append this argument. Served SDL is unchanged.
 - Fix [#295](https://github.com/Dastari/graphql-orm/issues/295): empty `in_list` and empty `or` match no rows across generated SQL backends, bounded writes and in-memory evaluation. The public `FilterExpression::Or` builder follows the same empty/empty-branch rules; runtime schema filter builders already follow these rules. Empty `not_in` remains a no-op. An OR branch with no conditions is true, including when mixed with restrictive branches; empty AND and NOT SQL behavior is unchanged.
