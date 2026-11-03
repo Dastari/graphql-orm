@@ -651,6 +651,68 @@ async fn unkeyed_subscriptions_are_unchanged(db: &Database) -> TestResult {
     );
 
     let sdl = schema_builder(db.clone()).finish().sdl();
+    // Compare every generated subscription in this root against the finished
+    // SDL, including scalar and complete composite key list types.
+    use graphql_orm::async_graphql::parser::{
+        parse_schema,
+        types::{TypeKind, TypeSystemDefinition},
+    };
+    let document = parse_schema(&sdl)?;
+    let descriptors = [
+        KeyedParent::generated_graphql_operations(),
+        KeyedChild::generated_graphql_operations(),
+        KeyedSlot::generated_graphql_operations(),
+    ];
+    for operation in descriptors
+        .into_iter()
+        .flatten()
+        .filter(|op| op.kind() == GraphqlOperationKind::Subscription)
+    {
+        let field = document
+            .definitions
+            .iter()
+            .filter_map(|definition| match definition {
+                TypeSystemDefinition::Type(ty) => match &ty.node.kind {
+                    TypeKind::Object(object) => Some(object),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .flat_map(|object| &object.fields)
+            .find(|field| field.node.name.node.as_str() == operation.field_name())
+            .expect("served subscription");
+        let actual = field
+            .node
+            .arguments
+            .iter()
+            .map(|arg| (arg.node.name.node.to_string(), arg.node.ty.node.to_string()))
+            .collect::<Vec<_>>();
+        let expected = operation
+            .arguments()
+            .iter()
+            .map(|arg| (arg.graphql_name().to_owned(), arg.graphql_type().to_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{}", operation.field_name());
+        #[cfg(feature = "router-protocol")]
+        {
+            let exported = graphql_orm_operation_catalog().router_protocol_operations()?;
+            let router = exported
+                .iter()
+                .find(|export| export.field_name == operation.field_name())
+                .expect("exported subscription");
+            let router_arguments = router
+                .arguments
+                .iter()
+                .map(|arg| (arg.name.clone(), arg.graphql_type.clone()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                router_arguments,
+                actual,
+                "router {}",
+                operation.field_name()
+            );
+        }
+    }
     let keys_arg = argument_name("keys");
     // The argument block of `name(...)` in the subscription root, whatever its layout.
     let arguments = |name: &str| {

@@ -111,6 +111,8 @@ jobs:
       - run: cargo test -p graphql-orm -- --exact --skip sqlite_and_mssql_services_can_share_one_graphql_orm_build --skip direct_host_dependency_resolves_one_exact_agql_auth_universe --skip generated_relationships_execute_across_real_crate_boundaries --skip two_orm_subgraphs_compose_and_join_through_the_router --skip external_legacy_migration_surface_compiles --skip pascal_relationship_semantics_compile_as_a_complete_query_capability --skip external_repository_aggregate_consumer_requires_no_direct_graphql_dependency
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
+      - name: Check Changed catalogue and provenance with PascalCase arguments
+        run: cargo test -p graphql-orm --features router-protocol,resolver-case-pascal,argument-case-pascal,field-case-pascal --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
@@ -161,7 +163,7 @@ jobs:
       - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions, keyed subscriptions and node ids
         env:
           CARGO_BUILD_JOBS: "1"
-        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test keyed_changed_subscriptions --test node_ids -- --include-ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids -- --include-ignored --test-threads=1
       - name: Execute the global node lookup through the router on owned PostgreSQL
         env:
           CARGO_BUILD_JOBS: "2"
@@ -240,7 +242,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Verify TLS, writes, and retained query notifications on owned servers
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications --test managed_version --test keyed_changed_subscriptions --test node_ids -- --ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids -- --ignored --test-threads=1
       - name: Execute the global node lookup through the router on owned servers
         run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 
@@ -302,7 +304,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order
 
   companions:
     runs-on: ubuntu-latest

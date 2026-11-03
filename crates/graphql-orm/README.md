@@ -496,3 +496,7 @@ With `auth-agql`, retain a coherent full accepted principal and wrap sensitive
 entity policies with immediate current-authority checks. See the
 [current-authority bridge](../../docs/reference/graphql-orm/agql-auth-bridge.md)
 and [upgrade guide](../../MIGRATION.md#0460-to-0470-current-authority-and-coherent-accepted-requests).
+
+Version 0.90.0 fixes empty-list filter semantics, generated Changed catalogue
+arguments and propagation path authorization. See the workspace
+[MIGRATION.md](../../MIGRATION.md#0890-to-0900-restrictive-empty-filters-and-complete-change-provenance) before upgrading.

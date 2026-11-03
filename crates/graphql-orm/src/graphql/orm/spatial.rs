@@ -229,7 +229,7 @@ pub fn string_filter_matches(
             && filter.starts_with.is_none()
             && filter.ends_with.is_none()
             && filter.in_list.is_none()
-            && filter.not_in.is_none()
+            && filter.not_in.as_ref().is_none_or(Vec::is_empty)
             && filter.similar.is_none();
     };
 
@@ -310,7 +310,7 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
             && filter.gt.is_none()
             && filter.gte.is_none()
             && filter.in_list.is_none()
-            && filter.not_in.is_none();
+            && filter.not_in.as_ref().is_none_or(Vec::is_empty);
     };
 
     if filter.eq.is_some_and(|expected| value != expected as i64) {
@@ -349,12 +349,16 @@ pub fn int_filter_matches(value: Option<i64>, filter: &crate::graphql::filters::
     true
 }
 
-/// Evaluate exact signed64 operands without narrowing. Empty lists are no-ops.
+/// Evaluate exact signed64 operands without narrowing. Empty inclusion is false;
+/// empty exclusion is a no-op.
 pub fn int64_filter_matches(
     value: Option<i64>,
     filter: &crate::graphql::filters::Int64Filter,
 ) -> Option<bool> {
     if filter.validate().is_err() {
+        return Some(false);
+    }
+    if filter.in_list.as_ref().is_some_and(Vec::is_empty) {
         return Some(false);
     }
     if let Some(is_null) = filter.is_null {
@@ -397,7 +401,7 @@ pub fn int64_filter_matches(
     if filter
         .in_list
         .as_ref()
-        .is_some_and(|list| !list.is_empty() && !list.iter().any(|candidate| value == *candidate))
+        .is_some_and(|list| !list.iter().any(|candidate| value == *candidate))
     {
         return Some(false);
     }
@@ -426,7 +430,7 @@ pub fn uuid_filter_matches(
         return filter.eq.is_none()
             && filter.ne.is_none()
             && filter.in_list.is_none()
-            && filter.not_in.is_none();
+            && filter.not_in.as_ref().is_none_or(Vec::is_empty);
     };
     if filter.eq.is_some_and(|expected| value != expected) {
         return false;

@@ -3,8 +3,8 @@ title: Plans index
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-18
-review_by: 2026-11-01
+last_reviewed: 2026-11-02
+review_by: 2026-12-02
 supersedes: []
 ---
 

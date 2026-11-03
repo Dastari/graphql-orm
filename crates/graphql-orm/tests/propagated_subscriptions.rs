@@ -647,7 +647,7 @@ async fn child_mutation_emits_parent_propagated_event() -> Result<(), Box<dyn st
     feature = "postgres",
     ignore = "requires test-owned PostgreSQL container"
 )]
-async fn multi_parent_propagation_reaches_both_parents_and_deduplicates_same_parent()
+async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
 -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
@@ -836,11 +836,20 @@ async fn multi_parent_propagation_reaches_both_parents_and_deduplicates_same_par
         duplicate_json["recordChanged"]["changeKind"].as_str(),
         Some("PROPAGATED")
     );
+    let alternate = next_json(&mut duplicate_stream).await;
+    assert_eq!(
+        alternate["recordChanged"]["record"]["id"],
+        duplicate_json["recordChanged"]["record"]["id"]
+    );
+    assert_ne!(
+        alternate["recordChanged"]["path"],
+        duplicate_json["recordChanged"]["path"]
+    );
     assert!(
         timeout(Duration::from_millis(250), duplicate_stream.next())
             .await
             .is_err(),
-        "duplicate propagation emitted more than once for the same parent"
+        "propagation emitted an extra event for the same path"
     );
 
     Ok(())

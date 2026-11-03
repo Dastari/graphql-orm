@@ -3,8 +3,8 @@ title: "Bounded append-only retention maintenance"
 kind: runbook
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-01
-review_by: 2026-11-01
+last_reviewed: 2026-11-02
+review_by: 2026-12-02
 supersedes: []
 ---
 
@@ -175,5 +175,5 @@ cargo test -p graphql-orm --no-default-features --features postgres \
   --test retention_purge_postgres -- --ignored --nocapture
 ```
 
-MSSQL remains read-only and intentionally generates no retention runtime
-capability. Schema metadata rejects the writable retention opt-in for MSSQL.
+MSSQL generates no retention runtime capability, including for external-writable
+entities. Schema metadata rejects the retention opt-in for MSSQL.

@@ -3,8 +3,8 @@ title: GraphQL ORM AI production-readiness plan
 kind: plan
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-02
-review_by: 2026-11-01
+last_reviewed: 2026-11-02
+review_by: 2026-12-02
 supersedes:
   - crates/graphql-orm-ai/docs/completion-plan.md
 ---
