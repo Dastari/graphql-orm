@@ -112,7 +112,7 @@ jobs:
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,router-protocol --test federation_entity_keys_contract
       - run: cargo test -p graphql-orm --no-default-features --features sqlite,field-case-pascal,argument-case-snake --test federation_entity_keys_case_features
       - name: Check Changed catalogue and provenance with PascalCase arguments
-        run: cargo test -p graphql-orm --features router-protocol,resolver-case-pascal,argument-case-pascal,field-case-pascal --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics
+        run: cargo test -p graphql-orm --features router-protocol,resolver-case-pascal,argument-case-pascal,field-case-pascal --test keyed_changed_subscriptions --test subscription_path_order --test empty_filter_semantics --test composite_subscription_scopes
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
@@ -160,6 +160,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo check -p graphql-orm --no-default-features --features postgres
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
+      - name: Check composite subscription scope declarations on native backends
+        run: |
+          for backend in postgres mssql; do
+            cargo test -p graphql-orm --locked --no-default-features --features "$backend,router-protocol" --test composite_subscription_scopes
+          done
       - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions, keyed subscriptions and node ids
         env:
           CARGO_BUILD_JOBS: "1"
@@ -304,7 +309,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order
+      - run: cargo test -p graphql-orm --locked --no-default-features --features sqlite,resolver-case-snake,argument-case-snake,field-case-snake --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test grouped_aggregates --test record_version_ui --test subscription_path_order --test composite_subscription_scopes
 
   companions:
     runs-on: ubuntu-latest
