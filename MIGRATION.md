@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## Router binary notice refresh
+
+The workspace release can attach router 0.8.1 built for `x86_64-unknown-linux-gnu` with `auth-agql`, together with its SBOM, notices, exact source archives, checksums and attestations. The notice-review refresh changes no runtime, configuration or stored data. For consumers replacing the older 0.6.3 archive, follow the [router migration guide](crates/graphql-orm-router/MIGRATION.md), including canonical Auth 0.24 types for Rust hosts and the repaired certificate-distrust trust roots. Binary publication remains conditional on the complete release gates and protected owner approval; this preparation does not assert that an archive has been published.
+
 ## 0.90.0 to 0.90.1: composite subscription authorization
 
 Composite-key and external-read-only Changed roots now accept `operation_authorization(categories = ["subscription"], ...)`, with the same scope enforcement and catalogue/router declarations as single-key roots. Declare the intended subscription scopes explicitly; upgrading does not infer them from read-operation scopes or replace entity/row/field policies. Generated descriptions no longer contain literal interpolation markers. No data migration is needed and the AI schema module version is unchanged.

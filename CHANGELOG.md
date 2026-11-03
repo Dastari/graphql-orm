@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- Refresh the lockfile/SBOM-bound router notice review for the approved Linux `auth-agql` archive: 698 dependency components and 11 exact source archives, preserving all six existing source-only notice dispositions and all existing supplemental notice hashes. New component identities since the previous review are Auth 0.24.0 and the already-adopted WebPKI/root distrust patches. No dependency, feature, runtime or schema change is introduced by this evidence refresh.
+
 ORM runtime/macros version: **0.90.1**, including the unpublished 0.90.0 changes below.
 
 - Fix [#298](https://github.com/Dastari/graphql-orm/issues/298): composite-key and external-read-only Changed roots accept declared subscription operation authorization, enforce its scopes, and export the requirement through catalogue, federation SDL and router descriptors. This addresses the authorization-declaration gap related to #191, not its entire qualification scope.
