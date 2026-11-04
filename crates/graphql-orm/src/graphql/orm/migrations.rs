@@ -1790,7 +1790,7 @@ fn json_option_string(value: Option<&String>) -> String {
         .unwrap_or_else(|| "null".to_string())
 }
 
-fn search_index_config_json(index: &SearchIndexModel) -> String {
+pub(crate) fn search_index_config_json(index: &SearchIndexModel) -> String {
     let fields = index
         .fields
         .iter()

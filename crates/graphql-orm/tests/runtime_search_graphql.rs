@@ -10,12 +10,13 @@
 
 use futures::future::BoxFuture;
 use graphql_orm::async_graphql::{Request, Variables};
+use graphql_orm::graphql::filters::SearchMode;
 use graphql_orm::{
     db::Database,
     graphql::{orm::*, runtime::*},
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 #[cfg(feature = "postgres")]
@@ -113,9 +114,14 @@ fn tokenized(remove_diacritics: bool, min_token_len: Option<u8>) -> RuntimeSchem
 }
 
 /// Grants one tenant and records whether a search was authorized.
+#[derive(Default)]
 struct Authority {
     deny_body_search: AtomicBool,
     saw_search: AtomicBool,
+    /// A host allowlist of modes that withholds `WEB`.
+    deny_web: AtomicBool,
+    /// The search reported by the last check, as (mode, minScore, ranked).
+    last_search: Mutex<Option<(SearchMode, bool, bool)>>,
 }
 
 impl RuntimeReadAuthority for Authority {
@@ -130,6 +136,18 @@ impl RuntimeReadAuthority for Authority {
                 .filter(|(_, op)| *op == "search")
                 .map(|(field, _)| field.id().as_str().to_owned())
                 .collect::<Vec<_>>();
+            // The check reports the search directly, beside its field operations.
+            assert_eq!(check.search.is_some(), !searched.is_empty());
+            *self.last_search.lock().unwrap() = check
+                .search
+                .map(|search| (search.mode, search.min_score, search.ranked));
+            if check
+                .search
+                .is_some_and(|search| search.mode == SearchMode::Web)
+                && self.deny_web.load(Ordering::SeqCst)
+            {
+                return Err(RuntimeGraphqlError::denied());
+            }
             if !searched.is_empty() {
                 assert_eq!(searched, ["records.title", "records.body"]);
                 self.saw_search.store(true, Ordering::SeqCst);
@@ -220,10 +238,7 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
     );
     assert!(sdl.contains("input RuntimeSearchInput"), "{sdl}");
 
-    let authority = Arc::new(Authority {
-        deny_body_search: AtomicBool::new(false),
-        saw_search: AtomicBool::new(false),
-    });
+    let authority = Arc::new(Authority::default());
     let run = |query: &str| {
         Request::new(query).variables(Variables::default()).data(
             RuntimeGraphqlRequest::<Backend>::new(
@@ -281,6 +296,39 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
     assert!(edges.iter().all(|edge| edge[&score].as_f64().is_some()));
     assert!(edges[0][&score].as_f64() >= edges[1][&score].as_f64());
     assert!(authority.saw_search.load(Ordering::SeqCst));
+    assert_eq!(
+        *authority.last_search.lock().unwrap(),
+        Some((SearchMode::Plain, false, true))
+    );
+
+    // A host may withhold a mode, here WEB, which SQLite evaluates like PLAIN.
+    let (mode, min_score) = (member("mode"), member("minScore"));
+    let web = format!(
+        "{{ records(search: {{ {query}: \"bridge\", {mode}: WEB }}) {{ edges {{ node {{ id }} }} }} }}"
+    );
+    assert!(api.execute(run(&web)).await.errors.is_empty());
+    authority.deny_web.store(true, Ordering::SeqCst);
+    let withheld = api.execute(run(&web)).await;
+    assert_eq!(
+        withheld.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("\"authorization_denied\""),
+        "{withheld:?}"
+    );
+    let phrase = api
+        .execute(run(&format!(
+            "{{ records(search: {{ {query}: \"harbour bridge\", {mode}: PHRASE, {min_score}: 0.0 }}) {{ edges {{ node {{ id }} }} }} }}"
+        )))
+        .await;
+    assert!(phrase.errors.is_empty(), "{:?}", phrase.errors);
+    assert_eq!(
+        *authority.last_search.lock().unwrap(),
+        Some((SearchMode::Phrase, true, true))
+    );
 
     // An explicit order wins over relevance.
     let ordered = api
@@ -296,6 +344,11 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
         .map(|edge| edge["node"]["title"].clone())
         .collect::<Vec<_>>();
     assert_eq!(titles, ["Harbour Bridge", "Opera House"]);
+    assert_eq!(
+        *authority.last_search.lock().unwrap(),
+        Some((SearchMode::Plain, false, false)),
+        "an explicit order is not ranked"
+    );
 
     // Without search, edges have a null score.
     let plain = api
@@ -304,6 +357,7 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
         )))
         .await;
     assert!(plain.errors.is_empty(), "{:?}", plain.errors);
+    assert_eq!(*authority.last_search.lock().unwrap(), None);
     assert!(
         plain.data.into_json().unwrap()["records"]["edges"]
             .as_array()
@@ -390,10 +444,7 @@ async fn search_ids(
         .unwrap()
         .finish()
         .unwrap();
-    let authority = Arc::new(Authority {
-        deny_body_search: AtomicBool::new(false),
-        saw_search: AtomicBool::new(false),
-    });
+    let authority = Arc::new(Authority::default());
     let query = format!(
         "{{ records(search: {{ {}: \"{term}\" }}, orderBy: [{{ field: id, direction: ASC }}]) {{ edges {{ node {{ id }} }} }} }}",
         member("query")

@@ -197,6 +197,11 @@ impl RuntimeSearchLimits {
     }
 }
 
+/// The scoring function bound into relevance-ordered cursors: per-document
+/// weighted scores on both backends (SQLite weighted phrase-instance counts,
+/// PostgreSQL `ts_rank_cd`).
+const SEARCH_RANKING: &str = "document-only-v1";
+
 /// A validated full-text search of one runtime collection.
 #[derive(Clone)]
 pub struct RuntimeSearchRequest {
@@ -232,17 +237,36 @@ impl RuntimeSearchRequest {
         self.rank
     }
 
+    /// The requested mode; `Plain` when the input names none.
+    pub fn mode(&self) -> crate::graphql::filters::SearchMode {
+        self.input.mode.unwrap_or_default()
+    }
+
+    /// The requested minimum score, if any.
+    pub fn min_score(&self) -> Option<f64> {
+        self.input.min_score
+    }
+
     /// A stable digest binding a cursor to this exact search.
+    ///
+    /// A relevance-ordered cursor carries a score as its leading keyset value,
+    /// so its digest also names the scoring function. A cursor scored by an
+    /// earlier function (SQLite `bm25` before 0.91.0) is then refused instead
+    /// of seeking with an incomparable score.
     fn binding(&self) -> String {
         let mode = self.input.mode.unwrap_or_default();
-        fnv(serde_json::to_string(&(
+        let inputs = (
             &self.input.query,
             format!("{mode:?}"),
             self.input.min_score.map(f64::to_bits),
             self.rank,
-        ))
-        .expect("search inputs serialize")
-        .as_bytes())
+        );
+        let text = if self.rank {
+            serde_json::to_string(&(inputs, SEARCH_RANKING))
+        } else {
+            serde_json::to_string(&inputs)
+        };
+        fnv(text.expect("search inputs serialize").as_bytes())
     }
 
     /// The document text a search compares against, folded like the query.
@@ -1920,8 +1944,9 @@ fn render_search_join(
                 search.min_token_len,
             )));
             format!(
-                "SELECT entity_pk AS {SEARCH_KEY}, bm25({fts}, 1.0, 0.7, 0.4, 0.1, 0.1) * -1.0 AS {SEARCH_SCORE} \
-                 FROM {fts} WHERE {fts} MATCH {bind}"
+                "SELECT entity_pk AS {SEARCH_KEY}, {} AS {SEARCH_SCORE} \
+                 FROM {fts} WHERE {fts} MATCH {bind}",
+                sqlite_isolated_score(&fts),
             )
         }
     };
@@ -1930,6 +1955,34 @@ fn render_search_join(
         backend.quote_identifier(table),
         backend.quote_identifier(&search.key_column),
     )
+}
+
+/// The SQLite relevance of one matched document, computed from that document
+/// alone: the weighted count of matched phrase instances in each weight column.
+///
+/// `highlight(fts, column, marker, '')` returns the column text with one
+/// one-character marker before every matched phrase instance (overlapping
+/// instances share one), so its length minus the column's length is that
+/// column's match count. Unlike `bm25`, it reads no corpus statistics (row
+/// count, average length or document frequency), so neither a visible row's
+/// score nor the order of visible rows depends on rows the caller cannot see.
+/// The weights are A 1.0, B 0.7, C 0.4 and D 0.1; FTS5 columns 1 to 4 are
+/// `weight_a` to `weight_d`.
+fn sqlite_isolated_score(fts: &str) -> String {
+    let terms = [
+        (1, "weight_a", "1.0"),
+        (2, "weight_b", "0.7"),
+        (3, "weight_c", "0.4"),
+        (4, "weight_d", "0.1"),
+    ]
+    .iter()
+    .map(|(index, column, weight)| {
+        format!(
+            "{weight} * COALESCE(LENGTH(highlight({fts}, {index}, char(1), '')) - LENGTH({column}), 0)"
+        )
+    })
+    .collect::<Vec<_>>();
+    format!("({})", terms.join(" + "))
 }
 
 fn render_min_score(
@@ -2300,6 +2353,40 @@ where
 mod tests {
     use super::*;
     use crate::graphql::orm::{RuntimeCollection, RuntimeField, RuntimeOrderTerm, RuntimeSchema};
+
+    /// Unranked search cursors keep their earlier digest, so they stay valid
+    /// across the scoring change; relevance-ordered ones name the scoring
+    /// function, so a cursor carrying an earlier score is refused.
+    #[test]
+    fn search_cursor_digests_name_the_scoring_function_only_when_ranked() {
+        let request = |rank: bool| RuntimeSearchRequest {
+            schema: serde_json::from_str("\"0123456789abcdef\"").unwrap(),
+            collection: collection_id("records"),
+            input: crate::graphql::filters::SearchInput {
+                query: "bridge".into(),
+                mode: None,
+                min_score: Some(0.5),
+            },
+            language: "english".into(),
+            remove_diacritics: false,
+            min_token_len: 2,
+            key_column: "id".into(),
+            rank,
+        };
+        let legacy = |rank: bool| {
+            fnv(serde_json::to_string(&(
+                "bridge",
+                "Plain".to_string(),
+                Some(0.5_f64.to_bits()),
+                rank,
+            ))
+            .unwrap()
+            .as_bytes())
+        };
+        assert_eq!(request(false).binding(), legacy(false));
+        assert_ne!(request(true).binding(), legacy(true));
+        assert_ne!(request(true).binding(), request(false).binding());
+    }
 
     fn collection_id(value: &str) -> CollectionId {
         CollectionId::new(value).unwrap()

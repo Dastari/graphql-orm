@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-04
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,18 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+ORM runtime/macros version: **0.91.0**. Runtime full-text search: ranking isolated from hidden rows, and a fenced backfill. See [runtime search](docs/reference/graphql-orm/runtime-search.md).
+
+- **SQLite ranking is per document.** SQLite now scores a match from the row's own document only: `1.0·nA + 0.7·nB + 0.4·nC + 0.1·nD`, the weighted number of matched phrase instances in each weight, counted with FTS5's built-in `highlight()`. It replaces `bm25`, whose row count, average length and document frequencies covered rows the host's grant hides. That let a caller estimate how many hidden rows contain a term, and made the order of visible rows and `minScore` results depend on hidden rows. Now a visible row's score, the order of visible rows, `minScore` results and `totalCount` do not change when hidden rows are added or removed. PostgreSQL `ts_rank_cd` already depended only on the row and is unchanged. See [ranking isolation](docs/reference/graphql-orm/runtime-search.md#ranking-isolation) for the parity analysis.
+  - SQLite scores have a new scale; existing `minScore` thresholds on SQLite need review.
+  - Relevance-ordered search cursors bind the scoring function, so one issued before 0.91.0 is refused with `cursor_invalid` on both backends. Clients restart from the first page. Cursors of searches with `orderBy`, and of reads without search, are unaffected.
+- **Search in the read check.** `RuntimeReadCheck` gains `search: Option<RuntimeReadSearchCheck>`, with the requested `mode`, whether `minScore` is supplied, and whether results are relevance-ordered. A host can withhold modes, for example `WEB` (which SQLite evaluates like `PLAIN`), by denying in `authorize`. `RuntimeSearchRequest` gains `mode()` and `min_score()`.
+- **Fenced backfill.** `backfill_runtime_search` compares the stored index configuration with the supplied schema's declaration in every batch's transaction. On any difference (fields, weights, JSON paths, language, tokenizer, `remove_diacritics` or minimum token length) it returns one `RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch` diagnostic per differing part, and writes nothing. Previously a stale schema could write documents from the old fields and mark a recreated index `ready`. A backfill with the current schema completes and resumes as before.
+- **Porter with accent folding.** `remove_diacritics` is accepted with the `porter` tokenizer (`porter unicode61 remove_diacritics 2`), so stemmed English keeps accent folding. It is still refused with `ascii`. `RuntimeSchema::from_static_entities` maps that tokenizer.
+- **Test lanes.** CI, the release workflow and `scripts/run-owned-database-lanes.sh` now run the runtime search tests on owned SQLite and PostgreSQL.
+- **Breaking for exhaustive matches:** `RuntimeMigrationDiagnosticCode` gains `SearchConfigurationMismatch`. `RuntimeReadCheck` is `#[non_exhaustive]`, so its new member is additive.
+- No change to static entity search, its generated API or its storage. No change to persistent schema, migration planning or search storage.
 
 - Repair the locked Tokio, ctutils and zstd-family advisory versions across workspace fixtures. Update the compatible S3 SigV4a owner to use corrected RustCrypto arithmetic. Retain only the owner-accepted, version-specific RUSTSEC-2026-0387 disposition for crypto-bigint 0.5.5 through JWT verification dependencies; no advisory ignore or gate changes. Refresh router binary notice bindings for the corrected lock.
 

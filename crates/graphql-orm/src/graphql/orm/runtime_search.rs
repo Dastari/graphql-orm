@@ -208,6 +208,69 @@ fn not_declared(collection: &CollectionId) -> super::runtime_migration::RuntimeM
     )
 }
 
+/// The parts of a stored index configuration that differ from `expected`,
+/// named as in [`RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch`](super::RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch).
+/// Readiness and the resume point are progress, not configuration.
+fn configuration_mismatch(
+    stored: &serde_json::Value,
+    expected: &serde_json::Value,
+) -> Vec<&'static str> {
+    const PROGRESS: [&str; 2] = ["readiness", "backfill_after"];
+    let part = |key: &str| match key {
+        "fields" | "json_paths" | "relations" => "fields",
+        "language" => "language",
+        "tokenizer" => "tokenizer",
+        "min_token_len" => "min_token_len",
+        _ => "index",
+    };
+    let (Some(stored), Some(expected)) = (stored.as_object(), expected.as_object()) else {
+        return vec!["index"];
+    };
+    let mut parts = std::collections::BTreeSet::new();
+    for key in stored.keys().chain(expected.keys()) {
+        if PROGRESS.contains(&key.as_str()) {
+            continue;
+        }
+        if stored.get(key) != expected.get(key) {
+            parts.insert(part(key));
+        }
+    }
+    // Report in a stable, documented order.
+    ["fields", "language", "tokenizer", "min_token_len", "index"]
+        .into_iter()
+        .filter(|name| parts.contains(name))
+        .collect()
+}
+
+fn configuration_mismatch_error(
+    collection: &CollectionId,
+    parts: Vec<&'static str>,
+) -> super::runtime_migration::RuntimeMigrationError {
+    super::runtime_migration::RuntimeMigrationError::Diagnostics(
+        super::runtime_migration::RuntimeMigrationDiagnostics(
+            parts
+                .into_iter()
+                .map(|part| super::runtime_migration::RuntimeMigrationDiagnostic {
+                    code: super::runtime_migration::RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch,
+                    collection: Some(collection.clone()),
+                    subject: Some(part.to_string()),
+                })
+                .collect(),
+        ),
+    )
+}
+
+/// One backfill batch's outcome.
+enum BatchStep {
+    /// The index has no metadata row: its storage does not exist.
+    Missing,
+    /// The stored configuration differs from the supplied declaration; nothing
+    /// was written.
+    Mismatch(Vec<&'static str>),
+    /// Rows indexed by the batch, and whether the index is now ready.
+    Indexed(u64, bool),
+}
+
 /// The bind form of a key read back as text, typed like the key column so the
 /// keyset comparison uses the primary-key index.
 fn key_bind(kind: RuntimeValueKind, text: &str) -> Option<SqlValue> {
@@ -234,12 +297,30 @@ async fn read_metadata<B: super::WriteBackend>(
     context: &mut super::MutationContext<'_, B>,
     table: &str,
 ) -> crate::Result<Option<serde_json::Value>> {
+    read_metadata_with(context, table, false).await
+}
+
+/// Read the metadata, and with `lock` hold its row (`FOR UPDATE` on
+/// PostgreSQL) until the transaction ends. A backfill batch locks it, so a
+/// migration that recreates the index either commits before the batch reads
+/// the configuration, which the fence then compares, or waits for the batch:
+/// the batch never writes back a configuration a migration replaced. SQLite
+/// serialises writers.
+async fn read_metadata_with<B: super::WriteBackend>(
+    context: &mut super::MutationContext<'_, B>,
+    table: &str,
+    lock: bool,
+) -> crate::Result<Option<serde_json::Value>> {
     let column = match B::DIALECT {
         DatabaseBackend::Postgres => "config_json::text",
         _ => "config_json",
     };
+    let lock = match B::DIALECT {
+        DatabaseBackend::Postgres if lock => " FOR UPDATE",
+        _ => "",
+    };
     let sql = format!(
-        "SELECT {column} AS config_json FROM {} WHERE table_name = ?",
+        "SELECT {column} AS config_json FROM {} WHERE table_name = ?{lock}",
         super::search::search_metadata_table_name()
     );
     let rows = context
@@ -330,11 +411,21 @@ where
     /// recorded in the index metadata after every batch, so a backfill stopped
     /// by a crash, a cancellation or `max_batches` resumes where it stopped.
     ///
+    /// Every batch first compares the stored index configuration (fields,
+    /// weights, JSON paths, language, tokenizer, `remove_diacritics` and
+    /// minimum token length) with `schema`'s declaration for the collection, in
+    /// the batch's own transaction. When they differ, for example because
+    /// `schema` is stale and the index was since recreated for another
+    /// declaration, the call writes nothing: no document, readiness or resume
+    /// point.
+    ///
     /// # Errors
     ///
     /// Returns [`RuntimeMigrationDiagnosticCode::SearchNotDeclared`](super::RuntimeMigrationDiagnosticCode::SearchNotDeclared)
     /// when the collection has no search or its search storage does not exist,
-    /// or a database failure.
+    /// [`RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch`](super::RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch)
+    /// when the stored configuration differs from the declaration, or a
+    /// database failure.
     pub async fn backfill_runtime_search(
         &self,
         schema: &ValidatedRuntimeSchema,
@@ -362,6 +453,12 @@ where
             .find(|field| &field.id == key_id)
             .cloned()
             .ok_or_else(|| not_declared(collection))?;
+        let expected: serde_json::Value =
+            serde_json::from_str(&super::migrations::search_index_config_json(
+                &super::runtime_migration::runtime_search_index_model(&found, B::DIALECT)
+                    .ok_or_else(|| not_declared(collection))?,
+            ))
+            .map_err(|_| not_declared(collection))?;
         let batch_size = options.batch_size.max(1);
         let mut processed = 0_u64;
         let mut batches = 0_usize;
@@ -373,16 +470,23 @@ where
             let found = found.clone();
             let search = search.clone();
             let key_field = key_field.clone();
+            let expected = expected.clone();
             let step = self
                 .database
                 .transaction(super::TransactionMode::Default, move |tx| {
                     Box::pin(async move {
                         let table = found.physical_table.clone();
-                        let Some(mut config) = read_metadata(tx, &table).await? else {
-                            return Ok(None);
+                        let Some(mut config) = read_metadata_with(tx, &table, true).await? else {
+                            return Ok(BatchStep::Missing);
                         };
+                        // Fence: never index with, or mark ready for, another
+                        // declaration than the one stored with the index.
+                        let mismatch = configuration_mismatch(&config, &expected);
+                        if !mismatch.is_empty() {
+                            return Ok(BatchStep::Mismatch(mismatch));
+                        }
                         if metadata_ready(Some(&config)) {
-                            return Ok(Some((0_u64, true)));
+                            return Ok(BatchStep::Indexed(0, true));
                         }
                         let key_column = B::DIALECT.quote_identifier(&key_field.physical_column);
                         let mut values = Vec::new();
@@ -438,13 +542,17 @@ where
                             object.insert("backfill_after".into(), last.into());
                         }
                         write_metadata(tx, &table, &config).await?;
-                        Ok(Some((rows.len() as u64, finished)))
+                        Ok(BatchStep::Indexed(rows.len() as u64, finished))
                     })
                 })
                 .await
                 .map_err(transaction_failure)?;
-            let Some((count, ready)) = step else {
-                return Err(not_declared(collection));
+            let (count, ready) = match step {
+                BatchStep::Missing => return Err(not_declared(collection)),
+                BatchStep::Mismatch(parts) => {
+                    return Err(configuration_mismatch_error(collection, parts));
+                }
+                BatchStep::Indexed(count, ready) => (count, ready),
             };
             processed += count;
             if ready {

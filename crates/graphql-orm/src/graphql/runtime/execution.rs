@@ -40,6 +40,35 @@ pub struct RuntimeReadCheck<'a> {
     pub relation_filters: Vec<(&'a RuntimeRelationHandle, RuntimeRelationQuantifier)>,
     /// Why this layer is read.
     pub purpose: RuntimeReadPurpose,
+    /// The full-text search this layer carries, if any. Only root lists of
+    /// searchable collections accept `search`; every other layer reports none.
+    /// Each searchable field also appears in `filter_operations` as `"search"`.
+    pub search: Option<RuntimeReadSearchCheck>,
+}
+/// The full-text search of a read layer, as presented to
+/// [`RuntimeReadAuthority::authorize`].
+///
+/// A host can refuse search, or any mode it does not offer (for example `Web`,
+/// which SQLite evaluates like `Plain`), by returning a denial; nothing is read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct RuntimeReadSearchCheck {
+    /// The requested mode; [`SearchMode::Plain`](crate::graphql::filters::SearchMode::Plain)
+    /// when the request names none.
+    pub mode: crate::graphql::filters::SearchMode,
+    /// Whether the request supplies `minScore`.
+    pub min_score: bool,
+    /// Whether results are ordered by relevance, because no `orderBy` was given.
+    pub ranked: bool,
+}
+impl RuntimeReadSearchCheck {
+    pub(super) fn of(search: &crate::graphql::orm::RuntimeSearchRequest) -> Self {
+        Self {
+            mode: search.mode(),
+            min_score: search.min_score().is_some(),
+            ranked: search.ranks(),
+        }
+    }
 }
 /// Why a layer is presented to [`RuntimeReadAuthority::authorize`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -575,6 +604,7 @@ pub(super) fn authorize<'a, B: RuntimeReadBackend>(
                     .map(|(relation, quantifier)| (relation, *quantifier))
                     .collect(),
                 purpose: RuntimeReadPurpose::Select,
+                search: plan.search.as_ref().map(RuntimeReadSearchCheck::of),
             })
             .await?;
         if !plan.relation_sites.is_empty() {
@@ -655,6 +685,7 @@ async fn relation_grants<B: RuntimeReadBackend>(
                     .map(|(relation, quantifier)| (relation, *quantifier))
                     .collect(),
                 purpose: RuntimeReadPurpose::RelationFilter(site.quantifier),
+                search: None,
             })
             .await;
         grants.push(match decision {

@@ -364,6 +364,16 @@ async fn a_failed_search_document_write_rolls_back_the_row() {
 impl Harness {
     /// Migrate to `definition`, replacing the mutation environment.
     async fn migrate(&mut self, definition: RuntimeSchema, search: RuntimeSearchApplyOptions) {
+        self.migrate_as("search", definition, search).await;
+    }
+
+    /// Migrate to `definition` under migration `version`.
+    async fn migrate_as(
+        &mut self,
+        version: &str,
+        definition: RuntimeSchema,
+        search: RuntimeSearchApplyOptions,
+    ) {
         let schema = Arc::new(definition.validate().unwrap());
         let target = schema
             .physical_schema::<Backend>(Default::default())
@@ -373,7 +383,7 @@ impl Harness {
             .db
             .schema()
             .plan_owned_migration(
-                "search",
+                version,
                 "add search",
                 &target,
                 &ownership,
@@ -969,6 +979,357 @@ async fn remove_diacritics_matches_accented_and_plain_forms() {
         ("Māori", vec![1, 2]),
         ("cafe", vec![3]),
         ("café", vec![3]),
+    ] {
+        let found = harness
+            .search(
+                query,
+                false,
+                None,
+                None,
+                RuntimePageRequest::first(10, None),
+            )
+            .await
+            .unwrap();
+        assert_eq!(harness.ids(&found), expected, "{query}");
+    }
+}
+
+impl Harness {
+    /// A relevance-ordered search under a host grant that hides every row with
+    /// `id >= 1000`, as `(ids, scores, totalCount)`.
+    async fn granted(&self, query: &str, min_score: Option<f64>) -> (Vec<i64>, Vec<f64>, i64) {
+        let grant = self
+            .schema()
+            .runtime_compare(
+                &self.collection(),
+                &self.field("id"),
+                RuntimeScalarOperator::Lt,
+                RuntimeValue::Integer(HIDDEN_FROM),
+                Default::default(),
+            )
+            .unwrap();
+        let found = self
+            .search(
+                query,
+                true,
+                min_score,
+                Some(grant),
+                RuntimePageRequest::first(50, None),
+            )
+            .await
+            .unwrap();
+        let scores = found
+            .edges
+            .iter()
+            .map(|edge| edge.score.expect("ranked edges carry a score").0)
+            .collect();
+        (
+            self.ids(&found),
+            scores,
+            found.total_count.expect("count requested"),
+        )
+    }
+
+    /// The number of stored search documents.
+    async fn document_count(&self) -> i64 {
+        #[cfg(feature = "sqlite")]
+        let sql = "SELECT COUNT(*) AS n FROM __graphql_orm_fts_search_records";
+        #[cfg(feature = "postgres")]
+        let sql = "SELECT COUNT(*) AS n FROM __graphql_orm_search_search_records";
+        let rows = Backend::fetch_rows(self.db.pool(), sql, &[]).await.unwrap();
+        Backend::try_get_i64(&rows[0], "n").unwrap()
+    }
+}
+
+/// Rows with this key or above are hidden by the grant in [`Harness::granted`].
+const HIDDEN_FROM: i64 = 1000;
+
+/// The weighted ranking fixture: "bridge" once in the title (A), the JSON
+/// summary (B) or the body (C) of a visible row, plus a row without it.
+async fn weighted_fixture(harness: &Harness) {
+    for (id, title, body, summary) in [
+        (1, "steel tower", "a bridge nearby", "harbour"),
+        (2, "Harbour Bridge", "steel arch", "landmark"),
+        (3, "ferry wharf", "busy", "next to the bridge"),
+        (4, "museum", "art", "galleries"),
+    ] {
+        harness.create(id, title, body, summary).await.unwrap();
+    }
+}
+
+/// A visible row's score, the order of visible rows, `minScore` results and
+/// `totalCount` are the same whether 0, 1 or 1,000 rows hidden by the grant
+/// contain the query term. Each backend scores a row from its own document
+/// only (SQLite weighted match counts, PostgreSQL `ts_rank_cd`), so hidden
+/// rows cannot be inferred from visible scores or order.
+#[tokio::test]
+async fn hidden_rows_do_not_change_visible_scores_order_or_min_score() {
+    let harness = Harness::new().await;
+    weighted_fixture(&harness).await;
+
+    let (ids, scores, total) = harness.granted("bridge", None).await;
+    assert_eq!(ids, [2, 3, 1], "A ranks above B above C");
+    assert_eq!(total, 3);
+    assert!(
+        scores.windows(2).all(|pair| pair[0] > pair[1]),
+        "{scores:?}"
+    );
+    // A threshold between the B and C scores keeps the A and B rows.
+    let threshold = (scores[1] + scores[2]) / 2.0;
+    let baseline = (
+        harness.granted("bridge", None).await,
+        harness.granted("bridge", Some(threshold)).await,
+        harness.granted("harbour bridge", None).await,
+    );
+    assert_eq!((baseline.1).0, [2, 3]);
+    assert_eq!((baseline.1).2, 2);
+
+    // One hidden row, then 1,000 of them, matching the term in every weight and
+    // with varied lengths and frequencies, so any corpus statistic would move.
+    let mut hidden = HIDDEN_FROM;
+    for count in [1, 999] {
+        for _ in 0..count {
+            let repeat = 1 + usize::try_from(hidden % 7).unwrap();
+            harness
+                .create(
+                    hidden,
+                    &"bridge ".repeat(repeat),
+                    &format!("harbour {}", "bridge span ".repeat(repeat * 3)),
+                    "bridge",
+                )
+                .await
+                .unwrap();
+            hidden += 1;
+        }
+        let with_hidden = (
+            harness.granted("bridge", None).await,
+            harness.granted("bridge", Some(threshold)).await,
+            harness.granted("harbour bridge", None).await,
+        );
+        assert_eq!(
+            with_hidden,
+            baseline,
+            "{} hidden rows",
+            hidden - HIDDEN_FROM
+        );
+    }
+    assert_eq!(hidden - HIDDEN_FROM, 1000);
+    // Removing hidden rows and their documents changes nothing either.
+    harness
+        .execute("DELETE FROM search_records WHERE id >= 1500")
+        .await;
+    #[cfg(feature = "sqlite")]
+    harness
+        .execute(
+            "DELETE FROM __graphql_orm_fts_search_records WHERE CAST(entity_pk AS INTEGER) >= 1500",
+        )
+        .await;
+    #[cfg(feature = "postgres")]
+    harness
+        .execute("DELETE FROM __graphql_orm_search_search_records WHERE CAST(entity_pk AS BIGINT) >= 1500")
+        .await;
+    assert_eq!(
+        (
+            harness.granted("bridge", None).await,
+            harness.granted("bridge", Some(threshold)).await,
+            harness.granted("harbour bridge", None).await,
+        ),
+        baseline
+    );
+}
+
+/// The weighted fixture keeps its order on both backends, including for a
+/// multi-term query and a row matching in two weights.
+#[tokio::test]
+async fn the_weighted_ranking_fixture_keeps_its_order() {
+    let harness = Harness::new().await;
+    weighted_fixture(&harness).await;
+    // Title (A) and body (C) both match.
+    harness
+        .create(5, "Bridge Street", "the bridge", "shops")
+        .await
+        .unwrap();
+    let (ids, scores, _) = harness.granted("bridge", None).await;
+    assert_eq!(ids, [5, 2, 3, 1], "{scores:?}");
+    let (ids, scores, _) = harness.granted("harbour bridge", None).await;
+    // Both terms in the title rank above both terms in B and C.
+    assert_eq!(ids, [2, 1], "{scores:?}");
+}
+
+fn stale_codes(error: RuntimeMigrationError) -> Vec<(RuntimeMigrationDiagnosticCode, String)> {
+    let RuntimeMigrationError::Diagnostics(diagnostics) = error else {
+        panic!("expected diagnostics, got {error:?}");
+    };
+    diagnostics
+        .0
+        .into_iter()
+        .map(|diagnostic| {
+            assert_eq!(
+                diagnostic.collection.as_ref().map(CollectionId::as_str),
+                Some("records")
+            );
+            (diagnostic.code, diagnostic.subject.unwrap_or_default())
+        })
+        .collect()
+}
+
+/// A backfill given a schema whose search declaration differs from the stored
+/// index is refused and writes nothing; the current schema still completes and
+/// resumes.
+#[tokio::test]
+async fn a_backfill_with_a_stale_schema_is_refused_and_writes_nothing() {
+    let mut harness = Harness::with_schema(with_search(false, None)).await;
+    for id in 1..=5 {
+        harness
+            .create(id, &format!("title {id}"), "body text", "summary")
+            .await
+            .unwrap();
+    }
+    let stale = definition().validate().unwrap();
+    harness
+        .migrate(definition(), RuntimeSearchApplyOptions::deferred())
+        .await;
+    let options = RuntimeSearchBackfillOptions::default().with_batch_size(2);
+    harness.backfill(options.with_max_batches(1)).await;
+
+    // The index is dropped and recreated for another field set while the old
+    // declaration is still held by a host job.
+    let mut changed = definition();
+    changed.collections[0]
+        .search
+        .as_mut()
+        .unwrap()
+        .fields
+        .remove(2);
+    harness
+        .migrate_as("recreate", changed, RuntimeSearchApplyOptions::deferred())
+        .await;
+    let before = (
+        harness.metadata().await,
+        harness.document_count().await,
+        harness.ready().await,
+    );
+    assert!(!before.2);
+    let refused = harness
+        .db
+        .schema()
+        .backfill_runtime_search(&stale, &harness.records(), options)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stale_codes(refused),
+        [(
+            RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch,
+            "fields".to_string()
+        )]
+    );
+    let after = (
+        harness.metadata().await,
+        harness.document_count().await,
+        harness.ready().await,
+    );
+    assert_eq!(after, before, "nothing written");
+
+    // The current schema still completes, in resumable batches.
+    let partial = harness.backfill(options.with_max_batches(1)).await;
+    assert_eq!(
+        (partial.processed, partial.remaining, partial.ready),
+        (2, 3, false)
+    );
+    let finished = harness.backfill(options).await;
+    assert_eq!((finished.processed, finished.ready), (3, true));
+    // Documents follow the current declaration, which no longer indexes the body.
+    let (text, _, _body) = harness.document(5).await.expect("document");
+    assert!(text.contains("title 5"), "{text}");
+    #[cfg(feature = "sqlite")]
+    assert!(_body.is_empty(), "{_body}");
+    #[cfg(feature = "postgres")]
+    assert!(!text.contains("body"), "{text}");
+
+    // A ready index refuses a stale schema too, and stays ready.
+    let ready = harness.metadata().await;
+    let refused = harness
+        .db
+        .schema()
+        .backfill_runtime_search(&stale, &harness.records(), options)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stale_codes(refused)[0].0,
+        RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch
+    );
+    assert_eq!(harness.metadata().await, ready);
+    assert!(harness.ready().await);
+
+    // Every part of the declaration is fenced, each reported by name.
+    let mut variants = Vec::new();
+    let mut folded = harness.schema().schema().clone();
+    folded.collections[0]
+        .search
+        .as_mut()
+        .unwrap()
+        .remove_diacritics = true;
+    variants.push((folded, "tokenizer"));
+    let mut language = harness.schema().schema().clone();
+    language.collections[0].search.as_mut().unwrap().language = Some("simple".into());
+    variants.push((language, "language"));
+    let mut shortest = harness.schema().schema().clone();
+    shortest.collections[0]
+        .search
+        .as_mut()
+        .unwrap()
+        .min_token_len = Some(3);
+    variants.push((shortest, "min_token_len"));
+    let mut reweighted = harness.schema().schema().clone();
+    reweighted.collections[0].search.as_mut().unwrap().fields[0].weight = RuntimeSearchWeight::B;
+    variants.push((reweighted, "fields"));
+    let mut repathed = harness.schema().schema().clone();
+    repathed.collections[0].search.as_mut().unwrap().fields[1].json_path = Some("$.other".into());
+    variants.push((repathed, "fields"));
+    for (variant, part) in variants {
+        let refused = harness
+            .db
+            .schema()
+            .backfill_runtime_search(&variant.validate().unwrap(), &harness.records(), options)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            stale_codes(refused),
+            [(
+                RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch,
+                part.to_string()
+            )]
+        );
+    }
+    assert_eq!(harness.metadata().await, ready);
+}
+
+/// `porter` stemming keeps accent folding with `remove_diacritics`.
+#[tokio::test]
+async fn porter_with_remove_diacritics_stems_and_folds_accents() {
+    let mut definition = definition();
+    let search = definition.collections[0].search.as_mut().unwrap();
+    search.tokenizer = Some(RuntimeSearchTokenizer::Porter);
+    search.remove_diacritics = true;
+    let harness = Harness::with_schema(definition).await;
+    harness
+        .create(1, "Māori carvings", "art", "whakairo")
+        .await
+        .unwrap();
+    harness
+        .create(2, "Café Society", "history", "Wellington")
+        .await
+        .unwrap();
+    harness
+        .create(3, "Bridges", "steel", "harbour")
+        .await
+        .unwrap();
+    for (query, expected) in [
+        ("maori carving", vec![1]),
+        ("Māori", vec![1]),
+        ("cafe", vec![2]),
+        ("café", vec![2]),
+        ("bridge", vec![3]),
     ] {
         let found = harness
             .search(
