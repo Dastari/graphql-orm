@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.120.1` allocates a fresh package identity for the provider-files documentation review-date update. No runtime or schema change; see [MIGRATION.md](MIGRATION.md#01200-to-01201-documentation-package-identity).
+
 Version `0.120.0` adopts ORM 0.89.0 (runtime collection search). No AI
 behaviour changes; see [MIGRATION.md](MIGRATION.md).
 

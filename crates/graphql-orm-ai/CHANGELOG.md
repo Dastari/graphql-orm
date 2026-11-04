@@ -10,7 +10,11 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.120.0
+## Unreleased - 0.120.1
+
+- Allocate a new immutable package identity for the provider-files documentation review-date update made after `graphql-orm-ai-v0.120.0`. Rust code, AI capabilities, schema module, persistence, authorization and provider behavior are unchanged. No data migration is needed.
+
+## 0.120.0
 
 - Adopt ORM 0.89.0, whose `RuntimeCollection` gains the optional `search`
   member. AI capabilities, persistence and provider behaviour are unchanged.
