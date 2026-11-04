@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## Dependency advisory remediation
+
+Refresh downstream lockfiles and rebuild to adopt the corrected Tokio, ctutils,
+zstd-family and S3 SigV4a dependency versions. Package APIs, entity declarations
+and persistent schema generation are unchanged; no data migration or AI schema
+module version change is needed. RUSTSEC-2026-0387 remains explicitly accepted
+for crypto-bigint 0.5.5 through the verification-only JWT paths under the
+[scoped disposition](docs/reference/dependency-security-disposition.md#owner-accepted-crypto-bigint-055-disposition).
+This acceptance does not cover a host using Auth's private EC signing API.
+
 ## Router binary notice refresh
 
 The workspace release can attach router 0.8.1 built for `x86_64-unknown-linux-gnu` with `auth-agql`, together with its SBOM, notices, exact source archives, checksums and attestations. The notice-review refresh changes no runtime, configuration or stored data. For consumers replacing the older 0.6.3 archive, follow the [router migration guide](crates/graphql-orm-router/MIGRATION.md), including canonical Auth 0.24 types for Rust hosts and the repaired certificate-distrust trust roots. Binary publication remains conditional on the complete release gates and protected owner approval; this preparation does not assert that an archive has been published.

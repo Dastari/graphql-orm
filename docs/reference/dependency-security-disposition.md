@@ -3,7 +3,7 @@ title: Dependency security disposition
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-22
+last_reviewed: 2026-11-04
 review_by: 2026-11-15
 supersedes: []
 ---
@@ -24,6 +24,34 @@ and release manifest own package identities. The
 publication gates; this reference creates no additional approval process.
 Application rollout steps belong to the
 [security upgrade guide](../how-to/upgrade-security-remediation.md).
+
+## Owner-accepted crypto-bigint 0.5.5 disposition
+
+**RUSTSEC-2026-0387; scope: `crypto-bigint` version `0.5.5` only.**
+Accepted by the workspace owner on **2026-11-04**; review by **2026-12-04**.
+This is a timing side channel on secret arithmetic. This workspace does not
+do ECDSA private-key operations; the exposure belongs to agql-auth's signing
+API; no compatible fixed release exists in the current owning dependency ranges.
+Patched crypto-bigint releases exist on the incompatible 0.7 line; this
+disposition does not describe those releases as unavailable.
+
+The retained path is `agql-auth 0.24.0 → jsonwebtoken 10.4.0 → p256/p384 0.13
+→ elliptic-curve 0.13.8 → crypto-bigint 0.5.5`. The workspace's direct
+jsonwebtoken 11.0.0 verification dependency also reaches that RustCrypto line.
+Search of workspace source, examples, fixtures and tests found no EC
+`EncodingKey` construction, ES256/ES384 signing, or calls to Auth's EC client
+signing API. JWT signing fixtures construct RSA keys and use RS256. The router
+runtime verifies signatures with public keys; public-input verification does
+not perform the secret arithmetic described by this advisory. SMB's selected
+credential path uses NTLM and symmetric signing. S3's SigV4a owner is updated
+to aws-sigv4 1.6.4, using the patched crypto-bigint 0.7.10 line; it does not rely
+on this disposition.
+
+This acceptance does not cover Auth signing services, consumer applications,
+other crate versions, or a future workspace EC signer. Introducing private EC
+operations invalidates it immediately. Keep the raw unsuppressed audit finding;
+no Cargo advisory ignore is added. Follow up upstream on a JWT aws_lc_rs backend
+or a release adopting the corrected RustCrypto owners.
 
 ## TLS certificate distrust patches
 
