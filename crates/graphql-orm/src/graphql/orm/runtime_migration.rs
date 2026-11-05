@@ -54,6 +54,14 @@ pub enum RuntimeMigrationDiagnosticCode {
     /// A search backfill was requested for a collection without search, or
     /// whose search storage does not exist.
     SearchNotDeclared,
+    /// A search backfill was given a schema whose search declaration for the
+    /// collection differs from the stored index configuration, for example a
+    /// stale schema after the index was recreated. Nothing was written. One
+    /// diagnostic per differing part, whose `subject` is `fields` (entries,
+    /// weights, JSON paths and their columns), `language`, `tokenizer`
+    /// (including `remove_diacritics`), `min_token_len` or `index` (table,
+    /// type, key or storage strategy).
+    SearchConfigurationMismatch,
 }
 
 /// A structured diagnostic identifies schema members without including default values or SQL.
@@ -584,6 +592,30 @@ impl ValidatedRuntimeSchema {
         Ok(target)
     }
 }
+/// The search storage model a runtime collection's declaration plans on
+/// `backend`, or none without search. A backfill compares it with the stored
+/// metadata so it never writes documents for a different declaration.
+pub(crate) fn runtime_search_index_model(
+    collection: &RuntimeCollection,
+    backend: DatabaseBackend,
+) -> Option<SearchIndexModel> {
+    let search = collection.search.as_ref()?;
+    let column_name = |id: &FieldId| {
+        collection
+            .fields
+            .iter()
+            .find(|field| &field.id == id)
+            .map(|field| field.physical_column.clone())
+            .unwrap_or_default()
+    };
+    Some(runtime_search_index(
+        collection,
+        search,
+        &column_name,
+        backend,
+    ))
+}
+
 /// The search storage model of one runtime collection, named like a static
 /// entity's so the existing renderers, introspection and drift detection apply.
 fn runtime_search_index(
@@ -609,7 +641,8 @@ fn runtime_search_index(
     let tokenizer = match (search.effective_tokenizer(), search.remove_diacritics) {
         (RuntimeSearchTokenizer::Unicode61, true) => "unicode61 remove_diacritics 2",
         (RuntimeSearchTokenizer::Unicode61, false) => "unicode61",
-        (RuntimeSearchTokenizer::Porter, _) => "porter unicode61",
+        (RuntimeSearchTokenizer::Porter, true) => "porter unicode61 remove_diacritics 2",
+        (RuntimeSearchTokenizer::Porter, false) => "porter unicode61",
         (RuntimeSearchTokenizer::Ascii, _) => "ascii",
     };
     SearchIndexModel {

@@ -756,6 +756,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     .collect(),
                                 relation_filters: Vec::new(),
                                 purpose: RuntimeReadPurpose::Select,
+                                search: None,
                             })
                             .await?
                     };

@@ -3,12 +3,21 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-04
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.90.1 to 0.91.0: isolated runtime search ranking and fenced backfill
+
+- **SQLite scores change.** Runtime search on SQLite now scores each row from its own document (`1.0·nA + 0.7·nB + 0.4·nC + 0.1·nD`, weighted matched-phrase counts) instead of `bm25`. Scores no longer depend on rows the host's grant hides. Their scale differs from `bm25`, so review any SQLite `minScore` thresholds; one match in a title (A) scores 1.0. PostgreSQL scores are unchanged.
+- **Relevance cursors restart.** A relevance-ordered search cursor issued before 0.91.0 is refused with `cursor_invalid`, on both backends. Clients restart from the first page. Other cursors are unaffected.
+- **Backfill with the current schema.** `backfill_runtime_search` now refuses a schema whose search declaration differs from the stored index, with `RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch` diagnostics and no writes. Pass the schema the index was last migrated to. A host job that may outlive a migration should treat this diagnostic as "reload the schema, then retry".
+- **Exhaustive matches.** Add an arm for `RuntimeMigrationDiagnosticCode::SearchConfigurationMismatch`.
+- **Optional.** Read `RuntimeReadCheck::search` instead of inferring search from `"search"` filter operations, and deny modes you do not offer. Declarations may now combine `RuntimeSearchTokenizer::Porter` with `remove_diacritics: true`.
+- No data migration, search rebuild or schema change is needed. Existing search storage, metadata and readiness are reused as they are.
 
 ## Dependency advisory remediation
 

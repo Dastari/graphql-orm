@@ -452,3 +452,8 @@ arguments and propagation path authorization. See the workspace
 Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
+
+Version 0.91.0 scores SQLite runtime search from each row's own document, so
+hidden rows cannot affect visible scores, and fences the runtime search
+backfill against a stale schema. See
+[the migration guide](../../MIGRATION.md#0901-to-0910-isolated-runtime-search-ranking-and-fenced-backfill).

@@ -585,8 +585,9 @@ pub struct RuntimeSearch {
     /// SQLite FTS5 tokenizer; `unicode61` when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer: Option<RuntimeSearchTokenizer>,
-    /// Fold accents so `Maori` matches `Māori` (`remove_diacritics 2`). Only
-    /// valid with the `unicode61` tokenizer. Omitted when false.
+    /// Fold accents so `Maori` matches `Māori` (`remove_diacritics 2`). Valid
+    /// with the `unicode61` and `porter` tokenizers (`porter unicode61
+    /// remove_diacritics 2`), refused with `ascii`. Omitted when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remove_diacritics: bool,
     /// Shortest indexed and queried token, 1 to 16; 2 when absent.
@@ -706,7 +707,7 @@ pub enum RuntimeSchemaDiagnosticCode {
     InvalidSearchField,
     /// A search declaration has no entries, more than
     /// [`RUNTIME_MAX_SEARCH_FIELDS`], an invalid language, `remove_diacritics`
-    /// with a tokenizer other than `unicode61`, a minimum token length outside
+    /// with the `ascii` tokenizer, a minimum token length outside
     /// 1 to 16, or belongs to a collection with a composite primary key.
     InvalidSearchConfiguration,
 }
@@ -2469,6 +2470,7 @@ fn static_search(
         "unicode61" => (None, false),
         "unicode61 remove_diacritics 2" => (None, true),
         "porter" | "porter unicode61" => (Some(RuntimeSearchTokenizer::Porter), false),
+        "porter unicode61 remove_diacritics 2" => (Some(RuntimeSearchTokenizer::Porter), true),
         "ascii" => (Some(RuntimeSearchTokenizer::Ascii), false),
         _ => {
             refuse(
@@ -2566,10 +2568,9 @@ fn validate_search(
             diagnostics,
         );
     }
-    if search.remove_diacritics && search.effective_tokenizer() != RuntimeSearchTokenizer::Unicode61
-    {
+    if search.remove_diacritics && search.effective_tokenizer() == RuntimeSearchTokenizer::Ascii {
         configuration(
-            "remove_diacritics requires the unicode61 tokenizer".to_string(),
+            "remove_diacritics requires the unicode61 or porter tokenizer".to_string(),
             diagnostics,
         );
     }

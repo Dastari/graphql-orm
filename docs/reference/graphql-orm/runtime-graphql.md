@@ -129,6 +129,9 @@ capabilities captured before constant lowering: empty `in: []` is false and empt
 Explicit nested `and`, `or` and `not` capabilities remain visible to the host.
 Use `RuntimeReadCheck::filter_operations` for requested filter authorization;
 the lowered predicate's referenced fields alone cannot represent constant inputs.
+A root list with full-text `search` also reports it as
+`RuntimeReadCheck::search`, with its mode, `minScore` presence and relevance
+ordering; see [runtime search authorization](runtime-search.md#authorization).
 
 ### Relation filters
 

@@ -143,10 +143,15 @@ fn search_declarations_are_validated_with_structured_diagnostics() {
             "{language:?}"
         );
     }
+    // Accent folding needs a unicode61 tokenizer: plain or under porter.
+    let mut ascii = valid();
+    ascii.tokenizer = Some(RuntimeSearchTokenizer::Ascii);
+    ascii.remove_diacritics = true;
+    assert_eq!(codes(ascii), [C::InvalidSearchConfiguration]);
     let mut stemmed = valid();
     stemmed.tokenizer = Some(RuntimeSearchTokenizer::Porter);
     stemmed.remove_diacritics = true;
-    assert_eq!(codes(stemmed), [C::InvalidSearchConfiguration]);
+    schema(Some(stemmed)).validate().unwrap();
     for length in [0, 17] {
         let mut declaration = valid();
         declaration.min_token_len = Some(length);
