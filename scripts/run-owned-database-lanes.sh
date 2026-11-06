@@ -149,6 +149,11 @@ run_static_related_filter() {
   done
 }
 
+run_read_predicate() {
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --test read_predicate -- --include-ignored --test-threads=1
+}
+
 case "${lane}" in
   notify-bulk)
     for backend in sqlite postgres mssql; do
@@ -165,15 +170,6 @@ case "${lane}" in
   field-write-denial) run_field_write_denial ;;
   denied-relations) run_denied_relations ;;
   static-related-filter) run_static_related_filter ;;
-  done
-}
-
-run_read_predicate() {
-  cargo test -p graphql-orm --locked --no-default-features --features mssql \
-    --test read_predicate -- --include-ignored --test-threads=1
-}
-
-case "${lane}" in
   read-predicate) run_read_predicate ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
