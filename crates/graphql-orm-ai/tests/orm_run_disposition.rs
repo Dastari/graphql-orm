@@ -365,7 +365,7 @@ async fn retry_authors_a_new_run_over_the_same_message_and_is_idempotent() {
                 },
             )
             .await,
-        Err(AiError::Conflict)
+        Err(AiError::RetryRefused(AiRetryRefusalReason::AlreadyDisposed))
     ));
 
     // The new run is queued over the same durable user message and is claimable.
@@ -577,7 +577,7 @@ async fn an_unclassified_failure_is_not_retryable() {
                 },
             )
             .await,
-        Err(AiError::Conflict)
+        Err(AiError::RetryRefused(AiRetryRefusalReason::Uncertain))
     ));
 }
 
@@ -1087,4 +1087,70 @@ async fn session_activity_tracks_retries_new_input_and_ignores_late_old_completi
     assert_eq!(activity.run_id, Some(older_input_retry));
     assert_eq!(activity.input_message_sequence, Some(2));
     assert_eq!(activity.state, Some(AiSessionActivityState::Working));
+}
+
+#[tokio::test]
+async fn retry_refusal_reaches_the_graphql_mutation_response() {
+    use async_graphql::{EmptySubscription, Request, Schema};
+    let fixture = fixture().await;
+    let session = session(&fixture).await;
+    let sent = failed_run(
+        &fixture,
+        session.id,
+        AiRunState::Failed,
+        "worker_stopped",
+        None,
+    )
+    .await;
+    let service: Arc<dyn AiRunDispositionService> = Arc::new(fixture.dispositions);
+    let schema = Schema::build(AiQueryRoot, AiMutationRoot, EmptySubscription)
+        .data(service)
+        .finish();
+    #[cfg(not(feature = "graphql-case-pascal"))]
+    let mutation = format!(
+        "mutation {{ retryAiRun(input: {{sessionId: \"{}\", runId: \"{}\", clientRequestId: \"{}\"}}) {{ runId }} }}",
+        session.id,
+        sent.run_id,
+        Uuid::new_v4()
+    );
+    #[cfg(feature = "graphql-case-pascal")]
+    let mutation = format!(
+        "mutation {{ RetryAiRun(Input: {{SessionId: \"{}\", RunId: \"{}\", ClientRequestId: \"{}\"}}) {{ RunId }} }}",
+        session.id,
+        sent.run_id,
+        Uuid::new_v4()
+    );
+    let response = serde_json::to_value(
+        schema
+            .execute(Request::new(mutation).data(fixture.owner))
+            .await,
+    )
+    .unwrap();
+    assert_eq!(
+        response["errors"][0]["extensions"],
+        serde_json::json!({"code":"AI_CONFLICT", "retryRefusal":"uncertain"})
+    );
+}
+
+#[test]
+fn a_clean_last_turn_does_not_prove_the_whole_run_was_unstarted() {
+    for code in ["provider_pre_transport_failed", "provider_budget_denied"] {
+        for dispatch_possible in [false, true] {
+            assert_eq!(
+                classify_run_retry(
+                    AiRunRetryEvidence {
+                        terminal: AiRunTerminalEvent::Failed,
+                        produced_assistant_output: false,
+                        provider_dispatch_possible: dispatch_possible,
+                    },
+                    Some(code)
+                ),
+                if dispatch_possible {
+                    AiRunRetryAdmission::RefusedUncertain
+                } else {
+                    AiRunRetryAdmission::Allowed
+                },
+            );
+        }
+    }
 }

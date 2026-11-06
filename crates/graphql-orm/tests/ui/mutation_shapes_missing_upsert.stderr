@@ -1,0 +1,5 @@
+error: mutation_shapes selects unavailable upsert mutation: configure graphql_entity upsert = "field, ..." to generate it
+ --> tests/ui/mutation_shapes_missing_upsert.rs:5:8
+  |
+5 | struct Shaped {
+  |        ^^^^^^

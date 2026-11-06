@@ -10,6 +10,30 @@ supersedes: []
 
 # Migration Guide
 
+## 0.121.0 to 0.122.0: retry refusal reasons
+
+Retry refusals retain `AI_CONFLICT` and add `extensions.retryRefusal` (`not_failed`, `uncertain`, `already_answered`, `already_disposed`). Rust callers may match `AiError::RetryRefused(AiRetryRefusalReason)`. No data migration is needed; AI schema module remains `0.76.0`.
+
+Direct `AiProviderCallExecutor` callers now receive
+`AiError::PreTransportProviderFailed` (`AI_PROVIDER_FAILED`) for closed local
+preflight refusals: `InvalidConfiguration`, `InvalidInput`, `NotFound`,
+`Conflict`, `Forbidden`, `EgressDenied`, `ReauthorizationFailed`,
+`RuntimeNotReady`, and `PersistenceFailed`. This applies only before reservation
+or after durable release, before transport; update variant-specific handling
+for those paths. Budget reservation/release failures and errors after possible
+dispatch retain uncertainty. Coordinators also recognize the existing
+proof-bearing `PreTransportToolSourceUnavailable` as a clean current-turn failure.
+At the same proven-unstarted boundary, `BudgetDenied` uses the existing
+`PreTransportBudgetDenied` proof. Unknown variants remain fail-closed.
+
+Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
+require committed evidence that no turn in the whole run may have dispatched.
+A clean last turn cannot authorize replay of an earlier possible effect.
+## AI 0.121.0 to 0.122.0: catalogue-change regression coverage
+
+No consumer action or data migration is needed. This patch adds regression tests
+only; runtime behavior and AI schema module version remain unchanged.
+
 ## 0.120.2 to 0.121.0: finite provider session cleanup
 
 Add an exhaustive match arm for `AiProviderSessionState::CleanupExhausted`.

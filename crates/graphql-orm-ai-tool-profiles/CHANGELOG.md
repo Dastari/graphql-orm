@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## 0.21.0 (unreleased)
+
+Fixes #327: expose content-free retry refusal reasons while preserving uncertain classification for possible provider effects.
+
 ## 0.20.0 (unreleased)
 
 - Adopt operation catalogue 0.7.0. Its optional

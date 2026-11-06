@@ -10,7 +10,17 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.122.0
+
+Fixes #327: report closed local validation, authorization, attachment, and audit refusals as clean provider failures only before reservation or after durable release, before transport. Recognize the existing protected-source pre-transport proof. Expose content-free GraphQL retry refusal reasons; possible provider effects remain uncertain.
+
+Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
+require committed evidence that no turn in the whole run may have dispatched.
+A clean last turn cannot authorize replay of an earlier possible effect.
+
 ## Unreleased
+
+- AI 0.122.0: retain ORM-backed regression coverage for added tools, removed tools, changes to tool schemas, and changes to unused tools across retained session cleanup/rebind. The reported stranded-conversation defect did not reproduce; no runtime or persistence change.
 
 - AI 0.121.0: **provider session cleanup now converges.** Real Codex `thread/list` pages carry `readStates`, which its generated schema omits, so the strict absence scan refused every real page on 0.165.0 and 0.166.0. A delete that returned `-32600` ("no rollout found for thread id") could therefore never settle, and retried about once a minute forever. The scan now admits `readStates` as a bounded, discarded map; arbitrary `-32600` is still not success. Backoff also grows, and a retry budget ends in visible `cleanup_exhausted` (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
 

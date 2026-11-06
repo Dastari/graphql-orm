@@ -293,7 +293,7 @@ async fn each_source_entity_key_and_link_policy_is_required() {
     }
 }
 #[tokio::test]
-async fn missing_current_source_drops_propagated_delete() {
+async fn missing_current_source_withholds_delete_provenance() {
     let (schema, _, _) = setup().await;
     create_child(&schema, "deleted-child", "alice").await;
     let mut stream =
@@ -310,6 +310,16 @@ async fn missing_current_source_drops_propagated_delete() {
         response.data.into_json().unwrap()["deleteProofChild"]["success"],
         true
     );
+    let response = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let json = response.data.into_json().unwrap();
+    assert!(json["proofParentChanged"]["sourceEntity"].is_null());
+    assert!(json["proofParentChanged"]["sourceId"].is_null());
+    assert!(!json.to_string().contains("deleted-child"));
+    assert!(!json.to_string().contains("ProofChild"));
     assert!(
         timeout(Duration::from_millis(100), stream.next())
             .await

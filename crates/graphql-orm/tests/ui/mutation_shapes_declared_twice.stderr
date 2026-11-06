@@ -1,0 +1,5 @@
+error: mutation_shapes may only be declared once
+ --> tests/ui/mutation_shapes_declared_twice.rs:4:64
+  |
+4 | #[graphql_entity(table = "shaped", mutation_shapes = "create", mutation_shapes = "update")]
+  |                                                                ^^^^^^^^^^^^^^^

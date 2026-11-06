@@ -592,6 +592,7 @@ pub enum MutationPhase {
 pub enum WriteOrigin {
     GraphqlMutation,
     Repository,
+    /// A generated write executed while a mutation hook is running.
     InternalMutationHook,
 }
 
@@ -884,6 +885,7 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) runtime_state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
+    hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Narrow transaction-bound capability for regulated retention maintenance.
@@ -1113,7 +1115,15 @@ where
         Self {
             graphql_ctx: None,
             entity_name,
-            origin: WriteOrigin::InternalMutationHook,
+            origin: if hook_ctx
+                .hook_depth
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            {
+                WriteOrigin::InternalMutationHook
+            } else {
+                WriteOrigin::Repository
+            },
             database: None,
             mutation_ctx: Some(hook_ctx),
         }
@@ -1311,6 +1321,7 @@ where
             runtime_state: Default::default(),
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
+            hook_depth: Default::default(),
         }
     }
 
@@ -1434,6 +1445,8 @@ where
             .await
     }
 
+    /// Queue a typed event to be emitted on the [`Database`](crate::db::Database)'s event channel after
+    /// this transaction commits. A rollback drops it.
     pub fn queue_event<T>(&mut self, event: T)
     where
         T: Clone + Send + Sync + 'static,
@@ -1441,6 +1454,30 @@ where
         self.deferred_events.push(Box::new(DeferredEvent { event }));
     }
 
+    /// Register an action to run once, after this transaction commits.
+    ///
+    /// This is the after-commit callback for mutation hooks and for
+    /// [`Database::transaction`](crate::db::Database::transaction) callbacks. Use it for work a rollback
+    /// cannot undo or that must not hold the transaction open, such as waking a worker or calling a
+    /// service. It is available on every write path that commits through a `MutationContext`: generated
+    /// GraphQL creates, updates, deletes, upserts and bulk writes, repository helpers, and explicit
+    /// transactions.
+    ///
+    /// - It never runs when the transaction rolls back, whether because a hook or the callback returned
+    ///   an error, the database refused a write, or the commit failed. A bulk write is one transaction,
+    ///   so a later row's failure discards the actions registered for earlier rows.
+    /// - After a successful commit, queued `Changed` events are emitted first, then actions run one at a
+    ///   time in registration order, and the write returns only after they finish. Generated GraphQL
+    ///   resolvers call `notify_with` after that, so a handler runs after the actions.
+    /// - The action receives a [`Database`](crate::db::Database), so reads through it see the committed
+    ///   data. Copy anything it needs from the event before registering it, since it outlives the hook.
+    /// - It runs at most once and is not persisted: a crash after commit loses it. Put work that must
+    ///   happen in a durable job row written in the same transaction, and use the action only to wake
+    ///   whatever processes that row.
+    /// - A returned error does not change the committed result and does not stop the remaining
+    ///   actions. Its text goes to [`PostCommitErrorHandler`] through
+    ///   [`Database::report_post_commit_error`](crate::db::Database::report_post_commit_error), or to
+    ///   stderr if no handler is installed.
     pub fn defer<F, Fut, E>(&mut self, action: F)
     where
         F: FnOnce(crate::db::Database<B>) -> Fut + Send + 'static,
@@ -1479,6 +1516,7 @@ where
             runtime_state: _,
             deferred_events,
             deferred_actions,
+            hook_depth: _,
         } = self;
         B::commit_write_transaction(tx).await?;
         for event in deferred_events {
@@ -1505,6 +1543,16 @@ where
     ) -> async_graphql::Result<()>
 where {
         if let Some(hook) = self.db.mutation_hook() {
+            // Restore the origin even on refusal or cancellation, including nested hooks.
+            struct HookDepth(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for HookDepth {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            self.hook_depth
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _depth = HookDepth(self.hook_depth.clone());
             hook.on_mutation(ctx, self, event).await?;
         }
         #[cfg(any(
@@ -2688,6 +2736,10 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+/// Shapes or validates generated write inputs once per row, before mutation hooks.
+/// Bulk updates receive each locked existing row and an independent copy of the
+/// original input; different rows may produce different values. A refusal aborts
+/// the transaction. External side effects must be deferred until after commit.
 pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     fn before_create_with_context<'a>(
         &'a self,

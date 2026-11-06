@@ -1073,6 +1073,47 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn provider_max_turns_is_execution_limit_after_prompt_dispatch() {
+        for metered in [false, true] {
+            let mut terminal = json!({"stopReason":"cancelled", "_meta":{"cancellationCategory":"max_turns_reached"}});
+            if metered {
+                terminal["_meta"]["usage"] = usage();
+            }
+            let mut reads = new_session_reads();
+            reads.push(response(9, terminal));
+            let (process, wire) = fixture(reads);
+            process.create_empty_session().await.unwrap();
+            let mut stream = process
+                .prompt(vec!["synthetic request".into()], Arc::new(NoTools))
+                .await
+                .unwrap();
+            let mut failures = 0;
+            while let Some(event) = stream.next().await {
+                match event {
+                    Err(error) => {
+                        assert_eq!(error.safe_category(), Failure::ExecutionLimit);
+                        failures += 1;
+                    }
+                    Ok(ProviderEvent::ResponseCompleted { .. }) => {
+                        panic!("limit is not completion")
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(failures, 1);
+            assert_eq!(
+                wire.writes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|frame| frame["method"] == "session/prompt")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn frozen_profile_scalar_selection_stream_and_usage() {
         let mut reads = new_session_reads();
         reads.extend([

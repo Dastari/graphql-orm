@@ -2266,9 +2266,9 @@ enum SupervisedProviderTurnFailure {
 const fn classify_supervised_turn_failure(error: &AiError) -> SupervisedProviderTurnFailure {
     match error {
         AiError::PreTransportBudgetDenied => SupervisedProviderTurnFailure::BudgetDenied,
-        AiError::PreTransportProviderFailed | AiError::ProviderSessionDeferred => {
-            SupervisedProviderTurnFailure::PreTransportProvider
-        }
+        AiError::PreTransportProviderFailed
+        | AiError::PreTransportToolSourceUnavailable
+        | AiError::ProviderSessionDeferred => SupervisedProviderTurnFailure::PreTransportProvider,
         AiError::StatelessNativeItemRejected => {
             SupervisedProviderTurnFailure::StatelessNativeItemRejected
         }
@@ -3768,74 +3768,79 @@ mod tests {
 
     #[tokio::test]
     async fn pre_transport_provider_rejection_is_a_certain_supervised_failure() {
-        let lease = AiRunLease::test_running(principal_reference());
-        let run = Arc::new(TestRunControl::new());
-        let provider = Arc::new(TestProviderExecutor {
-            responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportProviderFailed)])),
-            require_checkpoint_cleared: false,
-            calls: AtomicUsize::new(0),
-            closed: Mutex::new(Vec::new()),
-        });
-        let coordinator = AiSupervisedAgentCoordinator::new(
-            run.clone(),
-            provider.clone(),
-            Arc::new(TestOutputWriter),
-            Arc::new(TestCheckpointWriter {
-                provider_checkpoints: AtomicUsize::new(0),
-            }),
-            Arc::new(TestCheckpointControl {
-                adopted: Mutex::new(None),
-                consumed: AtomicBool::new(false),
-            }),
-            Arc::new(TestApprovalStager {
+        for error in [
+            AiError::PreTransportProviderFailed,
+            AiError::PreTransportToolSourceUnavailable,
+        ] {
+            let lease = AiRunLease::test_running(principal_reference());
+            let run = Arc::new(TestRunControl::new());
+            let provider = Arc::new(TestProviderExecutor {
+                responses: Mutex::new(VecDeque::from([Err(error)])),
+                require_checkpoint_cleared: false,
                 calls: AtomicUsize::new(0),
-                saw_checkpoint: AtomicBool::new(false),
-            }),
-            unused_automatic(),
-            unused_resume(),
-            Arc::new(TestRuleResolver),
-            Arc::new(TestPlanner {
-                scope: test_scope(),
-                route: test_route(),
-                continuation_count: AtomicUsize::new(0),
-            }),
-            Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
-            limits(),
-        );
+                closed: Mutex::new(Vec::new()),
+            });
+            let coordinator = AiSupervisedAgentCoordinator::new(
+                run.clone(),
+                provider.clone(),
+                Arc::new(TestOutputWriter),
+                Arc::new(TestCheckpointWriter {
+                    provider_checkpoints: AtomicUsize::new(0),
+                }),
+                Arc::new(TestCheckpointControl {
+                    adopted: Mutex::new(None),
+                    consumed: AtomicBool::new(false),
+                }),
+                Arc::new(TestApprovalStager {
+                    calls: AtomicUsize::new(0),
+                    saw_checkpoint: AtomicBool::new(false),
+                }),
+                unused_automatic(),
+                unused_resume(),
+                Arc::new(TestRuleResolver),
+                Arc::new(TestPlanner {
+                    scope: test_scope(),
+                    route: test_route(),
+                    continuation_count: AtomicUsize::new(0),
+                }),
+                Arc::new(FixedClock::new(time::OffsetDateTime::now_utc())),
+                limits(),
+            );
 
-        let outcome = coordinator
-            .execute_claimed(&lease)
-            .await
-            .expect("a proven supervised pre-transport rejection should fail cleanly");
+            let outcome = coordinator
+                .execute_claimed(&lease)
+                .await
+                .expect("a proven supervised pre-transport rejection should fail cleanly");
 
-        assert_eq!(
-            outcome,
-            AiSupervisedAgentRunOutcome::Failed {
-                provider_turns: 0,
-                total_tool_calls: 0,
-            }
-        );
-        assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(provider.remaining_responses(), 0);
-        assert_eq!(
-            *provider.closed.lock().unwrap(),
-            vec![(
-                crate::AiProviderRunBinding::from_lease(&lease).unwrap(),
-                crate::AiProviderRunCloseReason::Failed
-            )]
-        );
-        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
-        assert_eq!(
-            crate::classify_run_retry(
-                crate::AiRunRetryEvidence {
-                    terminal: crate::AiRunTerminalEvent::Failed,
-                    produced_assistant_output: false,
-                    provider_dispatch_possible: false,
-                },
-                Some("provider_pre_transport_failed"),
-            ),
-            crate::AiRunRetryAdmission::Allowed
-        );
+            assert_eq!(
+                outcome,
+                AiSupervisedAgentRunOutcome::Failed {
+                    provider_turns: 0,
+                    total_tool_calls: 0,
+                }
+            );
+            assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(provider.remaining_responses(), 0);
+            assert_eq!(
+                *provider.closed.lock().unwrap(),
+                vec![(
+                    crate::AiProviderRunBinding::from_lease(&lease).unwrap(),
+                    crate::AiProviderRunCloseReason::Failed
+                )]
+            );
+            assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+            assert_eq!(
+                crate::classify_run_retry(
+                    crate::AiRunRetryEvidence {
+                        terminal: crate::AiRunTerminalEvent::Failed,
+                        produced_assistant_output: false,
+                        provider_dispatch_possible: false,
+                    },
+                    Some("provider_pre_transport_failed"),
+                ),
+                crate::AiRunRetryAdmission::Allowed
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,5 @@
+error: mutation_shapes selects unavailable delete mutation: append_only entities generate only create
+ --> tests/ui/mutation_shapes_append_only_delete.rs:5:8
+  |
+5 | struct Shaped {
+  |        ^^^^^^

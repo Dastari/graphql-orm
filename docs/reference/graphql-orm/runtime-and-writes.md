@@ -265,12 +265,9 @@ A generated write runs in this order, after its entity and row policy checks:
 4. The `After` hook, inside the transaction.
 5. Commit. An error from either hook rolls back instead.
 6. Queued `Changed` events.
-7. Actions registered with `MutationContext::defer`, in order.
-
-Deferred actions run only after a successful commit, and they're awaited before the write returns, so
-a slow action delays the response. They run at most once and aren't persisted: a crash after commit
-loses them. A failure doesn't fail the committed write; it goes to the `PostCommitErrorHandler` from
-`set_post_commit_error_handler`, or to stderr if none is installed.
+7. Actions registered with `MutationContext::defer`, in registration order.
+8. For generated GraphQL mutations, the entity's `notify_with` handler. Single-row writes call it once;
+   bulk updates and deletes call it once per row, after the whole bulk transaction commits.
 
 | Write path | Hooks | GraphQL context in the hook | `Changed` |
 | --- | --- | --- | --- |
@@ -280,13 +277,114 @@ loses them. A failure doesn't fail the committed write; it goes to the `PostComm
 | Through `MutationContext` in a hook | Per row | No | After commit |
 | Database foreign-key actions, raw SQL, and any other write outside the ORM | No | | No |
 
-Field validators and `WriteInputTransform` differ by path. `Entity::insert` runs the transform twice
-and a bulk update runs it once, passing only the first matched row as the existing row, as tracked in
-[#284](https://github.com/Dastari/graphql-orm/issues/284). A transform must be idempotent and must not
-validate a bulk update against the existing row.
+Generated writes run `WriteInputTransform` once per input row. Repository `insert`
+uses the transaction helper's single call. Bulk updates pass every locked existing
+row to `before_update`, each with a fresh clone of the original input. Different
+rows may produce different values; the ORM retains a separate SQL plan per row.
+The explicit legacy field-policy opt-out still omits a field for the entire
+unbounded bulk operation if any row denies it, without repeating callbacks.
+For unbounded bulk updates, all transforms and field checks finish before mutation
+`Before` hooks, then
+all row writes run, followed by `After` hooks and commit. A refusal rolls back the
+whole write, including writes made through the transform's transaction context.
+Bounded updates retain their per-row transform/`Before`/write/`After` order.
+External side effects cannot be rolled back; use post-commit actions for those.
+There is no transform for deletes or for raw pool/SQL writes.
+
+This costs one transform invocation and one retained input/SQL plan per matched
+row. Bulk writes already execute by locked primary key, so it adds no update SQL
+round trips. The existing 1,000-row bound for GraphQL `notify_with` bulk writes
+is unchanged; other bulk writes gain no new bound. `InternalMutationHook` means
+a write made while a mutation hook is executing; ordinary transaction helpers
+report `Repository`.
+
+Transform invocation audit (N matched/input rows; successful ORM writes using a
+Database, not a raw pool). Upserts use `before_upsert` in either branch, not an
+additional create/update transform. Before counts are from the pre-0.93 generated
+paths; after counts are pinned by `bulk_refusals` and the skill contract suite.
+
+| Write path | Before | After |
+| --- | ---: | ---: |
+| GraphQL create | 1 | 1 |
+| Repository insert | 2 | 1 |
+| GraphQL / repository single update | 1 | 1 |
+| GraphQL upsert, insert / update branch | 1 / 1 | 1 / 1 |
+| Repository upsert, insert / update branch | 1 / 1 | 1 / 1 |
+| Repository insert_many | N | N |
+| Repository upsert_many, mixed branches | N | N |
+| Repository replace_all (inserted rows) | N | N |
+| GraphQL / repository bulk update | 1 (first row) | N |
+| Repository bounded update | N | N |
+| MutationContext insert / single update | 1 / 1 | 1 / 1 |
+| MutationContext upsert, insert / update branch | 1 / 1 | 1 / 1 |
+| MutationContext bulk update | 1 (first row) | N |
+| MutationContext bounded update | N | N |
+| Deletes / empty bulk match | 0 | 0 |
+
+Additional source audit: conditional update, compare-and-swap, and
+insert-if-absent each retain one transform call per attempt (including attempts
+that do not write). Composite-key helpers have no duplicate wrapper/helper call.
 
 A hook sees the event, not the mutation's arguments. Generated mutations have no typed transient input;
 [#221](https://github.com/Dastari/graphql-orm/issues/221) tracks that capability.
+
+### After-commit work
+
+`MutationContext::defer` is the after-commit callback. There is no other name for it and no second
+API: it takes `FnOnce(Database<B>) -> impl Future<Output = Result<(), E>>` where `E: Display`, and
+registers it on the transaction.
+
+```rust
+// In a `MutationHook::on_mutation`, or in a `Database::transaction` callback.
+// 1. The durable job commits or rolls back with the write.
+hook_ctx
+    .insert::<Job>(CreateJobInput { kind: "reindex".into(), subject: id.to_string() })
+    .await
+    .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+// 2. After commit, wake whatever processes the job rows.
+let wake = worker_wake.clone();
+hook_ctx.defer(move |_db| async move {
+    wake.notify_one();
+    Ok::<(), String>(())
+});
+```
+
+The job row is the guarantee. The callback is only a hint that a row is ready, so a worker should also
+poll for pending jobs on a timer and on startup, which covers a lost wake-up.
+
+Guarantees, each pinned by `crates/graphql-orm/tests/after_commit_defer.rs` on SQLite, PostgreSQL and
+MSSQL:
+
+- **Available on every commit path.** Hooks reach it on generated GraphQL create, update, delete,
+  upsert, `update_many` and `delete_many`; on repository helpers including `insert_many`,
+  `update_where`, `delete_where`, their bounded forms and `delete_all`; and on writes inside
+  `Database::transaction`. A transaction callback can also call `tx.defer(...)` directly.
+- **Only after a successful commit.** The action runs once per registration and sees committed data:
+  a read through the `Database` it receives, taken from the pool rather than the transaction, returns
+  the new rows, and a deleted row is gone.
+- **Never after a rollback.** A hook refusal (including after the same hook deferred an action), a
+  database failure such as a unique-constraint violation, and a callback error all discard the
+  registered actions, and so does a failed commit. A bulk write is one transaction, so a refusal or
+  failure on a later row discards the actions registered for earlier rows.
+- **Failures are contained.** An action that returns `Err` doesn't change the committed result: a
+  GraphQL mutation still returns `success: true`, a repository call returns `Ok`, and `transaction`
+  returns the callback's value. The error text goes to `PostCommitErrorHandler` through
+  `report_post_commit_error`, or to stderr if none is installed. The remaining actions of that commit
+  still run.
+- **Order.** After the commit: `Changed` events for every row, then every deferred action, then
+  `notify_with`. For a bulk GraphQL write that is all rows' events, all rows' actions, then all rows'
+  handler calls. Repository helpers and `Database::transaction` have no `notify_with`, so their order is
+  events and then actions.
+- **Awaited, at most once, not persisted.** Actions run one at a time before the write returns, so a
+  slow action delays the response. They are not retried, and nothing records them. The callback isn't
+  durable: a crash after commit loses it. That is why the durable job goes in the transaction and the
+  callback only wakes the worker.
+
+Don't spawn a delayed task by hand from a hook, such as `tokio::spawn` with a sleep, to approximate
+this. A hook runs before the commit and can't know whether the transaction will commit, so no fixed
+delay is right: a short one can fire before the commit and find no job row, or after a rollback for a
+write that never happened, and a long one adds latency to every write. `defer` runs after the commit
+decision and only on commit.
 
 Runtime collections use the separate `RuntimeMutationHook`; see
 [runtime mutations](runtime-mutations.md).
@@ -377,13 +475,14 @@ an external write made outside the ORM is not automatically observed.
 The runtime uses request-local event senders attached to `Database`. Subscriptions observe changes emitted by generated write paths.
 
 `#[relation(propagate_change = "up")]` also delivers a `PROPAGATED` event to the parent's `Changed`
-subscribers when a child is created or updated. Deletes are narrower:
+subscribers when a child is created, updated or deleted. Delete release differs:
 
 - A direct `DELETED` event reaches a GraphQL subscriber only when the host grants
   `RowPolicy::can_read_deleted_preimage`, which denies by default. See
   [subscription release authorization](entities-and-relations.md#subscription-release-authorization).
-- A deleted child doesn't notify its parent, because a deleted row can't prove the relation that would
-  authorize the event. [#290](https://github.com/Dastari/graphql-orm/issues/290) tracks this.
+- A child delete captures the parent tuple inside the transaction and authorizes against
+  the current parent. No child read grant is required; public source identity is null.
+  See [subscription release authorization](entities-and-relations.md#subscription-release-authorization).
 
 ## Relation Delete Policy
 
