@@ -1,3 +1,9 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 //! `#[graphql_entity(node_id)]`: the generated global `NodeId` field and its
 //! resolvable `@key(fields: "NodeId")`.

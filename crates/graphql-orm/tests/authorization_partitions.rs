@@ -251,7 +251,11 @@ mod sqlite_batch {
     use graphql_orm::sqlx::Row;
 
     #[derive(GraphQLEntity, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-    #[graphql_entity(table = "partition_children", plural = "PartitionChildren")]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "partition_children",
+        plural = "PartitionChildren"
+    )]
     struct Child {
         #[primary_key]
         #[filterable(type = "string")]
@@ -260,11 +264,11 @@ mod sqlite_batch {
         parent_id: String,
     }
 
-    impl BatchLoadEntity for Child {
+    impl BatchLoadEntity<graphql_orm::SqliteBackend> for Child {
         fn batch_column() -> &'static str {
             "parent_id"
         }
-        fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
+        fn batch_key_from_row(row: &sqlx::sqlite::SqliteRow) -> graphql_orm::Result<String> {
             row.try_get("parent_id")
         }
     }
@@ -286,10 +290,13 @@ mod sqlite_batch {
             .execute(&pool)
             .await
             .unwrap();
-        let loader = async_graphql::dataloader::DataLoader::new(
-            RelationLoader::<Child>::new(graphql_orm::db::Database::new(pool.clone())),
-            tokio::spawn,
-        );
+        let loader =
+            async_graphql::dataloader::DataLoader::new(
+                RelationLoader::<Child, graphql_orm::SqliteBackend>::new(
+                    graphql_orm::db::Database::<graphql_orm::SqliteBackend>::new(pool.clone()),
+                ),
+                tokio::spawn,
+            );
         let keys = [
             composite(context(&["read,write"])),
             composite(context(&["read", "write"])),
@@ -331,11 +338,11 @@ mod postgres_batch {
         parent_id: String,
     }
 
-    impl BatchLoadEntity for Child {
+    impl BatchLoadEntity<graphql_orm::PostgresBackend> for Child {
         fn batch_column() -> &'static str {
             "parent_id"
         }
-        fn batch_key_from_row(row: &graphql_orm::DbRow) -> graphql_orm::Result<String> {
+        fn batch_key_from_row(row: &sqlx::postgres::PgRow) -> graphql_orm::Result<String> {
             row.try_get("parent_id")
         }
     }
@@ -373,7 +380,9 @@ mod postgres_batch {
             .connect(&owned.url)
             .await?;
         let loader = async_graphql::dataloader::DataLoader::new(
-            RelationLoader::<Child>::new(graphql_orm::db::Database::new(pool.clone())),
+            RelationLoader::<Child, graphql_orm::PostgresBackend>::new(
+                graphql_orm::db::Database::<graphql_orm::PostgresBackend>::new(pool.clone()),
+            ),
             tokio::spawn,
         );
         let denied = composite(context(&["read,write"]));

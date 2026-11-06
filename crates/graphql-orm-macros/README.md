@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.93.1 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.
+
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 
 Version 0.93.0 runs write input transforms once per input row, including each

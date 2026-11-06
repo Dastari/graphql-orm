@@ -167,7 +167,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - run: cargo check -p graphql-orm --no-default-features --features postgres
+      - name: Compile and lint every backend target
+        run: |
+          for backend in postgres mssql sqlite,mssql; do
+            cargo check -p graphql-orm --locked --no-default-features --features "$backend" --all-targets
+            cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
+          done
       - run: cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres
       - name: Check composite subscription scope declarations on native backends
         run: |
@@ -255,10 +260,14 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Verify TLS, writes, and retained query notifications on owned servers
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids -- --ignored --test-threads=1
-      - name: Execute the global node lookup through the router on owned servers
-        run: cargo test -p graphql-orm --locked --no-default-features --features sqlite --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
+      - name: Execute the complete owned MSSQL lane
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: scripts/run-owned-database-lanes.sh mssql
+      - name: Verify TLS and retained query notifications on owned servers
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_notifications -- --ignored --test-threads=1
 
   orm-text-group-pages:
     runs-on: ubuntu-latest

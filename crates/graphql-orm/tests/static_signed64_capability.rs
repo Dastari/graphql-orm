@@ -1,3 +1,10 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
+
 //! Actual generated producer -> capability compiler -> exact variables -> resolver.
 #![cfg(feature = "sqlite")]
 use graphql_orm::async_graphql::{Context, Request, Variables};

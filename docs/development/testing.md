@@ -44,9 +44,9 @@ Compile every affected backend lane explicitly:
 
 ```sh
 cargo check -p graphql-orm --no-default-features --features sqlite
-cargo check -p graphql-orm --no-default-features --features postgres
-cargo check -p graphql-orm --no-default-features --features mssql
-cargo check -p graphql-orm --no-default-features --features "sqlite mssql"
+cargo check -p graphql-orm --no-default-features --features postgres --all-targets
+cargo check -p graphql-orm --no-default-features --features mssql --all-targets
+cargo check -p graphql-orm --no-default-features --features "sqlite mssql" --all-targets
 ```
 
 When manifests or backend features change, inspect the resolved graph:
@@ -133,7 +133,8 @@ Clippy and Rustdoc), `orm-runtime-graphql` (runtime GraphQL on owned SQLite and
 PostgreSQL, and the SQL Server refusal) and `orm-backends` (the PostgreSQL and
 SQL Server lanes, owned fixtures and the consumer examples).
 `scripts/check-replay-release-positive.py` requires the three jobs together to
-run exactly the commands of the qualified single ORM job. The one intended
+retain the commands of the qualified single ORM job, with explicit PostgreSQL,
+MSSQL and SQLite/MSSQL all-target check and warnings-denied Clippy coverage. The one intended
 difference is that the SQLite migration API fixture now runs only through the
 default suite's `migration_api_compatibility_fixture` driver, which ran the
 same command.
@@ -146,8 +147,14 @@ requires the skip list to be exactly the non-ignored tests of the binaries
 `orm-fixtures` runs, and no other test to share one of those names. A local
 `cargo test -p graphql-orm` still runs everything.
 
-The existing `sqlserver-security` job separately executes the ignored owned TLS,
-writable-transaction and query-notification tests. Release security jobs depend
+The existing `sqlserver-security` job executes `scripts/run-owned-database-lanes.sh mssql`,
+including `mssql_integration` (MONEY reads and two-parent paginated relation loading),
+then the ignored owned TLS and query-notification tests. Both CI and release use
+the same lane script. SQLite/PostgreSQL SQLx fixtures are gated to their supported
+backends. Fixtures that select a backend through mutually exclusive feature
+attributes or untyped pools run only when one backend is enabled. The combined
+SQLite/MSSQL lane compiles the dedicated coexistence fixtures and explicitly
+selected entities; strict multi-backend selection diagnostics remain enforced. Release security jobs depend
 on the protected `guard`; the aggregate `validate` gate requires them before
 publication. Workflow configuration establishes required execution, not a
 passing result for an unexecuted candidate.
