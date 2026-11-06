@@ -10,6 +10,32 @@ supersedes: []
 
 # Migration Guide
 
+## Codex executable version admission (AI 0.123.0)
+
+Opt in to exact release matching; no declaration preserves existing behavior.
+No data migration is needed; `AI_SCHEMA_MODULE_VERSION` is unchanged because
+this is an in-memory policy.
+
+```rust,ignore
+let registration = registration.with_supported_versions(
+    AiCodexAppServerSupportedVersions::exact(["0.165.0", "0.166.0"])?
+);
+let status = pool.check_version_readiness(&registration).await;
+if !status.is_ready() {
+    // Feed status.reason_code() into existing service readiness; admit no model work.
+}
+```
+
+On a Codex self-update, review the new release and update both the allow-list and
+the registration's executable SHA-256/version. Missing, malformed, failed, unsupported
+or identity-mismatched observations fail closed when declared. Custom factories must
+implement `observe_version` and attach fresh `AiCodexAppServerVersionObservation`
+through `AiCodexAppServerLaunchedProcess::with_version_observation` on every launch;
+the additive defaults report missing. Readiness never uses credentials or model budget.
+Launch refusal is proven pre-transport; strict deletion and fresh absence confirmation
+remain available without turn authority. See the [provider contract](crates/graphql-orm-ai/docs/provider-sessions-and-hosted-activity.md#codex-executable-version-admission-ai-01230) for image-binding,
+isolation, bounds, failure codes and migration details.
+
 ## 0.92.0 to 0.93.0: after-commit callback documented
 
 No action and no data migration is needed. `MutationContext::defer` keeps its signature and behaviour; it

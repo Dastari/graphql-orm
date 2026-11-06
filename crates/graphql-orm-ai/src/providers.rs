@@ -53,6 +53,14 @@ mod ollama;
 mod chat_completions;
 
 #[cfg(feature = "provider-codex-app-server")]
+mod codex_version_readiness;
+#[cfg(feature = "provider-codex-app-server")]
+pub use codex_version_readiness::{
+    AiCodexAppServerSupportedVersions, AiCodexAppServerVersionObservation,
+    AiCodexAppServerVersionReadiness,
+};
+
+#[cfg(feature = "provider-codex-app-server")]
 mod codex_app_server;
 
 #[cfg(all(test, feature = "provider-codex-app-server"))]

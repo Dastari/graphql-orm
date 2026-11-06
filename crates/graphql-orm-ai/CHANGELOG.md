@@ -10,7 +10,9 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.122.0
+## Unreleased - 0.123.0
+
+AI 0.123.0 adds opt-in authoritative Codex exact-version readiness and fresh launch admission, preserving strict cleanup during refusal. Related to #333. No data migration or persistent schema change.
 
 Fixes #327: report closed local validation, authorization, attachment, and audit refusals as clean provider failures only before reservation or after durable release, before transport. Recognize the existing protected-source pre-transport proof. Expose content-free GraphQL retry refusal reasons; possible provider effects remain uncertain.
 
