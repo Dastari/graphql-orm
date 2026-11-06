@@ -554,4 +554,4 @@ Version 0.92.0 adds the off-by-default macro `schema-export-only` feature for de
 SDL export builds. Runtime builds must leave it disabled; see
 [schema export](../../docs/reference/graphql-orm/schema-export.md).
 
-Version 0.92.1 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.
+Version 0.93.0 shares generated scalar-filter SQL and semantic metadata builders to reduce consumer compile cost. SQL, binds, SDL and public contracts are unchanged; no data migration is needed.

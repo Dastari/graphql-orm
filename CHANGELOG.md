@@ -29,9 +29,9 @@ AI **0.122.0**, ORM runtime/macros **0.93.0**, tool profiles **0.21.0**.
   null `sourceEntity`/`sourceId`. No data migration is needed.
 - AI 0.122.0 / tool profiles 0.21.0: preserve proven pre-transport audit failure classification and expose closed GraphQL retry refusal reasons (Fixes #327). Possible provider effects remain uncertain.
 - AI 0.122.0: retain ORM-backed regression coverage for added tools, removed tools, changes to tool schemas, and changes to unused tools across retained session cleanup/rebind. The reported stranded-conversation defect did not reproduce; no runtime or persistence change.
+- ORM/macros **0.93.0:** reduce generated scalar-filter SQL and semantic metadata construction. Emitted clauses, bind order, NULL handling and SDL are unchanged. No consumer changes or data migration are needed. Fixes #334.
 
 AI **0.121.0**, ORM runtime/macros **0.92.0**. Released as `workspace-2026.11.06.2`.
-- ORM/macros **0.92.1:** reduce generated scalar-filter SQL and semantic metadata construction. Emitted clauses, bind order, NULL handling and SDL are unchanged. No consumer changes or data migration are needed. Fixes #334.
 
 AI **0.121.0**, ORM runtime/macros **0.92.0**.
 
