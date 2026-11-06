@@ -10,6 +10,28 @@ supersedes: []
 
 # Changelog
 
+## 0.120.2
+
+- **Fix (urgent):** Codex 0.166.0 turns no longer fail closed at the first
+  lifecycle item. 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`
+  to every thread item, although its generated schema still omits them. The
+  `reasoning`, `dynamicToolCall`, `webSearch` and `sleep` allow-lists rejected the
+  new keys, so any turn reaching one of those items ended in `provider_rejection`
+  and `supervised_provider_turn_uncertain`. All four now admit the two keys as
+  optional, typed and bounded metadata: absent on older peers; on start a positive
+  integer and null; on completion two positive integers, in order, with the start
+  time matching the one observed. Everything else stays strict. See
+  [provider sessions](docs/provider-sessions-and-hosted-activity.md).
+- **Fix:** opt out of `turn/moderationMetadata` and `thread/readState/changed`, both
+  emitted on 0.165.0 and 0.166.0 on the tested account and both fatal to the turn
+  under the closed method allow-list. Neither carries settlement or execution
+  authority. A peer that ignores the opt-out is still rejected. Older peers ignore
+  unknown opt-out methods.
+- Add the ignored `live_codex_turn_reaches_authoritative_completion_through_strict_actor`
+  test, which runs a real read-only turn through the strict actor on any installed
+  Codex version.
+- No public API, schema-module or persistence change. No data migration is needed.
+
 ## Unreleased - 0.120.1
 
 - Allocate a new immutable package identity for the provider-files documentation review-date update made after `graphql-orm-ai-v0.120.0`. Rust code, AI capabilities, schema module, persistence, authorization and provider behavior are unchanged. No data migration is needed.

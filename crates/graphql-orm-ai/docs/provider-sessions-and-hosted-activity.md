@@ -3,7 +3,7 @@ title: "Provider Sessions, Hosted Search, and Visible Activity"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-01
+last_reviewed: 2026-11-06
 review_by: 2027-02-11
 supersedes: []
 ---
@@ -265,6 +265,36 @@ renewed. Existing adapters can ignore these validated item notifications. Native
 approval candidates still require successful provider settlement and the existing
 durable checkpoint before publication; this compatibility does not grant any
 consequential call, endpoint, command, file, or approval authority.
+
+Codex 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs` to every thread
+item; its generated schema does not list them, so the schema is not the contract here.
+Measured on real turns: `userMessage`, `agentMessage`, `reasoning`, `dynamicToolCall`,
+`webSearch` and `sleep` all carry them on 0.166.0, and none does on 0.165.0. The
+`reasoning`, `dynamicToolCall`, `webSearch` and `sleep` allow-lists admit them under one
+rule: both absent, or on `item/started` a positive integer `startedAtMs` with
+`completedAtMs` null or absent, or on `item/completed` both positive integers with
+completion no earlier than start and `startedAtMs` equal to the value the start reported.
+Values are at most 2^53 - 1. They are display metadata: no deadline, budget or authority
+reads them. `userMessage` and `agentMessage` items have no key allow-list, because their
+adapters read named fields only, so those two admit the keys without typing them.
+
+The same real turns showed `turn/moderationMetadata` and `thread/readState/changed` on
+0.165.0 and 0.166.0. Both are in the negotiated opt-out list, not the allowed-method list:
+the peer stops sending them, and a frame that arrives anyway is still rejected. Turn
+settlement remains `turn/completed`.
+
+To repeat this check against a Codex version, run a real read-only turn through the strict
+actor. The home must be disposable and hold only `auth.json`; set the scenario to
+`reasoning`, `dynamic`, `web_search` or `sleep`:
+
+```bash
+GRAPHQL_ORM_AI_CODEX_LIVE_BIN=/absolute/path/to/codex \
+GRAPHQL_ORM_AI_CODEX_LIVE_HOME=/absolute/path/to/disposable/home \
+GRAPHQL_ORM_AI_CODEX_LIVE_MODEL=<model> \
+GRAPHQL_ORM_AI_CODEX_LIVE_SCENARIO=reasoning \
+cargo test -p graphql-orm-ai --features provider-codex-app-server --lib -- --ignored --exact \
+  providers::codex_app_server::tests::live_codex_turn_reaches_authoritative_completion_through_strict_actor
+```
 
 The generated 0.148.0 server-notification union makes the outer `emittedAtMs`
 metadata optional for every method. The actor accepts an omitted field but

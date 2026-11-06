@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
+
+Update if you run Codex 0.166.0: earlier AI releases fail its turns. No API, schema, configuration or data change. ORM and macros 0.91.1 change no code. See the [AI migration note](crates/graphql-orm-ai/MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).
+
 ## 0.90.1 to 0.91.0: isolated runtime search ranking and fenced backfill
 
 - **SQLite scores change.** Runtime search on SQLite now scores each row from its own document (`1.0·nA + 0.7·nB + 0.4·nC + 0.1·nD`, weighted matched-phrase counts) instead of `bm25`. Scores no longer depend on rows the host's grant hides. Their scale differs from `bm25`, so review any SQLite `minScore` thresholds; one match in a title (A) scores 1.0. PostgreSQL scores are unchanged.
