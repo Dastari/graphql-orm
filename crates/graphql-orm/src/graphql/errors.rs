@@ -89,7 +89,9 @@ pub struct OrmPublicError {
     pub(crate) internal: Option<String>,
     pub(crate) retryable: bool,
     denied_write_field: Option<Box<str>>,
-    application_error: Option<Box<async_graphql::Error>>,
+    // An authored refusal's own extensions. Not the whole `async_graphql::Error`,
+    // whose type-erased source would make this public type lose its auto traits.
+    application_extensions: Option<Box<Option<async_graphql::ErrorExtensionValues>>>,
     pub(crate) runtime_mutation_code: Option<&'static str>,
 }
 
@@ -130,7 +132,7 @@ impl OrmPublicError {
             retryable: false,
             runtime_mutation_code: None,
             denied_write_field: None,
-            application_error: None,
+            application_extensions: None,
         }
     }
 
@@ -144,7 +146,7 @@ impl OrmPublicError {
             retryable: false,
             runtime_mutation_code: None,
             denied_write_field: None,
-            application_error: None,
+            application_extensions: None,
         }
     }
 
@@ -242,8 +244,10 @@ impl OrmPublicError {
     /// Convert into a GraphQL error, preserving explicit application callback extensions.
     /// Infrastructure failures expose only safe ORM extensions.
     pub fn into_graphql_error(self) -> async_graphql::Error {
-        if let Some(error) = self.application_error {
-            return *error;
+        if let Some(extensions) = self.application_extensions {
+            let mut error = async_graphql::Error::new(self.message);
+            error.extensions = *extensions;
+            return error;
         }
         let mut error = async_graphql::Error::new(self.message.clone());
         error = error.extend_with(|_, extensions| {
@@ -402,7 +406,7 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
             .unwrap_or(OrmErrorCode::InternalError),
     );
     public.message = error.message.clone();
-    public.application_error = Some(Box::new(error));
+    public.application_extensions = Some(Box::new(error.extensions));
     sqlx_error_from_public(public)
 }
 
