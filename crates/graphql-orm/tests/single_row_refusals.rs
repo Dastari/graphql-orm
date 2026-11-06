@@ -17,6 +17,7 @@ use std::any::Any;
         backend = "sqlite",
         table = "write_records",
         plural = "WriteRecords",
+        mutation_shapes = "create,upsert,update,delete",
         notify_with = "notify",
         upsert = "record_key"
     )
@@ -27,6 +28,7 @@ use std::any::Any;
         backend = "postgres",
         table = "write_records",
         plural = "WriteRecords",
+        mutation_shapes = "create,upsert,update,delete",
         notify_with = "notify",
         upsert = "record_key"
     )
@@ -38,6 +40,7 @@ use std::any::Any;
         table = "write_records",
         plural = "WriteRecords",
         schema_policy = "external_writable",
+        mutation_shapes = "create,upsert,update,delete",
         notify_with = "notify",
         upsert = "record_key"
     )
@@ -309,7 +312,7 @@ impl EntityPolicy for Callback {
         })
     }
 }
-// Notification handlers historically accept any error convertible into GraphQL.
+// Single-row-only schemas historically accept any error convertible into GraphQL.
 struct NotifyFailure(async_graphql::Error);
 impl From<NotifyFailure> for async_graphql::Error {
     fn from(error: NotifyFailure) -> Self {
