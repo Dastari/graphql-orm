@@ -4393,7 +4393,7 @@ where
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, true)?,
         );
-        let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+        let (count_rows, rows) = super::fetch_rows_pair_with_auth::<B>(
             provider.pool(),
             &count_rendered.sql,
             &count_rendered.values,
@@ -4426,6 +4426,99 @@ where
                 start_cursor: edges.first().map(|edge| edge.cursor.clone()),
                 end_cursor: edges.last().map(|edge| edge.cursor.clone()),
                 total_count: Some(total),
+            },
+            edges,
+        })
+    }
+
+    /// Fetch only selected connection components. Residual entity filters retain
+    /// the complete read path; callers must apply residual authorization first.
+    pub async fn fetch_connection_selected_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        selection: crate::graphql::pagination::ConnectionSelection,
+    ) -> crate::Result<Connection<T>>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        self.ensure_filter_valid()?;
+        if self.requires_in_memory_filtering() || (selection.rows && selection.count) {
+            return self.fetch_connection_with_auth(provider, auth).await;
+        }
+        let config = provider.pagination_config();
+        let page = config.resolve_page(self.page.as_ref(), true);
+        let offset = page.offset.max(0);
+        let limit = page.limit;
+        let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
+        let mut nodes = Vec::new();
+        let mut total = None;
+        if selection.count {
+            let mut query = self.build_select_query()?;
+            query.count_only = true;
+            query.pagination = None;
+            query.sorts.clear();
+            let rendered = render_select_query(B::DIALECT, &query);
+            let rows = super::fetch_rows_with_auth::<B>(
+                provider.pool(),
+                &rendered.sql,
+                &rendered.values,
+                auth,
+            )
+            .await?;
+            provider.observe_read(&rendered.sql, rows.len());
+            total = Some(B::try_get_i64(
+                rows.first().ok_or(sqlx::Error::RowNotFound)?,
+                "count",
+            )?);
+        }
+        if needs_rows {
+            let mut query = self.build_select_query_with_config(config, true)?;
+            if !selection.count
+                && selection.has_next_page
+                && let Some(pagination) = &mut query.pagination
+            {
+                pagination.limit = pagination.limit.map(|n| n.saturating_add(1));
+            }
+            let rendered = render_select_query(B::DIALECT, &query);
+            let rows = super::fetch_rows_with_auth::<B>(
+                provider.pool(),
+                &rendered.sql,
+                &rendered.values,
+                auth,
+            )
+            .await?;
+            provider.observe_read(&rendered.sql, rows.len());
+            nodes = rows
+                .iter()
+                .map(T::from_row)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        let page_len = limit.map_or(nodes.len() as i64, |n| (nodes.len() as i64).min(n.max(0)));
+        let has_next_page = total.map_or_else(
+            || limit.is_some_and(|n| nodes.len() as i64 > n),
+            |total| {
+                offset.saturating_add(limit.map_or((total - offset).max(0), |n| {
+                    n.max(0).min((total - offset).max(0))
+                })) < total
+            },
+        );
+        nodes.truncate(page_len as usize);
+        let edges: Vec<_> = nodes
+            .into_iter()
+            .enumerate()
+            .map(|(i, node)| Edge {
+                node,
+                cursor: encode_cursor(offset + i as i64),
+            })
+            .collect();
+        Ok(Connection {
+            page_info: PageInfo {
+                has_next_page,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|e| e.cursor.clone()),
+                end_cursor: edges.last().map(|e| e.cursor.clone()),
+                total_count: total,
             },
             edges,
         })
@@ -4488,7 +4581,7 @@ where
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, true)?,
         );
-        let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+        let (count_rows, rows) = super::fetch_rows_pair_with_auth::<B>(
             provider.pool(),
             &count_rendered.sql,
             &count_rendered.values,

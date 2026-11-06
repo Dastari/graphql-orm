@@ -461,3 +461,5 @@ backfill against a stale schema. See
 [the migration guide](../../MIGRATION.md#0901-to-0910-isolated-runtime-search-ranking-and-fenced-backfill).
 
 Version 0.91.2 pairs the runtime and macros for narrow-key paginated relation windows.
+
+Version 0.91.3 pairs the runtime and macros for selection-aware static offset connections.

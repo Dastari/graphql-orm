@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -77,9 +77,28 @@ opt-in work.
 
 ## Field Selection And Counts
 
-Legacy offset connections compute exact `totalCount` even when it is not
-selected. Keyset connections and authorized scans provide explicit count opt-in.
-Repository `fetch_all` remains intentionally unbounded for trusted internal use.
+Since 0.91.3, static offset connections use the selected fields to omit unused
+SQL while preserving selected values and authorization. No data migration is needed.
+
+Generated top-level and relation connections inspect schema field names through
+fragments and aliases. `edges`, `startCursor` or `endCursor` require page rows;
+`totalCount` requires a count. `hasNextPage` without a count uses one extra row
+(and truncates the probe before returning edges). Selecting only
+`hasPreviousPage` requires no SQL for the connection. Relation batch/cache
+identity includes selection requirements. Residual row policies retain the
+authorized scan, even for count-only requests; totals count readable rows only.
+
+Direct `fetch_connection` and `fetch_connection_with_auth` retain the full
+contract. `EntityQuery::fetch_connection_selected_with_auth` accepts
+`graphql::pagination::ConnectionSelection { rows, count, has_next_page }`;
+unrequested components are placeholders and must not be exposed by callers.
+`ConnectionSelection::ALL` requests the full contract; `from_context(ctx)`
+provides generated resolver selection requirements.
+
+When rows and count are both required, the existing paired fetch retains its
+pinned database auth transaction. Keyset connections and authorized scans keep
+their explicit count opt-in. Repository `fetch_all` remains intentionally
+unbounded for trusted internal use.
 
 ## Authorization-aware pagination (0.33.0)
 
@@ -144,8 +163,8 @@ same SQL visibility contract; residual callbacks still require implementation.
 
 ### Exact offsets remain compatible
 
-Generated ordinary list resolvers use database pagination and authorized SQL
-counts for `Complete` and `Unrestricted`. Their `totalCount`, visible offsets,
+Generated ordinary list resolvers use database pagination and selected authorized
+SQL counts for `Complete` and `Unrestricted`. Their `totalCount`, visible offsets,
 and existing offset cursor contract remain unchanged. With `CallbackOnly` or
 `Prefilter`, exact visible offsets and totals require examining all candidates,
 but 0.46 performs that work in finite SQL batches using an explicitly installed

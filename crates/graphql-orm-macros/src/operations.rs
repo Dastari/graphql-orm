@@ -7623,7 +7623,7 @@ fn generate_graphql_operations_unfiltered(
                     }
 
                     let mut generic_conn = query
-                        .fetch_connection_with_auth(db, auth_context.as_ref())
+                        .fetch_connection_selected_with_auth(db, auth_context.as_ref(), ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx))
                         .await
                         .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 
@@ -7999,7 +7999,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let mut generic_conn = query
-                    .fetch_connection_with_auth(db, auth_context.as_ref())
+                    .fetch_connection_selected_with_auth(db, auth_context.as_ref(), ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx))
                     .await
                     .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
 

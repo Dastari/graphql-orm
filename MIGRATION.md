@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.91.2 to 0.91.3: selected connection queries
+
+No consumer action or data migration is needed. Upgrade ORM and macros together. Static top-level and relation offset connections omit SQL for unselected components; selected values and authorization are unchanged. Detect the change by observing one statement for count-only or row-only pages. Existing direct connection fetch methods still return complete connections. The additive `ConnectionSelection` and `fetch_connection_selected_with_auth` support callers that intentionally accept placeholders for unselected fields.
+
 ## 0.91.1 to 0.91.2: narrow relation pagination windows
 
 No consumer action or data migration is needed. SQL-pushed static paginated relations on SQLite, PostgreSQL and MSSQL fetch full entities only for the requested page. GraphQL schemas, rows, totals, ordering and read policies are unchanged. Hosts can identify the optimization by the primary-key join outside the relation window in emitted SQL. Count-only GraphQL selections still load the requested page; selection-aware loading is a separate change.

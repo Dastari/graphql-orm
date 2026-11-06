@@ -730,6 +730,7 @@ fn render_relation_page(
 async fn load_composite_relation_keys<T, B>(
     db: crate::db::Database<B>,
     keys: Vec<CompositeRelationQueryKey>,
+    selection: crate::graphql::pagination::ConnectionSelection,
 ) -> Result<HashMap<CompositeRelationQueryKey, RelationLoadResult<T>>, String>
 where
     B: OrmBackend,
@@ -818,7 +819,14 @@ where
             })
             .collect::<Vec<_>>();
 
-        if let Some(PaginationRequest { limit, offset }) = sample.pagination.clone() {
+        if sample.pagination.is_some()
+            || selection != crate::graphql::pagination::ConnectionSelection::ALL
+        {
+            let PaginationRequest { limit, offset } =
+                sample.pagination.clone().unwrap_or(PaginationRequest {
+                    limit: None,
+                    offset: 0,
+                });
             let partition_columns = sample.fk_columns.join(", ");
             let rendered = render_relation_page(
                 B::DIALECT,
@@ -837,7 +845,14 @@ where
                 &partition_columns,
                 &sort_sql,
                 &relation_key_columns,
-                &PaginationRequest { limit, offset },
+                &PaginationRequest {
+                    limit: if !selection.count && selection.has_next_page {
+                        limit.map(|n| n.saturating_add(1))
+                    } else {
+                        limit
+                    },
+                    offset,
+                },
             );
             let start = offset.max(0);
             let row_sql = rendered.sql;
@@ -866,16 +881,45 @@ where
             count_sql.push_str(" GROUP BY ");
             count_sql.push_str(&partition_columns);
 
-            let (count_rows, rows) = crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
-                db.pool(),
-                &count_sql,
-                &count_values,
-                &row_sql,
-                &row_values,
-                sample.auth_context.as_ref(),
-            )
-            .await
-            .map_err(crate::graphql::errors::loader_error_from_sqlx)?;
+            let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
+            let (count_rows, rows) = if selection.count && needs_rows {
+                crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
+                    db.pool(),
+                    &count_sql,
+                    &count_values,
+                    &row_sql,
+                    &row_values,
+                    sample.auth_context.as_ref(),
+                )
+                .await
+                .map_err(crate::graphql::errors::loader_error_from_sqlx)?
+            } else {
+                let count_rows = if selection.count {
+                    crate::graphql::orm::fetch_rows_with_auth::<B>(
+                        db.pool(),
+                        &count_sql,
+                        &count_values,
+                        sample.auth_context.as_ref(),
+                    )
+                    .await
+                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?
+                } else {
+                    Vec::new()
+                };
+                let rows = if needs_rows {
+                    crate::graphql::orm::fetch_rows_with_auth::<B>(
+                        db.pool(),
+                        &row_sql,
+                        &row_values,
+                        sample.auth_context.as_ref(),
+                    )
+                    .await
+                    .map_err(crate::graphql::errors::loader_error_from_sqlx)?
+                } else {
+                    Vec::new()
+                };
+                (count_rows, rows)
+            };
 
             let mut total_counts: HashMap<RelationKey, i64> = parent_key_order
                 .iter()
@@ -918,10 +962,24 @@ where
             }
 
             for key in group {
-                let entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
+                let mut entities = grouped_entities.remove(&key.parent_key).unwrap_or_default();
                 let total_count = *total_counts.get(&key.parent_key).unwrap_or(&0);
                 let has_previous_page = start > 0;
-                let has_next_page = (start + entities.len() as i64) < total_count;
+                let has_next_page = if selection.count {
+                    let page_len = if selection.rows {
+                        entities.len() as i64
+                    } else {
+                        limit.map_or((total_count - start).max(0), |n| {
+                            n.max(0).min((total_count - start).max(0))
+                        })
+                    };
+                    start.saturating_add(page_len) < total_count
+                } else {
+                    limit.is_some_and(|n| entities.len() as i64 > n)
+                };
+                if let Some(limit) = limit {
+                    entities.truncate(limit.max(0) as usize);
+                }
                 results.insert(
                     key,
                     RelationLoadResult {
@@ -1129,8 +1187,12 @@ where
                     auth_context: key.auth_context.clone(),
                 })
                 .collect::<Vec<_>>();
-            let composite_results =
-                load_composite_relation_keys::<T, B>(db, composite_keys).await?;
+            let composite_results = load_composite_relation_keys::<T, B>(
+                db,
+                composite_keys,
+                crate::graphql::pagination::ConnectionSelection::ALL,
+            )
+            .await?;
             let mut results = HashMap::new();
             for key in keys {
                 let composite_key = CompositeRelationQueryKey {
@@ -1183,7 +1245,14 @@ where
         let keys = keys.to_vec();
         let db = self.db.clone();
 
-        async move { load_composite_relation_keys::<T, B>(db, keys).await }
+        async move {
+            load_composite_relation_keys::<T, B>(
+                db,
+                keys,
+                crate::graphql::pagination::ConnectionSelection::ALL,
+            )
+            .await
+        }
     }
 }
 
@@ -1513,5 +1582,47 @@ mod relation_page_tests {
         assert!(plan.contains("COVERING INDEX relation_order"), "{plan}");
         assert!(plan.contains("SEARCH __gom_relation_entity USING INDEX sqlite_autoindex_items_1 (tenant=? AND id=?)"), "{plan}");
         eprintln!("{plan}");
+    }
+}
+
+/// Selection-aware relation cache key. Requirements are part of the cache identity.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SelectedRelationQueryKey {
+    /// Existing relation query and authorization partition.
+    pub query: CompositeRelationQueryKey,
+    /// Selected connection components.
+    pub selection: crate::graphql::pagination::ConnectionSelection,
+}
+
+impl<T, B> Loader<SelectedRelationQueryKey> for RelationLoader<T, B>
+where
+    B: OrmBackend,
+    T: BatchLoadEntity<B>,
+{
+    type Value = RelationLoadResult<T>;
+    type Error = String;
+    async fn load(
+        &self,
+        keys: &[SelectedRelationQueryKey],
+    ) -> Result<HashMap<SelectedRelationQueryKey, Self::Value>, Self::Error> {
+        let mut groups: HashMap<
+            crate::graphql::pagination::ConnectionSelection,
+            Vec<CompositeRelationQueryKey>,
+        > = HashMap::new();
+        for key in keys {
+            groups
+                .entry(key.selection)
+                .or_default()
+                .push(key.query.clone());
+        }
+        let mut result = HashMap::new();
+        for (selection, queries) in groups {
+            for (query, value) in
+                load_composite_relation_keys::<T, B>(self.db.clone(), queries, selection).await?
+            {
+                result.insert(SelectedRelationQueryKey { query, selection }, value);
+            }
+        }
+        Ok(result)
     }
 }
