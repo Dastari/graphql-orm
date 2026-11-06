@@ -157,8 +157,7 @@ async fn fail(db: &Database, mode: Mode) -> async_graphql::Result<()> {
             .await?;
             Ok(())
         }
-        Mode::Plain => Err(async_graphql::Error::new("host refusal")
-            .extend_with(|_, ext| ext.set("detail", "preserved"))),
+        Mode::Plain => Err(async_graphql::Error::new("host refusal")),
         Mode::Coded => Err(
             async_graphql::Error::from(std::io::Error::other("host refusal")).extend_with(
                 |_, ext| {
@@ -438,6 +437,7 @@ async fn single_row_callback_contract() {
                         .extend_with(|_, ext| ext.set("code", "INTERNAL_ERROR"))
                 } else {
                     match mode {
+                        Mode::Plain => async_graphql::Error::new("host refusal"),
                         Mode::Coded => {
                             async_graphql::Error::new("host refusal").extend_with(|_, ext| {
                                 ext.set("code", "CUSTOM_REFUSAL");
