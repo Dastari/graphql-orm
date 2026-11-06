@@ -2941,7 +2941,14 @@ pub(crate) fn maybe_wrap_read_transform(
 pub(crate) fn generate_graphql_entity(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    generate_entity_impl(input, false)
+    generate_entity_impl(input, false, false)
+}
+
+/// Reuse the generated identity resolvers inside the relation-owned complex object.
+pub(crate) fn generate_complex_identity_fields(
+    input: &DeriveInput,
+) -> syn::Result<proc_macro2::TokenStream> {
+    generate_entity_impl(input, false, true)
 }
 
 /// Require the operations derive whenever a Federation key is declared.
@@ -2979,12 +2986,13 @@ pub(crate) fn federation_key_witness_tokens(
 pub(crate) fn generate_graphql_schema_entity(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    generate_entity_impl(input, true)
+    generate_entity_impl(input, true, false)
 }
 
 fn generate_entity_impl(
     input: &DeriveInput,
     schema_only_override: bool,
+    identity_only: bool,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let struct_name = &input.ident;
     let entity_meta = parse_entity_metadata(&input.attrs)?;
@@ -3389,6 +3397,7 @@ fn generate_entity_impl(
     let mut order_by_graphql_names = std::collections::BTreeSet::new();
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
+    let mut identity_field_methods = Vec::new();
     // GraphQL name of the managed record version field, also served as
     // `RecordVersion`; none for CAS-only versions and unversioned entities.
     let mut managed_version_api_name: Option<String> = None;
@@ -4637,6 +4646,12 @@ fn generate_entity_impl(
                     }
                 }
             };
+            let policy_record =
+                if identity_only && legacy_graphql_complex && entity_meta.compose_complex_object {
+                    quote! { self.0 }
+                } else {
+                    quote! { self }
+                };
             let policy_check = if let Some(policy_key) = &field_meta.read_policy {
                 quote! {
                     db.ensure_readable_field(
@@ -4644,7 +4659,7 @@ fn generate_entity_impl(
                         #entity_name_lit,
                         #graphql_name,
                         Some(#policy_key),
-                        Some(self as &(dyn ::std::any::Any + Send + Sync)),
+                        Some(#policy_record as &(dyn ::std::any::Any + Send + Sync)),
                     ).await?;
                 }
             } else {
@@ -4685,7 +4700,7 @@ fn generate_entity_impl(
                 let record_version_description = format!(
                     "Managed record version of this {struct_name}: the value of `{graphql_name}`, advanced by every generated write."
                 );
-                object_field_methods.push(quote! {
+                let method = quote! {
                     #[doc = #record_version_description]
                     #[graphql(name = "RecordVersion")]
                     async fn __gom_record_version(
@@ -4697,7 +4712,9 @@ fn generate_entity_impl(
                         #policy_check
                         #return_expr
                     }
-                });
+                };
+                object_field_methods.push(method.clone());
+                identity_field_methods.push(method);
             }
         }
 
@@ -4973,14 +4990,7 @@ fn generate_entity_impl(
         })
         .collect();
 
-    if let (true, Some(span)) = (legacy_graphql_complex, entity_meta.node_id) {
-        return Err(syn::Error::new(
-            span,
-            "node_id requires the generated GraphQL object; it cannot add the NodeId field to a `#[graphql(complex)]` SimpleObject entity",
-        ));
-    }
     if !schema_only
-        && !legacy_graphql_complex
         && let Ok(primary_key_fields) = crate::operations::collect_primary_key_fields(
             struct_name,
             fields,
@@ -4994,17 +5004,27 @@ fn generate_entity_impl(
             backend,
         )
     {
-        object_field_methods.push(crate::federation::node_id_field_tokens(
-            &struct_name_str,
-            &parts,
-        ));
+        let method = crate::federation::node_id_field_tokens(&struct_name_str, &parts);
+        object_field_methods.push(method.clone());
+        identity_field_methods.push(method);
+        subscription_field_policy_arms.push(quote! {
+            "NodeId" => Some(("__gom_node_id", true, None)),
+        });
+    }
+
+    if identity_only {
+        return Ok(quote! { #(#identity_field_methods)* });
     }
 
     let managed_version_field_tokens = match &managed_version_api_name {
-        Some(name) if !schema_only && !legacy_graphql_complex => quote! { Some(#name) },
+        Some(name) if !schema_only => quote! { Some(#name) },
         _ => quote! { None },
     };
-    let object_impl = if schema_only || legacy_graphql_complex {
+    let object_impl = if legacy_graphql_complex && entity_meta.node_id.is_some() {
+        // The relation derive owns the ComplexObject implementation. Require it
+        // rather than accepting a resolvable key whose field was never emitted.
+        quote! { const _: () = #struct_name::__GOM_COMPLEX_IDENTITY_FIELDS; }
+    } else if schema_only || legacy_graphql_complex {
         quote! {}
     } else {
         quote! {

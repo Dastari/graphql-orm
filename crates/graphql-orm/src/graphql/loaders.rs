@@ -876,7 +876,9 @@ where
             },
         );
 
-        let rows = B::fetch_rows_with_auth(
+        // Count relation batches alongside federation batches so their bounded
+        // statement count can be verified through the public ORM counter.
+        let rows = crate::graphql::orm::fetch_rows_with_auth::<B>(
             db.pool(),
             &rendered.sql,
             &rendered.values,

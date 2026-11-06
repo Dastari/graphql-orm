@@ -21,7 +21,15 @@ pub const HIDDEN_ZONE: &str = "zone-hidden";
 pub struct CallerScopes(pub Vec<String>);
 
 #[derive(
-    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    async_graphql::SimpleObject,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
 )]
 #[cfg_attr(
     feature = "sqlite",
@@ -63,6 +71,7 @@ pub struct CallerScopes(pub Vec<String>);
         aggregate = true
     )
 )]
+#[graphql(complex)]
 pub struct Zone {
     #[primary_key]
     pub id: String,
@@ -74,6 +83,23 @@ pub struct Zone {
     /// Served by the router as the fixed `RecordVersion` field as well.
     #[graphql_orm(version = "managed", default = "0")]
     pub row_version: i64,
+
+    /// Relation traversal shares the owning subgraph's row authorization.
+    #[graphql(skip)]
+    #[relation(target = "Zone", from = "id", to = "id", emit_fk = false)]
+    pub self_zone: Option<Box<Zone>>,
+}
+
+impl BatchLoadEntity for Zone {
+    fn batch_column() -> &'static str {
+        "id"
+    }
+
+    fn batch_key_from_row(row: &graphql_orm::DbRow) -> Result<String, graphql_orm::sqlx::Error> {
+        #[cfg(not(feature = "mssql"))]
+        use graphql_orm::sqlx::Row;
+        row.try_get("id")
+    }
 }
 
 #[cfg(feature = "sqlite")]

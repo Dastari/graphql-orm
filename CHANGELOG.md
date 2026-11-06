@@ -27,6 +27,9 @@ AI **0.120.2**, ORM runtime/macros **0.92.0**.
 - AI 0.121.0: **provider session cleanup now converges.** Real Codex `thread/list` pages carry `readStates`, which its generated schema omits, so the strict absence scan refused every real page on 0.165.0 and 0.166.0. A delete that returned `-32600` ("no rollout found for thread id") could therefore never settle, and retried about once a minute forever. The scan now admits `readStates` as a bounded, discarded map; arbitrary `-32600` is still not success. Backoff also grows, and a retry budget ends in visible `cleanup_exhausted` (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
 
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
+- Fix generated `NodeId` and managed `RecordVersion` on relation-bearing complex entities, including composed objects and Changed snapshots (#270, #288).
+
+AI **0.120.2**, ORM runtime/macros **0.91.2**.
 
 - **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).
 - ORM and macros 0.91.1 change no code. Fixture lockfiles record the AI version, so they need a new package identity to release alongside it.

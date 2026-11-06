@@ -1,5 +1,9 @@
 #![cfg(feature = "sqlite")]
 
+// Both tests measure a process-global ORM counter. Keep their query windows
+// separate so relation-loader statements cannot be attributed to the other test.
+static QUERY_COUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 use graphql_orm::async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
@@ -289,6 +293,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn source_and_target_conditions_keep_polymorphic_relations_exact_and_batched()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _query_count_guard = QUERY_COUNT_LOCK.lock().await;
     let schema = setup_schema().await?;
     graphql_orm::graphql::orm::reset_query_count();
 
@@ -377,6 +382,7 @@ async fn source_and_target_conditions_keep_polymorphic_relations_exact_and_batch
 #[tokio::test]
 async fn target_conditions_apply_to_argument_free_nested_bulk_preloads()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _query_count_guard = QUERY_COUNT_LOCK.lock().await;
     let schema = setup_schema().await?;
     graphql_orm::graphql::orm::reset_query_count();
 

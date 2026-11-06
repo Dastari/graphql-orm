@@ -1292,7 +1292,20 @@ pub(crate) fn generate_graphql_relations(
     let struct_name_str = struct_name.to_string();
     let has_relations = !relations.is_empty();
 
-    let complex_object_impl = if has_relations {
+    let identity_fields = if legacy_graphql_complex
+        && (entity_meta.node_id.is_some()
+            || parsed_fields.iter().any(|field| field.meta.managed_version))
+    {
+        crate::entity::generate_complex_identity_fields(input)?
+    } else {
+        quote! {}
+    };
+    let identity_witness = if !identity_fields.is_empty() {
+        quote! { const __GOM_COMPLEX_IDENTITY_FIELDS: () = (); }
+    } else {
+        quote! {}
+    };
+    let complex_object_impl = if has_relations || !identity_fields.is_empty() {
         if legacy_graphql_complex && entity_meta.compose_complex_object {
             let relation_object = syn::Ident::new(
                 &format!("{struct_name}GeneratedRelations"),
@@ -1313,6 +1326,7 @@ pub(crate) fn generate_graphql_relations(
 
                 #[::graphql_orm::async_graphql::Object(name = #relation_object_name)]
                 impl<'a> #relation_object<'a> {
+                    #identity_fields
                     #(#relation_resolvers)*
                 }
 
@@ -1328,6 +1342,7 @@ pub(crate) fn generate_graphql_relations(
             quote! {
                 #[::graphql_orm::async_graphql::ComplexObject]
                 impl #struct_name {
+                    #identity_fields
                     #(#relation_resolvers)*
                 }
             }
@@ -1382,6 +1397,8 @@ pub(crate) fn generate_graphql_relations(
         }
 
         impl #struct_name {
+            #identity_witness
+
             fn __gom_selection_contains(
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
                 target: &str,

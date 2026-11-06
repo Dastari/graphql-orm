@@ -163,7 +163,7 @@ struct Bin {
 
 batch_load!(Customer, Order, OrderLine, Warehouse, Bin, Account);
 
-// A generated object: no relation fields, so it can serve NodeId and RecordVersion.
+// A generated object with no relation fields, serving NodeId and RecordVersion.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
     table = "tickets",
@@ -1096,7 +1096,7 @@ async fn generated_names_and_surface_match_the_skill() {
 }
 
 #[tokio::test]
-async fn record_version_and_node_id_need_a_generated_object() {
+async fn record_version_and_node_id_are_served_with_or_without_relations() {
     let db = database().await;
     let sdl = schema_builder(db).finish().sdl();
     let object = |name: &str| {
@@ -1106,10 +1106,11 @@ async fn record_version_and_node_id_need_a_generated_object() {
     };
     assert!(object("Ticket").contains("RecordVersion: Int!"));
     assert!(object("Ticket").contains("NodeId: ID!"));
-    assert!(!object("Order").contains("RecordVersion"));
+    // A relation-bearing complex entity serves its managed version; NodeId stays opt-in.
+    assert!(object("Order").contains("RecordVersion: Int!"));
     assert!(!object("Order").contains("NodeId"));
     assert_eq!(Ticket::managed_version_field(), Some("rowVersion"));
-    assert_eq!(Order::managed_version_field(), None);
+    assert_eq!(Order::managed_version_field(), Some("rowVersion"));
 }
 
 #[tokio::test]
