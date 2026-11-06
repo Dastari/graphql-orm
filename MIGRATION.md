@@ -12,6 +12,8 @@ supersedes: []
 
 ## 0.92.0 to 0.92.1: bulk refusal payloads
 
+Two details of this rule. A callback failure that reached its `async_graphql::Error` through `?`, so with a source and no `code` extension, is not an authored refusal: its text stays private, and the bulk client sees the safe category. Give a refusal a message with `Error::new`, or set a `code`, to have it reach the client. And repository callers that matched `sqlx::Error::Protocol` to find a public refusal should use `OrmPublicError::from_sqlx`, because a refusal now travels as a private type inside `sqlx::Error::Decode`. Its text still contains the stable `graphql-orm-public:<CODE>`.
+
 No data migration is needed. Generated bulk update/delete refusals from hooks,
 row policies, transforms and field policies now return `success: false`, the
 original `error` message, and nullable `errorCode` with the original string code.

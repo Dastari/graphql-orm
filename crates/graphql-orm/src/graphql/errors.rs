@@ -202,10 +202,8 @@ impl OrmPublicError {
 
     /// Map a backend SQL error into a public error without leaking SQL text.
     pub fn from_sqlx(error: &sqlx::Error) -> Self {
-        if let sqlx::Error::Io(error) = error
-            && let Some(carrier) = error
-                .get_ref()
-                .and_then(|inner| inner.downcast_ref::<PublicErrorCarrier>())
+        if let sqlx::Error::Decode(error) = error
+            && let Some(carrier) = error.downcast_ref::<PublicErrorCarrier>()
         {
             return carrier.0.clone();
         }
@@ -296,6 +294,8 @@ fn is_sqlite_restrict_foreign_key_refusal(_: &dyn sqlx::error::DatabaseError) ->
 }
 
 // Private type identity is the trust boundary: SQL/driver strings cannot create it.
+// It travels as `Decode`, not `Io`, because consumers commonly treat `Io` as a
+// transient connection failure and retry it, and a refusal must never be retried.
 struct PublicErrorCarrier(OrmPublicError);
 impl fmt::Debug for PublicErrorCarrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -304,7 +304,8 @@ impl fmt::Debug for PublicErrorCarrier {
 }
 impl fmt::Display for PublicErrorCarrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ORM public refusal")
+        // Repository callers read this text; it carries only the stable public code.
+        write!(f, "graphql-orm-public:{}", self.0.code.as_str())
     }
 }
 impl std::error::Error for PublicErrorCarrier {}
@@ -313,7 +314,7 @@ impl std::error::Error for PublicErrorCarrier {}
 /// The private typed carrier cannot be constructed by database or driver text.
 #[doc(hidden)]
 pub fn sqlx_error_from_public(error: OrmPublicError) -> sqlx::Error {
-    sqlx::Error::Io(std::io::Error::other(PublicErrorCarrier(error)))
+    sqlx::Error::Decode(Box::new(PublicErrorCarrier(error)))
 }
 
 fn public_error_transport(error: OrmPublicError) -> String {
@@ -383,6 +384,18 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
             async_graphql::Value::String(code) => Some(code.as_str()),
             _ => None,
         });
+    // `?` in a callback converts through `From<T: Display>`, which records a source and
+    // takes the failure's own text as the message. That is not an authored refusal.
+    if error.source.is_some() && category.is_none() {
+        return sqlx_error_from_public(
+            error
+                .source
+                .as_ref()
+                .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                .map(OrmPublicError::from_sqlx)
+                .unwrap_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError)),
+        );
+    }
     let mut public = OrmPublicError::new(
         category
             .and_then(public_code)
@@ -417,6 +430,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn carried_refusals_read_as_their_code_and_never_as_a_connection_failure() {
+        let error = sqlx_error_from_public(OrmPublicError::new(
+            OrmErrorCode::AuthorizationMisconfigured,
+        ));
+        assert!(!matches!(error, sqlx::Error::Io(_)));
+        assert!(error.to_string().contains("AUTHORIZATION_MISCONFIGURED"));
+        let refusal = async_graphql::Error::new("private application detail")
+            .extend_with(|_, ext| ext.set("code", "FORBIDDEN"));
+        let error = sqlx_error_from_graphql(refusal);
+        assert!(!error.to_string().contains("private application detail"));
+        assert!(!format!("{error:?}").contains("private application detail"));
+    }
+
+    #[test]
+    fn converted_callback_failures_stay_masked_but_authored_refusals_do_not() {
+        // `?` inside a callback converts through `From<T: Display>`, so the message is
+        // the failure's own text, which can hold SQL or driver detail.
+        let text = "SELECT secret FROM private_table";
+        for converted in [
+            async_graphql::Error::from(sqlx::Error::Protocol(text.into())),
+            async_graphql::Error::from(std::io::Error::other(text)),
+        ] {
+            let error = graphql_error_from_sqlx(sqlx_error_from_graphql(converted));
+            assert_eq!(error.message, "internal error");
+            assert_eq!(
+                error.extensions.unwrap().get("code"),
+                Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+            );
+        }
+        let plain = graphql_error_from_sqlx(sqlx_error_from_graphql(async_graphql::Error::new(
+            "uncoded refusal",
+        )));
+        assert_eq!(plain.message, "uncoded refusal");
+        let coded = async_graphql::Error::from(std::io::Error::other("explicit refusal"))
+            .extend_with(|_, ext| ext.set("code", "CUSTOM_REFUSAL"));
+        let coded = graphql_error_from_sqlx(sqlx_error_from_graphql(coded));
+        assert_eq!(coded.message, "explicit refusal");
+    }
+
+    #[test]
     fn application_refusal_roundtrips_but_prefix_text_is_not_trusted() {
         let error = async_graphql::Error::new("application refusal")
             .extend_with(|_, ext| ext.set("code", "CUSTOM_REFUSAL"));
@@ -433,6 +486,7 @@ mod tests {
             for source in [
                 sqlx::Error::Protocol(text.into()),
                 sqlx::Error::Io(std::io::Error::other(text.to_owned())),
+                sqlx::Error::Decode(text.into()),
             ] {
                 let error = graphql_error_from_sqlx(source);
                 assert_eq!(error.message, "internal error");
@@ -471,7 +525,7 @@ mod tests {
             OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
                 .with_internal("secret policy and table detail"),
         );
-        assert!(matches!(sqlx, sqlx::Error::Io(_)));
+        assert!(matches!(sqlx, sqlx::Error::Decode(_)));
         assert!(!sqlx.to_string().contains("secret policy"));
         let public = OrmPublicError::from(sqlx);
         assert_eq!(public.code, OrmErrorCode::AuthorizationMisconfigured);

@@ -140,6 +140,23 @@ impl MutationHook for Refuse {
         Box::pin(async { Err(refusal()) })
     }
 }
+// A hook failing through `?` is not an authored refusal: its text stays private.
+struct FailingHook;
+impl MutationHook for FailingHook {
+    fn on_mutation<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a mut MutationContext<'_>,
+        _: &'a MutationEvent,
+    ) -> BoxFuture<'a, async_graphql::Result<()>> {
+        Box::pin(async {
+            Err(graphql_orm::sqlx::Error::Protocol(
+                "SELECT secret FROM private_table".into(),
+            ))?;
+            Ok(())
+        })
+    }
+}
 impl RowPolicy for Refuse {
     fn can_read_row<'a>(
         &'a self,
@@ -188,6 +205,7 @@ async fn run_refusal(source: &str, delete: bool) {
     execute(&db, "INSERT INTO write_records VALUES ('00000000-0000-0000-0000-000000000001', 'existing', 'before', 'before', 'before')").await.unwrap();
     match source {
         "hook" => db.set_mutation_hook(Refuse),
+        "failing_hook" => db.set_mutation_hook(FailingHook),
         "row" => db.set_row_policy(Refuse),
         "transform" => db.set_write_input_transform(Refuse),
         "database" => execute(&db, "DROP TABLE write_records").await.unwrap(),
@@ -196,7 +214,8 @@ async fn run_refusal(source: &str, delete: bool) {
     let schema = schema_builder(db.clone())
         .data(AuthSubject::new("test-principal"))
         .finish();
-    if source != "database" {
+    let masked = matches!(source, "database" | "failing_hook");
+    if !masked {
         let single = if delete {
             "deleteWriteRecord(id: \"00000000-0000-0000-0000-000000000001\")"
         } else {
@@ -228,7 +247,7 @@ async fn run_refusal(source: &str, delete: bool) {
     assert_eq!(payload["success"], false);
     assert_eq!(
         payload["error"],
-        if source == "database" {
+        if masked {
             "internal error"
         } else {
             "application refusal"
@@ -236,7 +255,7 @@ async fn run_refusal(source: &str, delete: bool) {
     );
     assert_eq!(
         payload["errorCode"],
-        if source == "database" {
+        if masked {
             "INTERNAL_ERROR"
         } else {
             "CUSTOM_REFUSAL"
@@ -275,5 +294,7 @@ case!(delete_hook, "hook", true);
 case!(update_row, "row", false);
 case!(delete_row, "row", true);
 case!(update_transform, "transform", false);
+case!(update_failing_hook, "failing_hook", false);
+case!(delete_failing_hook, "failing_hook", true);
 case!(update_database, "database", false);
 case!(delete_database, "database", true);
