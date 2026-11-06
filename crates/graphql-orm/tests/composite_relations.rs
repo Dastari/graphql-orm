@@ -4,6 +4,8 @@ use graphql_orm::async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
 
+static QUERY_COUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(
     GraphQLEntity,
     GraphQLRelations,
@@ -188,6 +190,10 @@ schema_roots! {
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
+    setup_schema_with_wide_rows(0).await
+}
+
+async fn setup_schema_with_wide_rows(rows: i64) -> Result<TestSchema, Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
 
     sqlx::query(
@@ -266,6 +272,11 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
         .await?;
     }
 
+    if rows > 0 {
+        sqlx::query("WITH RECURSIVE n(x) AS (SELECT 3 UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO LegacyCardFileContacts SELECT 1001, x, replace(hex(zeroblob(3328)), '0', 'x') FROM n")
+            .bind(rows).execute(&pool).await?;
+    }
+
     Ok(schema_builder(graphql_orm::db::Database::new(pool))
         .data("test-user".to_string())
         .finish())
@@ -274,6 +285,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn nested_composite_relations_batch_without_n_plus_one()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
     let schema = setup_schema().await?;
 
     graphql_orm::graphql::orm::reset_query_count();
@@ -344,7 +356,7 @@ async fn nested_composite_relations_batch_without_n_plus_one()
 
     assert!(
         graphql_orm::graphql::orm::query_count() <= 4,
-        "expected parent query + contact preload + detail batch query, got {} queries",
+        "expected batched contact and detail row/count queries, got {} instrumented queries",
         graphql_orm::graphql::orm::query_count()
     );
 
@@ -410,4 +422,91 @@ fn composite_relation_predicates_render_for_all_backends() {
             .sql
             .contains("([CardNo] = @P1 AND [ContNo] = @P2) OR ([CardNo] = @P3 AND [ContNo] = @P4)")
     );
+}
+
+/// Reproducible release measurement; setup is excluded from the timings.
+#[tokio::test]
+#[ignore = "large relation performance fixture"]
+async fn wide_relation_measurement() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = setup_schema_with_wide_rows(16_434).await?;
+    for (name, selection, limit) in [
+        ("count_only", "pageInfo { totalCount }", 1),
+        (
+            "rows",
+            "edges { node { CardNo ContNo DName } } pageInfo { totalCount }",
+            20,
+        ),
+    ] {
+        let query = format!(
+            "{{ legacyCardFiles(where: {{ CardNo: {{ eq: 1001 }} }}) {{ edges {{ node {{ Contacts(page: {{ limit: {limit} }}) {{ {selection} }} }} }} }} }}"
+        );
+        for iteration in 0..4 {
+            let start = std::time::Instant::now();
+            let response = schema.execute(&query).await;
+            let elapsed = start.elapsed();
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let data = response.data.into_json()?;
+            assert_eq!(
+                data["legacyCardFiles"]["edges"][0]["node"]["Contacts"]["pageInfo"]["totalCount"],
+                16_434
+            );
+            eprintln!(
+                "{name} iteration={iteration} elapsed_ms={:.3}",
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn paginated_composite_relations_keep_each_parents_page_and_total()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
+    let schema = setup_schema().await?;
+    for (offset, limit, expected) in [
+        (0, 1, vec![vec![1], vec![1]]),
+        (1, 1, vec![vec![2], vec![]]),
+        (20, 1, vec![vec![], vec![]]),
+        (0, 0, vec![vec![], vec![]]),
+    ] {
+        graphql_orm::graphql::orm::reset_query_count();
+        let response = schema
+            .execute(format!(
+                r#"{{
+            legacyCardFiles(orderBy: [{{CardNo: ASC}}]) {{ edges {{ node {{
+                Contacts(orderBy: {{ContNo: ASC}}, page: {{offset: {offset}, limit: {limit}}}) {{
+                    edges {{ node {{ CardNo ContNo }} }}
+                    pageInfo {{ totalCount hasNextPage hasPreviousPage }}
+                }}
+            }} }} }}
+        }}"#
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json()?;
+        for (index, expected) in expected.iter().enumerate() {
+            let page = &data["legacyCardFiles"]["edges"][index]["node"]["Contacts"];
+            let actual: Vec<i64> = page["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|edge| edge["node"]["ContNo"].as_i64().unwrap())
+                .collect();
+            assert_eq!(&actual, expected);
+            let total = if index == 0 { 2 } else { 1 };
+            assert_eq!(page["pageInfo"]["totalCount"], total);
+            assert_eq!(
+                page["pageInfo"]["hasNextPage"],
+                offset + (actual.len() as i64) < total
+            );
+            assert_eq!(page["pageInfo"]["hasPreviousPage"], offset > 0);
+        }
+        assert_eq!(
+            graphql_orm::graphql::orm::query_count(),
+            2,
+            "one instrumented relation row/count pair shared by both parents"
+        );
+    }
+    Ok(())
 }
