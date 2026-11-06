@@ -8,9 +8,6 @@ use graphql_orm::async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
 
-// These tests inspect the process-wide statement counter.
-static QUERY_COUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 #[derive(
     GraphQLEntity,
     GraphQLRelations,

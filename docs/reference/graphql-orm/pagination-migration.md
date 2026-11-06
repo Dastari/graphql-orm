@@ -77,7 +77,7 @@ opt-in work.
 
 ## Field Selection And Counts
 
-Since 0.91.3, static offset connections use the selected fields to omit unused
+Since 0.92.0, static offset connections use the selected fields to omit unused
 SQL while preserving selected values and authorization. No data migration is needed.
 
 Generated top-level and relation connections inspect schema field names through

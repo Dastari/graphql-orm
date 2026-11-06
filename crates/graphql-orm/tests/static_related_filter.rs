@@ -750,20 +750,26 @@ async fn graphql_bulk_writes_report_relation_refusal() {
                 String::new()
             };
             let request = async_graphql::Request::new(format!(
-                "mutation($w: FilterParentWhereInput!) {{ result: {}({}: $w{input}) {{ {} {} }} }}",
+                "mutation($w: FilterParentWhereInput!) {{ result: {}({}: $w{input}) {{ {} {} {} }} }}",
                 r(op),
                 a("where"),
                 f("success"),
-                f("error")
+                f("error"),
+                f("errorCode")
             ))
             .variables(async_graphql::Variables::from_json(json!({"w": filter})));
             let response = schema.execute(request).await;
-            assert_eq!(response.errors.len(), 1, "{:?}", response.errors);
-            assert!(response.errors[0].message.contains("Related-row filters"));
-            assert_eq!(
-                response.errors[0].extensions.as_ref().unwrap().get("code"),
-                Some(&async_graphql::Value::from("INVALID_INPUT"))
+            // The same channel as every other bulk refusal: the payload, not a top-level error.
+            assert!(response.errors.is_empty(), "{:?}", response.errors);
+            let data = response.data.into_json().unwrap();
+            assert_eq!(data["result"][f("success")], false);
+            assert!(
+                data["result"][f("error")]
+                    .as_str()
+                    .is_some_and(|message| message.contains("Related-row filters")),
+                "{data}"
             );
+            assert_eq!(data["result"][f("errorCode")], "INVALID_INPUT");
         }
     }
     assert_eq!(

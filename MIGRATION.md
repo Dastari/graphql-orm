@@ -10,11 +10,11 @@ supersedes: []
 
 # Migration Guide
 
-## 0.92.1 to 0.92.2: bulk post-commit notifications
+## 0.91.1 to 0.92.0: bulk post-commit notifications
 
-**ORM/macros 0.92.2:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
+**ORM/macros 0.92.0:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
 
-## 0.92.0 to 0.92.1: bulk refusal payloads
+## 0.91.1 to 0.92.0: bulk refusal payloads
 
 Two details of this rule. A callback failure that reached its `async_graphql::Error` through `?`, so with a source and no `code` extension, is not an authored refusal: its text stays private, and the bulk client sees the safe category. Give a refusal a message with `Error::new`, or set a `code`, to have it reach the client. And repository callers that matched `sqlx::Error::Protocol` to find a public refusal should use `OrmPublicError::from_sqlx`, because a refusal now travels as a private type inside `sqlx::Error::Decode`. Its text still contains the stable `graphql-orm-public:<CODE>`.
 
@@ -131,7 +131,7 @@ AI schema module `0.76.0` before restarting all workers. No row data migration i
 Custom Codex process adapters must implement bounded absence confirmation.
 Cleanup retries grow and stop, retaining the protected cursor for investigation;
 see the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
-## Relation denial contract (0.92.0)
+## 0.91.1 to 0.92.0: relation denial contract
 
 No data migration is needed. Find queries selecting generated to-one relations
 and clients inspecting `FORBIDDEN` at those relation paths: a target rejected
@@ -149,7 +149,7 @@ siblings. Use the generated nullable relation rather than relying on that
 non-compliant wrapper behavior. Nested relation
 selections on Changed snapshots remain rejected at admission.
 
-## Relation-bearing identity fields (0.91.2)
+## 0.91.1 to 0.92.0: relation-bearing identity fields
 
 No data migration is needed. Complex entities deriving `GraphQLRelations` can
 opt into `node_id` and automatically serve a readable managed version as
@@ -158,9 +158,9 @@ version fields remain supported. Consumers can remove an equivalent handwritten
 `RecordVersion` resolver; its declared version column still controls read policy
 and subscription availability. Inspect the entity SDL for `NodeId`,
 `RecordVersion` and `@key(fields: "NodeId")` to detect the generated contract.
-## 0.92.0 to 0.93.0: keyset cursors bind entity and filter
+## 0.91.1 to 0.92.0: keyset cursors bind entity and filter
 
-Restart in-flight keyset pagination after upgrading: a generated keyset cursor, scan continuation or protected runtime GraphQL cursor issued by 0.92.0 or earlier may be refused once with `CURSOR_INVALID` (`invalid_cursor` at runtime). Configured-order cursors now name their entity; scan and `MutationContext` keyset reads bind the caller's filter as filtered `recordsKeyset` already does; protected runtime cursors authenticate the caller's `where` digest. Nothing else changes for correct clients, and none of it affects stored data, so no data migration is needed. A client that reused one cursor with a different filter or on another entity now receives `CURSOR_INVALID` instead of a page; detect it by that error code. Value drift while paging is unchanged and is documented in the [pagination guide](docs/reference/graphql-orm/pagination-migration.md#value-drift-is-inherent-to-keyset-paging). `RepositoryEntity` and handwritten filters, and unprotected runtime cursors, remain unbound to the filter.
+Restart in-flight keyset pagination after upgrading: a generated keyset cursor, scan continuation or protected runtime GraphQL cursor issued by 0.91.1 or earlier may be refused once with `CURSOR_INVALID` (`invalid_cursor` at runtime). Configured-order cursors now name their entity; scan and `MutationContext` keyset reads bind the caller's filter as filtered `recordsKeyset` already does; protected runtime cursors authenticate the caller's `where` digest. Nothing else changes for correct clients, and none of it affects stored data, so no data migration is needed. A client that reused one cursor with a different filter or on another entity now receives `CURSOR_INVALID` instead of a page; detect it by that error code. Value drift while paging is unchanged and is documented in the [pagination guide](docs/reference/graphql-orm/pagination-migration.md#value-drift-is-inherent-to-keyset-paging). `RepositoryEntity` and handwritten filters, and unprotected runtime cursors, remain unbound to the filter.
 
 ## 0.91.1 to 0.92.0: authorized static collection filters
 
@@ -172,17 +172,17 @@ first and use supported key-based mutations when needed. No data migration is ne
 No data migration is needed. Opt in with `#[relation(..., multiple, filter)]` on an unconditional public collection relation. Its generated Where field accepts a list of target Where alternatives, including nested opted-in collections. Every traversed entity must provide `Complete` SQL read visibility or `Unrestricted`; callback-only/prefilter policies are rejected. Relation field policies and spatial combinations are unsupported and fail closed. Existing declarations require no changes.
 
 Filtered keyset cursors now bind the caller-visible typed filter input. Clients must restart filtered keyset pagination after upgrading (old cursors return `cursor_invalid`), when changing filters. Unfiltered cursors retain their identity. Private SQL visibility parameters are excluded from cursor fingerprints; ordinary per-request authorization still applies. Generated GraphQL list, keyset/scan and aggregate roots prepare relation filters under request authority; unprepared filters in context-free repository helpers are rejected. The preparation budget is eight levels and 128 filter nodes, with at most 512 binds per related predicate.
-## 0.91.1 to 0.91.2: private and negated read predicates
+## 0.91.1 to 0.92.0: private and negated read predicates
 
 No data migration is needed. Existing policies and working keyset roots are unchanged. Policies may opt into `ReadPredicate::column::<Backend, Entity>("column", ReadPredicateOp::Gt, SqlValue::Int(bound))` for private persisted columns and `.not()?` for SQL negation. UNKNOWN remains UNKNOWN and does not authorize a row. Policies that always return `Prefilter` or `CallbackOnly` should omit `keyset` from `query_shapes` and use bounded `scan` instead; detect these by `AUTHORIZATION_MISCONFIGURED` on every keyset request.
-## ORM 0.91.1 to 0.91.2: aggregate counts from two subgraphs, test only
+## 0.91.1 to 0.92.0: aggregate counts from two subgraphs, test only
 
-No action is required, and no data migration. This release adds a test and changes no runtime behaviour. A consumer who set `aggregate = false` on an entity only to avoid the aggregate result-type collision between two subgraphs can restore `aggregate = true`: the shared result objects have been `@shareable` since 0.82.0. A generated aggregate still needs a row policy whose `read_visibility` is `Complete` or `Unrestricted`; with a callback-only policy it is refused, which is intended.
-## 0.91.2 to 0.91.3: selected connection queries
+No action is required, and no data migration. This item adds a test and changes no runtime behaviour. A consumer who set `aggregate = false` on an entity only to avoid the aggregate result-type collision between two subgraphs can restore `aggregate = true`: the shared result objects have been `@shareable` since 0.82.0. A generated aggregate still needs a row policy whose `read_visibility` is `Complete` or `Unrestricted`; with a callback-only policy it is refused, which is intended.
+## 0.91.1 to 0.92.0: selected connection queries
 
 No consumer action or data migration is needed. Upgrade ORM and macros together. Static top-level and relation offset connections omit SQL for unselected components; selected values and authorization are unchanged. Detect the change by observing one statement for count-only or row-only pages. Existing direct connection fetch methods still return complete connections. The additive `ConnectionSelection` and `fetch_connection_selected_with_auth` support callers that intentionally accept placeholders for unselected fields.
 
-## 0.91.1 to 0.91.2: narrow relation pagination windows
+## 0.91.1 to 0.92.0: narrow relation pagination windows
 
 No consumer action or data migration is needed. SQL-pushed static paginated relations on SQLite, PostgreSQL and MSSQL fetch full entities only for the requested page. GraphQL schemas, rows, totals, ordering and read policies are unchanged. Hosts can identify the optimization by the primary-key join outside the relation window in emitted SQL. Count-only GraphQL selections still load the requested page; selection-aware loading is a separate change.
 ## 0.91.1 to 0.92.0: dedicated schema export builds
