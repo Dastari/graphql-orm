@@ -505,6 +505,8 @@ Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
 
+Version 0.91.2 adds a federation end-to-end test that serves generated aggregate counts from two subgraphs through the router. It changes no runtime behaviour and needs no migration; see [the migration guide](../../MIGRATION.md#orm-0911-to-0912-aggregate-counts-from-two-subgraphs-test-only).
+
 Version 0.91.1 only allocates a fresh package identity for fixture lockfiles that record AI 0.120.2. Generated code and runtime behaviour match 0.91.0.
 
 Version 0.91.0 scores SQLite runtime search from each row's own document, so

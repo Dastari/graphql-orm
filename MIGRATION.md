@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## ORM 0.91.1 to 0.91.2: aggregate counts from two subgraphs, test only
+
+No action is required, and no data migration. This release adds a test and changes no runtime behaviour. A consumer who set `aggregate = false` on an entity only to avoid the aggregate result-type collision between two subgraphs can restore `aggregate = true`: the shared result objects have been `@shareable` since 0.82.0. A generated aggregate still needs a row policy whose `read_visibility` is `Complete` or `Unrestricted`; with a callback-only policy it is refused, which is intended.
+
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
 Update if you run Codex 0.166.0: earlier AI releases fail its turns. No API, schema, configuration or data change. ORM and macros 0.91.1 change no code. See the [AI migration note](crates/graphql-orm-ai/MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).

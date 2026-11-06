@@ -16,8 +16,9 @@ for historical context.
 
 ## Unreleased
 
-AI **0.120.2**, ORM runtime/macros **0.91.1**.
+AI **0.120.2**, ORM runtime/macros **0.91.2**.
 
+- **Test:** the federation end-to-end fixture now queries the generated aggregate root of each of its two aggregate-enabled subgraphs through the router and asserts the exact seeded count, so serving counts from two aggregate subgraphs is proven as well as composing them (#323). The collision itself was fixed earlier by the shareable aggregate result objects (0.82.0). The fixture's zones row policy now also declares its read decision as a complete SQL predicate, because a generated aggregate over a callback-only row policy is refused by design. This adds a test and changes no runtime behaviour; ORM and macros 0.91.2 change no generated code or public API.
 - **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).
 - ORM and macros 0.91.1 change no code. Fixture lockfiles record the AI version, so they need a new package identity to release alongside it.
 

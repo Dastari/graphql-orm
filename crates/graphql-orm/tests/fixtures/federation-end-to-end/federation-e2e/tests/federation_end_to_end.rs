@@ -235,6 +235,39 @@ async fn two_orm_subgraphs_compose_and_join_through_a_generated_entity_key() {
         .collect::<Vec<_>>();
     assert_eq!(versions, [3, 1, 0]);
 
+    // (f) Both subgraphs generate aggregates and both serve counts through the
+    // one composed graph. Composition above only proves the shared result
+    // types do not conflict; this proves each generated aggregate root answers.
+    // The readings subgraph seeds three readings. The zones subgraph seeds four
+    // zones, one of which its row policy hides, so the expected count is the
+    // visible three and proves the policy still applies to an aggregate.
+    for (root, expected) in [("readingsAggregate", "3"), ("zonesAggregate", "3")] {
+        let counted = post(
+            &client,
+            &router,
+            Some(zones_subgraph::READ_SCOPE),
+            &format!(
+                "{{ {root}(groupBy: [], metrics: [{{ operator: COUNT }}], groupLimit: 1) \
+                 {{ groups {{ field }} metrics {{ operator kind value }} }} }}"
+            ),
+        )
+        .await;
+        assert!(
+            counted.get("errors").is_none(),
+            "{root} is served through the router: {counted}"
+        );
+        let rows = counted["data"][root]
+            .as_array()
+            .unwrap_or_else(|| panic!("{root} returns result rows: {counted}"));
+        assert_eq!(rows.len(), 1, "an ungrouped count is one row: {counted}");
+        assert_eq!(rows[0]["groups"], json!([]), "{counted}");
+        assert_eq!(
+            rows[0]["metrics"],
+            json!([{ "operator": "COUNT", "kind": "COUNT", "value": expected }]),
+            "{root} counts exactly the rows this test seeded: {counted}"
+        );
+    }
+
     // (d) Three joined representations cost the zones subgraph one statement.
     //
     // The ORM statement counter is process-global and both subgraphs share this
