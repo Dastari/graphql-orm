@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.92.0 to 0.92.1: bulk refusal payloads
+
+Two details of this rule. A callback failure that reached its `async_graphql::Error` through `?`, so with a source and no `code` extension, is not an authored refusal: its text stays private, and the bulk client sees the safe category. Give a refusal a message with `Error::new`, or set a `code`, to have it reach the client. And repository callers that matched `sqlx::Error::Protocol` to find a public refusal should use `OrmPublicError::from_sqlx`, because a refusal now travels as a private type inside `sqlx::Error::Decode`. Its text still contains the stable `graphql-orm-public:<CODE>`.
+
+No data migration is needed. Generated bulk update/delete refusals from hooks,
+row policies, transforms and field policies now return `success: false`, the
+original `error` message, and nullable `errorCode` with the original string code.
+Unexpected database failures retain safe messages and codes. Select `errorCode`
+in bulk client queries; refresh pinned SDL and generated client types. Error
+codes absent from the callback remain null. Bulk result Rust struct literals
+must initialize `error_code` (or use the existing constructors).
+
+SQLx adapters now carry refusals with a private typed error rather than a protocol
+string. Use `graphql_error_from_sqlx` to recover the authored GraphQL message/code;
+do not match `graphql-orm-public:` strings in SQLx errors.
+
 ## 0.91.1 to 0.92.0: rejected field writes fail the mutation
 
 No data migration or schema change is needed. Consumers are affected if a generated
@@ -19,9 +35,10 @@ for `write_policy`, inspect their `FieldPolicy` implementations, and test denied
 optional create/upsert inputs and denied optional or required update inputs.
 
 By default these writes now fail with a forbidden error naming the GraphQL field,
-including bulk updates, and write nothing. These denials are GraphQL errors with
+including bulk updates, and write nothing. Single-row denials are GraphQL errors with
 `extensions.code = "FORBIDDEN"` and `extensions.deniedWriteField` containing the
-public field name; bulk callers must also handle this error channel. Adjust clients to handle refusal or
+public field name. Bulk denials use the payload `error` and `errorCode = "FORBIDDEN"`
+with the public field name in the message. Adjust clients to handle refusal or
 stop sending fields they cannot write. To preserve legacy omission deliberately,
 add this method to your existing `impl FieldPolicy`:
 

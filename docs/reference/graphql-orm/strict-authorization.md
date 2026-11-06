@@ -106,7 +106,15 @@ Under `ExplicitPolicyForAllExposedOperations`, subscription surfaces deny when n
 A `false` field write decision fails generated create, update, upsert and bulk
 update before any row changes, using the forbidden error and naming the GraphQL
 field (`extensions.code = "FORBIDDEN"`, `extensions.deniedWriteField` names the
-field). This also uses the GraphQL error channel for bulk field denials.
+field). Bulk field denials use `success: false`, `error` naming the field and
+`errorCode = "FORBIDDEN"` in the payload, like other application refusals.
+
+Generated bulk update/delete payloads preserve the message and string code from
+application hooks, row policies and input transforms. Select nullable `errorCode`
+to receive the callback code (null if absent). Only unexpected failures are masked;
+database/driver text cannot forge a refusal through a string prefix. The SQLx
+compatibility path uses a private typed carrier. Refresh pinned SDL and client
+code generation for the additive bulk result field.
 Optional create/upsert fields are checked even when absent, as before;
 updates check only supplied fields, including explicit nulls.
 
