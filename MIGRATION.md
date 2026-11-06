@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.92.2 to 0.92.3: generated mutation shape selection
+
+Nothing changes unless you add `mutation_shapes`. An application that refuses unwanted generated mutations at run time can now remove them from the schema instead:
+
+```rust
+#[graphql_entity(table = "orders", plural = "Orders", mutation_shapes = "create,update")]
+struct Order { /* ... */ }
+```
+
+The schema then has `createOrder` and `updateOrder` only. Selectors are `create`, `upsert`, `update`, `update_many`, `delete` and `delete_many`. Disabled mutations vanish from the SDL and the operation and semantic catalogues (so AI tool profiles and router exports omit them), along with input and result types that only they used. Clients must refresh pinned SDL and generated types only for entities that opt in, and any client still calling a removed mutation now gets a validation error. Repository APIs, relations, hooks, `Changed` subscriptions and authorization are unchanged. `schema_roots!` `generated_mutations` still removes an entity's whole mutation object and wins over `mutation_shapes`; `append_only` entities accept only `create`. A selector the entity cannot generate, or an `operation_authorization` or `ai_mutations` category the selection removes, fails to compile. No data or schema migration is needed.
+
 ## 0.92.1 to 0.92.2: bulk post-commit notifications
 
 **ORM/macros 0.92.2:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.

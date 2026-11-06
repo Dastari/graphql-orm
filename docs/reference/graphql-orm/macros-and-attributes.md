@@ -596,6 +596,54 @@ Omission preserves all current generated queries. Disabled shapes are absent
 from both SDL and operation metadata. This selection does not alter repository
 APIs, relations, mutations, subscriptions or authorization. See the
 [migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
+Mutations have their own selector, [`mutation_shapes`](#generated-mutation-shapes).
+
+## Generated mutation shapes
+
+`#[graphql_entity(mutation_shapes = "create,update")]` selects which generated
+mutations an entity exposes. The selectors are the `ai_mutations` and
+`operation_authorization` categories: `create`, `upsert`, `update`,
+`update_many`, `delete` and `delete_many`. Omission keeps every current mutation
+and leaves the exported SDL byte-identical.
+
+```rust
+#[derive(GraphQLEntity, GraphQLOperations)]
+#[graphql_entity(table = "orders", plural = "Orders", mutation_shapes = "create,update")]
+struct Order { /* ... */ }
+```
+
+This exposes `createOrder` and `updateOrder` but not `deleteOrder`,
+`updateOrders` or `deleteOrders`.
+
+- **Absent everywhere.** A disabled mutation is not in the SDL and not in the
+  operation or semantic catalogue, so the AI tool profile and router or
+  federation exports derived from it omit it too. A client calling it gets a
+  schema validation error, not an application refusal.
+- **Compile-time checks.** An unknown or repeated selector, an empty value, a
+  second `mutation_shapes`, or a category the entity does not generate is a
+  compile error. That covers `upsert` without `upsert = "..."`, anything but
+  `create` on an `append_only` entity (`mutation_shapes = "create"` there is
+  accepted and redundant), and any selector on a composite-key,
+  `external_read_only` or non-writable MSSQL entity. `operation_authorization`
+  or `ai_mutations` naming a category the selection removes is also an error,
+  since that policy could never apply.
+- **Relation to `schema_roots!`.** `generated_mutations` (`none`, `allowlist`,
+  `denylist`) removes an entity's whole `<Entity>Mutations` object from the
+  root, and the attribute narrows within it. Both may be given: the
+  entity-level setting wins, because a mutation exists only if both permit it.
+  `mutation_shapes` is still validated when the root omits the entity.
+  `append_only` is a fixed profile (create only); it is not a second selection
+  mechanism, and `mutation_shapes` can only restate it.
+- **Orphan types.** Input and result types are registered only through the
+  operations that reference them, so a type only a disabled mutation used (for
+  example the bulk result objects) disappears from the SDL. A type a remaining
+  operation still uses stays; `UpdateXInput` is shared by `update` and
+  `update_many`.
+- **Unchanged.** Repository writes (`insert`, `update_by_id`, `delete_by_id`,
+  `upsert` ...), relations, hooks, `Changed` subscriptions, propagation and
+  authorization behave exactly as before.
+
+See the [migration guide](../../../MIGRATION.md#0922-to-0923-generated-mutation-shape-selection).
 
 ## Host-owned timestamps
 

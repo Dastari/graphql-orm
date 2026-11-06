@@ -29,6 +29,8 @@ pub(crate) struct EntityMetadata {
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
     pub(crate) query_shapes: Option<Vec<String>>,
+    /// Selected generated mutation categories; `None` keeps every mutation.
+    pub(crate) mutation_shapes: Option<Vec<String>>,
     pub(crate) backup_enabled: Option<bool>,
     pub(crate) backup_export_order: Option<i32>,
     pub(crate) backup_restore_order: Option<i32>,
@@ -294,6 +296,42 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     }
                     shapes.sort();
                     metadata.query_shapes = Some(shapes);
+                } else if meta.path.is_ident("mutation_shapes") {
+                    if attribute_name == "repository_entity" {
+                        return Err(meta.error("mutation_shapes requires a GraphQL entity"));
+                    }
+                    if metadata.mutation_shapes.is_some() {
+                        return Err(meta.error("mutation_shapes may only be declared once"));
+                    }
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    let value = lit.value();
+                    if value.trim().is_empty() {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "mutation_shapes must select at least one shape; omit it to keep every mutation, or remove the entity's mutations with schema_roots! generated_mutations",
+                        ));
+                    }
+                    let mut shapes = Vec::new();
+                    for shape in value.split(',').map(str::trim) {
+                        if !matches!(
+                            shape,
+                            "create" | "upsert" | "update" | "update_many" | "delete" | "delete_many"
+                        ) {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                "mutation_shapes accepts create, upsert, update, update_many, delete, delete_many",
+                            ));
+                        }
+                        if shapes.iter().any(|existing| existing == shape) {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                "mutation_shapes must not repeat a shape",
+                            ));
+                        }
+                        shapes.push(shape.to_owned());
+                    }
+                    shapes.sort();
+                    metadata.mutation_shapes = Some(shapes);
                 } else if meta.path.is_ident("keyset") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;

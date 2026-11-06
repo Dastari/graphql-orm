@@ -488,6 +488,7 @@ appear in the operation catalogue.
 | To limit | Use | Notes |
 | --- | --- | --- |
 | Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Repository APIs are unaffected |
+| Some of an entity's mutations | `mutation_shapes = "create,update"` | Also `upsert`, `update_many`, `delete`, `delete_many`. Absent from SDL and catalogues; repository writes and `Changed` stay. Narrows within `generated_mutations`, which wins when it removes the entity. `append_only` entities accept only `create`. Refusing a mutation at run time leaves it in the schema; this removes it |
 | All of an entity's mutations | `generated_mutations` with `generated_mutation_allowlist` or `generated_mutation_denylist` in `schema_roots!` | Repository writes and `Changed` stay |
 | Update and delete | `append_only = true` | |
 | All writes | `schema_policy = "external_read_only"` | `Changed` stays in the schema |
