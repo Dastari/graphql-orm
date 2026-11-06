@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.92.0 to 0.93.0: keyset cursors bind entity and filter
+
+Restart in-flight keyset pagination after upgrading: a generated keyset cursor, scan continuation or protected runtime GraphQL cursor issued by 0.92.0 or earlier may be refused once with `CURSOR_INVALID` (`invalid_cursor` at runtime). Configured-order cursors now name their entity; scan and `MutationContext` keyset reads bind the caller's filter as filtered `recordsKeyset` already does; protected runtime cursors authenticate the caller's `where` digest. Nothing else changes for correct clients, and none of it affects stored data, so no data migration is needed. A client that reused one cursor with a different filter or on another entity now receives `CURSOR_INVALID` instead of a page; detect it by that error code. Value drift while paging is unchanged and is documented in the [pagination guide](docs/reference/graphql-orm/pagination-migration.md#value-drift-is-inherent-to-keyset-paging). `RepositoryEntity` and handwritten filters, and unprotected runtime cursors, remain unbound to the filter.
+
 ## 0.91.1 to 0.92.0: authorized static collection filters
 
 Related-row filters are read-only. Bulk updates and deletes (including bounded repository

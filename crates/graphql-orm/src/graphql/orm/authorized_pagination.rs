@@ -295,6 +295,37 @@ pub struct KeysetCursorField {
     pub graphql_readable: bool,
 }
 
+/// Binds a keyset order fingerprint to what the cursor may be resumed on.
+///
+/// `entity` is supplied for a configured (compile-time) order, whose
+/// fingerprint names columns only, so two entities with the same key columns
+/// would otherwise accept one another's cursors. A runtime order already names
+/// its entity and passes `None`. A non-empty `filter_identities` appends a
+/// SHA-256 of the caller-visible filter; the filter itself is never placed in
+/// the cursor. Unfiltered reads keep the unfiltered fingerprint.
+///
+/// Every generated keyset path uses this one function, so a cursor issued by
+/// one path is accepted by another only for the same entity, order and filter.
+#[doc(hidden)]
+pub fn bind_keyset_fingerprint(
+    entity: Option<&str>,
+    fingerprint: &str,
+    filter_identities: &[String],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut bound = match entity {
+        Some(entity) => format!("entity-v1:{entity}:{fingerprint}"),
+        None => fingerprint.to_string(),
+    };
+    if !filter_identities.is_empty() {
+        bound = format!(
+            "{bound}:filter-v1:{:x}",
+            Sha256::digest(format!("{filter_identities:?}").as_bytes())
+        );
+    }
+    bound
+}
+
 fn runtime_keyset_order<T: AuthorizedKeysetEntity>(
     mut order: Vec<KeysetOrderColumn>,
 ) -> async_graphql::Result<(Vec<KeysetOrderColumn>, String)> {
@@ -378,11 +409,16 @@ impl AuthorizedScanConfig {
     fn encode<T: AuthorizedKeysetEntity>(
         &self,
         values: Vec<KeysetValue>,
+        filter_identities: &[String],
     ) -> async_graphql::Result<String> {
         let cipher = XChaCha20Poly1305::new((&self.key).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let plaintext = encode_keyset_cursor(
-            &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+            &bind_keyset_fingerprint(
+                None,
+                &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+                filter_identities,
+            ),
             values,
         );
         let ciphertext = cipher
@@ -397,6 +433,7 @@ impl AuthorizedScanConfig {
     fn decode<T: AuthorizedKeysetEntity>(
         &self,
         cursor: &str,
+        filter_identities: &[String],
     ) -> async_graphql::Result<Vec<KeysetValue>> {
         let error = || OrmPublicError::new(OrmErrorCode::CursorInvalid).into_graphql_error();
         let text = cursor.strip_prefix("goms1.").ok_or_else(error)?;
@@ -420,7 +457,11 @@ impl AuthorizedScanConfig {
         let plaintext = std::str::from_utf8(&plaintext).map_err(|_| error())?;
         decode_keyset_cursor(
             plaintext,
-            &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+            &bind_keyset_fingerprint(
+                None,
+                &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+                filter_identities,
+            ),
             T::KEYSET_ORDER.len(),
         )
         .map_err(|e| e.into_graphql_error())
@@ -779,17 +820,12 @@ where
             .limit
             .unwrap_or(PaginationConfig::DEFAULT_LIMIT)
             .max(1);
-        let bound_fingerprint;
-        let fingerprint = if base.keyset_filter_identities.is_empty() {
-            fingerprint
-        } else {
-            use sha2::{Digest, Sha256};
-            bound_fingerprint = format!(
-                "{fingerprint}:filter-v1:{:x}",
-                Sha256::digest(format!("{:?}", base.keyset_filter_identities).as_bytes())
-            );
-            &bound_fingerprint
-        };
+        let fingerprint = bind_keyset_fingerprint(
+            runtime.is_none().then(T::entity_name),
+            fingerprint,
+            &base.keyset_filter_identities,
+        );
+        let fingerprint = fingerprint.as_str();
         let after = page
             .cursor
             .as_deref()
@@ -905,7 +941,7 @@ where
         let mut position = page
             .after
             .as_deref()
-            .map(|c| config.decode::<T>(c))
+            .map(|c| config.decode::<T>(c, &base.keyset_filter_identities))
             .transpose()?;
         let total_count = if page.include_total_count {
             Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
@@ -966,7 +1002,10 @@ where
         let continuation = if status == ScanStatus::Exhausted {
             None
         } else {
-            Some(config.encode::<T>(position.ok_or_else(invalid)?)?)
+            Some(config.encode::<T>(
+                position.ok_or_else(invalid)?,
+                &base.keyset_filter_identities,
+            )?)
         };
         Ok(AuthorizedScanPage {
             nodes,

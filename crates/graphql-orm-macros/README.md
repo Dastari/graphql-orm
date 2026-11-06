@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.93.0 generates `MutationContext` keyset reads that bind the entity and caller filter into cursors, matching `graphql-orm` 0.93.0.
+See [keyset cursor binding](../../docs/reference/graphql-orm/pagination-migration.md#what-a-keyset-cursor-is-bound-to).
+
 Version 0.92.0 adds opt-in authorized static collection filters with `#[relation(filter)]`.
 Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
 See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).

@@ -4892,6 +4892,11 @@ fn generate_graphql_operations_unfiltered(
                                 #(#order_tokens),*
                             ];
                             const FINGERPRINT: &str = #fingerprint;
+                            let bound_fingerprint = ::graphql_orm::graphql::orm::bind_keyset_fingerprint(
+                                Some(<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()),
+                                FINGERPRINT,
+                                &filter.keyset_filter_identity().into_iter().collect::<Vec<_>>(),
+                            );
                             if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
                                 return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
                                     ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
@@ -4910,7 +4915,7 @@ fn generate_graphql_operations_unfiltered(
                                 None
                             };
                             if let Some(cursor) = page.after.as_deref() {
-                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, FINGERPRINT, ORDER.len())?;
+                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, ORDER.len())?;
                                 let (predicate, binds) = ::graphql_orm::graphql::orm::render_keyset_after(
                                     <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
                                     ORDER,
@@ -4932,7 +4937,7 @@ fn generate_graphql_operations_unfiltered(
                                 .map(|entity| {
                                     let values = vec![#(#cursor_tokens),*];
                                     ::graphql_orm::graphql::pagination::Edge {
-                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(FINGERPRINT, values),
+                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(&bound_fingerprint, values),
                                         node: entity,
                                     }
                                 })
@@ -4965,6 +4970,11 @@ fn generate_graphql_operations_unfiltered(
                                 #(#order_tokens),*
                             ];
                             const FINGERPRINT: &str = #fingerprint;
+                            let bound_fingerprint = ::graphql_orm::graphql::orm::bind_keyset_fingerprint(
+                                Some(<Self as ::graphql_orm::graphql::orm::Entity>::entity_name()),
+                                FINGERPRINT,
+                                &filter.keyset_filter_identity().into_iter().collect::<Vec<_>>(),
+                            );
                             if filter.requires_in_memory_filtering(<#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT) {
                                 return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
                                     ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
@@ -4996,7 +5006,7 @@ fn generate_graphql_operations_unfiltered(
                                 None
                             };
                             if let Some(cursor) = validated.cursor.as_deref() {
-                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, FINGERPRINT, ORDER.len())?;
+                                let values = ::graphql_orm::graphql::pagination::decode_keyset_cursor(cursor, &bound_fingerprint, ORDER.len())?;
                                 let (predicate, binds) = if backward {
                                     ::graphql_orm::graphql::orm::render_keyset_before(
                                         <#backend_marker as ::graphql_orm::graphql::orm::OrmBackend>::DIALECT,
@@ -5036,7 +5046,7 @@ fn generate_graphql_operations_unfiltered(
                                 .map(|entity| {
                                     let values = vec![#(#cursor_tokens),*];
                                     ::graphql_orm::graphql::pagination::Edge {
-                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(FINGERPRINT, values),
+                                        cursor: ::graphql_orm::graphql::pagination::encode_keyset_cursor(&bound_fingerprint, values),
                                         node: entity,
                                     }
                                 })

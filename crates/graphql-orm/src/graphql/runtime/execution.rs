@@ -778,15 +778,23 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
             .map_err(relation_error)?
             .unwrap_or_default();
         let fingerprint = plan.module.schema.fingerprint();
+        let mut parts = vec![
+            fingerprint.as_str().as_bytes(),
+            plan.collection.id().as_str().as_bytes(),
+            &order,
+            &parent,
+        ];
+        // A cursor taken under one caller filter must not resume under another.
+        // Only the digest is authenticated; unfiltered requests keep the
+        // associated data they always had.
+        if let Some(filter) = &plan.filter_binding {
+            parts.push(b"filter-v1");
+            parts.push(filter);
+        }
         RuntimeCursorContext::new(
             &protection.audience,
             self.request.scope.as_deref().ok_or_else(invalid)?,
-            &[
-                fingerprint.as_str().as_bytes(),
-                plan.collection.id().as_str().as_bytes(),
-                &order,
-                &parent,
-            ],
+            &parts,
             protection.limits,
         )
         .map(Some)
