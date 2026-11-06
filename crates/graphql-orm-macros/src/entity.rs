@@ -4050,6 +4050,7 @@ fn generate_entity_impl(
                 };
             }
             semantic_field_defs.push(quote! {
+                ::graphql_orm::graphql::orm::__gom_semantic_field(
                 ::graphql_orm::graphql::orm::GraphqlSemanticFieldMetadata {
                     field_name: ::std::string::ToString::to_string(#graphql_name),
                     description: ::std::string::ToString::to_string(#description),
@@ -4057,11 +4058,7 @@ fn generate_entity_impl(
                         &<#field_type as ::graphql_orm::async_graphql::OutputType>::qualified_type_name(),
                     ).expect("macro-generated public GraphQL field type must be valid"),
                     selectable: true,
-                    filter_operators: {
-                        let input: Option<::graphql_orm::graphql::orm::GraphqlSemanticFilterInputMetadata> = #filter_input;
-                        input.iter().flat_map(|input| input.operators.iter().map(|op| op.operator))
-                            .collect::<::std::collections::BTreeSet<_>>().into_iter().collect()
-                    },
+                    filter_operators: Vec::new(),
                     filter_input: #filter_input,
                     sortable: #sortable,
                     groupable: #groupable,
@@ -4071,7 +4068,7 @@ fn generate_entity_impl(
                     classification: #classification_tokens,
                     export: #export_tokens,
                     has_field_policy: #has_field_policy,
-                }
+                })
             });
         }
         if !field_meta.is_relation && !field_meta.skip_db {
@@ -5382,56 +5379,7 @@ fn generate_entity_impl(
             }
 
             fn to_sql_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
-                if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
-                    return (vec!["1 = 0".to_owned()], Vec::new());
-                }
-                let mut conditions = Vec::new();
-                let mut values = Vec::new();
-                let _gom_spatial_prefilter = false;
-
-                #(#related_render)*
-                #(#filter_to_sql)*
-
-                // Handle And
-                if let Some(ref and_filters) = self.and {
-                    for filter in and_filters {
-                        let (sub_conds, sub_vals) = filter.to_sql_conditions();
-                        conditions.extend(sub_conds);
-                        values.extend(sub_vals);
-                    }
-                }
-
-                // Handle Or
-                if let Some(ref or_filters) = self.or {
-                    let mut or_parts = Vec::new();
-                    for filter in or_filters {
-                        let (sub_conds, sub_vals) = filter.to_sql_conditions();
-                        // An empty branch is true. Keep it explicit so earlier
-                        // binds retain their numbered placeholder positions.
-                        or_parts.push(if sub_conds.is_empty() {
-                            "1 = 1".to_owned()
-                        } else {
-                            format!("({})", sub_conds.join(" AND "))
-                        });
-                        values.extend(sub_vals);
-                    }
-                    conditions.push(if or_parts.is_empty() {
-                        "1 = 0".to_owned()
-                    } else {
-                        format!("({})", or_parts.join(" OR "))
-                    });
-                }
-
-                // Handle Not
-                if let Some(ref not_filter) = self.not {
-                    let (sub_conds, sub_vals) = not_filter.to_sql_conditions();
-                    if !sub_conds.is_empty() {
-                        conditions.push(format!("NOT ({})", sub_conds.join(" AND ")));
-                        values.extend(sub_vals);
-                    }
-                }
-
-                (conditions, values)
+                self.__gom_sql_conditions(false)
             }
 
             fn is_empty(&self) -> bool {
@@ -5565,24 +5513,60 @@ fn generate_entity_impl(
             }
 
             fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
+                self.__gom_sql_conditions(true)
+            }
+
+            fn __gom_sql_conditions(&self, _gom_spatial_prefilter: bool) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
                     return (vec!["1 = 0".to_owned()], Vec::new());
                 }
                 let mut conditions = Vec::new();
                 let mut values = Vec::new();
-                let _gom_spatial_prefilter = true;
 
                 #(#related_render)*
                 #(#filter_to_sql)*
 
+                // Handle And
                 if let Some(ref and_filters) = self.and {
                     for filter in and_filters {
-                        let (sub_conds, sub_vals) = filter.__gom_to_sql_prefilter_conditions();
+                        let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
                         conditions.extend(sub_conds);
                         values.extend(sub_vals);
                     }
                 }
 
+                if !_gom_spatial_prefilter {
+                    // Handle Or
+                    if let Some(ref or_filters) = self.or {
+                        let mut or_parts = Vec::new();
+                        for filter in or_filters {
+                            let (sub_conds, sub_vals) = filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                            // An empty branch is true. Keep it explicit so earlier
+                            // binds retain their numbered placeholder positions.
+                            or_parts.push(if sub_conds.is_empty() {
+                                "1 = 1".to_owned()
+                            } else {
+                                format!("({})", sub_conds.join(" AND "))
+                            });
+                            values.extend(sub_vals);
+                        }
+                        conditions.push(if or_parts.is_empty() {
+                            "1 = 0".to_owned()
+                        } else {
+                            format!("({})", or_parts.join(" OR "))
+                        });
+                    }
+
+                    // Handle Not
+                    if let Some(ref not_filter) = self.not {
+                        let (sub_conds, sub_vals) = not_filter.__gom_sql_conditions(_gom_spatial_prefilter);
+                        if !sub_conds.is_empty() {
+                            conditions.push(format!("NOT ({})", sub_conds.join(" AND ")));
+                            values.extend(sub_vals);
+                        }
+                    }
+
+                }
                 (conditions, values)
             }
 
@@ -6558,81 +6542,9 @@ fn generate_filter_field(
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    if let Some(ref v) = f.eq {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} = {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.ne {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} != {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                    }
-                    if let Some(ref v) = f.contains {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(
-                            ::graphql_orm::graphql::orm::contains_like_pattern(v)
-                        ));
-                    }
-                    if let Some(ref v) = f.starts_with {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(
-                            ::graphql_orm::graphql::orm::starts_with_like_pattern(v)
-                        ));
-                    }
-                    if let Some(ref v) = f.ends_with {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(
-                            ::graphql_orm::graphql::orm::ends_with_like_pattern(v)
-                        ));
-                    }
-                    if let Some(ref list) = f.in_list {
-                        if list.is_empty() {
-                            conditions.push("1 = 0".to_owned());
-                        } else {
-                            let base_index = values.len() + 1;
-                            let placeholders: Vec<String> = (0..list.len())
-                                .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
-                                .collect();
-                            conditions.push(format!("{} IN ({})", #db_col, placeholders.join(", ")));
-                            for v in list {
-                                values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                            }
-                        }
-                    }
-                    if let Some(ref list) = f.not_in {
-                        if !list.is_empty() {
-                            let base_index = values.len() + 1;
-                            let placeholders: Vec<String> = (0..list.len())
-                                .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
-                                .collect();
-                            conditions.push(format!("{} NOT IN ({})", #db_col, placeholders.join(", ")));
-                            for v in list {
-                                values.push(::graphql_orm::graphql::orm::SqlValue::String(v.clone()));
-                            }
-                        }
-                    }
-                    // IsNull / IsNotNull
-                    if let Some(is_null) = f.is_null {
-                        if is_null {
-                            conditions.push(format!("{} IS NULL", #db_col));
-                        } else {
-                            conditions.push(format!("{} IS NOT NULL", #db_col));
-                        }
-                    }
-                    // Similar matching uses LIKE for candidate filtering.
-                    // Actual scoring happens in Rust post-processing
-                    if let Some(ref sim) = f.similar {
-                        // Use a broad LIKE pattern to get candidates
-                        // Generated fallback paths use deterministic substring scoring after fetch.
-                        let pattern = ::graphql_orm::graphql::orm::generate_candidate_pattern(&sim.value);
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(#struct_name::__gom_ci_like(#db_col, &placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::String(pattern));
-                    }
+                    ::graphql_orm::graphql::orm::__gom_render_string_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
                 }
             };
             let value_expr = if is_option_type(field_type) {
@@ -6667,70 +6579,9 @@ fn generate_filter_field(
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    if let Some(v) = f.eq {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} = {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
-                    }
-                    if let Some(v) = f.ne {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} != {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
-                    }
-                    if let Some(v) = f.lt {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} < {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
-                    }
-                    if let Some(v) = f.lte {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} <= {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
-                    }
-                    if let Some(v) = f.gt {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} > {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
-                    }
-                    if let Some(v) = f.gte {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} >= {}", #db_col, placeholder));
-                        values.push(::graphql_orm::graphql::orm::SqlValue::Int(v as i64));
-                    }
-                    if let Some(ref list) = f.in_list {
-                        if list.is_empty() {
-                            conditions.push("1 = 0".to_owned());
-                        } else {
-                            let base_index = values.len() + 1;
-                            let placeholders: Vec<String> = (0..list.len())
-                                .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
-                                .collect();
-                            conditions.push(format!("{} IN ({})", #db_col, placeholders.join(", ")));
-                            for v in list {
-                                values.push(::graphql_orm::graphql::orm::SqlValue::Int(*v as i64));
-                            }
-                        }
-                    }
-                    if let Some(ref list) = f.not_in {
-                        if !list.is_empty() {
-                            let base_index = values.len() + 1;
-                            let placeholders: Vec<String> = (0..list.len())
-                                .map(|offset| #struct_name::__gom_placeholder(base_index + offset))
-                                .collect();
-                            conditions.push(format!("{} NOT IN ({})", #db_col, placeholders.join(", ")));
-                            for v in list {
-                                values.push(::graphql_orm::graphql::orm::SqlValue::Int(*v as i64));
-                            }
-                        }
-                    }
-                    // IsNull / IsNotNull
-                    if let Some(is_null) = f.is_null {
-                        if is_null {
-                            conditions.push(format!("{} IS NULL", #db_col));
-                        } else {
-                            conditions.push(format!("{} IS NOT NULL", #db_col));
-                        }
-                    }
+                    ::graphql_orm::graphql::orm::__gom_render_number_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
                 }
             };
             let value_expr = if is_option_type(field_type) {
@@ -6950,24 +6801,9 @@ fn generate_filter_field(
             };
             let sql = quote! {
                 if let Some(ref f) = self.#filter_field_name {
-                    if let Some(v) = f.eq {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} = {}", #db_col, placeholder));
-                        values.push(#struct_name::__gom_bool_sql_value(v));
-                    }
-                    if let Some(v) = f.ne {
-                        let placeholder = #struct_name::__gom_placeholder(values.len() + 1);
-                        conditions.push(format!("{} != {}", #db_col, placeholder));
-                        values.push(#struct_name::__gom_bool_sql_value(v));
-                    }
-                    // IsNull / IsNotNull
-                    if let Some(is_null) = f.is_null {
-                        if is_null {
-                            conditions.push(format!("{} IS NULL", #db_col));
-                        } else {
-                            conditions.push(format!("{} IS NOT NULL", #db_col));
-                        }
-                    }
+                    ::graphql_orm::graphql::orm::__gom_render_boolean_filter(
+                        f, #backend_expr, #db_col, &mut conditions, &mut values,
+                    );
                 }
             };
             let value_expr = if is_option_type(field_type) {

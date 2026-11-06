@@ -31,6 +31,9 @@ AI **0.122.0**, ORM runtime/macros **0.93.0**, tool profiles **0.21.0**.
 - AI 0.122.0: retain ORM-backed regression coverage for added tools, removed tools, changes to tool schemas, and changes to unused tools across retained session cleanup/rebind. The reported stranded-conversation defect did not reproduce; no runtime or persistence change.
 
 AI **0.121.0**, ORM runtime/macros **0.92.0**. Released as `workspace-2026.11.06.2`.
+- ORM/macros **0.92.1:** reduce generated scalar-filter SQL and semantic metadata construction. Emitted clauses, bind order, NULL handling and SDL are unchanged. No consumer changes or data migration are needed. Fixes #334.
+
+AI **0.121.0**, ORM runtime/macros **0.92.0**.
 
 - **ORM/macros 0.92.0:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
 - ORM runtime/macros **0.92.0**: fix [#313](https://github.com/Dastari/graphql-orm/issues/313). Static offset connections use the selection (including fragments and aliases) to omit unused count or row queries. Page probes use one extra row when `hasNextPage` is selected without a total. Residual row authorization still scans readable rows before computing totals.

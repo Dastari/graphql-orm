@@ -78,6 +78,9 @@ still require current intermediate rows and relation authorization, within the
 existing 16-hop/256-target bounds. Missing or deleted parents emit nothing.
 Direct deleted-preimage authorization is unchanged; no key-only direct-delete
 opt-in is added.
+## 0.92.0 to 0.92.1: generated compile cost
+
+No consumer action or data migration is needed. ORM/macros share internal SQL and semantic metadata builders; filter SQL, bind order, NULL handling, SDL and public contracts are unchanged.
 
 ## 0.91.1 to 0.92.0: bulk post-commit notifications
 
