@@ -20,6 +20,10 @@ in bulk client queries; refresh pinned SDL and generated client types. Error
 codes absent from the callback remain null. Bulk result Rust struct literals
 must initialize `error_code` (or use the existing constructors).
 
+SQLx adapters now carry refusals with a private typed error rather than a protocol
+string. Use `graphql_error_from_sqlx` to recover the authored GraphQL message/code;
+do not match `graphql-orm-public:` strings in SQLx errors.
+
 ## 0.91.1 to 0.92.0: rejected field writes fail the mutation
 
 No data migration or schema change is needed. Consumers are affected if a generated
