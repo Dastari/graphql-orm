@@ -25,6 +25,12 @@ for historical context.
 
 AI **0.120.2**, ORM runtime/macros **0.92.0**.
 - AI 0.121.0: **provider session cleanup now converges.** Real Codex `thread/list` pages carry `readStates`, which its generated schema omits, so the strict absence scan refused every real page on 0.165.0 and 0.166.0. A delete that returned `-32600` ("no rollout found for thread id") could therefore never settle, and retried about once a minute forever. The scan now admits `readStates` as a bounded, discarded map; arbitrary `-32600` is still not success. Backoff also grows, and a retry budget ends in visible `cleanup_exhausted` (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
+- Reject related-row filters in every bulk write entry point and fail closed in direct in-memory matching (#314). Qualify generated relation reads on owned MSSQL and PostgreSQL.
+
+ORM runtime/macros **0.92.0**.
+
+- Add opt-in `#[relation(filter)]` collection predicates to static generated `WhereInput` and list, keyset, and aggregate count roots (#314). Parameterized `EXISTS` intersects complete target/link SQL read visibility before paging and counting; empty alternatives match no rows. Residual authorization and spatial combinations fail closed.
+- Bind filtered keyset cursors to the caller-visible typed filter input. Previously issued filtered cursors must restart; no data migration is needed.
 
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
 - ORM/macros **0.92.0**: callback-denied to-one relations now resolve like absent targets, without existence-revealing errors; generated relation-field `read_policy` checks fail closed before target loading (#325).

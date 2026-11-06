@@ -703,3 +703,39 @@ reused schema/loader requests, two identities, expired/source-denied identities,
 nullable error paths, alias/fragment selection and bounded page/count semantics
 on SQLite and test-owned disposable PostgreSQL. SQLite tracing also measures
 real multi-parent target dispatches. MSSQL coverage is compilation only.
+
+## Authorized collection filters
+
+Use `#[relation(target = "Link", from = "id", to = "parent_id", multiple, filter)]`
+to expose the relation name in the source's generated `WhereInput`. For example,
+`where: {links: [{targetId: {in: ["x", "y"]}}]}` matches parents with any authorized
+matching link. An empty list matches no parents. Each alternative is a typed target
+Where input; `and`, `or`, `not`, complete composite relation keys, and nested opted-in
+collections compose normally. Values are SQL binds, never interpolated SQL.
+
+Generated list, keyset/scan and aggregate roots resolve target entity and referenced
+field authority and intersect target read visibility inside a correlated `EXISTS`.
+This happens before paging and counts. For many-to-many data, declare a collection
+of link entities and an opted-in collection from each link to its target; both link
+and target row policies then apply inside their respective `EXISTS`. A denied target
+has the same membership effect as an absent target, including under negation.
+
+This static API does not reuse runtime schema handles or runtime `RelationFilter`
+grants. It requires `ReadVisibility::Complete` or `Unrestricted` for every traversed
+entity; residual row authorization, conditional relations, relation field policies,
+and spatial filter combinations are refused. Filters are limited to eight levels,
+128 nodes and 512 binds per related predicate. Context-free repository helpers
+reject unprepared relation predicates. Nested relation resolvers do not prepare
+these predicates; the supported entry points are generated roots. Semantic field
+metadata continues to describe the selectable relationship; it does not advertise
+these predicates as scalar filter operators.
+
+Filtered keyset cursors bind caller-visible typed filter input, excluding private
+SQL visibility parameters. Authorization is still evaluated on each request. Restart
+pagination when filters change or when upgrading from a version that issued unbound
+filtered cursors. No data migration is needed.
+
+Related-row filters are read-only. Bulk updates and deletes (including bounded repository
+and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
+or `not` with `invalid_input` before writing. Select authorized rows through a read
+first and use supported key-based mutations when needed. No data migration is needed.

@@ -45,7 +45,7 @@ struct Customer {
     #[graphql_orm(min_length = 2)]
     name: String,
     #[graphql(skip)]
-    #[relation(target = "Order", from = "id", to = "customer_id", multiple)]
+    #[relation(target = "Order", from = "id", to = "customer_id", multiple, filter)]
     orders: Vec<Order>,
 }
 
@@ -1485,4 +1485,20 @@ async fn a_hidden_to_one_target_is_null_without_losing_the_parent() {
     let data = response.data.into_json().unwrap();
     assert_eq!(data["order"]["id"], order.id.to_string());
     assert!(data["order"]["customer"].is_null());
+}
+
+fn collection_filter_opt_in_is_typed_and_read_only() {
+    let filter = CustomerWhereInput {
+        orders: Some(vec![]),
+        ..Default::default()
+    };
+    assert!(!filter.is_empty());
+    assert!(filter.validate().is_err());
+    let entity = Customer {
+        id: Uuid::new_v4(),
+        name: "Reader".into(),
+        orders: vec![],
+    };
+    assert!(!filter.matches_entity(&entity).unwrap());
+    assert!(filter.__gom_require_scalar_write_filter().is_err());
 }

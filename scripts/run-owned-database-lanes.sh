@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -44,6 +44,8 @@ run_sqlite() {
 }
 
 run_postgres() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test static_related_filter -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \
@@ -67,6 +69,7 @@ run_postgres() {
 
 run_postgres_legacy() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test static_related_filter \
     --test app_repository_helpers \
     --test backup_roundtrip \
     --test bidirectional_join_relations \
@@ -137,6 +140,13 @@ run_denied_relations() {
   done
 }
 
+run_static_related_filter() {
+  for backend in postgres mssql; do
+    cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+      --test static_related_filter -- --include-ignored --test-threads=1
+  done
+}
+
 case "${lane}" in
   notify-bulk)
     for backend in sqlite postgres mssql; do
@@ -152,6 +162,7 @@ case "${lane}" in
     ;;
   field-write-denial) run_field_write_denial ;;
   denied-relations) run_denied_relations ;;
+  static-related-filter) run_static_related_filter ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;

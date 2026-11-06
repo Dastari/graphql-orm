@@ -22,6 +22,9 @@ Version 0.92.0 uses RFC 3339 UTC implicit defaults for String timestamp fields;
 integer timestamps retain epoch seconds. Existing defaults and rows are preserved.
 See the [migration guide](../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
 Version 0.92.0 makes callback-denied to-one relations indistinguishable from absent targets and enforces relation-field read policies.
+Version 0.92.0 adds opt-in authorized static collection filters with `#[relation(filter)]`.
+Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
+See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
 
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.

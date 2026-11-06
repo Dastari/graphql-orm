@@ -5111,6 +5111,11 @@ fn generate_graphql_operations_unfiltered(
     // unrelated fields. Authorize original recursive predicate intent before
     // any list/count/scan SQL, using the same public identities as field reads.
     let filter_read_authorization = quote! {
+        let mut where_input = where_input;
+        if let Some(filter) = where_input.as_mut() {
+            filter.__gom_prepare_read(ctx, 0, &mut 128).await?;
+        }
+
         if let Some(filter) = where_input.as_ref() {
             for field_name in ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter) {
                 let field = <#struct_name as ::graphql_orm::graphql::orm::Entity>::repository_field_policies()
@@ -6198,6 +6203,7 @@ fn generate_graphql_operations_unfiltered(
                     input: #update_input,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6245,6 +6251,7 @@ fn generate_graphql_operations_unfiltered(
                     where_input: #where_input,
                     limit: ::graphql_orm::graphql::orm::MutationLimit,
                 ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                    where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                     use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                     let db = hook_ctx.database().clone();
                     Self::__gom_require_repository_write_policy(&db)?;
@@ -6610,6 +6617,7 @@ fn generate_graphql_operations_unfiltered(
                 input: #update_input,
                 limit: ::graphql_orm::graphql::orm::MutationLimit,
             ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                 if where_input.is_empty() {
                     return Err(Self::__gom_runtime_error("bounded update requires a non-empty typed filter"));
@@ -6654,6 +6662,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input: #where_input,
                 limit: ::graphql_orm::graphql::orm::MutationLimit,
             ) -> ::graphql_orm::Result<::graphql_orm::graphql::orm::BoundedMutationOutcome> {
+                where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
                 if where_input.is_empty() {
                     return Err(Self::__gom_runtime_error("bounded delete requires a non-empty typed filter"));
@@ -6814,6 +6823,7 @@ fn generate_graphql_operations_unfiltered(
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
+                #filter_read_authorization
                 let mut query = #struct_name::aggregate(db).with_auth(auth_context.as_ref());
                 if let Some(filter) = where_input {
                     query = query.filter(filter);
@@ -8573,6 +8583,9 @@ fn generate_graphql_operations_unfiltered(
                     _ => return Ok(#update_many_result_type::err("Where filter is required for bulk update and must not be empty")),
                 };
 
+                if let Err(error) = filter.__gom_require_scalar_write_filter() {
+                    return Ok(#update_many_result_type::from_graphql_error(error.into_graphql_error()));
+                }
                 let mut notification_rows = Vec::new();
                 match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), Some(ctx), Some(&mut notification_rows)).await {
                     Ok(affected_count) => {
@@ -8622,6 +8635,9 @@ fn generate_graphql_operations_unfiltered(
                     _ => return Ok(#delete_many_result_type::err("Where filter is required for bulk delete and must not be empty")),
                 };
 
+                if let Err(error) = filter.__gom_require_scalar_write_filter() {
+                    return Ok(#delete_many_result_type::from_graphql_error(error.into_graphql_error()));
+                }
                 let mut notification_rows = Vec::new();
                 match #struct_name::__gom_delete_where_with_auth(db, filter.clone(), auth_context.as_ref(), Some(ctx), Some(&mut notification_rows)).await {
                     Ok(deleted_count) => {
@@ -8952,6 +8968,7 @@ fn generate_graphql_operations_unfiltered(
                 where_input: #where_input,
                 mut input: #update_input,
             ) -> ::graphql_orm::Result<i64> {
+                where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
                 if where_input.is_empty() {
@@ -9162,6 +9179,7 @@ fn generate_graphql_operations_unfiltered(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: #where_input,
             ) -> ::graphql_orm::Result<i64> {
+                where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 if where_input.is_empty() {
@@ -9517,6 +9535,7 @@ fn generate_graphql_operations_unfiltered(
                 graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
                 notification_rows: Option<&mut Vec<Self>>,
             ) -> ::graphql_orm::Result<i64> {
+                where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
                 if where_input.is_empty() {
@@ -9931,6 +9950,7 @@ fn generate_graphql_operations_unfiltered(
                 allow_empty_filter: bool,
                 notification_rows: Option<&mut Vec<Self>>,
             ) -> ::graphql_orm::Result<i64> {
+                where_input.__gom_require_scalar_write_filter().map_err(::graphql_orm::graphql::errors::sqlx_error_from_public)?;
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow};
 
                 let filter_is_empty = where_input.is_empty();
