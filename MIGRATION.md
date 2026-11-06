@@ -15,7 +15,8 @@ supersedes: []
 This security-improving public error contract change is breaking for consumers
 reading driver text from generated single-row create, update, upsert or delete
 errors, including default propagating `notify_with` failures. Generated field-policy and
-entity-policy callback boundaries follow the same rule. Those callbacks now
+entity-policy callback boundaries and generated single-row row-read callbacks
+follow the same rule; clients reading their driver text are also affected. Those callbacks now
 use the bulk refusal classifier: when `async_graphql::Error.source` is `Some`
 and there is no string `extensions.code`, the client receives the safe ORM
 category/message/code. Direct SQLx sources use the same SQLx category mapping as

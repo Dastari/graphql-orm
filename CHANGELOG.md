@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased
 
-- **Breaking (ORM/macros 0.94.0):** mask source-bearing callback failures without a string `code` in generated single-row mutations and default propagating notifications, matching bulk. Authored refusals retain their messages and extensions. No data migration is needed. Fixes #328.
+- **Breaking (ORM/macros 0.94.0):** mask source-bearing callback failures without a string `code` in generated single-row mutations and default propagating notifications, matching bulk. Apply the same rule to generated entity/field policy and single-row row-read callback boundaries. Authored refusals retain their messages and extensions. No data migration is needed. Fixes #328.
 
 AI **0.122.0**, ORM runtime/macros **0.93.0**, tool profiles **0.21.0**.
 
