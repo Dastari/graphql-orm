@@ -5,7 +5,7 @@ title: Using graphql-orm
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -515,13 +515,10 @@ with `operation_authorization`, or a write policy that refuses it. Don't replace
 | Backends | One feature per service, or `backend` on each entity | Features are alternatives. SQL Server's schema stays externally owned: no managed migrations, search, RLS, backup or runtime-schema writes. Check [backend support](../../docs/reference/graphql-orm/backends.md) before relying on a capability |
 | Tests | Temporary SQLite, or disposable containers your tests own | Never point tests at an application database. Run each backend you ship as its own explicit feature lane |
 
-`RecordVersion` and `NodeId` need the **generated object**, so an entity can't have them together
-with generated relation fields today. `compose_complex_object` doesn't change that: it still counts
-as `#[graphql(complex)]`, and removing `SimpleObject` from an entity with `GraphQLRelations` doesn't
-compile. The route to `RecordVersion` on such an entity is a hand-written field for now
-([#288](https://github.com/Dastari/graphql-orm/issues/288)). `NodeId` has none
-([#270](https://github.com/Dastari/graphql-orm/issues/270)), so report it rather than hand-writing
-one. Managed versions and `expectedVersion` still work on these entities.
+An entity with generated relation fields serves both too. On a `#[graphql(complex)]` entity,
+including `compose_complex_object`, `GraphQLRelations` emits `NodeId` (with `node_id`) and
+`RecordVersion` (with a managed version), and `Changed` payloads carry them. A hand-written
+`RecordVersion` field on such an entity still works, and can now be removed.
 
 See the [macro reference](../../docs/reference/graphql-orm/macros-and-attributes.md),
 [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md),
