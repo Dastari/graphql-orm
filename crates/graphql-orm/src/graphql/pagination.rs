@@ -233,3 +233,71 @@ impl KeysetConnectionInput {
         })
     }
 }
+
+/// SQL requirements for the fields selected on an offset connection.
+/// Unselected fields in the returned connection are placeholders.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ConnectionSelection {
+    /// Fetch nodes (also needed to compute selected boundary cursors).
+    pub rows: bool,
+    /// Fetch the exact total count.
+    pub count: bool,
+    /// Determine whether another page exists.
+    pub has_next_page: bool,
+}
+
+impl ConnectionSelection {
+    /// Preserve the complete connection contract for direct callers.
+    pub const ALL: Self = Self {
+        rows: true,
+        count: true,
+        has_next_page: true,
+    };
+
+    /// Inspect schema field names, including aliases and fragment selections.
+    pub fn from_context(ctx: &async_graphql::Context<'_>) -> Self {
+        let fields = crate::graphql::loaders::relation_selected_fields(
+            ctx,
+            &ctx.item.node.selection_set.node,
+        );
+        let mut selected = Self {
+            rows: false,
+            count: false,
+            has_next_page: false,
+        };
+        for field in fields {
+            let name = field
+                .node
+                .name
+                .node
+                .as_str()
+                .replace('_', "")
+                .to_ascii_lowercase();
+            if name == "edges" {
+                selected.rows = true;
+            }
+            if name == "pageinfo" {
+                for child in crate::graphql::loaders::relation_selected_fields(
+                    ctx,
+                    &field.node.selection_set.node,
+                ) {
+                    match child
+                        .node
+                        .name
+                        .node
+                        .as_str()
+                        .replace('_', "")
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "totalcount" => selected.count = true,
+                        "hasnextpage" => selected.has_next_page = true,
+                        "startcursor" | "endcursor" => selected.rows = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        selected
+    }
+}

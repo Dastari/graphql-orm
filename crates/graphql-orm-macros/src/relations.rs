@@ -826,9 +826,10 @@ pub(crate) fn generate_graphql_relations(
 
                         let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
                         loader
-                            .load_one(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
-                                #relation_query_key, &visibility,
-                            )?)
+                            .load_one(::graphql_orm::graphql::loaders::SelectedRelationQueryKey {
+                                query: ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
+                                selection: ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
+                            })
                             .await
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {
@@ -874,26 +875,15 @@ pub(crate) fn generate_graphql_relations(
                             ).await?
                         } else {
                         query = query.with_read_visibility(&visibility)?;
-                        // Count must be computed before/independent of pagination window.
-                        // EntityQuery::count ignores limit/offset and uses only WHERE clauses.
-                        let total = query
-                            .count_with_auth(db, auth_context.as_ref())
-                            .await
-                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                        let offset = resolved_page.offset.max(0) as usize;
-
-                        let entities = query
-                            .fetch_all_with_auth(db, auth_context.as_ref())
-                            .await
-                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
+                        let connection = query.fetch_connection_selected_with_auth(
+                            db, auth_context.as_ref(), ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
+                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                         ::graphql_orm::graphql::loaders::RelationLoadResult {
-                            has_next_page: (offset as i64 + entities.len() as i64) < total,
-                            has_previous_page: offset > 0,
-                            entities,
-                            total_count: total,
-                            offset: offset as i64,
+                            has_next_page: connection.page_info.has_next_page,
+                            has_previous_page: connection.page_info.has_previous_page,
+                            entities: connection.edges.into_iter().map(|edge| edge.node).collect(),
+                            total_count: connection.page_info.total_count.unwrap_or(0),
+                            offset: resolved_page.offset.max(0),
                         }
                         }
                     };
