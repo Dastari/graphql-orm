@@ -4450,7 +4450,7 @@ fn generate_graphql_operations_unfiltered(
                         *clause = format!("{} = {rhs}", dialect.quote_identifier_path(column));
                     }
                     if #has_updated_at_column {
-                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                     }
                     let before_state = current_entity
                         .as_ref()
@@ -6070,7 +6070,7 @@ fn generate_graphql_operations_unfiltered(
                         set_clauses.push(format!(
                             "{} = {}",
                             dialect.quote_identifier("updated_at"),
-                            Self::__gom_current_epoch_expr(),
+                            Self::__gom_current_updated_at_expr(),
                         ));
                     }
                     if let Some(assignment) = Self::__gom_managed_version_assignment() {
@@ -6312,7 +6312,7 @@ fn generate_graphql_operations_unfiltered(
                         set_clauses.push(format!(
                             "{} = {}",
                             dialect.quote_identifier("updated_at"),
-                            Self::__gom_current_epoch_expr(),
+                            Self::__gom_current_updated_at_expr(),
                         ));
                     }
                     if let Some(assignment) = Self::__gom_managed_version_assignment() {
@@ -8266,7 +8266,7 @@ fn generate_graphql_operations_unfiltered(
 
                 // Update timestamp column when this entity defines one
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", #struct_name::__gom_current_epoch_expr()));
+                    set_clauses.push(format!("updated_at = {}", #struct_name::__gom_current_updated_at_expr()));
                 }
                 if let Some(assignment) = #struct_name::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
@@ -8806,7 +8806,7 @@ fn generate_graphql_operations_unfiltered(
                 #(#update_field_checks_repo)*
 
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                 }
                 if let Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
@@ -8935,7 +8935,7 @@ fn generate_graphql_operations_unfiltered(
                 #(#update_field_checks_repo)*
 
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                 }
                 if let Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
@@ -9358,7 +9358,7 @@ fn generate_graphql_operations_unfiltered(
                 #(#update_field_checks_repo)*
 
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                 }
                 if let Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);
@@ -9532,7 +9532,7 @@ fn generate_graphql_operations_unfiltered(
                 #(#update_field_checks_repo)*
 
                 if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_updated_at_expr()));
                 }
                 if let Some(assignment) = Self::__gom_managed_version_assignment() {
                     set_clauses.push(assignment);

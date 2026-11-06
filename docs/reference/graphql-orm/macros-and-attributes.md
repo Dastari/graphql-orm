@@ -596,6 +596,17 @@ from both SDL and operation metadata. This selection does not alter repository
 APIs, relations, mutations, subscriptions or authorization. See the
 [migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
 
+## Implicit timestamps
+
+Fields named `created_at` and `updated_at` receive implicit SQL defaults unless
+an explicit default or `default = false` is supplied. String and optional String
+use RFC 3339 UTC; integers use epoch seconds. `#[date_field]` uses native
+`NOW()`/`SYSUTCDATETIME()` defaults on PostgreSQL/MSSQL. Generated non-host-managed writes
+refresh the physical `updated_at` column using its type. SQL defaults alone do not
+refresh timestamps on raw SQL updates. Host management disables generated refresh.
+Existing epoch defaults on text columns are retained without a schema change;
+see the [upgrade and mixed-format paging contract](../../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
+
 ## Host-owned timestamps
 
 `#[graphql_orm(timestamp = "host")]` accepts ordinary `i64`, `String` and optional

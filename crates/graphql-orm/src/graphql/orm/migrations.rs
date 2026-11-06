@@ -35,17 +35,6 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
-fn defaults_equivalent(before: &Option<String>, after: &Option<String>) -> bool {
-    match (before, after) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            super::dialect::canonicalize_column_default_expression(left)
-                == super::dialect::canonicalize_column_default_expression(right)
-        }
-        _ => false,
-    }
-}
-
 // PostgreSQL adds ::text when deparsing a TEXT literal default. Compare only
 // complete literals here: changing the shared canonicalizer would change
 // persisted physical/plan hash identities. E-strings emitted by PostgreSQL's
@@ -163,6 +152,43 @@ mod postgres_text_default_tests {
             is_primary_key: false,
             is_unique: false,
             default: Some(default.into()),
+        }
+    }
+
+    #[test]
+    fn legacy_text_timestamp_defaults_are_directionally_compatible_on_every_backend() {
+        for backend in [
+            DatabaseBackend::Sqlite,
+            DatabaseBackend::Postgres,
+            DatabaseBackend::Mssql,
+        ] {
+            let (epoch, text) =
+                super::super::dialect::implicit_timestamp_defaults(backend).unwrap();
+            let mut old = column(epoch);
+            let mut new = column(text);
+            if backend == DatabaseBackend::Mssql {
+                old.sql_type = "NVARCHAR(MAX)".into();
+                new.sql_type = "NVARCHAR(MAX)".into();
+            }
+            assert!(!column_changed_for_backend(backend, &old, &new));
+            if backend == DatabaseBackend::Postgres {
+                let mut deparsed = old.clone();
+                deparsed.default = Some("((EXTRACT(epoch FROM now()))::bigint)::text".into());
+                assert!(!column_changed_for_backend(backend, &deparsed, &new));
+            }
+            assert!(!column_changed_for_backend(backend, &new, &new));
+            // No global equivalence, and no suppressing unrelated changes.
+            assert!(column_changed_for_backend(backend, &new, &old));
+            assert_ne!(
+                super::super::dialect::canonicalize_column_default_expression(epoch),
+                super::super::dialect::canonicalize_column_default_expression(text)
+            );
+            let mut unrelated = new.clone();
+            unrelated.default = Some("'fixed'".into());
+            assert!(column_changed_for_backend(backend, &old, &unrelated));
+            old.sql_type = "BIGINT".into();
+            new.sql_type = "BIGINT".into();
+            assert!(column_changed_for_backend(backend, &old, &new));
         }
     }
 
@@ -977,9 +1003,34 @@ pub(super) fn column_changed_with(
         return true;
     }
 
-    if defaults_equivalent(&before.default, &after.default) {
+    let live_default = before
+        .default
+        .as_deref()
+        .map(super::dialect::canonicalize_column_default_expression);
+    let target_default = after
+        .default
+        .as_deref()
+        .map(super::dialect::canonicalize_column_default_expression);
+    if live_default == target_default {
         return false;
     }
+
+    // Retain pre-0.92 text timestamp defaults in existing databases. This is a
+    // directional compatibility rule, not SQL expression equivalence: changing
+    // an existing default between these exact forms requires explicit SQL.
+    if (after.sql_type.eq_ignore_ascii_case("TEXT")
+        || after.sql_type.eq_ignore_ascii_case("NVARCHAR(MAX)"))
+        && let (Some(live), Some(target)) = (&live_default, &target_default)
+        && let Some((epoch, text)) = super::dialect::implicit_timestamp_defaults(backend)
+        && target == text
+        && (live == epoch
+            || (backend == DatabaseBackend::Postgres
+                && (live.eq_ignore_ascii_case("((extract(epoch from now()))::bigint)::text")
+                    || live.eq_ignore_ascii_case("(extract(epoch from now())::bigint)::text"))))
+    {
+        return false;
+    }
+
     if backend == DatabaseBackend::Postgres
         && before.sql_type.eq_ignore_ascii_case("TEXT")
         && after.sql_type.eq_ignore_ascii_case("TEXT")

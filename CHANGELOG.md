@@ -16,7 +16,9 @@ for historical context.
 
 ## Unreleased
 
-AI **0.120.2**, ORM runtime/macros **0.91.1**.
+- ORM/macros 0.92.0: implicit String timestamp defaults and generated `updated_at` writes use RFC 3339 UTC; integers retain epoch seconds. Preserve legacy stored defaults and rows on reopen. Fixes #308.
+
+AI **0.120.2**, ORM runtime/macros **0.92.0**.
 
 - **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).
 - ORM and macros 0.91.1 change no code. Fixture lockfiles record the AI version, so they need a new package identity to release alongside it.

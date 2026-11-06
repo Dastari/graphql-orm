@@ -33,6 +33,24 @@ impl DatabaseBackend {
     }
 }
 
+// Keep these canonical expressions aligned with the derive backend helpers.
+pub(crate) fn implicit_timestamp_defaults(
+    backend: DatabaseBackend,
+) -> Option<(&'static str, &'static str)> {
+    match backend {
+        DatabaseBackend::Sqlite => Some(("unixepoch()", "strftime('%Y-%m-%dT%H:%M:%f000Z','now')")),
+        DatabaseBackend::Postgres => Some((
+            "EXTRACT(EPOCH FROM NOW())::bigint",
+            r#"to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#,
+        )),
+        DatabaseBackend::Mssql => Some((
+            "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
+            "CONVERT(varchar(27), SYSUTCDATETIME(), 126) + 'Z'",
+        )),
+        DatabaseBackend::Mysql => None,
+    }
+}
+
 /// Canonicalize a column default expression for schema comparison and hashing.
 ///
 /// SQLite stores `DEFAULT (unixepoch())` as `dflt_value = unixepoch()`, while
@@ -45,10 +63,11 @@ impl DatabaseBackend {
 /// - trim surrounding whitespace
 /// - strip balanced outer parentheses that wrap the entire expression
 /// - normalize SQL keyword defaults (`CURRENT_TIMESTAMP`, `NULL`, booleans)
-/// - recognize PostgreSQL's deparsed form of the ORM's known epoch-second default
+/// - recognize catalog forms of the ORM's exact epoch-second and UTC text defaults
+/// - normalize the native `NOW()` and `SYSUTCDATETIME()` clock functions
 /// - leave string/blob literals and other non-keyword identifiers untouched
 ///
-/// Apart from that exact known default, does **not** rewrite operators, function names, or argument order, so
+/// Apart from those exact known defaults, does **not** rewrite operators, function names, or argument order, so
 /// genuinely different expressions remain distinct.
 pub fn canonicalize_column_default_expression(default: &str) -> String {
     let mut value = default.trim().to_string();
@@ -66,9 +85,37 @@ pub fn canonicalize_column_default_expression(default: &str) -> String {
         return "EXTRACT(EPOCH FROM NOW())::bigint".to_string();
     }
 
+    // Catalog deparsing of these exact ORM expressions only. Quoted format
+    // literals remain case-sensitive; no arbitrary SQL is interpreted.
+    let postgres_text =
+        r#"to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'::text)"#;
+    if value == postgres_text {
+        return implicit_timestamp_defaults(DatabaseBackend::Postgres)
+            .unwrap()
+            .1
+            .into();
+    }
+    if value == "datediff_big(second,'1970-01-01',sysutcdatetime())"
+        || value == "datediff_big([second],'1970-01-01',sysutcdatetime())"
+    {
+        return implicit_timestamp_defaults(DatabaseBackend::Mssql)
+            .unwrap()
+            .0
+            .into();
+    }
+    if value == "CONVERT([varchar](27),sysutcdatetime(),(126))+'Z'"
+        || value == "CONVERT([varchar](27),sysutcdatetime(),126)+'Z'"
+    {
+        return implicit_timestamp_defaults(DatabaseBackend::Mssql)
+            .unwrap()
+            .1
+            .into();
+    }
+
     let uppercase = value.to_ascii_uppercase();
     match uppercase.as_str() {
-        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "NULL" => uppercase,
+        "CURRENT_TIMESTAMP" | "CURRENT_DATE" | "CURRENT_TIME" | "NULL" | "NOW()"
+        | "SYSUTCDATETIME()" => uppercase,
         "TRUE" | "FALSE" => value.to_ascii_lowercase(),
         _ => value,
     }
@@ -133,6 +180,47 @@ fn is_fully_parenthesized(value: &str) -> bool {
 #[cfg(test)]
 mod default_canonicalization_tests {
     use super::canonicalize_column_default_expression;
+
+    #[test]
+    fn recognizes_only_exact_timestamp_catalog_forms() {
+        use super::{DatabaseBackend, implicit_timestamp_defaults};
+        assert_eq!(canonicalize_column_default_expression("now()"), "NOW()");
+        assert_eq!(
+            canonicalize_column_default_expression("(sysutcdatetime())"),
+            "SYSUTCDATETIME()"
+        );
+        for (backend, deparsed, text) in [
+            (
+                DatabaseBackend::Postgres,
+                r#"to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'::text)"#,
+                true,
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(CONVERT([varchar](27),sysutcdatetime(),(126))+'Z')",
+                true,
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(datediff_big(second,'1970-01-01',sysutcdatetime()))",
+                false,
+            ),
+        ] {
+            let (epoch, timestamp) = implicit_timestamp_defaults(backend).unwrap();
+            assert_eq!(
+                canonicalize_column_default_expression(deparsed),
+                if text { timestamp } else { epoch }
+            );
+            let different_literal = deparsed
+                .replace("'UTC'", "'utc'")
+                .replace("'Z'", "'z'")
+                .replace("'1970-01-01'", "'2000-01-01'");
+            assert_ne!(
+                canonicalize_column_default_expression(&different_literal),
+                if text { timestamp } else { epoch }
+            );
+        }
+    }
 
     #[test]
     fn strips_redundant_outer_parens_for_epoch_defaults() {

@@ -1,8 +1,9 @@
 use super::*;
 use crate::backend::{
-    BackendKind, backend_current_epoch_expr, backend_dialect_tokens, backend_helper_import_tokens,
-    backend_marker_tokens, backend_quote_identifier_path, backend_render_identifier_path,
-    backend_row_type_tokens, resolve_backend,
+    BackendKind, backend_current_epoch_expr, backend_current_timestamp_expr,
+    backend_dialect_tokens, backend_helper_import_tokens, backend_marker_tokens,
+    backend_quote_identifier_path, backend_render_identifier_path, backend_row_type_tokens,
+    resolve_backend,
 };
 use crate::naming::{graphql_field_name, selected_field_case_rule};
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -3010,13 +3011,6 @@ fn generate_entity_impl(
     } else {
         quote! { ::graphql_orm::graphql::orm::SqlValue::Int(if value { 1 } else { 0 }) }
     };
-    // Keep in lockstep with `backend_current_epoch_expr` so runtime helpers and
-    // generated column defaults use the same canonical form.
-    let current_epoch_expr = backend_current_epoch_expr(backend);
-    let current_epoch_runtime = {
-        let lit = syn::LitStr::new(current_epoch_expr, proc_macro2::Span::call_site());
-        quote! { #lit }
-    };
     let spatial_sql_value_body = if backend == BackendKind::Sqlite {
         quote! {
             ::graphql_orm::graphql::orm::spatial::canonical_geojson_sql_value(value, spatial)
@@ -3046,6 +3040,23 @@ fn generate_entity_impl(
                 "GraphQLEntity requires named fields",
             ));
         }
+    };
+
+    // Generated updates target the physical updated_at column, including aliases.
+    let text_updated_at = fields.iter().find_map(|field| {
+        field.ident.as_ref().and_then(|ident| {
+            let meta = parse_field_metadata(field).ok()?;
+            (meta
+                .timestamp_behavior(&ident.to_string())
+                .update_updated_at
+                && is_string_type(&field.ty))
+            .then_some(meta.is_date_field)
+        })
+    });
+    let current_updated_at_runtime = if let Some(native_date) = text_updated_at {
+        backend_current_timestamp_expr(backend, native_date)
+    } else {
+        backend_current_epoch_expr(backend)
     };
 
     let entity_name_lit = struct_name.to_string();
@@ -4480,7 +4491,14 @@ fn generate_entity_impl(
             if !field_meta.suppress_implicit_default
                 && (rust_name == "created_at" || rust_name == "updated_at")
             {
-                Some(backend_current_epoch_expr(backend).to_string())
+                Some(
+                    if is_string_type(field_type) {
+                        backend_current_timestamp_expr(backend, field_meta.is_date_field)
+                    } else {
+                        backend_current_epoch_expr(backend)
+                    }
+                    .to_string(),
+                )
             } else {
                 None
             }
@@ -5516,8 +5534,8 @@ fn generate_entity_impl(
                 #bool_sql_value_body
             }
 
-            pub(crate) fn __gom_current_epoch_expr() -> &'static str {
-                #current_epoch_runtime
+            pub(crate) fn __gom_current_updated_at_expr() -> &'static str {
+                #current_updated_at_runtime
             }
 
         }
