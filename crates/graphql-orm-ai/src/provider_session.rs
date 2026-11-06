@@ -249,7 +249,7 @@ impl AiProviderSessionLimits {
     ///
     /// Returns [`AiError::InvalidConfiguration`] unless all durations are
     /// positive and within compiled ceilings, idle TTL does not exceed the
-    /// absolute lifetime, the persisted retry counter saturates at no more
+    /// absolute lifetime, the retry budget is no more
     /// than 100, and candidate scans are in `1..=256`.
     pub fn new(
         idle_ttl: Duration,
@@ -1011,6 +1011,9 @@ pub enum AiProviderSessionState {
     Deleted,
     /// Restored provider state that must never resume automatically.
     RestoreQuarantined,
+    /// Automatic cleanup exhausted its attempt budget. The protected cursor
+    /// remains retained; operator investigation is required and reuse is denied.
+    CleanupExhausted,
 }
 
 impl AiProviderSessionState {
@@ -1022,6 +1025,7 @@ impl AiProviderSessionState {
             Self::CleanupRequired => "cleanup_required",
             Self::CleanupInProgress => "cleanup_in_progress",
             Self::CleanupBackoff => "cleanup_backoff",
+            Self::CleanupExhausted => "cleanup_exhausted",
             Self::Deleted => "deleted",
             Self::RestoreQuarantined => "restore_quarantined",
         }
@@ -1035,6 +1039,7 @@ impl AiProviderSessionState {
             "cleanup_required" => Some(Self::CleanupRequired),
             "cleanup_in_progress" => Some(Self::CleanupInProgress),
             "cleanup_backoff" => Some(Self::CleanupBackoff),
+            "cleanup_exhausted" => Some(Self::CleanupExhausted),
             "deleted" => Some(Self::Deleted),
             "restore_quarantined" => Some(Self::RestoreQuarantined),
             _ => None,
@@ -1751,7 +1756,11 @@ pub trait AiProviderSessionService: Send + Sync {
         proof: AiProviderSessionAbsenceProof,
     ) -> Result<(), AiError>;
 
-    /// Releases cleanup under bounded retry backoff.
+    /// Releases cleanup under bounded exponential retry backoff.
+    ///
+    /// The ORM applies a one-minute exponential floor capped by its maximum
+    /// delay. Exhausting the retry budget retains the cursor in
+    /// [`AiProviderSessionState::CleanupExhausted`] and stops automatic claims.
     async fn schedule_cleanup_retry(
         &self,
         claim: &AiProviderSessionCleanupClaim,
@@ -1892,6 +1901,10 @@ mod tests {
                 "cleanup_in_progress",
             ),
             (AiProviderSessionState::CleanupBackoff, "cleanup_backoff"),
+            (
+                AiProviderSessionState::CleanupExhausted,
+                "cleanup_exhausted",
+            ),
             (AiProviderSessionState::Deleted, "deleted"),
             (
                 AiProviderSessionState::RestoreQuarantined,

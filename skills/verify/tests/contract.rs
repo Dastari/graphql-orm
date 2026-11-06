@@ -45,7 +45,7 @@ struct Customer {
     #[graphql_orm(min_length = 2)]
     name: String,
     #[graphql(skip)]
-    #[relation(target = "Order", from = "id", to = "customer_id", multiple)]
+    #[relation(target = "Order", from = "id", to = "customer_id", multiple, filter)]
     orders: Vec<Order>,
 }
 
@@ -163,7 +163,7 @@ struct Bin {
 
 batch_load!(Customer, Order, OrderLine, Warehouse, Bin, Account);
 
-// A generated object: no relation fields, so it can serve NodeId and RecordVersion.
+// A generated object with no relation fields, serving NodeId and RecordVersion.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(
     table = "tickets",
@@ -1096,7 +1096,7 @@ async fn generated_names_and_surface_match_the_skill() {
 }
 
 #[tokio::test]
-async fn record_version_and_node_id_need_a_generated_object() {
+async fn record_version_and_node_id_are_served_with_or_without_relations() {
     let db = database().await;
     let sdl = schema_builder(db).finish().sdl();
     let object = |name: &str| {
@@ -1106,10 +1106,11 @@ async fn record_version_and_node_id_need_a_generated_object() {
     };
     assert!(object("Ticket").contains("RecordVersion: Int!"));
     assert!(object("Ticket").contains("NodeId: ID!"));
-    assert!(!object("Order").contains("RecordVersion"));
+    // A relation-bearing complex entity serves its managed version; NodeId stays opt-in.
+    assert!(object("Order").contains("RecordVersion: Int!"));
     assert!(!object("Order").contains("NodeId"));
     assert_eq!(Ticket::managed_version_field(), Some("rowVersion"));
-    assert_eq!(Order::managed_version_field(), None);
+    assert_eq!(Order::managed_version_field(), Some("rowVersion"));
 }
 
 #[tokio::test]
@@ -1432,4 +1433,98 @@ async fn an_upsert_needs_a_state_machine_transaction() {
         })
         .await;
     assert!(machine.is_ok());
+}
+
+#[test]
+fn bulk_notification_payload_is_additive() {
+    let result = UpdateTicketsResult::ok(3);
+    assert!(result.success);
+    assert_eq!(result.affected_count, 3);
+    assert!(result.notification_errors.is_none());
+}
+
+struct HiddenCustomers;
+impl RowPolicy for HiddenCustomers {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(entity != "Customer") })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[tokio::test]
+async fn a_hidden_to_one_target_is_null_without_losing_the_parent() {
+    let mut db = database().await;
+    let (_, order, _) = seed(&db).await;
+    db.set_row_policy(HiddenCustomers);
+    let schema = schema_builder(db).finish();
+    let response = schema
+        .execute(as_user(format!(
+            "{{ order(id: \"{}\") {{ id customer {{ id }} }} }}",
+            order.id
+        )))
+        .await;
+    assert!(response.errors.is_empty(), "{response:?}");
+    let data = response.data.into_json().unwrap();
+    assert_eq!(data["order"]["id"], order.id.to_string());
+    assert!(data["order"]["customer"].is_null());
+}
+
+fn collection_filter_opt_in_is_typed_and_read_only() {
+    let filter = CustomerWhereInput {
+        orders: Some(vec![]),
+        ..Default::default()
+    };
+    assert!(!filter.is_empty());
+    assert!(filter.validate().is_err());
+    let entity = Customer {
+        id: Uuid::new_v4(),
+        name: "Reader".into(),
+        orders: vec![],
+    };
+    assert!(!filter.matches_entity(&entity).unwrap());
+    assert!(filter.__gom_require_scalar_write_filter().is_err());
+}
+
+fn private_read_predicate_is_validated_and_negatable() {
+    let predicate = ReadPredicate::column::<SqliteBackend, Profile>(
+        "hidden_note",
+        ReadPredicateOp::Eq,
+        SqlValue::String("host-owned".into()),
+    )
+    .unwrap()
+    .not()
+    .unwrap();
+    let (sql, values) = EntityQuery::<Profile>::new()
+        .with_read_visibility(&ReadVisibility::Complete(predicate))
+        .unwrap()
+        .build_delete_sql();
+    assert!(sql.contains("NOT ("));
+    assert!(!sql.contains("host-owned"));
+    assert_eq!(values, vec![SqlValue::String("host-owned".into())]);
+    assert!(
+        ReadPredicate::column::<SqliteBackend, Profile>(
+            "missing",
+            ReadPredicateOp::Eq,
+            SqlValue::Null,
+        )
+        .is_err()
+    );
 }

@@ -15,6 +15,7 @@ use syn::spanned::Spanned;
 struct RelationDef {
     field_name: syn::Ident,
     graphql_name: String,
+    read_policy: Option<String>,
     description: String,
     target_type_str: String,
     source_columns: Vec<String>,
@@ -420,6 +421,7 @@ pub(crate) fn generate_graphql_relations(
 
         relations.push(RelationDef {
             field_name,
+            read_policy: meta.read_policy.clone(),
             graphql_name,
             description: meta
                 .description
@@ -490,6 +492,18 @@ pub(crate) fn generate_graphql_relations(
         .map(|r| -> syn::Result<proc_macro2::TokenStream> {
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
+        let relation_read_check = if let Some(policy) = &r.read_policy {
+            let record = if legacy_graphql_complex && entity_meta.compose_complex_object {
+                quote! { &**self }
+            } else {
+                quote! { self }
+            };
+            quote! {
+                db.ensure_readable_field(ctx, stringify!(#struct_name), #graphql_name,
+                    Some(#policy), Some(#record)).await
+                    .map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
+            }
+        } else { quote! {} };
         let relation_loader_identity = format!("{struct_name}::{graphql_name}");
         let description = &r.description;
         let fk_columns_sql = r
@@ -773,6 +787,7 @@ pub(crate) fn generate_graphql_relations(
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_multiple_guard
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    #relation_read_check
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                         .cloned();
@@ -811,9 +826,10 @@ pub(crate) fn generate_graphql_relations(
 
                         let loader = ctx.data_unchecked::<DataLoader<RelationLoader<#target_type, #backend_marker>>>();
                         loader
-                            .load_one(::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(
-                                #relation_query_key, &visibility,
-                            )?)
+                            .load_one(::graphql_orm::graphql::loaders::SelectedRelationQueryKey {
+                                query: ::graphql_orm::graphql::loaders::with_relation_visibility::<#target_type, #backend_marker>(#relation_query_key, &visibility)?,
+                                selection: ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
+                            })
                             .await
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_loader)?
                             .unwrap_or(::graphql_orm::graphql::loaders::RelationLoadResult {
@@ -859,26 +875,15 @@ pub(crate) fn generate_graphql_relations(
                             ).await?
                         } else {
                         query = query.with_read_visibility(&visibility)?;
-                        // Count must be computed before/independent of pagination window.
-                        // EntityQuery::count ignores limit/offset and uses only WHERE clauses.
-                        let total = query
-                            .count_with_auth(db, auth_context.as_ref())
-                            .await
-                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
-                        let offset = resolved_page.offset.max(0) as usize;
-
-                        let entities = query
-                            .fetch_all_with_auth(db, auth_context.as_ref())
-                            .await
-                            .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
-
+                        let connection = query.fetch_connection_selected_with_auth(
+                            db, auth_context.as_ref(), ::graphql_orm::graphql::pagination::ConnectionSelection::from_context(ctx),
+                        ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                         ::graphql_orm::graphql::loaders::RelationLoadResult {
-                            has_next_page: (offset as i64 + entities.len() as i64) < total,
-                            has_previous_page: offset > 0,
-                            entities,
-                            total_count: total,
-                            offset: offset as i64,
+                            has_next_page: connection.page_info.has_next_page,
+                            has_previous_page: connection.page_info.has_previous_page,
+                            entities: connection.edges.into_iter().map(|edge| edge.node).collect(),
+                            total_count: connection.page_info.total_count.unwrap_or(0),
+                            offset: resolved_page.offset.max(0),
                         }
                         }
                     };
@@ -918,6 +923,7 @@ pub(crate) fn generate_graphql_relations(
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_single_guard
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    #relation_read_check
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                         .cloned();
@@ -969,7 +975,7 @@ pub(crate) fn generate_graphql_relations(
                                 <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                 ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation, row,
                             ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)? {
-                                return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                                return Ok(None);
                             }
                         }
                     }
@@ -1292,7 +1298,20 @@ pub(crate) fn generate_graphql_relations(
     let struct_name_str = struct_name.to_string();
     let has_relations = !relations.is_empty();
 
-    let complex_object_impl = if has_relations {
+    let identity_fields = if legacy_graphql_complex
+        && (entity_meta.node_id.is_some()
+            || parsed_fields.iter().any(|field| field.meta.managed_version))
+    {
+        crate::entity::generate_complex_identity_fields(input)?
+    } else {
+        quote! {}
+    };
+    let identity_witness = if !identity_fields.is_empty() {
+        quote! { const __GOM_COMPLEX_IDENTITY_FIELDS: () = (); }
+    } else {
+        quote! {}
+    };
+    let complex_object_impl = if has_relations || !identity_fields.is_empty() {
         if legacy_graphql_complex && entity_meta.compose_complex_object {
             let relation_object = syn::Ident::new(
                 &format!("{struct_name}GeneratedRelations"),
@@ -1313,6 +1332,7 @@ pub(crate) fn generate_graphql_relations(
 
                 #[::graphql_orm::async_graphql::Object(name = #relation_object_name)]
                 impl<'a> #relation_object<'a> {
+                    #identity_fields
                     #(#relation_resolvers)*
                 }
 
@@ -1328,6 +1348,7 @@ pub(crate) fn generate_graphql_relations(
             quote! {
                 #[::graphql_orm::async_graphql::ComplexObject]
                 impl #struct_name {
+                    #identity_fields
                     #(#relation_resolvers)*
                 }
             }
@@ -1382,6 +1403,8 @@ pub(crate) fn generate_graphql_relations(
         }
 
         impl #struct_name {
+            #identity_witness
+
             fn __gom_selection_contains(
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
                 target: &str,

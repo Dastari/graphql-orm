@@ -304,6 +304,37 @@ The first implementation records relation search metadata and keeps local search
 through generated writes. For relation-heavy documents, run an explicit search rebuild after large
 related-data changes until deeper propagation is enabled.
 
+## Denied and absent relation targets
+
+Generated to-one fields are nullable, independent of the source foreign key's
+nullability. A callback row denial and a target excluded by SQL read visibility
+resolve to null without errors, exactly like a physically absent target. Collection
+relations omit denied targets and count only visible targets. Callback policy
+errors still fail closed; they are never converted to null or empty collections.
+
+Target entity read denials and relation-field `read_policy` denials are explicit
+`FORBIDDEN` errors. Relation-field policy checks run on the source record before
+looking up targets, including absent ones. Missing policy providers retain
+`AUTHORIZATION_MISCONFIGURED`. These operation/field denials are independent of
+row existence. Public errors are sanitized at the relation boundary.
+
+A handwritten non-null relation cannot promise availability under visibility
+filtering. Prefer the generated nullable field. If a host exposes a non-null
+wrapper, report identical unavailability for denied and absent targets and let
+GraphQL propagate errors to the nearest nullable boundary. The pinned runtime
+currently omits failed fields while retaining siblings in the handwritten wrapper
+fixture, even for a non-null field; this is not compliant null propagation.
+Generated relations therefore make no non-null availability promise. Hosts should
+use the nullable generated field instead of relying on that wrapper behavior.
+Never substitute a
+hidden target to satisfy a non-null schema promise. Changed snapshots reject
+nested relation selections at admission, as described below.
+
+The regression matrix is in `tests/denied_relations.rs`: single, list and
+connection parents, nullable to-one, a handwritten non-null wrapper, collections,
+and Changed admission. Tests compare complete serialized denied/absent responses
+and the instrumented query counter; this does not claim constant wall-clock time.
+
 ## Subscription release authorization
 
 Generated ordinary and append-only subscriptions recheck current request,
@@ -432,8 +463,14 @@ filter signature, sort signature, page signature, and auth context. Belongs-to r
 same grouped loader with a single-row result per parent key.
 
 Paged relation connections are pushed into SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` and a
-grouped count on SQLite, Postgres, and MSSQL-capable relation reads. This avoids loading every child
-row for every selected parent when a nested field asks for the first page of a large relation. When a
+grouped count on SQLite, Postgres, and MSSQL-capable relation reads. The window projects only the
+complete primary key and parent identity; the bounded keys join back to the entity table for full
+page rows. Non-ordering payload columns stay out of the partition window. With an index covering
+the parent, sort and key columns, ranking can use a covering scan and fetch wide rows by primary
+key only for the page. Ranking and exact totals still inspect matching keys; arbitrary filters or
+sorts on wide columns can still require reading those columns. Read predicates, auth context,
+primary-key tie breakers and batched multi-parent behavior are preserved. Count-only GraphQL
+selections still execute the page query. When a
 relation has no page argument, the loader keeps the simpler batched query and groups the returned
 rows in memory.
 
@@ -672,3 +709,39 @@ reused schema/loader requests, two identities, expired/source-denied identities,
 nullable error paths, alias/fragment selection and bounded page/count semantics
 on SQLite and test-owned disposable PostgreSQL. SQLite tracing also measures
 real multi-parent target dispatches. MSSQL coverage is compilation only.
+
+## Authorized collection filters
+
+Use `#[relation(target = "Link", from = "id", to = "parent_id", multiple, filter)]`
+to expose the relation name in the source's generated `WhereInput`. For example,
+`where: {links: [{targetId: {in: ["x", "y"]}}]}` matches parents with any authorized
+matching link. An empty list matches no parents. Each alternative is a typed target
+Where input; `and`, `or`, `not`, complete composite relation keys, and nested opted-in
+collections compose normally. Values are SQL binds, never interpolated SQL.
+
+Generated list, keyset/scan and aggregate roots resolve target entity and referenced
+field authority and intersect target read visibility inside a correlated `EXISTS`.
+This happens before paging and counts. For many-to-many data, declare a collection
+of link entities and an opted-in collection from each link to its target; both link
+and target row policies then apply inside their respective `EXISTS`. A denied target
+has the same membership effect as an absent target, including under negation.
+
+This static API does not reuse runtime schema handles or runtime `RelationFilter`
+grants. It requires `ReadVisibility::Complete` or `Unrestricted` for every traversed
+entity; residual row authorization, conditional relations, relation field policies,
+and spatial filter combinations are refused. Filters are limited to eight levels,
+128 nodes and 512 binds per related predicate. Context-free repository helpers
+reject unprepared relation predicates. Nested relation resolvers do not prepare
+these predicates; the supported entry points are generated roots. Semantic field
+metadata continues to describe the selectable relationship; it does not advertise
+these predicates as scalar filter operators.
+
+Filtered keyset cursors bind caller-visible typed filter input, excluding private
+SQL visibility parameters. Authorization is still evaluated on each request. Restart
+pagination when filters change or when upgrading from a version that issued unbound
+filtered cursors. No data migration is needed.
+
+Related-row filters are read-only. Bulk updates and deletes (including bounded repository
+and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
+or `not` with `invalid_input` before writing. Select authorized rows through a read
+first and use supported key-based mutations when needed. No data migration is needed.

@@ -21,7 +21,15 @@ pub const HIDDEN_ZONE: &str = "zone-hidden";
 pub struct CallerScopes(pub Vec<String>);
 
 #[derive(
-    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    GraphQLEntity,
+    GraphQLOperations,
+    GraphQLRelations,
+    async_graphql::SimpleObject,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
 )]
 #[cfg_attr(
     feature = "sqlite",
@@ -63,8 +71,10 @@ pub struct CallerScopes(pub Vec<String>);
         aggregate = true
     )
 )]
+#[graphql(complex)]
 pub struct Zone {
     #[primary_key]
+    #[filterable(type = "string")]
     pub id: String,
 
     #[filterable(type = "string")]
@@ -74,6 +84,23 @@ pub struct Zone {
     /// Served by the router as the fixed `RecordVersion` field as well.
     #[graphql_orm(version = "managed", default = "0")]
     pub row_version: i64,
+
+    /// Relation traversal shares the owning subgraph's row authorization.
+    #[graphql(skip)]
+    #[relation(target = "Zone", from = "id", to = "id", emit_fk = false)]
+    pub self_zone: Option<Box<Zone>>,
+}
+
+impl BatchLoadEntity for Zone {
+    fn batch_column() -> &'static str {
+        "id"
+    }
+
+    fn batch_key_from_row(row: &graphql_orm::DbRow) -> Result<String, graphql_orm::sqlx::Error> {
+        #[cfg(not(feature = "mssql"))]
+        use graphql_orm::sqlx::Row;
+        row.try_get("id")
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -132,9 +159,44 @@ impl graphql_orm::graphql::orm::EntityPolicy for ScopedEntityPolicy {
 }
 
 /// Federation entity-key resolution also checks the loaded row's current scope.
+///
+/// The same decision is also stated as a complete SQL predicate. A generated
+/// aggregate is answered by the database and cannot run a per-row callback, so
+/// an aggregate over a callback-only policy is refused; the predicate lets
+/// the aggregate root count exactly the rows the callback would let through.
 struct ScopedRowPolicy;
 
 impl RowPolicy for ScopedRowPolicy {
+    fn read_visibility<'a>(
+        &'a self,
+        ctx: Option<&'a async_graphql::Context<'_>>,
+        _db: &'a graphql_orm::db::Database,
+        _entity_name: &'static str,
+        _policy_key: Option<&'static str>,
+        _surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<ReadVisibility>> {
+        Box::pin(async move {
+            let holds_scope = ctx
+                .and_then(|ctx| ctx.data_opt::<CallerScopes>())
+                .is_some_and(|scopes| scopes.0.iter().any(|scope| scope == READ_SCOPE));
+            if !holds_scope {
+                return Err(async_graphql::Error::new(format!(
+                    "zones subgraph denied the caller: scope `{READ_SCOPE}` is required"
+                )));
+            }
+            Ok(ReadVisibility::Complete(ReadPredicate::from_filter::<
+                graphql_orm::DefaultBackend,
+                _,
+            >(&ZoneWhereInput {
+                id: Some(StringFilter {
+                    ne: Some(HIDDEN_ZONE.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })?))
+        })
+    }
+
     fn can_read_row<'a>(
         &'a self,
         ctx: Option<&'a async_graphql::Context<'_>>,

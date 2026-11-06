@@ -3,12 +3,195 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.91.1 to 0.92.0: bulk post-commit notifications
+
+**ORM/macros 0.92.0:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
+
+## 0.91.1 to 0.92.0: bulk refusal payloads
+
+Two details of this rule. A callback failure that reached its `async_graphql::Error` through `?`, so with a source and no `code` extension, is not an authored refusal: its text stays private, and the bulk client sees the safe category. Give a refusal a message with `Error::new`, or set a `code`, to have it reach the client. And repository callers that matched `sqlx::Error::Protocol` to find a public refusal should use `OrmPublicError::from_sqlx`, because a refusal now travels as a private type inside `sqlx::Error::Decode`. Its text still contains the stable `graphql-orm-public:<CODE>`.
+
+No data migration is needed. Generated bulk update/delete refusals from hooks,
+row policies, transforms and field policies now return `success: false`, the
+original `error` message, and nullable `errorCode` with the original string code.
+Unexpected database failures retain safe messages and codes. Select `errorCode`
+in bulk client queries; refresh pinned SDL and generated client types. Error
+codes absent from the callback remain null. Bulk result Rust struct literals
+must initialize `error_code` (or use the existing constructors).
+
+SQLx adapters now carry refusals with a private typed error rather than a protocol
+string. Use `graphql_error_from_sqlx` to recover the authored GraphQL message/code;
+do not match `graphql-orm-public:` strings in SQLx errors.
+
+## 0.91.1 to 0.92.0: rejected field writes fail the mutation
+
+No data migration or schema change is needed. Consumers are affected if a generated
+mutation with a field `write_policy` receives `false` from `can_write_field` and
+previously relied on success after dropping that input. Search entity declarations
+for `write_policy`, inspect their `FieldPolicy` implementations, and test denied
+optional create/upsert inputs and denied optional or required update inputs.
+
+By default these writes now fail with a forbidden error naming the GraphQL field,
+including bulk updates, and write nothing. Single-row denials are GraphQL errors with
+`extensions.code = "FORBIDDEN"` and `extensions.deniedWriteField` containing the
+public field name. Bulk denials use the payload `error` and `errorCode = "FORBIDDEN"`
+with the public field name in the message. Adjust clients to handle refusal or
+stop sending fields they cannot write. To preserve legacy omission deliberately,
+add this method to your existing `impl FieldPolicy`:
+
+```rust,ignore
+fn ignore_denied_field_write(&self, entity: &'static str, field: &'static str) -> bool {
+    entity == "Record" && field == "note"
+}
+```
+
+Return `true` unconditionally for a global compatibility opt-out. It applies only
+to generated paths that previously dropped inputs: optional create/upsert fields
+and supplied update fields of either nullability. Required create/upsert fields
+still fail on denial. Policy errors and missing-provider errors still propagate;
+repository field authorization remains strict. Omitted update fields remain untouched.
+## 0.91.1 to 0.92.0: type-aware implicit timestamps
+
+String (including optional String) fields named `created_at` or `updated_at` with
+no explicit default now get an RFC 3339 UTC SQL default on newly created columns.
+Integer fields still use Unix epoch seconds. String `#[date_field]` columns use
+native timestamp expressions on PostgreSQL/MSSQL and RFC 3339 on SQLite; static
+DateTime defaults convert to runtime `CurrentTimestamp`. Generated writes to a non-host-managed
+physical `updated_at` column also use the field type, even when the caller omits it.
+Raw SQL UPDATE does not fire a default. Host-managed timestamps retain supplied
+values; explicit SQL defaults and `default = false` keep their existing meaning.
+
+No automatic data migration is performed: existing rows are never rewritten.
+Catalog equivalences are comparison-only: the shared default canonicalizer and
+existing default-expression hash inputs remain unchanged.
+
+MSSQL introspection now retains NVARCHAR lengths (including MAX), which it
+previously omitted. Physical schema hashes containing NVARCHAR columns therefore
+change, and any saved MSSQL migration plan using the old source hash must be
+regenerated from the live catalog before use via
+`db.schema().plan_migration_to_entities(...)` under `PlanOnly` or
+`ExternalWritable` schema policy. Inspect `CHARACTER_MAXIMUM_LENGTH`
+in `INFORMATION_SCHEMA.COLUMNS` to detect these columns. No rows or defaults are
+changed by this catalog correction; integer-only schemas retain their hashes.
+
+Reopening accepts the exact old epoch default on a text column in place of the new
+implicit expression, without rebuilding the table or altering its default. Thus
+omitted inserts into existing columns continue to produce digit strings until an
+operator explicitly changes the stored default. This compatibility rule also
+applies when those exact expressions are explicitly declared; use an explicit SQL
+migration to change between them on an existing text column.
+
+Detect affected columns by inspecting entity metadata for String fields with the
+Rust names `created_at`/`updated_at`, no explicit default, and database catalog
+defaults (`PRAGMA table_info` on SQLite, `information_schema.columns.column_default`
+on PostgreSQL, `sys.default_constraints` on MSSQL). The old expressions are
+`unixepoch()`, `EXTRACT(EPOCH FROM NOW())::bigint`, and
+`DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())`, respectively. Audit stored
+values too: digit-only strings indicate legacy epoch seconds; RFC 3339 parsing
+identifies timestamp strings. A supplied application value may use either format.
+
+Consumers that need uniform values must explicitly migrate the default and, if
+wanted, convert only validated epoch-second rows to UTC timestamps in an owned,
+reviewed data migration (SQLite requires a table rebuild to change a default).
+Alternatively declare `timestamp = "host"` and supply canonical strings yourself.
+For example, replace the identifiers below with the inspected table/column:
+
+```sql
+-- PostgreSQL: changes future omitted inserts only.
+ALTER TABLE records ALTER COLUMN created_at SET DEFAULT
+  to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
+-- MSSQL: first drop the inspected sys.default_constraints constraint, then:
+ALTER TABLE records ADD DEFAULT
+  (CONVERT(varchar(27), SYSUTCDATETIME(), 126) + 'Z') FOR created_at;
+```
+
+For SQLite, rebuild the table in a transaction with the same schema, indexes and
+foreign keys, changing only the default to
+`(strftime('%Y-%m-%dT%H:%M:%f000Z','now'))`; copy every existing column verbatim,
+validate foreign keys, then swap tables. Do not convert row values implicitly.
+
+Mixed digit/RFC 3339 text sorts by the database's text collation, not instant: under
+binary ordering modern epoch strings starting with `1` precede ISO dates starting
+with `2`, regardless of their actual time; different digit lengths and offsets add
+further discrepancies. Keyset paging uses this same stored ordering and key tie
+breakers. Normalize values before relying on chronological pages; discard old
+cursors after normalization and restart paging. No migration is needed for integer
+columns or applications intentionally retaining existing text representations.
+## AI 0.120.2 to 0.121.0: finite provider session cleanup
+
+Handle `AiProviderSessionState::CleanupExhausted` in exhaustive matches and apply
+AI schema module `0.76.0` before restarting all workers. No row data migration is needed.
+Custom Codex process adapters must implement bounded absence confirmation.
+Cleanup retries grow and stop, retaining the protected cursor for investigation;
+see the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
+## 0.91.1 to 0.92.0: relation denial contract
+
+No data migration is needed. Find queries selecting generated to-one relations
+and clients inspecting `FORBIDDEN` at those relation paths: a target rejected
+by `can_read_row` now returns null without errors, matching a physically absent
+target. Collections still exclude rejected rows. Entity denials and relation-field
+`read_policy` denials remain errors, including when the target is absent.
+Declared relation-field read policies are now enforced before loading targets;
+a missing provider remains a fail-closed configuration error. Audit relation
+fields bearing `#[graphql_orm(read_policy = "...")]` and supply their FieldPolicy.
+Generated to-one fields remain nullable; a handwritten non-null wrapper must
+handle unavailability with the same error for denied and absent targets, and
+GraphQL requires propagation to the nearest nullable boundary; the pinned
+runtime currently omits a failed handwritten non-null field while retaining
+siblings. Use the generated nullable relation rather than relying on that
+non-compliant wrapper behavior. Nested relation
+selections on Changed snapshots remain rejected at admission.
+
+## 0.91.1 to 0.92.0: relation-bearing identity fields
+
+No data migration is needed. Complex entities deriving `GraphQLRelations` can
+opt into `node_id` and automatically serve a readable managed version as
+`RecordVersion`, including Changed snapshots. Existing composed handwritten
+version fields remain supported. Consumers can remove an equivalent handwritten
+`RecordVersion` resolver; its declared version column still controls read policy
+and subscription availability. Inspect the entity SDL for `NodeId`,
+`RecordVersion` and `@key(fields: "NodeId")` to detect the generated contract.
+## 0.91.1 to 0.92.0: keyset cursors bind entity and filter
+
+Restart in-flight keyset pagination after upgrading: a generated keyset cursor, scan continuation or protected runtime GraphQL cursor issued by 0.91.1 or earlier may be refused once with `CURSOR_INVALID` (`invalid_cursor` at runtime). Configured-order cursors now name their entity; scan and `MutationContext` keyset reads bind the caller's filter as filtered `recordsKeyset` already does; protected runtime cursors authenticate the caller's `where` digest. Nothing else changes for correct clients, and none of it affects stored data, so no data migration is needed. A client that reused one cursor with a different filter or on another entity now receives `CURSOR_INVALID` instead of a page; detect it by that error code. Value drift while paging is unchanged and is documented in the [pagination guide](docs/reference/graphql-orm/pagination-migration.md#value-drift-is-inherent-to-keyset-paging). `RepositoryEntity` and handwritten filters, and unprotected runtime cursors, remain unbound to the filter.
+
+## 0.91.1 to 0.92.0: authorized static collection filters
+
+Related-row filters are read-only. Bulk updates and deletes (including bounded repository
+and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
+or `not` with `invalid_input` before writing. Select authorized rows through a read
+first and use supported key-based mutations when needed. No data migration is needed.
+
+No data migration is needed. Opt in with `#[relation(..., multiple, filter)]` on an unconditional public collection relation. Its generated Where field accepts a list of target Where alternatives, including nested opted-in collections. Every traversed entity must provide `Complete` SQL read visibility or `Unrestricted`; callback-only/prefilter policies are rejected. Relation field policies and spatial combinations are unsupported and fail closed. Existing declarations require no changes.
+
+Filtered keyset cursors now bind the caller-visible typed filter input. Clients must restart filtered keyset pagination after upgrading (old cursors return `cursor_invalid`), when changing filters. Unfiltered cursors retain their identity. Private SQL visibility parameters are excluded from cursor fingerprints; ordinary per-request authorization still applies. Generated GraphQL list, keyset/scan and aggregate roots prepare relation filters under request authority; unprepared filters in context-free repository helpers are rejected. The preparation budget is eight levels and 128 filter nodes, with at most 512 binds per related predicate.
+## 0.91.1 to 0.92.0: private and negated read predicates
+
+No data migration is needed. Existing policies and working keyset roots are unchanged. Policies may opt into `ReadPredicate::column::<Backend, Entity>("column", ReadPredicateOp::Gt, SqlValue::Int(bound))` for private persisted columns and `.not()?` for SQL negation. UNKNOWN remains UNKNOWN and does not authorize a row. Policies that always return `Prefilter` or `CallbackOnly` should omit `keyset` from `query_shapes` and use bounded `scan` instead; detect these by `AUTHORIZATION_MISCONFIGURED` on every keyset request.
+## 0.91.1 to 0.92.0: aggregate counts from two subgraphs, test only
+
+No action is required, and no data migration. This item adds a test and changes no runtime behaviour. A consumer who set `aggregate = false` on an entity only to avoid the aggregate result-type collision between two subgraphs can restore `aggregate = true`: the shared result objects have been `@shareable` since 0.82.0. A generated aggregate still needs a row policy whose `read_visibility` is `Complete` or `Unrestricted`; with a callback-only policy it is refused, which is intended.
+## 0.91.1 to 0.92.0: selected connection queries
+
+No consumer action or data migration is needed. Upgrade ORM and macros together. Static top-level and relation offset connections omit SQL for unselected components; selected values and authorization are unchanged. Detect the change by observing one statement for count-only or row-only pages. Existing direct connection fetch methods still return complete connections. The additive `ConnectionSelection` and `fetch_connection_selected_with_auth` support callers that intentionally accept placeholders for unselected fields.
+
+## 0.91.1 to 0.92.0: narrow relation pagination windows
+
+No consumer action or data migration is needed. SQL-pushed static paginated relations on SQLite, PostgreSQL and MSSQL fetch full entities only for the requested page. GraphQL schemas, rows, totals, ordering and read policies are unchanged. Hosts can identify the optimization by the primary-key join outside the relation window in emitted SQL. Count-only GraphQL selections still load the requested page; selection-aware loading is a separate change.
+## 0.91.1 to 0.92.0: dedicated schema export builds
+
+No data migration is needed. Normal builds require no changes. Export tools may
+opt into the macro crate `schema-export-only` feature only in a dedicated build.
+Cargo unifies features: one dependency enabling it stubs all consumers of the same
+macro package in that build graph. Inspect `cargo tree -e features -i graphql-orm-macros`
+and remove it from production graphs. See [schema export](docs/reference/graphql-orm/schema-export.md).
 
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 

@@ -176,7 +176,8 @@ async fn provider_session_fixture() -> ProviderSessionFixture {
     let runs = OrmAiRunService::new(
         database.clone(),
         clock.clone(),
-        AiRunServiceLimits::new(Duration::minutes(1), Duration::minutes(1), 16, 3, 3)
+        // Keep the run fence live while tests advance through cleanup backoff.
+        AiRunServiceLimits::new(Duration::days(2), Duration::minutes(1), 16, 3, 3)
             .expect("run limits should validate"),
     )
     .with_cancellation_hub(cancellation_hub.clone());
@@ -715,7 +716,7 @@ async fn changed_active_plan_is_cleaned_and_rebound_without_stranding_the_run() 
         )
         .await
         .expect("transient deletion failure should retain the cleanup origin");
-    fixture.clock.advance_seconds(2);
+    fixture.clock.advance_seconds(61);
     let cleanup = fixture
         .provider_sessions
         .claim_cleanup("changed-plan-cleanup-worker")
@@ -856,6 +857,132 @@ async fn provider_session_resume_atomically_rotates_a_fresh_current_principal() 
     assert_ne!(first_claim.run_id(), refreshed_claim.run_id());
 }
 
+async fn cleanup_failure_fixture() -> (
+    ProviderSessionFixture,
+    AiRunLease,
+    AiProviderSessionTurnPlan,
+) {
+    let fixture = provider_session_fixture().await;
+    let owner = fixture.owner.clone();
+    let first_run = active_run(&fixture, &owner, "rebind-workspace").await;
+    let descriptor = AiProviderSessionDescriptor::new(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "reviewed-model",
+        "a".repeat(64),
+        "codex-app-server/v2",
+        "b".repeat(64),
+    )
+    .expect("provider descriptor should validate");
+    let first_claim = fixture
+        .provider_sessions
+        .bind_for_run(
+            &first_run,
+            AiProviderSessionBindRequest::new(
+                descriptor.clone(),
+                AiProviderSessionCursor::new("codex.thread", "deleted-thread")
+                    .expect("old cursor should validate"),
+                "c".repeat(64),
+                None,
+            )
+            .expect("old bind request should validate"),
+        )
+        .await
+        .expect("old provider session should bind");
+    fixture
+        .provider_sessions
+        .require_cleanup(&first_claim, "provider_turn_uncertain")
+        .await
+        .expect("uncertain provider turn should require cleanup");
+
+    let plan = AiProviderSessionTurnPlan::new(descriptor, "d".repeat(64)).unwrap();
+    (fixture, first_run, plan)
+}
+
+#[tokio::test]
+async fn cleanup_failures_grow_backoff_and_exhaust_without_authorizing_rebind() {
+    check_cleanup_budget(true, false, 60).await;
+}
+
+#[tokio::test]
+async fn cleanup_failures_exhaust_without_authorizing_rebind() {
+    check_cleanup_budget(false, false, 60).await;
+}
+
+#[tokio::test]
+async fn expired_cleanup_leases_also_exhaust_the_attempt_budget() {
+    check_cleanup_budget(false, true, 60).await;
+}
+
+#[tokio::test]
+async fn cleanup_backoff_scales_the_requested_base_delay() {
+    check_cleanup_budget(true, false, 180).await;
+}
+
+async fn check_cleanup_budget(check_growth: bool, abandon_claim: bool, base_seconds: i64) {
+    let (fixture, first_run, plan) = cleanup_failure_fixture().await;
+    for attempt in 0..=10 {
+        let cleanup = fixture
+            .provider_sessions
+            .claim_cleanup("cleanup-worker")
+            .await
+            .unwrap()
+            .expect("retry should become eligible");
+        if abandon_claim {
+            fixture.clock.advance_seconds(301);
+        } else {
+            fixture
+                .provider_sessions
+                .schedule_cleanup_retry(
+                    &cleanup,
+                    Duration::seconds(base_seconds),
+                    "provider_delete_unavailable",
+                )
+                .await
+                .unwrap();
+            if attempt < 10 {
+                // Check the exact exponential boundary, including its one-hour cap.
+                let delay = (base_seconds * (1_i64 << attempt)).min(3600);
+                if check_growth {
+                    fixture.clock.advance_seconds(delay - 1);
+                    assert!(
+                        fixture
+                            .provider_sessions
+                            .claim_cleanup("cleanup-worker")
+                            .await
+                            .unwrap()
+                            .is_none(),
+                        "cleanup must honor the growing delay"
+                    );
+                    fixture.clock.advance_seconds(1);
+                } else {
+                    fixture.clock.advance_seconds(3600);
+                }
+            }
+        }
+    }
+    fixture.clock.advance_seconds(86400);
+    for _ in 0..2 {
+        assert!(
+            fixture
+                .provider_sessions
+                .claim_cleanup("cleanup-worker")
+                .await
+                .unwrap()
+                .is_none(),
+            "exhausted failures must stop provider calls"
+        );
+    }
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .disposition_for_run(&first_run, &plan)
+            .await
+            .unwrap(),
+        AiProviderSessionRunDisposition::Unavailable(AiProviderSessionState::CleanupExhausted)
+    ));
+}
+
 #[tokio::test]
 async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
     let fixture = provider_session_fixture().await;
@@ -942,7 +1069,7 @@ async fn exact_absence_authorizes_one_fenced_rebind_with_a_fresh_cursor() {
             .expect("backoff disposition should resolve"),
         AiProviderSessionRunDisposition::Unavailable(AiProviderSessionState::CleanupBackoff)
     ));
-    fixture.clock.advance_seconds(2);
+    fixture.clock.advance_seconds(61);
     let cleanup = fixture
         .provider_sessions
         .claim_cleanup("provider-session-cleanup-worker")

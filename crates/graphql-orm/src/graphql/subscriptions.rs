@@ -681,14 +681,36 @@ pub fn validate_subscription_selection<T: Entity, B: OrmBackend>(
                 continue;
             }
             if !field.node.selection_set.node.items.is_empty()
-                || !T::columns().iter().any(|column| column.api_name == name)
-                || !T::subscription_field_policy(name).is_some_and(|(_, available, _)| available)
+                || if is_node_identity::<T>(name) {
+                    !subscription_keys_available::<T, B>()
+                } else {
+                    !T::columns().iter().any(|column| column.api_name == name)
+                        || !T::subscription_field_policy(name)
+                            .is_some_and(|(_, available, _)| available)
+                }
             {
                 return Err(unsupported_subscription_selection());
             }
         }
     }
     Ok(())
+}
+
+// Only a generated NodeId opts into this path; arbitrary computed fields remain refused.
+fn is_node_identity<T: Entity>(name: &str) -> bool {
+    name == "NodeId" && T::subscription_field_policy(name) == Some(("__gom_node_id", true, None))
+}
+
+fn subscription_keys_available<T: Entity, B: OrmBackend>() -> bool {
+    T::PRIMARY_KEYS.iter().all(|key| {
+        T::columns()
+            .iter()
+            .find(|column| {
+                column.name == *key || B::DIALECT.quote_identifier_path(column.name) == *key
+            })
+            .and_then(|column| T::subscription_field_policy(column.api_name))
+            .is_some_and(|(_, available, _)| available)
+    })
 }
 
 /// The persisted field behind a selected name: the fixed record version name
@@ -729,6 +751,14 @@ where
                 if name == "__typename" {
                     continue;
                 }
+                let scalar_ctx = field_ctx.with_field(scalar);
+                if is_node_identity::<T>(name) {
+                    if !scalar.node.selection_set.node.items.is_empty() {
+                        return Err(OrmPublicError::forbidden().into_graphql_error());
+                    }
+                    authorize_subscription_keys::<T, B>(db, &scalar_ctx, row).await?;
+                    continue;
+                }
                 // Nested relation/custom resolvers can fail after outer metadata
                 // has been written. Only persisted scalar snapshots are proved here.
                 if !scalar.node.selection_set.node.items.is_empty()
@@ -736,7 +766,6 @@ where
                 {
                     return Err(OrmPublicError::forbidden().into_graphql_error());
                 }
-                let scalar_ctx = field_ctx.with_field(scalar);
                 check_field::<T, B>(db, &scalar_ctx, row, name).await?;
             }
         }

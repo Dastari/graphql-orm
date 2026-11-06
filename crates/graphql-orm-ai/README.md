@@ -10,6 +10,11 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.121.0` bounds provider session cleanup with growing delays and visible
+`CleanupExhausted` failures. Codex cleanup requires bounded absence confirmation
+even after a delete acknowledgement. Upgrade all workers and apply AI schema module
+`0.76.0`; see [MIGRATION.md](MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
+
 Version `0.120.2` runs Codex 0.166.0: lifecycle items carrying nested timing no longer fail the turn, and `turn/moderationMetadata` and `thread/readState/changed` are opted out. No API or schema change; see [MIGRATION.md](MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).
 
 Version `0.120.1` allocates a fresh package identity for the provider-files documentation review-date update. No runtime or schema change; see [MIGRATION.md](MIGRATION.md#01200-to-01201-documentation-package-identity).

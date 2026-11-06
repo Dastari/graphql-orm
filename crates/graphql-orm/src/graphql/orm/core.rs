@@ -2397,6 +2397,36 @@ pub trait MutationContextKeysetConnectionPage<B: WriteBackend = DefaultWriteBack
     >;
 }
 
+/// Safe client-visible failure of one post-commit notification.
+/// A notification failure never changes the committed bulk row count.
+#[derive(Debug, Clone, async_graphql::SimpleObject)]
+#[graphql(shareable)]
+pub struct NotificationError {
+    /// Authored message, or a masked internal error category.
+    pub message: String,
+    /// Optional authored code, or a safe internal error code.
+    pub code: Option<String>,
+}
+
+impl NotificationError {
+    /// Convert an already-sanitized GraphQL error to the additive bulk payload.
+    pub fn from_graphql_error(error: async_graphql::Error) -> Self {
+        let code = error
+            .extensions
+            .as_ref()
+            .and_then(|ext| ext.get("code"))
+            .and_then(|value| match value {
+                async_graphql::Value::String(code) => Some(code.clone()),
+                _ => None,
+            });
+        Self {
+            message: error.message,
+            code,
+        }
+    }
+}
+
+/// Receives errors from work performed after a successful database commit.
 pub trait PostCommitErrorHandler<B: OrmBackend = DefaultBackend>: Send + Sync {
     fn on_post_commit_error<'a>(
         &'a self,
@@ -2529,6 +2559,21 @@ pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Restore legacy omission of policy-denied generated mutation inputs.
+    ///
+    /// Return `true` for selected GraphQL entity/field names, or unconditionally
+    /// for a global opt-out. Defaults to `false`: denial fails the mutation.
+    /// Applies to optional create/upsert fields and supplied update fields;
+    /// required create/upsert fields and repository checks remain strict.
+    /// Policy errors always propagate, regardless of this setting.
+    fn ignore_denied_field_write(
+        &self,
+        _entity_name: &'static str,
+        _field_name: &'static str,
+    ) -> bool {
+        false
+    }
+
     fn can_read_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,

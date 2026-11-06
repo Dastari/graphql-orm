@@ -384,6 +384,11 @@ pub struct Zone {
 
 The entity gains a read-only `NodeId: ID!` field, which has no column and no
 input, and a resolvable `@key(fields: "NodeId")` next to any `federation_key`.
+Complex `SimpleObject` entities deriving `GraphQLRelations` also receive these
+fields, including the `compose_complex_object` layout. Generated `Changed`
+snapshots may select `NodeId`; admission and release check every encoded
+primary-key field rather than treating the identity as authority.
+
 The subgraph SDL never declares `interface Node` or `implements Node`. The
 router discovers the implementing types from these keys and owns the
 interface; with `graphql-composition` 0.12.2, a subgraph-local `interface Node`

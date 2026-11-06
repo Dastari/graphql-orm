@@ -1108,3 +1108,84 @@ async fn postgres_rls_context_is_propagated_to_read_count_and_relation_layers() 
     owner.pool().close().await;
     owned.cleanup().unwrap();
 }
+
+/// A protected cursor is bound to the caller's `where` input: resuming under a
+/// different filter, or under none, is refused exactly like any other
+/// context mismatch, and an empty filter is the same as no filter.
+#[tokio::test]
+async fn protected_cursor_is_bound_to_the_callers_filter() {
+    let _query_counts = QUERY_COUNTS.lock().await;
+    #[cfg(feature = "postgres")]
+    let mut owned = owned_postgres::OwnedPostgres::start("runtime-graphql-f").unwrap();
+    #[cfg(feature = "postgres")]
+    let database = Database::connect_postgres(&owned.url).await.unwrap();
+    #[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+    let database = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+    #[cfg(feature = "postgres")]
+    let json_type = "JSONB";
+    #[cfg(not(feature = "postgres"))]
+    let json_type = "TEXT";
+    graphql_orm::sqlx::query(&format!("CREATE TABLE gql_parents (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, label TEXT NOT NULL, caption TEXT NOT NULL DEFAULT 'caption', document {json_type}, required {json_type} NOT NULL DEFAULT 'null')")).execute(database.pool()).await.unwrap();
+    graphql_orm::sqlx::query("CREATE TABLE gql_children (id BIGINT PRIMARY KEY, tenant TEXT NOT NULL, owner BIGINT NOT NULL, label TEXT NOT NULL)").execute(database.pool()).await.unwrap();
+    graphql_orm::sqlx::query("INSERT INTO gql_parents(id,tenant,label,document) VALUES (1,'north','first','null'),(2,'north','second',NULL),(3,'north','third',NULL)").execute(database.pool()).await.unwrap();
+    let runtime = schema();
+    let module = RuntimeGraphqlModule::compile(runtime.clone(), Default::default()).unwrap();
+    let api = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+        .unwrap()
+        .cursor_protection(
+            Arc::new(TestAead),
+            RuntimeCursorAudience::new("synthetic-tests").unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let authority = Arc::new(Authority {
+        deny_child: AtomicBool::new(false),
+        deny_count: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+        tenant: "north",
+    });
+    let query = "query($w:ParentWhereInput,$c:String){parents(first:1,where:$w,after:$c){edges{node{id}cursor}}}";
+    let run = |filter: serde_json::Value, cursor: serde_json::Value| {
+        api.execute(request(
+            &runtime,
+            authority.clone(),
+            query,
+            serde_json::json!({"w": filter, "c": cursor}),
+        ))
+    };
+    let cursor_of = |response: async_graphql::Response| {
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json().unwrap();
+        data["parents"]["edges"][0]["cursor"].clone()
+    };
+    let tenant = serde_json::json!({"label": {"in": ["first", "second", "third"]}});
+    let label = serde_json::json!({"label": {"in": ["second", "third"]}});
+
+    let filtered = cursor_of(run(tenant.clone(), serde_json::Value::Null).await);
+    let resumed = run(tenant.clone(), filtered.clone()).await;
+    assert!(resumed.errors.is_empty(), "{:?}", resumed.errors);
+    assert_eq!(
+        resumed.data.into_json().unwrap()["parents"]["edges"][0]["node"]["id"],
+        "2"
+    );
+    for (name, filter) in [
+        ("different filter", label.clone()),
+        ("no filter", serde_json::Value::Null),
+    ] {
+        let refused = run(filter, filtered.clone()).await;
+        assert_eq!(refused.errors.len(), 1, "{name}: {:?}", refused.errors);
+    }
+
+    let unfiltered = cursor_of(run(serde_json::Value::Null, serde_json::Value::Null).await);
+    let refused = run(tenant, unfiltered.clone()).await;
+    assert_eq!(refused.errors.len(), 1, "{:?}", refused.errors);
+    // An empty filter is the same query as no filter.
+    let empty = run(serde_json::json!({}), unfiltered).await;
+    assert!(empty.errors.is_empty(), "{:?}", empty.errors);
+    #[cfg(feature = "postgres")]
+    owned.cleanup().unwrap();
+}

@@ -4,6 +4,8 @@ use graphql_orm::async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use graphql_orm::sqlx::Row;
 
+static QUERY_COUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(
     GraphQLEntity,
     GraphQLRelations,
@@ -71,7 +73,7 @@ pub struct LegacyCardFile {
     table = "LegacyCardFileContacts",
     plural = "LegacyCardFileContacts",
     schema_policy = "external_read_only",
-    default_sort = "CardNo ASC, ContNo ASC"
+    default_sort = "DName ASC"
 )]
 pub struct LegacyCardFileContact {
     #[primary_key]
@@ -91,7 +93,10 @@ pub struct LegacyCardFileContact {
     #[graphql(name = "DName")]
     #[graphql_orm(db_column = "DName")]
     #[filterable(type = "string")]
+    #[sortable]
     pub display_name: Option<String>,
+
+    pub payload: Option<String>,
 
     #[graphql(skip, name = "Details")]
     #[relation(
@@ -188,6 +193,10 @@ schema_roots! {
 type TestSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
+    setup_schema_with_wide_rows(0).await
+}
+
+async fn setup_schema_with_wide_rows(rows: i64) -> Result<TestSchema, Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
 
     sqlx::query(
@@ -205,6 +214,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
             CardNo INTEGER NOT NULL,
             ContNo INTEGER NOT NULL,
             DName TEXT NULL,
+            payload TEXT NULL,
             PRIMARY KEY (CardNo, ContNo)
         )",
     )
@@ -266,6 +276,17 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
         .await?;
     }
 
+    if rows > 0 {
+        sqlx::query("WITH RECURSIVE n(x) AS (SELECT 3 UNION ALL SELECT x+1 FROM n WHERE x < ?) INSERT INTO LegacyCardFileContacts SELECT 1001, x, printf('sort-%08d', ? - x), replace(hex(zeroblob(3328)), '0', 'x') FROM n")
+            .bind(rows).bind(rows).execute(&pool).await?;
+    }
+
+    sqlx::query("CREATE INDEX contact_filter ON LegacyCardFileContacts(CardNo)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX contact_sort ON LegacyCardFileContacts(DName)")
+        .execute(&pool)
+        .await?;
     Ok(schema_builder(graphql_orm::db::Database::new(pool))
         .data("test-user".to_string())
         .finish())
@@ -274,6 +295,7 @@ async fn setup_schema() -> Result<TestSchema, Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn nested_composite_relations_batch_without_n_plus_one()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
     let schema = setup_schema().await?;
 
     graphql_orm::graphql::orm::reset_query_count();
@@ -343,8 +365,8 @@ async fn nested_composite_relations_batch_without_n_plus_one()
     );
 
     assert!(
-        graphql_orm::graphql::orm::query_count() <= 4,
-        "expected parent query + contact preload + detail batch query, got {} queries",
+        graphql_orm::graphql::orm::query_count() <= 5,
+        "expected batched contact and detail row/count queries, got {} instrumented queries",
         graphql_orm::graphql::orm::query_count()
     );
 
@@ -410,4 +432,235 @@ fn composite_relation_predicates_render_for_all_backends() {
             .sql
             .contains("([CardNo] = @P1 AND [ContNo] = @P2) OR ([CardNo] = @P3 AND [ContNo] = @P4)")
     );
+}
+
+/// Reproducible release measurement; setup is excluded from the timings.
+#[tokio::test]
+#[ignore = "large relation performance fixture"]
+async fn wide_relation_measurement() -> Result<(), Box<dyn std::error::Error>> {
+    let schema = setup_schema_with_wide_rows(16_434).await?;
+    for relation in [false, true] {
+        for (name, selection) in [
+            ("count_only", "pageInfo { totalCount }"),
+            ("rows_only", "edges { node { CardNo ContNo DName } }"),
+            (
+                "both",
+                "edges { node { CardNo ContNo DName } } pageInfo { totalCount hasNextPage }",
+            ),
+        ] {
+            let query = if relation {
+                format!(
+                    "{{ legacyCardFiles(where: {{ CardNo: {{ eq: 1001 }} }}) {{ edges {{ node {{ Contacts(page: {{ limit: 1 }}) {{ {selection} }} }} }} }} }}"
+                )
+            } else {
+                format!(
+                    "{{ legacyCardFileContacts(where: {{ CardNo: {{ eq: 1001 }} }}, page: {{limit: 1}}) {{ {selection} }} }}"
+                )
+            };
+            for iteration in 0..4 {
+                graphql_orm::graphql::orm::reset_query_count();
+                let start = std::time::Instant::now();
+                let response = schema.execute(&query).await;
+                let elapsed = start.elapsed();
+                assert!(response.errors.is_empty(), "{:?}", response.errors);
+                eprintln!(
+                    "relation={relation} {name} iteration={iteration} elapsed_ms={:.3} statements={}",
+                    elapsed.as_secs_f64() * 1000.0,
+                    graphql_orm::graphql::orm::query_count()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn paginated_composite_relations_keep_each_parents_page_and_total()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
+    let schema = setup_schema().await?;
+    for (offset, limit, expected) in [
+        (0, 1, vec![vec![1], vec![1]]),
+        (1, 1, vec![vec![2], vec![]]),
+        (20, 1, vec![vec![], vec![]]),
+        (0, 0, vec![vec![], vec![]]),
+    ] {
+        graphql_orm::graphql::orm::reset_query_count();
+        let response = schema
+            .execute(format!(
+                r#"{{
+            legacyCardFiles(orderBy: [{{CardNo: ASC}}]) {{ edges {{ node {{
+                Contacts(orderBy: {{ContNo: ASC}}, page: {{offset: {offset}, limit: {limit}}}) {{
+                    edges {{ node {{ CardNo ContNo }} }}
+                    pageInfo {{ totalCount hasNextPage hasPreviousPage }}
+                }}
+            }} }} }}
+        }}"#
+            ))
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let data = response.data.into_json()?;
+        for (index, expected) in expected.iter().enumerate() {
+            let page = &data["legacyCardFiles"]["edges"][index]["node"]["Contacts"];
+            let actual: Vec<i64> = page["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|edge| edge["node"]["ContNo"].as_i64().unwrap())
+                .collect();
+            assert_eq!(&actual, expected);
+            let total = if index == 0 { 2 } else { 1 };
+            assert_eq!(page["pageInfo"]["totalCount"], total);
+            assert_eq!(
+                page["pageInfo"]["hasNextPage"],
+                offset + (actual.len() as i64) < total
+            );
+            assert_eq!(page["pageInfo"]["hasPreviousPage"], offset > 0);
+        }
+        assert_eq!(
+            graphql_orm::graphql::orm::query_count(),
+            3,
+            "one top-level row query and one relation row/count pair shared by both parents"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn connection_selection_omits_unused_statements() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
+    let schema = setup_schema().await?;
+    graphql_orm::graphql::orm::reset_query_count();
+    let response = schema
+        .execute("{ legacyCardFiles(page: {limit: 1}) { pageInfo { totalCount } } }")
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json()?["legacyCardFiles"]["pageInfo"]["totalCount"],
+        2
+    );
+    assert_eq!(graphql_orm::graphql::orm::query_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_connection_selection_matches_full_answer() -> Result<(), Box<dyn std::error::Error>>
+{
+    let _guard = QUERY_COUNT_LOCK.lock().await;
+    let schema = setup_schema().await?;
+    for relation in [false, true] {
+        for (offset, limit) in [(0, 1), (1, 1), (20, 1), (0, 0), (0, 10)] {
+            let execute_query = |selection: String| {
+                if relation {
+                    format!(
+                        "{{ legacyCardFiles(where: {{CardNo: {{eq: 1001}}}}) {{edges {{node {{Contacts(orderBy: {{ContNo: ASC}}, page: {{offset: {offset}, limit: {limit}}}) {{ {selection} }} }} }} }} }}"
+                    )
+                } else {
+                    format!(
+                        "{{ legacyCardFileContacts(where: {{CardNo: {{eq: 1001}}}}, orderBy: [{{ContNo: ASC}}], page: {{offset: {offset}, limit: {limit}}}) {{ {selection} }} }}"
+                    )
+                }
+            };
+            let full = schema.execute(execute_query("edges {cursor node {ContNo}} pageInfo {totalCount hasNextPage hasPreviousPage startCursor endCursor}".into())).await;
+            assert!(full.errors.is_empty(), "{:?}", full.errors);
+            let full = full.data.into_json()?;
+            let extract = |value: serde_json::Value| {
+                if relation {
+                    value["legacyCardFiles"]["edges"][0]["node"]["Contacts"].clone()
+                } else {
+                    value["legacyCardFileContacts"].clone()
+                }
+            };
+            let full = extract(full);
+            for mask in 1..64 {
+                let rows = mask & 1 != 0;
+                let count = mask & 2 != 0;
+                let next = mask & 4 != 0;
+                let start_cursor = mask & 8 != 0;
+                let end_cursor = mask & 16 != 0;
+                let cursors = start_cursor || end_cursor;
+                let previous = mask & 32 != 0;
+                let mut fields = Vec::new();
+                if count {
+                    fields.push("totalCount");
+                }
+                if next {
+                    fields.push("hasNextPage");
+                }
+                if start_cursor {
+                    fields.push("startCursor");
+                }
+                if end_cursor {
+                    fields.push("endCursor");
+                }
+                if previous {
+                    fields.push("hasPreviousPage");
+                }
+                let mut selection = String::new();
+                if rows {
+                    selection.push_str("e: edges {cursor node {ContNo}} ");
+                }
+                if !fields.is_empty() {
+                    selection.push_str(&format!("p: pageInfo {{ {} }}", fields.join(" ")));
+                }
+                let query = format!(
+                    "{} fragment Selected on LegacyCardFileContactConnection {{ ... on LegacyCardFileContactConnection {{ {selection} }} }}",
+                    execute_query("...Selected".into())
+                );
+                graphql_orm::graphql::orm::reset_query_count();
+                let response = schema.execute(query).await;
+                assert!(response.errors.is_empty(), "{:?}", response.errors);
+                let actual = extract(response.data.into_json()?);
+                if rows {
+                    assert_eq!(actual["e"], full["edges"], "mask={mask} offset={offset}");
+                }
+                for field in fields {
+                    assert_eq!(
+                        actual["p"][field], full["pageInfo"][field],
+                        "{field} mask={mask} offset={offset}"
+                    );
+                }
+                // Include the enclosing top-level row query for relation requests.
+                let expected = i64::from(relation)
+                    + i64::from(count)
+                    + i64::from(rows || cursors || (next && !count));
+                assert_eq!(
+                    graphql_orm::graphql::orm::query_count() as i64,
+                    expected,
+                    "relation={relation} mask={mask}"
+                );
+            }
+        }
+    }
+    let response = schema.execute("{ legacyCardFiles(page: {limit: 1}) { ...ConnectionFields } } fragment ConnectionFields on LegacyCardFileConnection { aliased: pageInfo { ... on PageInfo { totalCount } } }").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json()?["legacyCardFiles"]["aliased"]["totalCount"],
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn partial_relation_selections_batch_and_partition_aliases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
+    let schema = setup_schema().await?;
+    for selection in ["pageInfo {totalCount}", "edges {node {ContNo}}"] {
+        graphql_orm::graphql::orm::reset_query_count();
+        let response = schema.execute(format!("{{legacyCardFiles {{edges {{node {{Contacts(page: {{limit: 1}}) {{ {selection} }} }} }} }} }}")).await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert_eq!(
+            graphql_orm::graphql::orm::query_count(),
+            2,
+            "one parent query and one batched relation statement"
+        );
+    }
+    let response = schema.execute("{legacyCardFiles(where: {CardNo: {eq: 1001}}) {edges {node {c: Contacts(page: {limit: 1}) {pageInfo {totalCount}} r: Contacts(page: {limit: 1}) {edges {node {ContNo}}}}}}}").await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json()?;
+    let node = &data["legacyCardFiles"]["edges"][0]["node"];
+    assert_eq!(node["c"]["pageInfo"]["totalCount"], 2);
+    assert_eq!(node["r"]["edges"].as_array().unwrap().len(), 1);
+    Ok(())
 }

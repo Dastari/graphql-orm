@@ -40,6 +40,10 @@ pub(super) struct Plan {
     pub relation_sites: Vec<RelationSite>,
     /// The validated `search` argument of a root list.
     pub search: Option<RuntimeSearchRequest>,
+    /// SHA-256 of the caller's `where` input as planned, before any host grant
+    /// is applied. Absent for no filter or an empty one. It binds protected
+    /// cursors to the filter without placing the filter in them.
+    pub filter_binding: Option<Vec<u8>>,
 }
 impl Plan {
     pub fn relations(&self) -> Vec<RuntimeRelationHandle> {
@@ -180,6 +184,16 @@ impl Planner<'_> {
         let mut filter_intent = FilterIntent::default();
         let mut relation_sites = Vec::new();
         let where_value = args.get("where").filter(|v| *v != &Value::Null).cloned();
+        let filter_binding = where_value
+            .as_ref()
+            .filter(|value| !matches!(value, Value::Object(map) if map.is_empty()))
+            .map(|value| {
+                use sha2::{Digest, Sha256};
+                serde_json::to_vec(value)
+                    .map(|bytes| Sha256::digest(bytes).to_vec())
+                    .map_err(|_| invalid())
+            })
+            .transpose()?;
         let predicate = match &where_value {
             Some(value) => Some(filter(
                 &module.schema,
@@ -503,6 +517,7 @@ impl Planner<'_> {
             where_value,
             relation_sites,
             search,
+            filter_binding,
         })
     }
     /// Validate a projected field's object subselection; returns selected field names.

@@ -56,12 +56,13 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
+| `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
 | `federation_key` | marker, or `(fields = ["GraphQLField", …], assume_unique = bool)` | repeatable; rejected on `repository_entity` and schema-only entities |
-| `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only and `#[graphql(complex)]` entities and on float, nullable or read-policy primary-key fields |
+| `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only entities and on float, nullable or read-policy primary-key fields |
 
 The bare `federation_key` keys on the primary key in declaration order.
 `fields` names exported GraphQL fields, which must be readable, non-null,
@@ -231,13 +232,18 @@ impl BatchLoadEntity for Account {
 }
 ```
 
-Because `node_id` and `RecordVersion` need the generated object, an entity can't currently combine
-them with generated relation fields. See [#270](https://github.com/Dastari/graphql-orm/issues/270) and
-[#288](https://github.com/Dastari/graphql-orm/issues/288).
+`GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
+`RecordVersion` (for an exported managed version) to its complex object.
+They use the same encoding and declared version-field policy as generated objects.
+Both are available in `Changed` snapshots; relations and arbitrary computed fields
+still require a query refresh. Selecting `NodeId` requires every primary-key field
+to remain subscribable and pass its read policy.
 
 `target`, `from`, and `to` are relation metadata. `from` and `to` take either
 one string or an array of string literals for a composite key. `multiple`
-changes the relation cardinality. `emit_fk` is a boolean; `on_delete` and
+changes the relation cardinality. `filter` opts an unconditional public collection into
+authorized target-Where alternatives in generated roots; see
+[authorized collection filters](entities-and-relations.md#authorized-collection-filters). `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
 Relations are not ordinary persisted fields.
 
@@ -287,8 +293,9 @@ relations through an internal flattened object, so handwritten fields and
 batched relation resolvers share the one `async_graphql::ComplexObject` trait
 implementation required by `SimpleObject`.
 
-`compose_complex_object` still counts as `#[graphql(complex)]`, so it doesn't lift the `node_id` and
-`RecordVersion` restrictions.
+Composed objects also include the generated identity fields. Existing handwritten
+`RecordVersion` resolvers remain compatible, but equivalent resolvers can be removed.
+The declared managed column controls subscription preflight policy.
 
 Polymorphic references can add one fixed discriminator condition:
 
@@ -591,10 +598,27 @@ Enable at most one in each group:
 `#[graphql_entity(query_shapes = "list,keyset,scan")]` selects generated query
 shapes for the entity. The available selectors are `single`, `list`, `keyset`,
 `scan`, `search`, and `aggregate`; optional capabilities must be configured.
-Omission preserves all current generated queries. Disabled shapes are absent
+Omission preserves all current generated queries.
+If a row policy can only return `Prefilter` or `CallbackOnly`, omit `keyset`,
+for example `query_shapes = "single,list,scan"`, and install finite scan bounds.
+Keyset requires `Complete` or `Unrestricted`; residual-only policies otherwise
+fail every keyset request with `AUTHORIZATION_MISCONFIGURED`. This is explicit
+shape guidance rather than a registration diagnostic because policy decisions
+are request-dependent; working keyset entities keep their existing behavior. Disabled shapes are absent
 from both SDL and operation metadata. This selection does not alter repository
 APIs, relations, mutations, subscriptions or authorization. See the
 [migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).
+
+## Implicit timestamps
+
+Fields named `created_at` and `updated_at` receive implicit SQL defaults unless
+an explicit default or `default = false` is supplied. String and optional String
+use RFC 3339 UTC; integers use epoch seconds. `#[date_field]` uses native
+`NOW()`/`SYSUTCDATETIME()` defaults on PostgreSQL/MSSQL. Generated non-host-managed writes
+refresh the physical `updated_at` column using its type. SQL defaults alone do not
+refresh timestamps on raw SQL updates. Host management disables generated refresh.
+Existing epoch defaults on text columns are retained without a schema change;
+see the [upgrade and mixed-format paging contract](../../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
 
 ## Host-owned timestamps
 
@@ -672,9 +696,9 @@ type Ticket {
 - It resolves the declared field's value and applies the same field read policy and subscription
   availability. Generated `Changed` payloads may select it.
 - It has no column and no input, filter, order or aggregate entry.
-- CAS-only `version` fields, repository-only and schema-only entities, and legacy
-  `#[graphql(complex)]` entities do not get it. Add it to a complex entity's `ComplexObject` by
-  hand if clients need it.
+- CAS-only `version` fields and repository-only and schema-only entities do not get it.
+  Complex entities deriving `GraphQLRelations` receive it through their relation object;
+  standalone handwritten complex objects still need their own resolver.
 - A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile
   error.
 
@@ -754,3 +778,40 @@ policy-suppressed and propagated subscriptions all behave the same way:
 - The `GraphQLOperations` resolver method returns
   `Stream<Item = async_graphql::Result<ChangedPayload<_>>>`. The SDL type of the subscription field
   is unchanged.
+
+## Post-commit notifications
+
+`notify_with = "handler"` (alias `notify`) calls
+`async fn(&Context<'_>, &Pool, &Entity, ChangeAction) -> async_graphql::Result<()>`
+after a generated GraphQL create, update, delete, upsert, update-many or
+delete-many commits. Bulk update passes the updated row; delete passes the
+deleted pre-image. Every selected row is notified even if earlier calls fail.
+Rollbacks and refusals call no notifications.
+
+Single-row failures propagate through `?` by default, after commit.
+Opt into `notify_on_error = "report"` to send failures through
+`Database::report_post_commit_error` / `PostCommitErrorHandler` and return
+the normal success response. Install that handler to observe these failures.
+
+Bulk responses in both modes retain `success: true` and the committed
+`affectedCount` (update) or `deletedCount` (delete). Nullable
+`notificationErrors` contains every failed call's safe message and nullable
+code; null means no failures. These failures also reach the post-commit
+error handler. Clients must not retry a committed write. Error text follows
+the same authored-message/code rule as bulk refusals; source-bearing
+`?` conversions without an authored code are masked.
+
+GraphQL bulk writes on entities with notifications reject more than 1,000
+matched rows before writing. Split larger work into explicit requests.
+Handlers run sequentially; a separate batch API is unnecessary within this
+bound. This bounds handler calls, not the cost or duration of each handler.
+
+Repository writes have no GraphQL `Context` and do not call this
+GraphQL-specific callback, matching existing single-row repository behavior.
+This includes insert_many/upsert_many/replace_all,
+update_where/delete_where/delete_all, bounded bulk update and
+delete (single and composite keys), retention purge, and every
+`MutationContext` path. Inside `Database::transaction`, use existing deferred
+post-commit actions for repository side effects; they run only after the outer
+commit and are discarded on rollback. Do not invoke this callback before
+the outer commit.

@@ -732,3 +732,21 @@ async fn callback_offset_budget_exhaustion_never_releases_partial_totals_or_node
     assert!(reads.iter().all(|(_, count)| *count <= 7));
     assert_eq!(policy.evaluations.load(Ordering::Relaxed), 19);
 }
+
+#[tokio::test]
+async fn count_only_retains_residual_authorized_total() {
+    let (db, _, _) = setup(Mode::Callback, 10, 128).await;
+    let full = data(&db, "a", "{ visibilityItems(page: {limit: 3, offset: 4}) {edges {node {id}} pageInfo {totalCount hasNextPage}} }".into()).await;
+    let count = data(
+        &db,
+        "a",
+        "{ visibilityItems(page: {limit: 3, offset: 4}) {pageInfo {totalCount hasNextPage}} }"
+            .into(),
+    )
+    .await;
+    assert_eq!(
+        count["visibilityItems"]["pageInfo"],
+        full["visibilityItems"]["pageInfo"]
+    );
+    assert_eq!(count["visibilityItems"]["pageInfo"]["totalCount"], 50);
+}

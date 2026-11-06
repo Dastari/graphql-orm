@@ -5,7 +5,7 @@ title: Using graphql-orm
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -320,6 +320,13 @@ inputs. `deleteOrder(keepInvoice: true)` can't be expressed. This is a gap, trac
 
 ## Relationships
 
+Generated to-one relation fields are nullable: row denial or SQL visibility
+exclusion returns null like an absent target; collections exclude hidden rows.
+Entity and relation-field `read_policy` denials remain explicit errors even for
+absent targets, and policy failures stay errors. Do not wrap a nullable relation
+as non-null unless denied and absent targets have identical unavailability.
+Changed snapshots reject nested relations; refresh an authorized query.
+
 Declare relations rather than leaving bare `*_id` fields. A relation gives you a typed GraphQL field,
 batched loading, a foreign key in managed schemas, and optional propagation. Declare the inverse when
 clients walk both ways.
@@ -331,6 +338,12 @@ a to-many relation, with a `Vec<T>` field. The relation field isn't a column.
 - An entity with relation fields needs `GraphQLRelations`, `SimpleObject` and `#[graphql(complex)]`,
   and every target needs a `BatchLoadEntity` impl
   ([#285](https://github.com/Dastari/graphql-orm/issues/285)). The worked example shows both.
+- Add `filter` to an unconditional public `multiple` relation to expose a typed list of target
+  Where alternatives on the source Where input: `#[relation(target = "OrderLine", from = "id", to = "order_id", multiple, filter)]`.
+  Alternatives use authorized EXISTS before paging and counts; an empty list matches nothing.
+  Each target and link needs complete SQL read visibility. Related filters are read-only:
+  bulk updates/deletes, including bounded and `MutationContext` writes, return `invalid_input`.
+  Restart filtered keyset pagination after changing the filter.
 - Don't hand-load related rows in resolvers, and don't write loaders to avoid N+1 queries. Generated
   relation fields already batch through `DataLoader`, per layer, and to-many fields take `where`,
   `orderBy` and `page`. See [nested relation batching](../../docs/reference/graphql-orm/entities-and-relations.md#nested-relation-batching).
@@ -487,7 +500,7 @@ appear in the operation catalogue.
 
 | To limit | Use | Notes |
 | --- | --- | --- |
-| Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Repository APIs are unaffected |
+| Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Omit `keyset` for policies always returning `Prefilter` or `CallbackOnly`; use bounded `scan`. Repository APIs are unaffected |
 | All of an entity's mutations | `generated_mutations` with `generated_mutation_allowlist` or `generated_mutation_denylist` in `schema_roots!` | Repository writes and `Changed` stay |
 | Update and delete | `append_only = true` | |
 | All writes | `schema_policy = "external_read_only"` | `Changed` stays in the schema |
@@ -515,13 +528,10 @@ with `operation_authorization`, or a write policy that refuses it. Don't replace
 | Backends | One feature per service, or `backend` on each entity | Features are alternatives. SQL Server's schema stays externally owned: no managed migrations, search, RLS, backup or runtime-schema writes. Check [backend support](../../docs/reference/graphql-orm/backends.md) before relying on a capability |
 | Tests | Temporary SQLite, or disposable containers your tests own | Never point tests at an application database. Run each backend you ship as its own explicit feature lane |
 
-`RecordVersion` and `NodeId` need the **generated object**, so an entity can't have them together
-with generated relation fields today. `compose_complex_object` doesn't change that: it still counts
-as `#[graphql(complex)]`, and removing `SimpleObject` from an entity with `GraphQLRelations` doesn't
-compile. The route to `RecordVersion` on such an entity is a hand-written field for now
-([#288](https://github.com/Dastari/graphql-orm/issues/288)). `NodeId` has none
-([#270](https://github.com/Dastari/graphql-orm/issues/270)), so report it rather than hand-writing
-one. Managed versions and `expectedVersion` still work on these entities.
+An entity with generated relation fields serves both too. On a `#[graphql(complex)]` entity,
+including `compose_complex_object`, `GraphQLRelations` emits `NodeId` (with `node_id`) and
+`RecordVersion` (with a managed version), and `Changed` payloads carry them. A hand-written
+`RecordVersion` field on such an entity still works, and can now be removed.
 
 See the [macro reference](../../docs/reference/graphql-orm/macros-and-attributes.md),
 [typed aggregates](../../docs/reference/graphql-orm/typed-aggregates.md),
@@ -624,3 +634,12 @@ Run this against any graphql-orm service. The commands use `rg` from the service
 - [ ] **Confirm clients handle continuity errors on their real delivery path**, with a test that feeds
       in `SUBSCRIPTION_CONTINUITY_LOST` and checks that the client resubscribes and then refetches.
 - [ ] **Decide how clients learn of deletes:** `can_read_deleted_preimage`, a refetch, or both.
+
+Generated GraphQL bulk writes invoke configured `notify_with` per row after commit
+(maximum 1,000 rows for notified writes). Select `notificationErrors { message code }`
+and the committed count; `success: true` means do not retry the write. Single-row
+`notify_on_error = "report"` reports via `PostCommitErrorHandler` and returns success;
+the default propagates the handler error after commit. Repository/MutationContext
+paths have no GraphQL context and retain their existing notification-free behavior.
+
+Host read policies can use `ReadPredicate::column::<Backend, Entity>(physical_name, ReadPredicateOp::Gt, SqlValue::Int(bound))` for validated private persisted columns without exposing public filters. `.not()?` preserves SQL NULL/UNKNOWN as denied; use `exists_any.not()?.or(exists_matching)?` for absent-or-matching relations.

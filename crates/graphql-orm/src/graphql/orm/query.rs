@@ -190,12 +190,24 @@ pub trait DatabaseFilter {
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>);
     fn is_empty(&self) -> bool;
 
+    /// Stable caller-visible filter intent for keyset cursor binding.
+    /// This must exclude private authorization predicates and policy parameters.
+    /// Handwritten filters retain their existing cursor behavior by default.
+    fn keyset_filter_identity(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether this filter carries request-authorized non-scalar predicates.
+    /// Generated relation filters supply this evidence only after preparation.
+    fn has_request_authorized_predicates(&self) -> bool {
+        false
+    }
+
     /// Public field identities referenced by active predicates.
     ///
     /// Generated filters override this so aggregate execution can authorize
-    /// every predicate field before the database observes it. A handwritten
-    /// filter that does not provide this evidence cannot be used by the
-    /// policy-aware aggregate builder.
+    /// every predicate field before the database observes it. Handwritten
+    /// filters must provide field identities or request authorization evidence.
     fn referenced_fields(&self) -> Vec<&'static str> {
         Vec::new()
     }
@@ -2413,7 +2425,10 @@ where
                 ));
             }
             let referenced = filter.referenced_fields();
-            if !filter.is_empty() && referenced.is_empty() {
+            if !filter.is_empty()
+                && referenced.is_empty()
+                && !filter.has_request_authorized_predicates()
+            {
                 return Err(invalid_aggregate(
                     "aggregate filter did not provide field authorization evidence",
                 ));
@@ -3547,6 +3562,7 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
+    pub(crate) keyset_filter_identities: Vec<String>,
     _marker: PhantomData<(T, B)>,
 }
 
@@ -3560,6 +3576,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             page: self.page.clone(),
             entity_matchers: self.entity_matchers.clone(),
             filter_is_valid: self.filter_is_valid,
+            keyset_filter_identities: self.keyset_filter_identities.clone(),
             _marker: PhantomData,
         }
     }
@@ -3579,6 +3596,7 @@ where
             page: None,
             entity_matchers: Vec::new(),
             filter_is_valid: true,
+            keyset_filter_identities: Vec::new(),
             _marker: PhantomData,
         }
     }
@@ -3600,6 +3618,9 @@ where
         F: DatabaseFilter,
     {
         self.filter_is_valid &= filter.validate().is_ok();
+        if let Some(identity) = filter.keyset_filter_identity() {
+            self.keyset_filter_identities.push(identity);
+        }
         let (conds, values) = filter.to_sql_conditions();
         self.where_clauses.extend(conds);
         self.values.extend(values);
@@ -3611,6 +3632,9 @@ where
         F: DatabaseFilter + Clone + Send + Sync + 'static,
     {
         self.filter_is_valid &= filter.validate().is_ok();
+        if let Some(identity) = filter.keyset_filter_identity() {
+            self.keyset_filter_identities.push(identity);
+        }
         if filter.requires_in_memory_filtering(B::DIALECT) {
             let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
             self.where_clauses.extend(conds);
@@ -4393,7 +4417,7 @@ where
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, true)?,
         );
-        let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+        let (count_rows, rows) = super::fetch_rows_pair_with_auth::<B>(
             provider.pool(),
             &count_rendered.sql,
             &count_rendered.values,
@@ -4426,6 +4450,99 @@ where
                 start_cursor: edges.first().map(|edge| edge.cursor.clone()),
                 end_cursor: edges.last().map(|edge| edge.cursor.clone()),
                 total_count: Some(total),
+            },
+            edges,
+        })
+    }
+
+    /// Fetch only selected connection components. Residual entity filters retain
+    /// the complete read path; callers must apply residual authorization first.
+    pub async fn fetch_connection_selected_with_auth<P>(
+        &self,
+        provider: &P,
+        auth: Option<&DbAuthContext>,
+        selection: crate::graphql::pagination::ConnectionSelection,
+    ) -> crate::Result<Connection<T>>
+    where
+        P: PoolProvider<B> + ?Sized,
+    {
+        self.ensure_filter_valid()?;
+        if self.requires_in_memory_filtering() || (selection.rows && selection.count) {
+            return self.fetch_connection_with_auth(provider, auth).await;
+        }
+        let config = provider.pagination_config();
+        let page = config.resolve_page(self.page.as_ref(), true);
+        let offset = page.offset.max(0);
+        let limit = page.limit;
+        let needs_rows = selection.rows || (selection.has_next_page && !selection.count);
+        let mut nodes = Vec::new();
+        let mut total = None;
+        if selection.count {
+            let mut query = self.build_select_query()?;
+            query.count_only = true;
+            query.pagination = None;
+            query.sorts.clear();
+            let rendered = render_select_query(B::DIALECT, &query);
+            let rows = super::fetch_rows_with_auth::<B>(
+                provider.pool(),
+                &rendered.sql,
+                &rendered.values,
+                auth,
+            )
+            .await?;
+            provider.observe_read(&rendered.sql, rows.len());
+            total = Some(B::try_get_i64(
+                rows.first().ok_or(sqlx::Error::RowNotFound)?,
+                "count",
+            )?);
+        }
+        if needs_rows {
+            let mut query = self.build_select_query_with_config(config, true)?;
+            if !selection.count
+                && selection.has_next_page
+                && let Some(pagination) = &mut query.pagination
+            {
+                pagination.limit = pagination.limit.map(|n| n.saturating_add(1));
+            }
+            let rendered = render_select_query(B::DIALECT, &query);
+            let rows = super::fetch_rows_with_auth::<B>(
+                provider.pool(),
+                &rendered.sql,
+                &rendered.values,
+                auth,
+            )
+            .await?;
+            provider.observe_read(&rendered.sql, rows.len());
+            nodes = rows
+                .iter()
+                .map(T::from_row)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        let page_len = limit.map_or(nodes.len() as i64, |n| (nodes.len() as i64).min(n.max(0)));
+        let has_next_page = total.map_or_else(
+            || limit.is_some_and(|n| nodes.len() as i64 > n),
+            |total| {
+                offset.saturating_add(limit.map_or((total - offset).max(0), |n| {
+                    n.max(0).min((total - offset).max(0))
+                })) < total
+            },
+        );
+        nodes.truncate(page_len as usize);
+        let edges: Vec<_> = nodes
+            .into_iter()
+            .enumerate()
+            .map(|(i, node)| Edge {
+                node,
+                cursor: encode_cursor(offset + i as i64),
+            })
+            .collect();
+        Ok(Connection {
+            page_info: PageInfo {
+                has_next_page,
+                has_previous_page: offset > 0,
+                start_cursor: edges.first().map(|e| e.cursor.clone()),
+                end_cursor: edges.last().map(|e| e.cursor.clone()),
+                total_count: total,
             },
             edges,
         })
@@ -4488,7 +4605,7 @@ where
             B::DIALECT,
             &self.build_select_query_with_config(pagination_config, true)?,
         );
-        let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+        let (count_rows, rows) = super::fetch_rows_pair_with_auth::<B>(
             provider.pool(),
             &count_rendered.sql,
             &count_rendered.values,

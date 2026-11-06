@@ -1,0 +1,371 @@
+#[cfg(feature = "mssql")]
+#[allow(dead_code)]
+#[path = "support/owned_mssql.rs"]
+mod owned_mssql;
+#[cfg(feature = "postgres")]
+#[allow(dead_code)]
+#[path = "support/owned_postgres.rs"]
+mod owned_postgres;
+use graphql_orm::futures::future::BoxFuture;
+use graphql_orm::prelude::*;
+use std::any::Any;
+
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "sqlite",
+    graphql_entity(
+        backend = "sqlite",
+        table = "write_records",
+        plural = "WriteRecords",
+        upsert = "record_key"
+    )
+)]
+#[cfg_attr(
+    feature = "postgres",
+    graphql_entity(
+        backend = "postgres",
+        table = "write_records",
+        plural = "WriteRecords",
+        upsert = "record_key"
+    )
+)]
+#[cfg_attr(
+    feature = "mssql",
+    graphql_entity(
+        backend = "mssql",
+        table = "write_records",
+        plural = "WriteRecords",
+        schema_policy = "external_writable",
+        upsert = "record_key"
+    )
+)]
+struct WriteRecord {
+    #[primary_key]
+    id: graphql_orm::uuid::Uuid,
+    #[unique]
+    #[sortable]
+    #[filterable(type = "string")]
+    record_key: String,
+    #[graphql_orm(write_policy = "guard")]
+    required: String,
+    #[graphql_orm(write_policy = "guard")]
+    optional: Option<String>,
+    other: String,
+}
+#[cfg(feature = "sqlite")]
+schema_roots! { backend: "sqlite", query_custom_ops: [], entities: [WriteRecord] }
+#[cfg(feature = "postgres")]
+schema_roots! { backend: "postgres", query_custom_ops: [], entities: [WriteRecord] }
+#[cfg(feature = "mssql")]
+schema_roots! { backend: "mssql", schema_policy: "external_writable", query_custom_ops: [], entities: [WriteRecord] }
+struct Deny {
+    legacy: bool,
+    fail: bool,
+}
+impl FieldPolicy for Deny {
+    fn ignore_denied_field_write(&self, entity: &'static str, field: &'static str) -> bool {
+        self.legacy && entity == "WriteRecord" && matches!(field, "optional" | "required")
+    }
+    fn can_read_field<'a>(
+        &'a self,
+        _: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn can_write_field<'a>(
+        &'a self,
+        ctx: &'a async_graphql::Context<'_>,
+        _: &'a Database,
+        _: &'static str,
+        field: &'static str,
+        _: Option<&'static str>,
+        record: Option<&'a (dyn Any + Send + Sync)>,
+        _: Option<&'a (dyn Any + Send + Sync)>,
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            if self.fail {
+                return Err(async_graphql::Error::new(format!(
+                    "policy error for {field}"
+                )));
+            }
+            if record
+                .and_then(|record| record.downcast_ref::<WriteRecord>())
+                .is_some_and(|record| record.record_key == "allowed")
+            {
+                return Ok(true);
+            }
+            Ok(ctx.data::<String>()? != field)
+        })
+    }
+}
+#[cfg(feature = "sqlite")]
+struct FixtureOwner;
+#[cfg(feature = "sqlite")]
+impl FixtureOwner {
+    fn cleanup(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        Ok(())
+    }
+}
+#[cfg(feature = "postgres")]
+type FixtureOwner = owned_postgres::OwnedPostgres;
+#[cfg(feature = "mssql")]
+type FixtureOwner = owned_mssql::OwnedSqlServer;
+
+#[cfg(feature = "mssql")]
+struct AllowEntityPolicy;
+#[cfg(feature = "mssql")]
+impl EntityPolicy for AllowEntityPolicy {
+    fn can_access_entity<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessKind,
+        _: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+async fn fixture() -> Result<(Database, FixtureOwner), Box<dyn std::error::Error>> {
+    #[cfg(feature = "sqlite")]
+    {
+        Ok((
+            Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?,
+            FixtureOwner,
+        ))
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let owner = FixtureOwner::start("field-write-denial")?;
+        let pool = graphql_orm::sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&owner.url)
+            .await?;
+        Ok((Database::new(pool), owner))
+    }
+    #[cfg(feature = "mssql")]
+    {
+        let owner = FixtureOwner::start().await?;
+        let pool = graphql_orm::db::mssql::MssqlPool::connect_ado_external_writable(
+            &owner.connection_string,
+        )
+        .await?;
+        let mut db = Database::builder(pool)
+            .schema_policy(SchemaPolicy::ExternalWritable)
+            .build();
+        db.set_entity_policy(AllowEntityPolicy);
+        Ok((db, owner))
+    }
+}
+async fn execute(db: &Database, sql: &str) -> graphql_orm::Result<()> {
+    <DefaultBackend as WriteBackend>::execute_with_binds(db.pool(), sql, &[]).await?;
+    Ok(())
+}
+
+async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
+    let (mut db, mut owner) = fixture().await.unwrap();
+    #[cfg(feature = "sqlite")]
+    let ddl = "CREATE TABLE write_records (id TEXT PRIMARY KEY, record_key TEXT UNIQUE NOT NULL, required TEXT NOT NULL, optional TEXT, other TEXT NOT NULL)";
+    #[cfg(feature = "postgres")]
+    let ddl = "CREATE TABLE write_records (id UUID PRIMARY KEY, record_key TEXT UNIQUE NOT NULL, required TEXT NOT NULL, optional TEXT, other TEXT NOT NULL)";
+    #[cfg(feature = "mssql")]
+    let ddl = "CREATE TABLE write_records (id UNIQUEIDENTIFIER PRIMARY KEY, record_key NVARCHAR(100) UNIQUE NOT NULL, required NVARCHAR(100) NOT NULL, optional NVARCHAR(100), other NVARCHAR(100) NOT NULL)";
+    execute(&db, ddl).await.unwrap();
+    let id = graphql_orm::uuid::Uuid::new_v4();
+    let seed = DefaultBackend::normalize_sql(
+        "INSERT INTO write_records VALUES (?, 'existing', 'before', 'before', 'before')",
+        1,
+    );
+    <DefaultBackend as WriteBackend>::execute_with_binds(db.pool(), &seed, &[SqlValue::Uuid(id)])
+        .await
+        .unwrap();
+    if operation.starts_with("bulk") {
+        let seed = DefaultBackend::normalize_sql(
+            "INSERT INTO write_records VALUES (?, 'allowed', 'before', 'before', 'before')",
+            1,
+        );
+        <DefaultBackend as WriteBackend>::execute_with_binds(
+            db.pool(),
+            &seed,
+            &[SqlValue::Uuid(graphql_orm::uuid::Uuid::new_v4())],
+        )
+        .await
+        .unwrap();
+    }
+    db.set_field_policy(Deny { legacy, fail });
+    let schema = schema_builder(db.clone())
+        .data(AuthSubject::new("test-principal"))
+        .data(field.to_string())
+        .finish();
+    let input = if operation == "create" || operation.starts_with("upsert") {
+        let key = if operation == "upsert_existing" {
+            "existing"
+        } else {
+            "new"
+        };
+        format!("recordKey: \"{key}\", required: \"after\", optional: \"after\", other: \"after\"")
+    } else {
+        format!("{field}: \"after\", other: \"after\"")
+    };
+    let input = if operation.ends_with("_null") {
+        "optional: null, other: \"after\"".to_string()
+    } else {
+        input
+    };
+    let call = match operation {
+        "create" => format!("createWriteRecord(input: {{{input}}})"),
+        "upsert_new" | "upsert_existing" => format!("upsertWriteRecord(input: {{{input}}})"),
+        "update" | "update_null" => format!("updateWriteRecord(id: \"{id}\", input: {{{input}}})"),
+        "bulk" | "bulk_null" => {
+            format!(
+                "updateWriteRecords(where: {{recordKey: {{inList: [\"existing\", \"allowed\"]}}}}, input: {{{input}}})"
+            )
+        }
+        _ => unreachable!(),
+    };
+    let response = schema
+        .execute(format!(
+            "mutation {{ {call} {{ success error {} }} }}",
+            if operation.starts_with("bulk") {
+                "errorCode"
+            } else {
+                ""
+            }
+        ))
+        .await;
+    let data = response.data.into_json().unwrap();
+    let ignored =
+        legacy && !fail && (field == "optional" || matches!(operation, "update" | "bulk"));
+    if ignored {
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        assert!(
+            data.as_object()
+                .unwrap()
+                .values()
+                .all(|v| v["success"] == true),
+            "{data}"
+        );
+    } else {
+        assert!(
+            !response.errors.is_empty()
+                || data
+                    .as_object()
+                    .is_some_and(|o| o.values().any(|v| v["success"] == false)),
+            "{operation}/{field}: {data}"
+        );
+        let diagnostic = format!("{:?} {data}", response.errors);
+        // Bulk policy callback error mapping is a separate contract; ordinary
+        // field denials must retain the field name through that path too.
+        if !fail {
+            assert!(diagnostic.contains(field), "{diagnostic}");
+        }
+        if !fail {
+            if operation.starts_with("bulk") {
+                assert!(response.errors.is_empty());
+                assert!(
+                    data.as_object()
+                        .unwrap()
+                        .values()
+                        .all(|v| v["errorCode"] == "FORBIDDEN")
+                );
+            } else {
+                assert_eq!(
+                    response.errors[0].extensions.as_ref().unwrap().get("code"),
+                    Some(&async_graphql::Value::from("FORBIDDEN"))
+                );
+            }
+        }
+    }
+    let rows = <DefaultBackend as OrmBackend>::fetch_rows(
+        db.pool(),
+        "SELECT required, optional, other FROM write_records",
+        &[],
+    )
+    .await
+    .unwrap();
+    let rows: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                DefaultBackend::try_get_string(row, "required").unwrap(),
+                DefaultBackend::try_get_optional_string(row, "optional").unwrap(),
+                DefaultBackend::try_get_string(row, "other").unwrap(),
+            )
+        })
+        .collect();
+    if ignored {
+        assert!(rows.iter().any(|row| row.2 == "after"), "{rows:?}");
+        assert!(
+            rows.iter().all(|row| if field == "optional" {
+                row.1.as_deref() != Some("after")
+            } else {
+                row.0 != "after"
+            }),
+            "{rows:?}"
+        );
+    } else {
+        assert_eq!(
+            rows,
+            vec![
+                ("before".into(), Some("before".into()), "before".into());
+                if operation.starts_with("bulk") { 2 } else { 1 }
+            ]
+        );
+    }
+    owner.cleanup().unwrap();
+}
+macro_rules! case {
+    ($name:ident, $op:literal, $field:literal) => {
+        #[tokio::test]
+        #[cfg_attr(
+            any(feature = "postgres", feature = "mssql"),
+            ignore = "requires test-owned disposable database"
+        )]
+        async fn $name() {
+            run($op, $field, false, false).await;
+        }
+    };
+}
+case!(create_optional, "create", "optional");
+case!(create_required, "create", "required");
+case!(update_optional, "update", "optional");
+case!(update_required, "update", "required");
+case!(upsert_new_optional, "upsert_new", "optional");
+case!(upsert_new_required, "upsert_new", "required");
+case!(upsert_existing_optional, "upsert_existing", "optional");
+case!(upsert_existing_required, "upsert_existing", "required");
+case!(bulk_optional, "bulk", "optional");
+case!(bulk_required, "bulk", "required");
+
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires test-owned disposable database"
+)]
+async fn explicit_opt_out_preserves_legacy_omission() {
+    for operation in ["create", "update", "upsert_new", "upsert_existing", "bulk"] {
+        for field in ["optional", "required"] {
+            run(operation, field, true, false).await;
+        }
+    }
+}
+#[tokio::test]
+#[cfg_attr(
+    any(feature = "postgres", feature = "mssql"),
+    ignore = "requires test-owned disposable database"
+)]
+async fn explicit_opt_out_never_swallows_policy_errors() {
+    for operation in ["create", "update", "upsert_new", "upsert_existing", "bulk"] {
+        run(operation, "optional", true, true).await;
+    }
+}
+
+case!(update_optional_null, "update_null", "optional");
+case!(bulk_optional_null, "bulk_null", "optional");

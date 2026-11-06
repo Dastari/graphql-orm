@@ -88,6 +88,10 @@ pub struct OrmPublicError {
     /// Internal diagnostic text never exposed by default GraphQL extensions.
     pub(crate) internal: Option<String>,
     pub(crate) retryable: bool,
+    denied_write_field: Option<Box<str>>,
+    // An authored refusal's own extensions. Not the whole `async_graphql::Error`,
+    // whose type-erased source would make this public type lose its auto traits.
+    application_extensions: Option<Box<Option<async_graphql::ErrorExtensionValues>>>,
     pub(crate) runtime_mutation_code: Option<&'static str>,
 }
 
@@ -127,6 +131,8 @@ impl OrmPublicError {
             internal: None,
             retryable: false,
             runtime_mutation_code: None,
+            denied_write_field: None,
+            application_extensions: None,
         }
     }
 
@@ -139,6 +145,8 @@ impl OrmPublicError {
             internal: None,
             retryable: false,
             runtime_mutation_code: None,
+            denied_write_field: None,
+            application_extensions: None,
         }
     }
 
@@ -174,6 +182,16 @@ impl OrmPublicError {
         Self::new(OrmErrorCode::Forbidden)
     }
 
+    /// Forbidden write naming only the public GraphQL field that was refused.
+    pub fn field_write_denied(field: &str) -> Self {
+        let mut error = Self::with_message(
+            OrmErrorCode::Forbidden,
+            format!("write denied for field {field}"),
+        );
+        error.denied_write_field = Some(field.into());
+        error
+    }
+
     /// Not-found decision that does not reveal cross-tenant existence.
     pub fn not_found() -> Self {
         Self::new(OrmErrorCode::NotFound)
@@ -186,26 +204,10 @@ impl OrmPublicError {
 
     /// Map a backend SQL error into a public error without leaking SQL text.
     pub fn from_sqlx(error: &sqlx::Error) -> Self {
-        if let sqlx::Error::Protocol(message) = error {
-            if let Some(code) = message.strip_prefix("graphql-orm-public:") {
-                let code = match code {
-                    "INVALID_INPUT" => Some(OrmErrorCode::InvalidInput),
-                    "UNAUTHENTICATED" => Some(OrmErrorCode::Unauthenticated),
-                    "FORBIDDEN" => Some(OrmErrorCode::Forbidden),
-                    "NOT_FOUND" => Some(OrmErrorCode::NotFound),
-                    "CONFLICT" => Some(OrmErrorCode::Conflict),
-                    "CONSTRAINT_VIOLATION" => Some(OrmErrorCode::ConstraintViolation),
-                    "CURSOR_INVALID" => Some(OrmErrorCode::CursorInvalid),
-                    "PAGE_LIMIT_EXCEEDED" => Some(OrmErrorCode::PageLimitExceeded),
-                    "SERVICE_UNAVAILABLE" => Some(OrmErrorCode::ServiceUnavailable),
-                    "AUTHORIZATION_MISCONFIGURED" => Some(OrmErrorCode::AuthorizationMisconfigured),
-                    "INTERNAL_ERROR" => Some(OrmErrorCode::InternalError),
-                    _ => None,
-                };
-                if let Some(code) = code {
-                    return Self::new(code);
-                }
-            }
+        if let sqlx::Error::Decode(error) = error
+            && let Some(carrier) = error.downcast_ref::<PublicErrorCarrier>()
+        {
+            return carrier.0.clone();
         }
         let retryable = error
             .as_database_error()
@@ -239,11 +241,20 @@ impl OrmPublicError {
         }
     }
 
-    /// Convert into an `async-graphql` error with safe extensions only.
+    /// Convert into a GraphQL error, preserving explicit application callback extensions.
+    /// Infrastructure failures expose only safe ORM extensions.
     pub fn into_graphql_error(self) -> async_graphql::Error {
+        if let Some(extensions) = self.application_extensions {
+            let mut error = async_graphql::Error::new(self.message);
+            error.extensions = *extensions;
+            return error;
+        }
         let mut error = async_graphql::Error::new(self.message.clone());
         error = error.extend_with(|_, extensions| {
             extensions.set("code", self.code.as_str());
+            if let Some(field) = &self.denied_write_field {
+                extensions.set("deniedWriteField", field.to_string());
+            }
             if let Some(correlation_id) = &self.correlation_id {
                 extensions.set("correlationId", correlation_id.clone());
             }
@@ -286,20 +297,66 @@ fn is_sqlite_restrict_foreign_key_refusal(_: &dyn sqlx::error::DatabaseError) ->
     false
 }
 
-/// Preserve a safe public category through legacy generated SQLx-result paths.
-///
-/// The protocol payload contains only the stable public code; internal policy
-/// diagnostics, identifiers, and protected values are deliberately discarded.
+// Private type identity is the trust boundary: SQL/driver strings cannot create it.
+// It travels as `Decode`, not `Io`, because consumers commonly treat `Io` as a
+// transient connection failure and retry it, and a refusal must never be retried.
+struct PublicErrorCarrier(OrmPublicError);
+impl fmt::Debug for PublicErrorCarrier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PublicErrorCarrier([redacted])")
+    }
+}
+impl fmt::Display for PublicErrorCarrier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Repository callers read this text; it carries only the stable public code.
+        write!(f, "graphql-orm-public:{}", self.0.code.as_str())
+    }
+}
+impl std::error::Error for PublicErrorCarrier {}
+
+/// Preserve a trusted public error through generated SQLx-result paths.
+/// The private typed carrier cannot be constructed by database or driver text.
 #[doc(hidden)]
 pub fn sqlx_error_from_public(error: OrmPublicError) -> sqlx::Error {
-    sqlx::Error::Protocol(public_error_transport(error))
+    sqlx::Error::Decode(Box::new(PublicErrorCarrier(error)))
 }
 
 fn public_error_transport(error: OrmPublicError) -> String {
     if let Some(internal) = &error.internal {
         tracing_log_internal(&error.code, internal);
     }
+    if let Some(field) = &error.denied_write_field {
+        return format!("graphql-orm-public:FIELD_WRITE_DENIED:{field}");
+    }
     format!("graphql-orm-public:{}", error.code.as_str())
+}
+
+fn public_code(code: &str) -> Option<OrmErrorCode> {
+    match code {
+        "INVALID_INPUT" => Some(OrmErrorCode::InvalidInput),
+        "UNAUTHENTICATED" => Some(OrmErrorCode::Unauthenticated),
+        "FORBIDDEN" => Some(OrmErrorCode::Forbidden),
+        "NOT_FOUND" => Some(OrmErrorCode::NotFound),
+        "CONFLICT" => Some(OrmErrorCode::Conflict),
+        "CONSTRAINT_VIOLATION" => Some(OrmErrorCode::ConstraintViolation),
+        "CURSOR_INVALID" => Some(OrmErrorCode::CursorInvalid),
+        "PAGE_LIMIT_EXCEEDED" => Some(OrmErrorCode::PageLimitExceeded),
+        "SERVICE_UNAVAILABLE" => Some(OrmErrorCode::ServiceUnavailable),
+        "AUTHORIZATION_MISCONFIGURED" => Some(OrmErrorCode::AuthorizationMisconfigured),
+        "INTERNAL_ERROR" => Some(OrmErrorCode::InternalError),
+        _ => None,
+    }
+}
+
+fn public_error_from_loader_transport(message: &str) -> OrmPublicError {
+    if let Some(field) = message.strip_prefix("graphql-orm-public:FIELD_WRITE_DENIED:") {
+        return OrmPublicError::field_write_denied(field);
+    }
+    let code = message
+        .strip_prefix("graphql-orm-public:")
+        .and_then(public_code)
+        .unwrap_or(OrmErrorCode::InternalError);
+    OrmPublicError::new(code)
 }
 
 /// Preserve only the safe public category through a generated loader's String error.
@@ -313,38 +370,43 @@ pub fn loader_error_from_sqlx(error: sqlx::Error) -> String {
 #[doc(hidden)]
 pub fn graphql_error_from_loader(error: String) -> async_graphql::Error {
     if error.starts_with("graphql-orm-public:") {
-        graphql_error_from_sqlx(sqlx::Error::Protocol(error))
+        public_error_from_loader_transport(&error).into_graphql_error()
     } else {
         graphql_internal_error(error)
     }
 }
 
-/// Preserve a safe public category emitted by an internal policy callback.
+/// Preserve an application callback's explicit message and extensions through SQLx.
+/// Only call this at a trusted GraphQL callback boundary; never with driver text.
 #[doc(hidden)]
 pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
-    let code = error
+    let category = error
         .extensions
         .as_ref()
-        .and_then(|extensions| extensions.get("code"))
+        .and_then(|ext| ext.get("code"))
         .and_then(|value| match value {
-            async_graphql::Value::String(value) => Some(value.as_str()),
+            async_graphql::Value::String(code) => Some(code.as_str()),
             _ => None,
         });
-    let public = match code {
-        Some("INVALID_INPUT") => OrmPublicError::new(OrmErrorCode::InvalidInput),
-        Some("UNAUTHENTICATED") => OrmPublicError::new(OrmErrorCode::Unauthenticated),
-        Some("FORBIDDEN") => OrmPublicError::new(OrmErrorCode::Forbidden),
-        Some("NOT_FOUND") => OrmPublicError::new(OrmErrorCode::NotFound),
-        Some("CONFLICT") => OrmPublicError::new(OrmErrorCode::Conflict),
-        Some("CONSTRAINT_VIOLATION") => OrmPublicError::new(OrmErrorCode::ConstraintViolation),
-        Some("CURSOR_INVALID") => OrmPublicError::new(OrmErrorCode::CursorInvalid),
-        Some("PAGE_LIMIT_EXCEEDED") => OrmPublicError::new(OrmErrorCode::PageLimitExceeded),
-        Some("SERVICE_UNAVAILABLE") => OrmPublicError::new(OrmErrorCode::ServiceUnavailable),
-        Some("AUTHORIZATION_MISCONFIGURED") => {
-            OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
-        }
-        _ => OrmPublicError::new(OrmErrorCode::InternalError),
-    };
+    // `?` in a callback converts through `From<T: Display>`, which records a source and
+    // takes the failure's own text as the message. That is not an authored refusal.
+    if error.source.is_some() && category.is_none() {
+        return sqlx_error_from_public(
+            error
+                .source
+                .as_ref()
+                .and_then(|source| source.downcast_ref::<sqlx::Error>())
+                .map(OrmPublicError::from_sqlx)
+                .unwrap_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError)),
+        );
+    }
+    let mut public = OrmPublicError::new(
+        category
+            .and_then(public_code)
+            .unwrap_or(OrmErrorCode::InternalError),
+    );
+    public.message = error.message.clone();
+    public.application_extensions = Some(Box::new(error.extensions));
     sqlx_error_from_public(public)
 }
 
@@ -370,6 +432,75 @@ fn tracing_log_internal(code: &OrmErrorCode, internal: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn carried_refusals_read_as_their_code_and_never_as_a_connection_failure() {
+        let error = sqlx_error_from_public(OrmPublicError::new(
+            OrmErrorCode::AuthorizationMisconfigured,
+        ));
+        assert!(!matches!(error, sqlx::Error::Io(_)));
+        assert!(error.to_string().contains("AUTHORIZATION_MISCONFIGURED"));
+        let refusal = async_graphql::Error::new("private application detail")
+            .extend_with(|_, ext| ext.set("code", "FORBIDDEN"));
+        let error = sqlx_error_from_graphql(refusal);
+        assert!(!error.to_string().contains("private application detail"));
+        assert!(!format!("{error:?}").contains("private application detail"));
+    }
+
+    #[test]
+    fn converted_callback_failures_stay_masked_but_authored_refusals_do_not() {
+        // `?` inside a callback converts through `From<T: Display>`, so the message is
+        // the failure's own text, which can hold SQL or driver detail.
+        let text = "SELECT secret FROM private_table";
+        for converted in [
+            async_graphql::Error::from(sqlx::Error::Protocol(text.into())),
+            async_graphql::Error::from(std::io::Error::other(text)),
+        ] {
+            let error = graphql_error_from_sqlx(sqlx_error_from_graphql(converted));
+            assert_eq!(error.message, "internal error");
+            assert_eq!(
+                error.extensions.unwrap().get("code"),
+                Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+            );
+        }
+        let plain = graphql_error_from_sqlx(sqlx_error_from_graphql(async_graphql::Error::new(
+            "uncoded refusal",
+        )));
+        assert_eq!(plain.message, "uncoded refusal");
+        let coded = async_graphql::Error::from(std::io::Error::other("explicit refusal"))
+            .extend_with(|_, ext| ext.set("code", "CUSTOM_REFUSAL"));
+        let coded = graphql_error_from_sqlx(sqlx_error_from_graphql(coded));
+        assert_eq!(coded.message, "explicit refusal");
+    }
+
+    #[test]
+    fn application_refusal_roundtrips_but_prefix_text_is_not_trusted() {
+        let error = async_graphql::Error::new("application refusal")
+            .extend_with(|_, ext| ext.set("code", "CUSTOM_REFUSAL"));
+        let restored = graphql_error_from_sqlx(sqlx_error_from_graphql(error));
+        assert_eq!(restored.message, "application refusal");
+        assert_eq!(
+            restored.extensions.unwrap().get("code"),
+            Some(&async_graphql::Value::from("CUSTOM_REFUSAL"))
+        );
+        for text in [
+            "graphql-orm-public:FIELD_WRITE_DENIED:secret",
+            "graphql-orm-public:FORBIDDEN",
+        ] {
+            for source in [
+                sqlx::Error::Protocol(text.into()),
+                sqlx::Error::Io(std::io::Error::other(text.to_owned())),
+                sqlx::Error::Decode(text.into()),
+            ] {
+                let error = graphql_error_from_sqlx(source);
+                assert_eq!(error.message, "internal error");
+                assert_eq!(
+                    error.extensions.unwrap().get("code"),
+                    Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+                );
+            }
+        }
+    }
 
     #[test]
     fn graphql_extensions_are_safe() {
@@ -398,10 +529,7 @@ mod tests {
             OrmPublicError::new(OrmErrorCode::AuthorizationMisconfigured)
                 .with_internal("secret policy and table detail"),
         );
-        assert!(
-            sqlx.to_string()
-                .contains("graphql-orm-public:AUTHORIZATION_MISCONFIGURED")
-        );
+        assert!(matches!(sqlx, sqlx::Error::Decode(_)));
         assert!(!sqlx.to_string().contains("secret policy"));
         let public = OrmPublicError::from(sqlx);
         assert_eq!(public.code, OrmErrorCode::AuthorizationMisconfigured);

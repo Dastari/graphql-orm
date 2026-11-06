@@ -3,7 +3,7 @@ title: "Pagination Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -77,9 +77,28 @@ opt-in work.
 
 ## Field Selection And Counts
 
-Legacy offset connections compute exact `totalCount` even when it is not
-selected. Keyset connections and authorized scans provide explicit count opt-in.
-Repository `fetch_all` remains intentionally unbounded for trusted internal use.
+Since 0.92.0, static offset connections use the selected fields to omit unused
+SQL while preserving selected values and authorization. No data migration is needed.
+
+Generated top-level and relation connections inspect schema field names through
+fragments and aliases. `edges`, `startCursor` or `endCursor` require page rows;
+`totalCount` requires a count. `hasNextPage` without a count uses one extra row
+(and truncates the probe before returning edges). Selecting only
+`hasPreviousPage` requires no SQL for the connection. Relation batch/cache
+identity includes selection requirements. Residual row policies retain the
+authorized scan, even for count-only requests; totals count readable rows only.
+
+Direct `fetch_connection` and `fetch_connection_with_auth` retain the full
+contract. `EntityQuery::fetch_connection_selected_with_auth` accepts
+`graphql::pagination::ConnectionSelection { rows, count, has_next_page }`;
+unrequested components are placeholders and must not be exposed by callers.
+`ConnectionSelection::ALL` requests the full contract; `from_context(ctx)`
+provides generated resolver selection requirements.
+
+When rows and count are both required, the existing paired fetch retains its
+pinned database auth transaction. Keyset connections and authorized scans keep
+their explicit count opt-in. Repository `fetch_all` remains intentionally
+unbounded for trusted internal use.
 
 ## Authorization-aware pagination (0.33.0)
 
@@ -125,7 +144,21 @@ let predicate = ReadPredicate::from_filter::<SqliteBackend, _>(&filter)?;
 Ok(ReadVisibility::Complete(predicate))
 ```
 
+`ReadPredicate::column::<Backend, Entity>(column, ReadPredicateOp::Gt,
+SqlValue::Int(bound))` validates the physical name against `Entity::columns()`,
+quotes it, and binds the value. It accepts private (`read = false, filter = false`)
+persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
+`Lt`, `Lte`, `Gt`, and `Gte`; NULL comparisons use ordinary SQL semantics.
+
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
+`predicate.not()?` uses SQL `NOT`: TRUE becomes FALSE, FALSE becomes TRUE,
+and NULL/UNKNOWN remains UNKNOWN (denied in WHERE). It never treats UNKNOWN as
+FALSE before negating. Empty SQL fragments and empty conjunctions fail closed; an empty disjunction
+is the supported constant FALSE. Relation
+EXISTS is two-valued: `exists_any.not()?.or(exists_matching)?` means absent or
+matching. For a present related row whose comparison is UNKNOWN, matching does
+not grant access. Avoid `not(exists(not(matches)))` when NULL must be denied:
+NULL comparisons inside EXISTS do not match rows.
 `ReadPredicate::related::<Backend, Source, Target>(&[("source_column",
 "target_column")], target_predicate)` provides a validated, parameterized
 EXISTS equality relation, including composite key mappings. Column names are
@@ -144,8 +177,8 @@ same SQL visibility contract; residual callbacks still require implementation.
 
 ### Exact offsets remain compatible
 
-Generated ordinary list resolvers use database pagination and authorized SQL
-counts for `Complete` and `Unrestricted`. Their `totalCount`, visible offsets,
+Generated ordinary list resolvers use database pagination and selected authorized
+SQL counts for `Complete` and `Unrestricted`. Their `totalCount`, visible offsets,
 and existing offset cursor contract remain unchanged. With `CallbackOnly` or
 `Prefilter`, exact visible offsets and totals require examining all candidates,
 but 0.46 performs that work in finite SQL batches using an explicitly installed
@@ -188,6 +221,59 @@ row-policy totals. They do not yet consume database visibility decisions.
 Use the standalone authorized executor for the new capability. Handwritten
 pool-bound queries are still low-level queries and do not automatically apply
 application authorization.
+
+### What a keyset cursor is bound to
+
+A generated keyset cursor (`gomk1.`) holds the order values of one row. It is
+refused with `CURSOR_INVALID` unless it matches all of:
+
+| Bound to | Mismatch |
+| --- | --- |
+| The entity (for the configured order) | A cursor from another entity with the same key columns |
+| The complete effective order, including `orderBy` and the primary-key suffix | A different order, direction or null placement |
+| The caller-visible filter, when one was supplied | A different filter, a filter where there was none, or none where there was one |
+
+Only a SHA-256 of the filter is bound: neither the cursor nor the error contains
+filter contents. An empty filter is the same query as no filter and shares its
+cursors. The binding covers generated `recordsKeyset`, `keyset_page`,
+`keyset_connection_page` and their `_ordered` forms, `recordsScan` continuations
+(which are also encrypted), and the `MutationContext` keyset methods, which all
+use the same function, `bind_keyset_fingerprint`. Private authorization
+predicates are not part of the filter, so changing a caller's visibility never
+invalidates a cursor by itself; current policy applies to every resumed page.
+
+Three paths intentionally stay unbound:
+
+- `RepositoryEntity` types and handwritten `DatabaseFilter` implementations
+  return no `keyset_filter_identity`, because the ORM does not own their filter
+  shape. Their cursors are bound to entity and order only. A caller that needs
+  filter binding on them must keep the filter fixed while paging.
+- Runtime GraphQL cursors with `RuntimeCursorProfile::Unprotected` are readable
+  and unauthenticated; only the default protected profile binds the filter.
+  The protected profile authenticates a digest of the caller's `where` input
+  (before the host's grant is applied) as associated data, and so refuses a
+  changed filter with the usual `invalid_cursor`. Key order in the `where`
+  object is part of that digest.
+- `RuntimeReadRequest` built directly by a host receives one combined predicate
+  (filter and grant), so it cannot tell the caller's filter from the host's.
+  Hosts that page through it should bind their own filter, for example in the
+  cursor protection they already supply. Offset cursors (ordinary list,
+  search and relation connections) are positions, not keys, and are not
+  bound to anything.
+
+#### Value drift is inherent to keyset paging
+
+A cursor records the order values of its row, not the row. Keyset pagination
+resumes "after these values", so a cursor taken before a row's order values
+change is still accepted, and the next page reflects the new values: a row
+moved before the cursor is not returned again, a row moved after it is returned
+(possibly a second time), and a deleted cursor row changes nothing. Only a
+cursor that is malformed, tampered with, or bound to something else (above) is
+refused. The ORM does not try to detect this; doing so would need row versions
+or snapshots, which keyset pagination exists to avoid. Clients that need a
+stable view should page inside one transaction or order by an immutable column
+such as a creation time. `value_drift_after_the_cursor_is_accepted_and_resumes_by_value`
+in `crates/graphql-orm/tests/keyset_cursor_binding.rs` pins this behaviour.
 
 ### Opt-in bounded scans
 

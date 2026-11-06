@@ -10,6 +10,26 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.92.0 runs post-commit notifications for GraphQL bulk writes and adds
+`notify_on_error = "report"` for single-row success after notification failures.
+
+Version 0.92.0 preserves application refusal messages and codes in generated bulk
+write payloads, including denied fields. Bulk result SDL adds nullable `errorCode`.
+
+Version 0.92.0 rejects generated policy-denied field writes by default.
+Use `FieldPolicy::ignore_denied_field_write` to retain legacy omission for selected fields.
+Version 0.92.0 uses RFC 3339 UTC implicit defaults for String timestamp fields;
+integer timestamps retain epoch seconds. Existing defaults and rows are preserved.
+See the [migration guide](../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
+Version 0.92.0 makes callback-denied to-one relations indistinguishable from absent targets and enforces relation-field read policies.
+Version 0.92.0 generates `MutationContext` keyset reads that bind the entity and caller filter into cursors, matching `graphql-orm` 0.92.0.
+See [keyset cursor binding](../../docs/reference/graphql-orm/pagination-migration.md#what-a-keyset-cursor-is-bound-to).
+
+Version 0.92.0 adds opt-in authorized static collection filters with `#[relation(filter)]`.
+Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
+See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
+Version 0.92.0 pairs with the runtime read-predicate additions; generated code is unchanged.
+
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.
 
@@ -453,9 +473,17 @@ Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
 
+
 Version 0.91.1 keeps this crate aligned with `graphql-orm` 0.91.1. Generated code matches 0.91.0.
 
 Version 0.91.0 scores SQLite runtime search from each row's own document, so
 hidden rows cannot affect visible scores, and fences the runtime search
 backfill against a stale schema. See
 [the migration guide](../../MIGRATION.md#0901-to-0910-isolated-runtime-search-ranking-and-fenced-backfill).
+
+Version 0.92.0 pairs the runtime and macros for narrow-key paginated relation windows.
+
+Version 0.92.0 pairs the runtime and macros for selection-aware static offset connections.
+Version 0.92.0 adds the off-by-default macro `schema-export-only` feature for dedicated
+SDL export builds. Runtime builds must leave it disabled; see
+[schema export](../../docs/reference/graphql-orm/schema-export.md).

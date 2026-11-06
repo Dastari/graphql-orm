@@ -601,6 +601,41 @@ A managed cleanup loop performs:
    the cursor and retains a private absence-proven `Deleted` tombstone; or
 5. `schedule_cleanup_retry` with a bounded safe reason and delay.
 
+The ORM uses the larger of one minute and the caller's requested base delay,
+doubles it per failed attempt, and caps it at `maximum_retry_delay`. `maximum_retries` allows that many retries after the initial attempt;
+the next failure persists `CleanupExhausted`, clears scheduling and emits
+`ai.provider_session.cleanup_exhausted` once. Expired cleanup leases also consume
+the finite attempt budget. Exhaustion retains the protected cursor, remains
+unavailable to runs and is never selected by automatic cleanup. Operators must
+investigate rather than treating exhaustion as proof of deletion.
+
+Codex cleanup now always confirms absence through a fresh bounded, content-discarding
+state-index scan, including after a successful delete acknowledgement. Custom
+process adapters must implement `AiCodexAppServerRunProcess::confirm_thread_absent`;
+the default remains fail-closed. Both active and archived partitions must be
+exhausted without the exact cursor before issuing an absence proof.
+
+The scan admits a page's `readStates`, which Codex 0.165.0 and 0.166.0 send but their
+generated schemas omit: an object of at most one page of objects keyed by thread ID. Only
+the IDs are read, and an entry naming the target counts as present, never as absent.
+
+To check rejected deletion against a real peer without sending a model turn, use
+a disposable home and a synthetic thread already known absent from that home. It
+never treats an error code alone as proof of absence:
+
+```bash
+GRAPHQL_ORM_AI_CODEX_LIVE_BIN=/absolute/path/to/codex \
+GRAPHQL_ORM_AI_CODEX_LIVE_HOME=/absolute/path/to/disposable/home \
+GRAPHQL_ORM_AI_CODEX_ABSENT_THREAD=synthetic-already-deleted-thread \
+cargo test -p graphql-orm-ai --features provider-codex-app-server --lib -- --ignored --exact \
+  providers::codex_app_server::tests::live_codex_cleanup_confirms_absence_after_rejected_delete
+```
+
+To check the whole cycle after a real turn, set `GRAPHQL_ORM_AI_CODEX_LIVE_CLEANUP=1` on the
+live turn check. A thread that ran a turn must not scan as absent, an acknowledged delete
+must then scan as absent, and a repeated delete must not disturb that. Passed on 0.166.0 and
+0.165.0 with `gpt-6.1-sol`, along with the rejected-deletion check above.
+
 An ordinary later run may replace only that exact absence-proven tombstone.
 Expiry, process death, transport failure, cleanup backoff, and restore
 quarantine remain unavailable. If creation of the replacement empty thread

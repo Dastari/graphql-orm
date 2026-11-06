@@ -10,6 +10,26 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.92.0 runs post-commit notifications for GraphQL bulk writes and adds
+`notify_on_error = "report"` for single-row success after notification failures.
+
+Version 0.92.0 preserves application refusal messages and codes in generated bulk
+write payloads, including denied fields. Bulk result SDL adds nullable `errorCode`.
+
+Version 0.92.0 rejects generated policy-denied field writes by default.
+Use `FieldPolicy::ignore_denied_field_write` to retain legacy omission for selected fields.
+Version 0.92.0 uses RFC 3339 UTC implicit defaults for String timestamp fields;
+integer timestamps retain epoch seconds. Existing defaults and rows are preserved.
+See the [migration guide](../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
+Version 0.92.0 makes callback-denied to-one relations indistinguishable from absent targets and enforces relation-field read policies.
+Version 0.92.0 binds keyset cursors to their entity and caller filter on every generated path; restart in-flight keyset paging.
+See [keyset cursor binding](../../docs/reference/graphql-orm/pagination-migration.md#what-a-keyset-cursor-is-bound-to).
+
+Version 0.92.0 adds opt-in authorized static collection filters with `#[relation(filter)]`.
+Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
+See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
+Version 0.92.0 adds validated private-column and NULL-preserving negated read predicates.
+
 Version 0.89.0 adds full-text search to runtime collections: an IR declaration, managed storage with
 readiness and a resumable backfill, write maintenance, and a ranked runtime GraphQL `search` argument.
 See [runtime search](../../docs/reference/graphql-orm/runtime-search.md).
@@ -505,9 +525,18 @@ Version 0.90.1 permits declared subscription scopes on composite and read-only
 Changed roots and fixes generated descriptions. It adds no migration steps; see
 [the migration guide](../../MIGRATION.md#0900-to-0901-composite-subscription-authorization).
 
+Version 0.92.0 adds a federation end-to-end test that serves generated aggregate counts from two subgraphs through the router. It changes no runtime behaviour and needs no migration; see [the migration guide](../../MIGRATION.md#0911-to-0920-aggregate-counts-from-two-subgraphs-test-only).
+
 Version 0.91.1 only allocates a fresh package identity for fixture lockfiles that record AI 0.120.2. Generated code and runtime behaviour match 0.91.0.
 
 Version 0.91.0 scores SQLite runtime search from each row's own document, so
 hidden rows cannot affect visible scores, and fences the runtime search
 backfill against a stale schema. See
 [the migration guide](../../MIGRATION.md#0901-to-0910-isolated-runtime-search-ranking-and-fenced-backfill).
+
+Version 0.92.0 pairs the runtime and macros for narrow-key paginated relation windows.
+
+Version 0.92.0 pairs the runtime and macros for selection-aware static offset connections.
+Version 0.92.0 adds the off-by-default macro `schema-export-only` feature for dedicated
+SDL export builds. Runtime builds must leave it disabled; see
+[schema export](../../docs/reference/graphql-orm/schema-export.md).

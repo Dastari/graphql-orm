@@ -26,6 +26,24 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     fn backend() -> DatabaseBackend;
 }
 
+/// Closed set of scalar comparisons for trusted read policy columns.
+/// Operands use SQL three-valued logic, including when the value is NULL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadPredicateOp {
+    /// Equal (`=`).
+    Eq,
+    /// Not equal (`<>`).
+    Ne,
+    /// Less than (`<`).
+    Lt,
+    /// Less than or equal (`<=`).
+    Lte,
+    /// Greater than (`>`).
+    Gt,
+    /// Greater than or equal (`>=`).
+    Gte,
+}
+
 /// Entity- and backend-bound authorization predicate, built from the same typed
 /// filters used by ordinary queries (including supported relation predicates).
 /// An empty filter is rejected: use `ReadVisibility::Unrestricted` deliberately.
@@ -36,6 +54,70 @@ pub struct ReadPredicate {
     expression: FilterExpression,
 }
 impl ReadPredicate {
+    /// Compare a validated persisted physical column with a bound value.
+    /// Private and non-filterable columns are accepted; this does not expose
+    /// them in GraphQL inputs or grant any field access. Unknown names fail closed.
+    pub fn column<B: OrmBackend, T: Entity + 'static>(
+        column: &str,
+        op: ReadPredicateOp,
+        value: SqlValue,
+    ) -> async_graphql::Result<Self> {
+        if !T::columns()
+            .iter()
+            .any(|definition| definition.name == column)
+        {
+            return Err(invalid());
+        }
+        let operator = match op {
+            ReadPredicateOp::Eq => "=",
+            ReadPredicateOp::Ne => "<>",
+            ReadPredicateOp::Lt => "<",
+            ReadPredicateOp::Lte => "<=",
+            ReadPredicateOp::Gt => ">",
+            ReadPredicateOp::Gte => ">=",
+        };
+        Ok(Self {
+            entity: TypeId::of::<T>(),
+            backend: B::DIALECT,
+            expression: FilterExpression::trusted_fragment(
+                format!("{} {operator} ?", B::DIALECT.quote_identifier(column)),
+                vec![value],
+            ),
+        })
+    }
+
+    /// SQL negation: UNKNOWN (NULL) remains UNKNOWN and cannot authorize a row.
+    /// EXISTS relations negate to NOT EXISTS. To allow absent or matching rows,
+    /// compose `exists_any.not()?.or(exists_matching)?`. Empty inner fragments
+    /// are refused rather than interpreted as an authorization grant.
+    #[allow(clippy::should_implement_trait)] // Fallible policy construction.
+    pub fn not(self) -> async_graphql::Result<Self> {
+        fn supported(expression: &FilterExpression) -> bool {
+            match expression {
+                FilterExpression::Raw { clause, .. }
+                | FilterExpression::TrustedFragment { clause, .. } => !clause.trim().is_empty(),
+                FilterExpression::And(children) => {
+                    !children.is_empty() && children.iter().all(supported)
+                }
+                FilterExpression::Or(children) => children.iter().all(supported),
+            }
+        }
+        if !supported(&self.expression) {
+            return Err(invalid());
+        }
+        let mut values = Vec::new();
+        let clause = render_filter_expression(
+            DatabaseBackend::Sqlite,
+            &self.expression,
+            &mut 1,
+            &mut values,
+        );
+        Ok(Self {
+            expression: FilterExpression::trusted_fragment(format!("NOT ({clause})"), values),
+            ..self
+        })
+    }
+
     /// Reject filters requiring residual Rust matching on this backend. A partial
     /// policy must supply a SQL-only prefilter and retain its row callback.
     pub fn from_filter<B: OrmBackend, F: ReadVisibilityFilter>(
@@ -124,6 +206,95 @@ impl ReadPredicate {
     }
 }
 
+/// Internal authorization bridge for generated static collection filters.
+/// Only complete SQL visibility is accepted; callback policies fail closed.
+#[doc(hidden)]
+pub async fn prepare_static_relation_filter<B, S, T, F>(
+    ctx: &async_graphql::Context<'_>,
+    keys: &[(&str, &str)],
+    alternatives: &[F],
+) -> async_graphql::Result<(Vec<String>, Vec<SqlValue>)>
+where
+    B: OrmBackend,
+    S: Entity + 'static,
+    T: Entity + 'static,
+    F: ReadVisibilityFilter,
+{
+    if F::entity_type_id() != TypeId::of::<T>() || F::backend() != B::DIALECT {
+        return Err(invalid());
+    }
+    let db = ctx.data::<Database<B>>()?;
+    let surface = EntityAccessSurface::GraphqlRelation;
+    db.ensure_entity_access(
+        Some(ctx),
+        T::entity_name(),
+        T::metadata().read_policy,
+        EntityAccessKind::Read,
+        surface,
+    )
+    .await?;
+    let visibility = db.read_visibility::<T>(Some(ctx), surface).await?;
+    if visibility.requires_residual_checks() {
+        return Err(invalid());
+    }
+    let mut expressions = Vec::new();
+    for filter in alternatives {
+        filter.validate().map_err(query_error)?;
+        if filter.requires_in_memory_filtering(B::DIALECT) {
+            return Err(input_error());
+        }
+        for name in filter.referenced_fields() {
+            let field = T::repository_field_policies()
+                .iter()
+                .find(|f| f.api_name == name)
+                .ok_or_else(invalid)?;
+            db.ensure_readable_field(
+                ctx,
+                T::entity_name(),
+                field.api_name,
+                field.read_policy,
+                None,
+            )
+            .await?;
+        }
+        expressions.push(
+            filter.to_filter_expression().unwrap_or_else(|| {
+                FilterExpression::trusted_fragment("1 = 1".to_owned(), Vec::new())
+            }),
+        );
+    }
+    let mut expression = if expressions.is_empty() {
+        FilterExpression::trusted_fragment("1 = 0".to_owned(), Vec::new())
+    } else {
+        FilterExpression::Or(expressions)
+    };
+    if let Some(policy) = visibility.predicate_expression() {
+        expression = FilterExpression::And(vec![expression, policy.clone()]);
+    }
+    let predicate = ReadPredicate::related::<B, S, T>(
+        keys,
+        ReadPredicate {
+            entity: TypeId::of::<T>(),
+            backend: B::DIALECT,
+            expression,
+        },
+    )?;
+    let mut values = Vec::new();
+    // Keep anonymous placeholders in this composable fragment. EntityQuery
+    // rebases them after preceding scalar/policy binds using B::DIALECT.
+    // Identifiers inside the EXISTS are already quoted by ReadPredicate::related.
+    let clause = render_filter_expression(
+        DatabaseBackend::Sqlite,
+        &predicate.expression,
+        &mut 1,
+        &mut values,
+    );
+    if values.len() > 512 {
+        return Err(input_error());
+    }
+    Ok((vec![clause], values))
+}
+
 /// The policy's explicit read decision for one request/entity/surface.
 #[derive(Clone, Debug)]
 pub enum ReadVisibility {
@@ -204,6 +375,37 @@ pub struct KeysetCursorField {
     pub read_policy: Option<&'static str>,
     /// Raw cursor values may be public only for readable, untransformed scalars.
     pub graphql_readable: bool,
+}
+
+/// Binds a keyset order fingerprint to what the cursor may be resumed on.
+///
+/// `entity` is supplied for a configured (compile-time) order, whose
+/// fingerprint names columns only, so two entities with the same key columns
+/// would otherwise accept one another's cursors. A runtime order already names
+/// its entity and passes `None`. A non-empty `filter_identities` appends a
+/// SHA-256 of the caller-visible filter; the filter itself is never placed in
+/// the cursor. Unfiltered reads keep the unfiltered fingerprint.
+///
+/// Every generated keyset path uses this one function, so a cursor issued by
+/// one path is accepted by another only for the same entity, order and filter.
+#[doc(hidden)]
+pub fn bind_keyset_fingerprint(
+    entity: Option<&str>,
+    fingerprint: &str,
+    filter_identities: &[String],
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut bound = match entity {
+        Some(entity) => format!("entity-v1:{entity}:{fingerprint}"),
+        None => fingerprint.to_string(),
+    };
+    if !filter_identities.is_empty() {
+        bound = format!(
+            "{bound}:filter-v1:{:x}",
+            Sha256::digest(format!("{filter_identities:?}").as_bytes())
+        );
+    }
+    bound
 }
 
 fn runtime_keyset_order<T: AuthorizedKeysetEntity>(
@@ -289,11 +491,16 @@ impl AuthorizedScanConfig {
     fn encode<T: AuthorizedKeysetEntity>(
         &self,
         values: Vec<KeysetValue>,
+        filter_identities: &[String],
     ) -> async_graphql::Result<String> {
         let cipher = XChaCha20Poly1305::new((&self.key).into());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let plaintext = encode_keyset_cursor(
-            &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+            &bind_keyset_fingerprint(
+                None,
+                &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+                filter_identities,
+            ),
             values,
         );
         let ciphertext = cipher
@@ -308,6 +515,7 @@ impl AuthorizedScanConfig {
     fn decode<T: AuthorizedKeysetEntity>(
         &self,
         cursor: &str,
+        filter_identities: &[String],
     ) -> async_graphql::Result<Vec<KeysetValue>> {
         let error = || OrmPublicError::new(OrmErrorCode::CursorInvalid).into_graphql_error();
         let text = cursor.strip_prefix("goms1.").ok_or_else(error)?;
@@ -331,7 +539,11 @@ impl AuthorizedScanConfig {
         let plaintext = std::str::from_utf8(&plaintext).map_err(|_| error())?;
         decode_keyset_cursor(
             plaintext,
-            &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+            &bind_keyset_fingerprint(
+                None,
+                &format!("scan:{}:{}", T::entity_name(), T::KEYSET_FINGERPRINT),
+                filter_identities,
+            ),
             T::KEYSET_ORDER.len(),
         )
         .map_err(|e| e.into_graphql_error())
@@ -690,6 +902,12 @@ where
             .limit
             .unwrap_or(PaginationConfig::DEFAULT_LIMIT)
             .max(1);
+        let fingerprint = bind_keyset_fingerprint(
+            runtime.is_none().then(T::entity_name),
+            fingerprint,
+            &base.keyset_filter_identities,
+        );
+        let fingerprint = fingerprint.as_str();
         let after = page
             .cursor
             .as_deref()
@@ -805,7 +1023,7 @@ where
         let mut position = page
             .after
             .as_deref()
-            .map(|c| config.decode::<T>(c))
+            .map(|c| config.decode::<T>(c, &base.keyset_filter_identities))
             .transpose()?;
         let total_count = if page.include_total_count {
             Some(base.count_with_auth(db, auth).await.map_err(query_error)?)
@@ -866,7 +1084,10 @@ where
         let continuation = if status == ScanStatus::Exhausted {
             None
         } else {
-            Some(config.encode::<T>(position.ok_or_else(invalid)?)?)
+            Some(config.encode::<T>(
+                position.ok_or_else(invalid)?,
+                &base.keyset_filter_identities,
+            )?)
         };
         Ok(AuthorizedScanPage {
             nodes,
@@ -876,5 +1097,26 @@ where
                 total_count,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+
+    #[test]
+    fn negation_refuses_empty_inner_shapes() {
+        for expression in [
+            FilterExpression::And(vec![]),
+            FilterExpression::trusted_fragment("", vec![]),
+            FilterExpression::Or(vec![FilterExpression::trusted_fragment("", vec![])]),
+        ] {
+            let predicate = ReadPredicate {
+                entity: TypeId::of::<()>(),
+                backend: DatabaseBackend::Sqlite,
+                expression,
+            };
+            assert!(predicate.not().is_err());
+        }
     }
 }
