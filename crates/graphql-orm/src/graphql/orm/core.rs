@@ -2400,6 +2400,7 @@ pub trait MutationContextKeysetConnectionPage<B: WriteBackend = DefaultWriteBack
 /// Safe client-visible failure of one post-commit notification.
 /// A notification failure never changes the committed bulk row count.
 #[derive(Debug, Clone, async_graphql::SimpleObject)]
+#[graphql(shareable)]
 pub struct NotificationError {
     /// Authored message, or a masked internal error category.
     pub message: String,
