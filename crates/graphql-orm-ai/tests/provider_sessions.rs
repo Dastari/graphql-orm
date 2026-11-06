@@ -1300,3 +1300,345 @@ async fn provider_session_invalidation_is_disclosed_on_the_session_stream() {
             .any(|event| event.event_type == "provider_session_reset")
     );
 }
+
+// Use real catalogue descriptor fingerprints, rather than substituting unrelated
+// hashes at the rebind gate. The ORM session/run services own the full lifecycle;
+// provider absence is supplied by the fixture, without a real peer or credentials.
+fn catalogue(tools: &[(&str, &str)]) -> AiToolCatalog {
+    let mut catalog = AiToolCatalog::new();
+    for (id, argument_type) in tools {
+        let disclosure = AiDisclosureSchema::new(
+            "records-v1",
+            AiDisclosureShape::object(
+                AiDisclosureRule::exportable(DataClassification::Internal),
+                [(
+                    "records".to_owned(),
+                    AiDisclosureShape::list(
+                        AiDisclosureRule::exportable(DataClassification::Internal),
+                        100,
+                        AiDisclosureShape::object(
+                            AiDisclosureRule::exportable(DataClassification::Internal),
+                            [(
+                                "id".to_owned(),
+                                AiDisclosureShape::scalar(AiDisclosureRule::exportable(
+                                    DataClassification::Internal,
+                                )),
+                            )],
+                        ),
+                    ),
+                )],
+            ),
+        )
+        .unwrap();
+        let document = if *argument_type == "integer" {
+            "query Search($term: Int!) { records(term: $term) { id } }"
+        } else {
+            "query Search($term: String!) { records(term: $term) { id } }"
+        };
+        let contract = GraphqlOperationContract::new(
+            GraphqlExecutionTargetId::parse("application").unwrap(),
+            "schema-v1",
+            "Search",
+            document,
+            "records-v1",
+            disclosure.fingerprint.clone(),
+        )
+        .unwrap();
+        let tool = AiToolDescriptor::new(
+            *id,
+            "Search readable records",
+            AiToolOperationKind::Query,
+            document,
+            serde_json::json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object", "properties": {"term": {"type": argument_type}},
+                "required": ["term"], "additionalProperties": false
+            }),
+        )
+        .unwrap()
+        .with_result_projection("records-v1")
+        .with_graphql_contract(contract);
+        catalog.register_with_disclosure(tool, disclosure).unwrap();
+    }
+    catalog
+}
+
+fn catalogue_descriptor(catalog: &AiToolCatalog) -> AiProviderSessionDescriptor {
+    let binding = AiProviderCapabilitySessionBinding::new(
+        AiCapabilityDeliveryMode::EagerExact,
+        "a".repeat(64),
+        catalog
+            .descriptors()
+            .map(|tool| tool.fingerprint.clone())
+            .collect(),
+        "fixture-projection/v1",
+        "reviewed-model",
+        ModelReasoningEffort::Unspecified,
+        "b".repeat(64),
+    )
+    .unwrap();
+    AiProviderSessionDescriptor::new_with_capability_binding(
+        ProviderKind::LocalHarness,
+        "reviewed-local-profile",
+        "retained-runtime/v2",
+        "c".repeat(64),
+        &binding,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn retained_session_survives_added_tool() {
+    catalogue_change_round_trip("add").await;
+}
+#[tokio::test]
+async fn retained_session_survives_removed_tool() {
+    catalogue_change_round_trip("remove").await;
+}
+#[tokio::test]
+async fn retained_session_survives_changed_tool_schema() {
+    catalogue_change_round_trip("schema").await;
+}
+#[tokio::test]
+async fn retained_session_survives_unrelated_tool_change() {
+    catalogue_change_round_trip("unrelated").await;
+}
+
+async fn catalogue_change_round_trip(case: &str) {
+    let fixture = provider_session_fixture().await;
+    let owner = fixture.owner.clone();
+    let first = active_run(&fixture, &owner, "changed-plan-workspace").await;
+    let original = catalogue(&[("records.search", "string"), ("records.unused", "string")]);
+    let changed = match case {
+        "add" => catalogue(&[
+            ("records.search", "string"),
+            ("records.unused", "string"),
+            ("records.added", "string"),
+        ]),
+        "remove" => catalogue(&[("records.unused", "string")]),
+        "schema" => catalogue(&[("records.search", "integer"), ("records.unused", "string")]),
+        "unrelated" => catalogue(&[("records.search", "string"), ("records.unused", "integer")]),
+        _ => unreachable!(),
+    };
+    let original_descriptor = catalogue_descriptor(&original);
+    let changed_descriptor = catalogue_descriptor(&changed);
+    assert_ne!(original_descriptor, changed_descriptor);
+    let mut policy = AiToolPolicySet::new(ToolMaturity::ReadOnly);
+    for tool in original.descriptors() {
+        policy.bind(AiToolPolicyBinding {
+            tool_id: tool.id.clone(),
+            fingerprint: tool.fingerprint.clone(),
+            enabled: true,
+        });
+    }
+    let added = AiToolId::parse("records.added").unwrap();
+    if let Some(tool) = changed.descriptor(&added) {
+        assert!(
+            !policy.allows(tool),
+            "registration must not enable an added tool"
+        );
+    }
+    let used = AiToolId::parse("records.search").unwrap();
+    if case == "remove" {
+        assert!(matches!(
+            changed.read_only_model_definition(&used, "records_search"),
+            Err(AiError::Forbidden)
+        ));
+    }
+    if case == "schema" {
+        assert!(
+            !policy.allows(changed.descriptor(&used).unwrap()),
+            "stale policy must not grant changed arguments"
+        );
+    }
+    if case == "unrelated" {
+        assert!(policy.allows(changed.descriptor(&used).unwrap()));
+    }
+    fixture
+        .provider_sessions
+        .bind_for_run(
+            &first,
+            AiProviderSessionBindRequest::new(
+                original_descriptor,
+                AiProviderSessionCursor::new("retained.thread", "original-thread")
+                    .expect("original cursor should validate"),
+                "c".repeat(64),
+                None,
+            )
+            .expect("original bind request should validate"),
+        )
+        .await
+        .expect("original retained thread should bind");
+    fixture
+        .cancellation
+        .request_cancellation(
+            &owner,
+            CancelAiRunInput {
+                session_id: first.session_id().0,
+                run_id: first.run_id().0,
+                client_request_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("owner cancellation should become durable");
+    let settled = fixture
+        .provider_sessions
+        .settle_interrupted_turn(&first, AiRunInterruptSettlement::Settled)
+        .await
+        .expect("settled empty turn should release the original thread");
+
+    let next = next_active_run(&fixture, &owner, first.session_id()).await;
+    let transcript = settled.transcript_fingerprint();
+    let unchanged_plan =
+        AiProviderSessionTurnPlan::new(catalogue_descriptor(&original), transcript).unwrap();
+    assert!(
+        matches!(
+            fixture
+                .provider_sessions
+                .disposition_for_run(&next, &unchanged_plan)
+                .await
+                .unwrap(),
+            AiProviderSessionRunDisposition::Resume(_)
+        ),
+        "the same transcript and catalogue must resume without cleanup"
+    );
+    let changed_plan = AiProviderSessionTurnPlan::new(changed_descriptor.clone(), transcript)
+        .expect("changed plan should validate");
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .disposition_for_run(&next, &changed_plan)
+            .await
+            .expect("changed active plan should converge into cleanup"),
+        AiProviderSessionRunDisposition::Unavailable(AiProviderSessionState::CleanupRequired)
+    ));
+
+    assert!(matches!(
+        fixture
+            .provider_sessions
+            .claim_for_run(&next, &changed_descriptor, transcript)
+            .await,
+        Err(AiError::Conflict)
+    ));
+
+    let cleanup = fixture
+        .provider_sessions
+        .claim_cleanup("changed-plan-cleanup-worker")
+        .await
+        .expect("cleanup claim should succeed")
+        .expect("changed active plan should require deletion");
+    let deletion = fixture
+        .provider_sessions
+        .open_for_cleanup(&cleanup, &protection_policy(cleanup.scope().clone()))
+        .await
+        .expect("old cursor should open only for deletion");
+    assert_eq!(
+        deletion.cursor().expose_to_provider_adapter(),
+        "original-thread"
+    );
+    fixture
+        .provider_sessions
+        .schedule_cleanup_retry(
+            &cleanup,
+            Duration::seconds(1),
+            "provider_delete_unavailable",
+        )
+        .await
+        .expect("transient deletion failure should retain the cleanup origin");
+    fixture.clock.advance_seconds(61);
+    let cleanup = fixture
+        .provider_sessions
+        .claim_cleanup("changed-plan-cleanup-worker")
+        .await
+        .expect("cleanup retry claim should succeed")
+        .expect("backoff expiry should expose the same deletion");
+    let deletion = fixture
+        .provider_sessions
+        .open_for_cleanup(&cleanup, &protection_policy(cleanup.scope().clone()))
+        .await
+        .expect("retried cleanup cursor should open");
+    fixture
+        .provider_sessions
+        .complete_cleanup(
+            &cleanup,
+            AiProviderSessionAbsenceProof::for_request(&deletion, fixture.clock.now()),
+        )
+        .await
+        .expect("exact absence should tombstone the old cursor");
+
+    let authorization = match fixture
+        .provider_sessions
+        .disposition_for_run(&next, &changed_plan)
+        .await
+        .expect("the same pre-dispatch run should receive rebind authority")
+    {
+        AiProviderSessionRunDisposition::RebindAllowed(authorization) => *authorization,
+        other => panic!("expected same-run rebind authority, got {other:?}"),
+    };
+    let stale_request = AiProviderSessionBindRequest::new(
+        catalogue_descriptor(&original),
+        AiProviderSessionCursor::new("retained.thread", "stale-thread").unwrap(),
+        transcript,
+        None,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            fixture
+                .provider_sessions
+                .rebind_for_run(&next, authorization.clone(), stale_request)
+                .await,
+            Err(AiError::Conflict)
+        ),
+        "new authorization must reject the old descriptor"
+    );
+    let rebound = fixture
+        .provider_sessions
+        .rebind_for_run(
+            &next,
+            authorization,
+            AiProviderSessionBindRequest::new(
+                changed_descriptor,
+                AiProviderSessionCursor::new("retained.thread", "replacement-thread")
+                    .expect("replacement cursor should validate"),
+                transcript,
+                None,
+            )
+            .expect("replacement bind request should validate"),
+        )
+        .await
+        .expect("the current plan should bind after old-provider absence");
+    let opened = fixture
+        .provider_sessions
+        .open_for_run(&next, &rebound)
+        .await
+        .expect("replacement cursor should open under the same run fence");
+    assert_eq!(
+        opened.cursor().expose_to_provider_adapter(),
+        "replacement-thread"
+    );
+    let history = fixture
+        .sessions
+        .conversation_bootstrap(&owner, first.session_id(), 20, 20, 20)
+        .await
+        .unwrap();
+    assert_eq!(
+        history.messages.len(),
+        2,
+        "both user messages survive provider replacement"
+    );
+    assert!(!history.reset_required);
+    let blocks = fixture
+        .sessions
+        .message_blocks(&owner, first.input_message_id(), None, 20)
+        .await
+        .unwrap();
+    assert!(
+        blocks.iter().any(|block| block
+            .content
+            .0
+            .to_string()
+            .contains("Start a retained provider turn")),
+        "original durable text remains readable"
+    );
+}

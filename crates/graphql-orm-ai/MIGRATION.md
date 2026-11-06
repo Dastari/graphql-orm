@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.121.0 to 0.121.1: catalogue-change regression coverage
+
+No consumer action or data migration is needed. This patch adds regression tests
+only; runtime behavior and AI schema module version remain unchanged.
+
 ## 0.120.2 to 0.121.0: finite provider session cleanup
 
 Add an exhaustive match arm for `AiProviderSessionState::CleanupExhausted`.
