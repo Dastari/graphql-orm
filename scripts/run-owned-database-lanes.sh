@@ -44,6 +44,8 @@ run_sqlite() {
 }
 
 run_postgres() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test static_related_filter -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \
@@ -67,6 +69,7 @@ run_postgres() {
 
 run_postgres_legacy() {
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
+    --test static_related_filter \
     --test app_repository_helpers \
     --test backup_roundtrip \
     --test bidirectional_join_relations \

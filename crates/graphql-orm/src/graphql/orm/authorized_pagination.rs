@@ -124,6 +124,92 @@ impl ReadPredicate {
     }
 }
 
+/// Internal authorization bridge for generated static collection filters.
+/// Only complete SQL visibility is accepted; callback policies fail closed.
+#[doc(hidden)]
+pub async fn prepare_static_relation_filter<B, S, T, F>(
+    ctx: &async_graphql::Context<'_>,
+    keys: &[(&str, &str)],
+    alternatives: &[F],
+) -> async_graphql::Result<(Vec<String>, Vec<SqlValue>)>
+where
+    B: OrmBackend,
+    S: Entity + 'static,
+    T: Entity + 'static,
+    F: ReadVisibilityFilter,
+{
+    if F::entity_type_id() != TypeId::of::<T>() || F::backend() != B::DIALECT {
+        return Err(invalid());
+    }
+    let db = ctx.data::<Database<B>>()?;
+    let surface = EntityAccessSurface::GraphqlRelation;
+    db.ensure_entity_access(
+        Some(ctx),
+        T::entity_name(),
+        T::metadata().read_policy,
+        EntityAccessKind::Read,
+        surface,
+    )
+    .await?;
+    let visibility = db.read_visibility::<T>(Some(ctx), surface).await?;
+    if visibility.requires_residual_checks() {
+        return Err(invalid());
+    }
+    let mut expressions = Vec::new();
+    for filter in alternatives {
+        filter.validate().map_err(query_error)?;
+        if filter.requires_in_memory_filtering(B::DIALECT) {
+            return Err(input_error());
+        }
+        for name in filter.referenced_fields() {
+            let field = T::repository_field_policies()
+                .iter()
+                .find(|f| f.api_name == name)
+                .ok_or_else(invalid)?;
+            db.ensure_readable_field(
+                ctx,
+                T::entity_name(),
+                field.api_name,
+                field.read_policy,
+                None,
+            )
+            .await?;
+        }
+        expressions.push(
+            filter.to_filter_expression().unwrap_or_else(|| {
+                FilterExpression::trusted_fragment("1 = 1".to_owned(), Vec::new())
+            }),
+        );
+    }
+    let mut expression = if expressions.is_empty() {
+        FilterExpression::trusted_fragment("1 = 0".to_owned(), Vec::new())
+    } else {
+        FilterExpression::Or(expressions)
+    };
+    if let Some(policy) = visibility.predicate_expression() {
+        expression = FilterExpression::And(vec![expression, policy.clone()]);
+    }
+    let predicate = ReadPredicate::related::<B, S, T>(
+        keys,
+        ReadPredicate {
+            entity: TypeId::of::<T>(),
+            backend: B::DIALECT,
+            expression,
+        },
+    )?;
+    let mut values = Vec::new();
+    let clause = render_filter_expression(
+        DatabaseBackend::Sqlite,
+        &predicate.expression,
+        &mut 1,
+        &mut values,
+    );
+    if values.len() > 512 {
+        return Err(input_error());
+    }
+    Ok((vec![clause], values))
+}
+
 /// The policy's explicit read decision for one request/entity/surface.
 #[derive(Clone, Debug)]
 pub enum ReadVisibility {
@@ -690,6 +776,17 @@ where
             .limit
             .unwrap_or(PaginationConfig::DEFAULT_LIMIT)
             .max(1);
+        let bound_fingerprint;
+        let fingerprint = if base.keyset_filter_identities.is_empty() {
+            fingerprint
+        } else {
+            use sha2::{Digest, Sha256};
+            bound_fingerprint = format!(
+                "{fingerprint}:filter-v1:{:x}",
+                Sha256::digest(format!("{:?}", base.keyset_filter_identities).as_bytes())
+            );
+            &bound_fingerprint
+        };
         let after = page
             .cursor
             .as_deref()

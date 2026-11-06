@@ -16,6 +16,11 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.92.0**.
+
+- Add opt-in `#[relation(filter)]` collection predicates to static generated `WhereInput` and list, keyset, and aggregate count roots (#314). Parameterized `EXISTS` intersects complete target/link SQL read visibility before paging and counting; empty alternatives match no rows. Residual authorization and spatial combinations fail closed.
+- Bind filtered keyset cursors to the caller-visible typed filter input. Previously issued filtered cursors must restart; no data migration is needed.
+
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
 
 - **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).

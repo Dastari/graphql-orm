@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.92.0 adds opt-in authorized static collection filters with `#[relation(filter)]`.
+Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
+See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
+
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.
 

@@ -190,12 +190,24 @@ pub trait DatabaseFilter {
     fn to_sql_conditions(&self) -> (Vec<String>, Vec<SqlValue>);
     fn is_empty(&self) -> bool;
 
+    /// Stable caller-visible filter intent for keyset cursor binding.
+    /// This must exclude private authorization predicates and policy parameters.
+    /// Handwritten filters retain their existing cursor behavior by default.
+    fn keyset_filter_identity(&self) -> Option<String> {
+        None
+    }
+
+    /// Whether this filter carries request-authorized non-scalar predicates.
+    /// Generated relation filters supply this evidence only after preparation.
+    fn has_request_authorized_predicates(&self) -> bool {
+        false
+    }
+
     /// Public field identities referenced by active predicates.
     ///
     /// Generated filters override this so aggregate execution can authorize
-    /// every predicate field before the database observes it. A handwritten
-    /// filter that does not provide this evidence cannot be used by the
-    /// policy-aware aggregate builder.
+    /// every predicate field before the database observes it. Handwritten
+    /// filters must provide field identities or request authorization evidence.
     fn referenced_fields(&self) -> Vec<&'static str> {
         Vec::new()
     }
@@ -2413,7 +2425,10 @@ where
                 ));
             }
             let referenced = filter.referenced_fields();
-            if !filter.is_empty() && referenced.is_empty() {
+            if !filter.is_empty()
+                && referenced.is_empty()
+                && !filter.has_request_authorized_predicates()
+            {
                 return Err(invalid_aggregate(
                     "aggregate filter did not provide field authorization evidence",
                 ));
@@ -3547,6 +3562,7 @@ pub struct EntityQuery<T, B: OrmBackend = DefaultBackend> {
     pub page: Option<PageInput>,
     entity_matchers: Vec<EntityMatcher<T>>,
     filter_is_valid: bool,
+    pub(crate) keyset_filter_identities: Vec<String>,
     _marker: PhantomData<(T, B)>,
 }
 
@@ -3560,6 +3576,7 @@ impl<T, B: OrmBackend> Clone for EntityQuery<T, B> {
             page: self.page.clone(),
             entity_matchers: self.entity_matchers.clone(),
             filter_is_valid: self.filter_is_valid,
+            keyset_filter_identities: self.keyset_filter_identities.clone(),
             _marker: PhantomData,
         }
     }
@@ -3579,6 +3596,7 @@ where
             page: None,
             entity_matchers: Vec::new(),
             filter_is_valid: true,
+            keyset_filter_identities: Vec::new(),
             _marker: PhantomData,
         }
     }
@@ -3600,6 +3618,9 @@ where
         F: DatabaseFilter,
     {
         self.filter_is_valid &= filter.validate().is_ok();
+        if let Some(identity) = filter.keyset_filter_identity() {
+            self.keyset_filter_identities.push(identity);
+        }
         let (conds, values) = filter.to_sql_conditions();
         self.where_clauses.extend(conds);
         self.values.extend(values);
@@ -3611,6 +3632,9 @@ where
         F: DatabaseFilter + Clone + Send + Sync + 'static,
     {
         self.filter_is_valid &= filter.validate().is_ok();
+        if let Some(identity) = filter.keyset_filter_identity() {
+            self.keyset_filter_identities.push(identity);
+        }
         if filter.requires_in_memory_filtering(B::DIALECT) {
             let (conds, values) = filter.to_sql_prefilter_conditions(B::DIALECT);
             self.where_clauses.extend(conds);

@@ -237,7 +237,9 @@ them with generated relation fields. See [#270](https://github.com/Dastari/graph
 
 `target`, `from`, and `to` are relation metadata. `from` and `to` take either
 one string or an array of string literals for a composite key. `multiple`
-changes the relation cardinality. `emit_fk` is a boolean; `on_delete` and
+changes the relation cardinality. `filter` opts an unconditional public collection into
+authorized target-Where alternatives in generated roots; see
+[authorized collection filters](entities-and-relations.md#authorized-collection-filters). `emit_fk` is a boolean; `on_delete` and
 `propagate_change` are strings validated for the selected backend/policy.
 Relations are not ordinary persisted fields.
 

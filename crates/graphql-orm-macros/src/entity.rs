@@ -1319,6 +1319,7 @@ pub(crate) struct FieldMetadata {
     pub(crate) relation_propagate_change: Option<String>,
     pub(crate) relation_source_condition: Option<RelationConditionMetadata>,
     pub(crate) relation_target_condition: Option<RelationConditionMetadata>,
+    pub(crate) relation_filter: bool,
     pub(crate) relation_order_aggregate: Option<RelationOrderAggregateMetadata>,
     pub(crate) skip_db: bool,
     /// Skip from generated public GraphQL Create/Update inputs only; field remains in DB,
@@ -1504,6 +1505,7 @@ impl Default for FieldMetadata {
             relation_propagate_change: None,
             relation_source_condition: None,
             relation_target_condition: None,
+            relation_filter: false,
             relation_order_aggregate: None,
             skip_db: false,
             skip_input: false,
@@ -2417,6 +2419,8 @@ pub(crate) fn parse_field_metadata(field: &Field) -> syn::Result<FieldMetadata> 
                             }
                             meta.relation_target_condition =
                                 Some(parse_relation_condition(nested, "column")?);
+                        } else if nested.path.is_ident("filter") {
+                            meta.relation_filter = true;
                         } else if nested.path.is_ident("order_aggregate") {
                             if meta.relation_order_aggregate.is_some() {
                                 return Err(nested.error("duplicate relation order_aggregate"));
@@ -3354,6 +3358,10 @@ fn generate_entity_impl(
     let mut filter_to_sql = Vec::new();
     let mut filter_to_entity_match = Vec::new();
     let mut filter_is_empty_checks = Vec::new();
+    let mut related_prepare = Vec::new();
+    let mut related_render = Vec::new();
+    let mut related_validate = Vec::new();
+    let mut related_present = Vec::new();
     let mut filter_contains_spatial_checks = Vec::new();
     let mut filter_validation_checks = Vec::new();
     let mut filter_referenced_field_checks = Vec::new();
@@ -3687,6 +3695,69 @@ fn generate_entity_impl(
                         search_fields: #search_fields_tokens,
                     }
                 });
+
+                if field_meta.relation_filter {
+                    if !is_multiple
+                        || field_meta.input_only
+                        || !field_meta.read
+                        || field_meta.is_private
+                        || field_meta.read_policy.is_some()
+                        || field_meta.relation_source_condition.is_some()
+                        || field_meta.relation_target_condition.is_some()
+                    {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "relation(filter) requires an unconditional public collection without a field policy",
+                        ));
+                    }
+                    let target = syn::Ident::new(&target_type, field.span());
+                    let target_where =
+                        syn::Ident::new(&format!("{target_type}WhereInput"), field.span());
+                    let source_physical = source_columns
+                        .iter()
+                        .map(|name| {
+                            let source = parsed_fields
+                                .iter()
+                                .find(|p| p.field.ident.as_ref().is_some_and(|i| i == name))
+                                .unwrap();
+                            source.meta.db_column.as_deref().unwrap_or(name).to_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    where_input_fields.push(quote! {
+                        /// Match any authorized related row satisfying one of these alternatives; an empty list matches nothing.
+                        #[graphql(name = #graphql_name)]
+                        pub #field_name: Option<Vec<#target_where>>,
+                    });
+                    filter_is_empty_checks
+                        .push(quote! { if self.#field_name.is_some() { return false; } });
+                    related_present.push(quote! { self.#field_name.is_some() });
+                    related_validate.push(quote! {
+                        if self.#field_name.is_some() && !self.__gom_related.contains_key(#graphql_name) {
+                            return Err(::graphql_orm::sqlx::Error::Protocol("relation filter requires request authorization".into()));
+                        }
+                    });
+                    related_render.push(quote! {
+                        if self.#field_name.is_some() {
+                            if let Some((clauses, binds)) = self.__gom_related.get(#graphql_name) {
+                                conditions.extend(clauses.clone());
+                                values.extend(binds.clone());
+                            }
+                        }
+                    });
+                    related_prepare.push(quote! {
+                        if let Some(alternatives) = self.#field_name.as_mut() {
+                            ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?
+                                .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await?;
+                            for filter in alternatives.iter_mut() {
+                                filter.__gom_prepare_read(ctx, depth + 1, budget).await?;
+                            }
+                            let predicate = ::graphql_orm::graphql::orm::prepare_static_relation_filter::<
+                                #backend_marker, #struct_name, #target, #target_where
+                            >(ctx, &[#((#source_physical, #target_columns)),*], alternatives).await?;
+                            self.__gom_related.insert(#graphql_name.to_owned(), predicate);
+                        }
+                    });
+                }
 
                 if let Some(order_aggregate) = &field_meta.relation_order_aggregate {
                     if field_meta.relation_source_condition.is_some()
@@ -5109,6 +5180,31 @@ fn generate_entity_impl(
         });
     }
 
+    let keyset_filter_identity_impl = if has_repository_entity_attribute(&input.attrs) {
+        quote! {}
+    } else {
+        quote! {
+            fn keyset_filter_identity(&self) -> Option<String> {
+                if ::graphql_orm::graphql::orm::DatabaseFilter::is_empty(self) { return None; }
+                Some(::graphql_orm::async_graphql::InputType::to_value(self).to_string())
+            }
+        }
+    };
+    let related_storage = if related_prepare.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            /// Request-authorized relation predicates. Internal to generated resolvers.
+            #[doc(hidden)]
+            #[graphql(skip)]
+            pub __gom_related: ::std::collections::BTreeMap<String, (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>)>,
+        }
+    };
+    let related_clear = if related_prepare.is_empty() {
+        quote! {}
+    } else {
+        quote! { self.__gom_related.clear(); }
+    };
     Ok(quote! {
         #rls_impl
         #search_schema_impl
@@ -5121,6 +5217,7 @@ fn generate_entity_impl(
         #[graphql(name = #where_input_name_str, rename_fields = #field_case_rule)]
         pub struct #where_input_name {
             #(#where_input_fields)*
+            #related_storage
 
             /// Logical AND of conditions
             pub and: Option<Vec<#where_input_name>>,
@@ -5182,6 +5279,7 @@ fn generate_entity_impl(
 
         impl ::graphql_orm::graphql::orm::DatabaseFilter for #where_input_name {
             fn validate(&self) -> ::graphql_orm::Result<()> {
+                #(#related_validate)*
                 #(#filter_validation_checks)*
                 if let Some(filters) = &self.and {
                     for filter in filters {
@@ -5207,6 +5305,7 @@ fn generate_entity_impl(
                 let mut values = Vec::new();
                 let _gom_spatial_prefilter = false;
 
+                #(#related_render)*
                 #(#filter_to_sql)*
 
                 // Handle And
@@ -5253,6 +5352,13 @@ fn generate_entity_impl(
 
             fn is_empty(&self) -> bool {
                 self.__gom_is_empty()
+            }
+
+            #keyset_filter_identity_impl
+
+            fn has_request_authorized_predicates(&self) -> bool {
+                self.__gom_has_related_filters()
+                    && ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_ok()
             }
 
             fn referenced_fields(&self) -> Vec<&'static str> {
@@ -5325,6 +5431,44 @@ fn generate_entity_impl(
         }
 
         impl #where_input_name {
+            /// Resolve related-row predicates under the current request authority.
+            /// Relation filters require complete SQL visibility and reject residual row policies.
+            #[doc(hidden)]
+            pub fn __gom_prepare_read<'a>(
+                &'a mut self,
+                ctx: &'a ::graphql_orm::async_graphql::Context<'_>,
+                depth: usize,
+                budget: &'a mut usize,
+            ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = ::graphql_orm::async_graphql::Result<()>> + Send + 'a>> {
+                Box::pin(async move {
+                    if depth == 0 && !self.__gom_has_related_filters() { return Ok(()); }
+                    if depth > 8 || *budget == 0 {
+                        return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                            ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
+                    }
+                    *budget -= 1;
+                    #related_clear
+                    #(#related_prepare)*
+                    for filters in [&mut self.and, &mut self.or].into_iter().flatten() {
+                        for filter in filters { filter.__gom_prepare_read(ctx, depth + 1, budget).await?; }
+                    }
+                    if let Some(filter) = self.not.as_mut() {
+                        filter.__gom_prepare_read(ctx, depth + 1, budget).await?;
+                    }
+                    if self.__gom_has_related_filters() && self.__gom_contains_spatial_filter() {
+                        return Err(::graphql_orm::graphql::errors::OrmPublicError::new(
+                            ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput).into_graphql_error());
+                    }
+                    Ok(())
+                })
+            }
+            fn __gom_has_related_filters(&self) -> bool {
+                false #(|| #related_present)*
+                    || self.and.as_ref().is_some_and(|fs| fs.iter().any(Self::__gom_has_related_filters))
+                    || self.or.as_ref().is_some_and(|fs| fs.iter().any(Self::__gom_has_related_filters))
+                    || self.not.as_ref().is_some_and(|f| f.__gom_has_related_filters())
+            }
+
             fn __gom_to_sql_prefilter_conditions(&self) -> (Vec<String>, Vec<::graphql_orm::graphql::orm::SqlValue>) {
                 if ::graphql_orm::graphql::orm::DatabaseFilter::validate(self).is_err() {
                     return (vec!["1 = 0".to_owned()], Vec::new());
@@ -5333,6 +5477,7 @@ fn generate_entity_impl(
                 let mut values = Vec::new();
                 let _gom_spatial_prefilter = true;
 
+                #(#related_render)*
                 #(#filter_to_sql)*
 
                 if let Some(ref and_filters) = self.and {

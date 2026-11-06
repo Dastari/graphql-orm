@@ -5089,6 +5089,11 @@ fn generate_graphql_operations_unfiltered(
     // unrelated fields. Authorize original recursive predicate intent before
     // any list/count/scan SQL, using the same public identities as field reads.
     let filter_read_authorization = quote! {
+        let mut where_input = where_input;
+        if let Some(filter) = where_input.as_mut() {
+            filter.__gom_prepare_read(ctx, 0, &mut 128).await?;
+        }
+
         if let Some(filter) = where_input.as_ref() {
             for field_name in ::graphql_orm::graphql::orm::DatabaseFilter::referenced_fields(filter) {
                 let field = <#struct_name as ::graphql_orm::graphql::orm::Entity>::repository_field_policies()
@@ -6792,6 +6797,7 @@ fn generate_graphql_operations_unfiltered(
                 let auth_context = ctx
                     .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                     .cloned();
+                #filter_read_authorization
                 let mut query = #struct_name::aggregate(db).with_auth(auth_context.as_ref());
                 if let Some(filter) = where_input {
                     query = query.filter(filter);
