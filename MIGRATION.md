@@ -124,6 +124,13 @@ further discrepancies. Keyset paging uses this same stored ordering and key tie
 breakers. Normalize values before relying on chronological pages; discard old
 cursors after normalization and restart paging. No migration is needed for integer
 columns or applications intentionally retaining existing text representations.
+## AI 0.120.2 to 0.121.0: finite provider session cleanup
+
+Handle `AiProviderSessionState::CleanupExhausted` in exhaustive matches and apply
+AI schema module `0.76.0` before restarting all workers. No row data migration is needed.
+Custom Codex process adapters must implement bounded absence confirmation.
+Cleanup retries grow and stop, retaining the protected cursor for investigation;
+see the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
 
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
