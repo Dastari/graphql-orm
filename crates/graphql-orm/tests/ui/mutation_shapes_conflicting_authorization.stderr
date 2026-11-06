@@ -1,0 +1,5 @@
+error: `delete` is declared for operation authorization or AI mutation policy but mutation_shapes does not select it
+ --> tests/ui/mutation_shapes_conflicting_authorization.rs:9:8
+  |
+9 | struct Shaped {
+  |        ^^^^^^

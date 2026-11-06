@@ -1,0 +1,5 @@
+error: mutation_shapes accepts create, upsert, update, update_many, delete, delete_many
+ --> tests/ui/mutation_shapes_unknown.rs:4:54
+  |
+4 | #[graphql_entity(table = "shaped", mutation_shapes = "create,truncate")]
+  |                                                      ^^^^^^^^^^^^^^^^^

@@ -35,6 +35,16 @@ report `Repository`; `InternalMutationHook` is reserved for writes executing
 inside mutation hooks. Do not use origin to compensate for duplicate calls.
 External side effects are not transactional; defer them until after commit.
 Fixes #284.
+## 0.92.2 to 0.92.3: generated mutation shape selection
+
+Nothing changes unless you add `mutation_shapes`. An application that refuses unwanted generated mutations at run time can now remove them from the schema instead:
+
+```rust
+#[graphql_entity(table = "orders", plural = "Orders", mutation_shapes = "create,update")]
+struct Order { /* ... */ }
+```
+
+The schema then has `createOrder` and `updateOrder` only. Selectors are `create`, `upsert`, `update`, `update_many`, `delete` and `delete_many`. Disabled mutations vanish from the SDL and the operation and semantic catalogues (so AI tool profiles and router exports omit them), along with input and result types that only they used. Clients must refresh pinned SDL and generated types only for entities that opt in, and any client still calling a removed mutation now gets a validation error. Repository APIs, relations, hooks, `Changed` subscriptions and authorization are unchanged. `schema_roots!` `generated_mutations` still removes an entity's whole mutation object and wins over `mutation_shapes`; `append_only` entities accept only `create`. A selector the entity cannot generate, or an `operation_authorization` or `ai_mutations` category the selection removes, fails to compile. No data or schema migration is needed.
 
 ## 0.92.1 to 0.92.2: bulk post-commit notifications
 

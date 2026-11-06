@@ -1,0 +1,615 @@
+enum ChangeAction {
+	CREATED
+	UPDATED
+	DELETED
+}
+
+enum ChangeKind {
+	DIRECT
+	PROPAGATED
+}
+
+input CreateParcelInput {
+	shelfId: UUID!
+	code: String!
+}
+
+input CreateShelfInput {
+	label: String!
+}
+
+"""
+Result of bulk delete by Where filter
+"""
+type DeleteParcelsResult {
+	success: Boolean!
+	"""
+	Failures after commit; success and count still describe the committed write.
+	"""
+	notificationErrors: [NotificationError!]
+	error: String
+	"""
+	Application refusal code, or the safe database error category.
+	"""
+	errorCode: String
+	deletedCount: Int!
+}
+
+"""
+Result of bulk delete by Where filter
+"""
+type DeleteShelvesResult {
+	success: Boolean!
+	"""
+	Failures after commit; success and count still describe the committed write.
+	"""
+	notificationErrors: [NotificationError!]
+	error: String
+	"""
+	Application refusal code, or the safe database error category.
+	"""
+	errorCode: String
+	deletedCount: Int!
+}
+
+type Mutation {
+	"""
+	Create one Shelf records
+	"""
+	createShelf(
+		"""
+		Input
+		"""
+		input: CreateShelfInput!
+	): ShelfResult!
+	"""
+	Update one Shelf records
+	"""
+	updateShelf(
+		"""
+		Id
+		"""
+		id: UUID!,
+		"""
+		Input
+		"""
+		input: UpdateShelfInput!
+	): ShelfResult!
+	"""
+	Delete one Shelf records
+	"""
+	deleteShelf(
+		"""
+		Id
+		"""
+		id: UUID!
+	): ShelfResult!
+	"""
+	Update matching Shelf records
+	"""
+	updateShelves(
+		"""
+		Where
+		"""
+		where: ShelfWhereInput,
+		"""
+		Input
+		"""
+		input: UpdateShelfInput!
+	): UpdateShelvesResult!
+	"""
+	Delete matching Shelf records
+	"""
+	deleteShelves(
+		"""
+		Where
+		"""
+		where: ShelfWhereInput
+	): DeleteShelvesResult!
+	"""
+	Create one Parcel records
+	"""
+	createParcel(
+		"""
+		Input
+		"""
+		input: CreateParcelInput!
+	): ParcelResult!
+	"""
+	Create or update one Parcel records
+	"""
+	upsertParcel(
+		"""
+		Input
+		"""
+		input: CreateParcelInput!
+	): UpsertParcelResult!
+	"""
+	Update one Parcel records
+	"""
+	updateParcel(
+		"""
+		Id
+		"""
+		id: UUID!,
+		"""
+		Input
+		"""
+		input: UpdateParcelInput!
+	): ParcelResult!
+	"""
+	Delete one Parcel records
+	"""
+	deleteParcel(
+		"""
+		Id
+		"""
+		id: UUID!
+	): ParcelResult!
+	"""
+	Update matching Parcel records
+	"""
+	updateParcels(
+		"""
+		Where
+		"""
+		where: ParcelWhereInput,
+		"""
+		Input
+		"""
+		input: UpdateParcelInput!
+	): UpdateParcelsResult!
+	"""
+	Delete matching Parcel records
+	"""
+	deleteParcels(
+		"""
+		Where
+		"""
+		where: ParcelWhereInput
+	): DeleteParcelsResult!
+}
+
+"""
+Safe client-visible failure of one post-commit notification.
+A notification failure never changes the committed bulk row count.
+"""
+type NotificationError {
+	"""
+	Authored message, or a masked internal error category.
+	"""
+	message: String!
+	"""
+	Optional authored code, or a safe internal error code.
+	"""
+	code: String
+}
+
+enum OrderDirection {
+	ASC
+	DESC
+}
+
+"""
+Connection page metadata shared by every generated connection type.
+
+Every `graphql-orm` subgraph exports an identical `PageInfo` object. Without
+`@shareable`, Federation v2 composition rejects a supergraph that contains
+two ORM subgraphs because a non-entity object field may otherwise be
+resolved by only one subgraph. The type carries no owned data, so declaring
+it shareable is the accurate description rather than a composition
+workaround.
+"""
+type PageInfo {
+	hasNextPage: Boolean!
+	hasPreviousPage: Boolean!
+	startCursor: String
+	endCursor: String
+	totalCount: Int
+}
+
+"""
+Offset pagination input shared by generated list, relation, and search APIs.
+
+Generated connection resolvers combine this request input with
+[`PaginationConfig`] from the runtime `Database`. The default config applies
+a limit of [`PaginationConfig::DEFAULT_LIMIT`] (`50`) when this input or its
+`limit` field is omitted, and clamps explicit limits to
+[`PaginationConfig::DEFAULT_MAX_LIMIT`] (`100`). Use
+[`PaginationConfig::legacy`] on `Database` for the previous 1000/1000 caps
+during migration.
+"""
+input PageInput {
+	"""
+	Requested page size. Explicit limits are clamped by the runtime
+	[`PaginationConfig`] before SQL rendering.
+	"""
+	limit: Int
+	"""
+	Requested offset. Negative offsets are treated as `0`.
+	"""
+	offset: Int
+}
+
+"""
+Parcel
+"""
+type Parcel {
+	"""
+	Id
+	"""
+	id: UUID!
+	"""
+	Shelf Id
+	"""
+	shelfId: UUID!
+	"""
+	Code
+	"""
+	code: String!
+}
+
+"""
+Subscription change event for this entity.
+"""
+type ParcelChangedEvent {
+	action: ChangeAction!
+	changeKind: ChangeKind!
+	id: UUID!
+	sourceEntity: String
+	sourceId: String
+	path: [String!]!
+	parcel: Parcel
+}
+
+"""
+Connection containing edges and page info
+"""
+type ParcelConnection {
+	"""
+	The edges in this connection
+	"""
+	edges: [ParcelEdge!]!
+	"""
+	Pagination information
+	"""
+	pageInfo: PageInfo!
+}
+
+"""
+Edge containing a node and cursor
+"""
+type ParcelEdge {
+	"""
+	The item at the end of the edge
+	"""
+	node: Parcel!
+	"""
+	A cursor for pagination
+	"""
+	cursor: String!
+}
+
+input ParcelOrderByInput {
+	code: OrderDirection
+}
+
+"""
+Mutation result for this entity.
+"""
+type ParcelResult {
+	success: Boolean!
+	error: String
+	parcel: Parcel
+}
+
+input ParcelWhereInput {
+	id: UuidFilter
+	shelfId: UuidFilter
+	code: StringFilter
+	"""
+	Logical AND of conditions
+	"""
+	and: [ParcelWhereInput!]
+	"""
+	Logical OR of conditions
+	"""
+	or: [ParcelWhereInput!]
+	"""
+	Logical NOT of condition
+	"""
+	not: ParcelWhereInput
+}
+
+type Query {
+	"""
+	List Shelf records
+	"""
+	shelves(
+		"""
+		Where
+		"""
+		where: ShelfWhereInput,
+		"""
+		Order by
+		"""
+		orderBy: [ShelfOrderByInput!],
+		"""
+		Page
+		"""
+		page: PageInput
+	): ShelfConnection!
+	"""
+	Read one Shelf records
+	"""
+	shelf(
+		"""
+		Id
+		"""
+		id: UUID!
+	): Shelf
+	"""
+	List Parcel records
+	"""
+	parcels(
+		"""
+		Where
+		"""
+		where: ParcelWhereInput,
+		"""
+		Order by
+		"""
+		orderBy: [ParcelOrderByInput!],
+		"""
+		Page
+		"""
+		page: PageInput
+	): ParcelConnection!
+	"""
+	Read one Parcel records
+	"""
+	parcel(
+		"""
+		Id
+		"""
+		id: UUID!
+	): Parcel
+}
+
+"""
+Shelf
+"""
+type Shelf {
+	"""
+	Id
+	"""
+	id: UUID!
+	"""
+	Label
+	"""
+	label: String!
+}
+
+"""
+Subscription change event for this entity.
+"""
+type ShelfChangedEvent {
+	action: ChangeAction!
+	changeKind: ChangeKind!
+	id: UUID!
+	sourceEntity: String
+	sourceId: String
+	path: [String!]!
+	shelf: Shelf
+}
+
+"""
+Connection containing edges and page info
+"""
+type ShelfConnection {
+	"""
+	The edges in this connection
+	"""
+	edges: [ShelfEdge!]!
+	"""
+	Pagination information
+	"""
+	pageInfo: PageInfo!
+}
+
+"""
+Edge containing a node and cursor
+"""
+type ShelfEdge {
+	"""
+	The item at the end of the edge
+	"""
+	node: Shelf!
+	"""
+	A cursor for pagination
+	"""
+	cursor: String!
+}
+
+input ShelfOrderByInput {
+	label: OrderDirection
+}
+
+"""
+Mutation result for this entity.
+"""
+type ShelfResult {
+	success: Boolean!
+	error: String
+	shelf: Shelf
+}
+
+input ShelfWhereInput {
+	id: UuidFilter
+	label: StringFilter
+	"""
+	Logical AND of conditions
+	"""
+	and: [ShelfWhereInput!]
+	"""
+	Logical OR of conditions
+	"""
+	or: [ShelfWhereInput!]
+	"""
+	Logical NOT of condition
+	"""
+	not: ShelfWhereInput
+}
+
+input SimilarityInput {
+	value: String!
+}
+
+input StringFilter {
+	eq: String
+	ne: String
+	contains: String
+	startsWith: String
+	endsWith: String
+	inList: [String!]
+	notIn: [String!]
+	isNull: Boolean
+	similar: SimilarityInput
+}
+
+type Subscription {
+	"""
+	Observe changes to Shelf records Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Events recheck current authorization and may be suppressed; refresh authorized queries for richer data.
+	"""
+	shelfChanged(
+		"""
+		Filter
+		"""
+		filter: SubscriptionFilterInput,
+		"""
+		Exact complete primary key to observe
+		"""
+		key: UUID,
+		"""
+		Complete primary keys to observe, at most Database::subscription_key_limit (default 500); duplicates are ignored, an empty list matches nothing, and it cannot be combined with key
+		"""
+		keys: [UUID!]
+	): ShelfChangedEvent!
+	"""
+	Observe changes to Parcel records Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Events recheck current authorization and may be suppressed; refresh authorized queries for richer data.
+	"""
+	parcelChanged(
+		"""
+		Filter
+		"""
+		filter: SubscriptionFilterInput,
+		"""
+		Exact complete primary key to observe
+		"""
+		key: UUID,
+		"""
+		Complete primary keys to observe, at most Database::subscription_key_limit (default 500); duplicates are ignored, an empty list matches nothing, and it cannot be combined with key
+		"""
+		keys: [UUID!]
+	): ParcelChangedEvent!
+}
+
+input SubscriptionFilterInput {
+	"""
+	Restrict delivered actions; an empty list matches no events.
+	"""
+	actions: [ChangeAction!]
+	"""
+	Unsupported compatibility placeholder. Supplying any value is rejected
+	with INVALID_INPUT at generated subscription admission.
+	"""
+	dummy: Boolean
+}
+
+"""
+A UUID is a unique 128-bit number, stored as 16 octets. UUIDs are parsed as
+Strings within GraphQL. UUIDs are used to assign unique identifiers to
+entities without requiring a central allocating authority.
+
+# References
+
+* [Wikipedia: Universally Unique Identifier](http://en.wikipedia.org/wiki/Universally_unique_identifier)
+* [RFC4122: A Universally Unique Identifier (UUID) URN Namespace](http://tools.ietf.org/html/rfc4122)
+"""
+scalar UUID
+
+input UpdateParcelInput {
+	shelfId: UUID
+	code: String
+}
+
+"""
+Result of bulk update by Where filter
+"""
+type UpdateParcelsResult {
+	success: Boolean!
+	"""
+	Failures after commit; success and count still describe the committed write.
+	"""
+	notificationErrors: [NotificationError!]
+	error: String
+	"""
+	Application refusal code, or the safe database error category.
+	"""
+	errorCode: String
+	affectedCount: Int!
+}
+
+input UpdateShelfInput {
+	label: String
+}
+
+"""
+Result of bulk update by Where filter
+"""
+type UpdateShelvesResult {
+	success: Boolean!
+	"""
+	Failures after commit; success and count still describe the committed write.
+	"""
+	notificationErrors: [NotificationError!]
+	error: String
+	"""
+	Application refusal code, or the safe database error category.
+	"""
+	errorCode: String
+	affectedCount: Int!
+}
+
+type UpsertParcelResult {
+	success: Boolean!
+	error: String
+	action: ChangeAction
+	parcel: Parcel
+}
+
+input UuidFilter {
+	eq: UUID
+	ne: UUID
+	inList: [UUID!]
+	notIn: [UUID!]
+	isNull: Boolean
+}
+
+"""
+Directs the executor to include this field or fragment only when the `if` argument is true.
+"""
+directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Directs the executor to skip this field or fragment when the `if` argument is true.
+"""
+directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
+"""
+Provides a scalar specification URL for specifying the behavior of custom scalar types.
+"""
+directive @specifiedBy(url: String!) on SCALAR
+schema {
+	query: Query
+	mutation: Mutation
+	subscription: Subscription
+}

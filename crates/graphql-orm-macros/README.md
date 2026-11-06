@@ -15,6 +15,8 @@ Version 0.92.3 is the companion of graphql-orm 0.92.3; macro generation is uncha
 Version 0.93.0 runs write input transforms once per input row, including each
 existing row in bulk updates, with independent outputs and atomic refusal.
 Ordinary transaction writes report Repository; hook writes report InternalMutationHook.
+Version 0.92.3 adds `mutation_shapes`, which selects the generated mutations an entity
+exposes; omission changes nothing.
 
 Version 0.92.2 runs post-commit notifications for GraphQL bulk writes and adds
 `notify_on_error = "report"` for single-row success after notification failures.

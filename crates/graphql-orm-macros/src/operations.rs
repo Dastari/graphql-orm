@@ -1264,6 +1264,9 @@ fn generated_resolver_schema_signature(
     if let Some(shapes) = &entity_meta.query_shapes {
         signature.push_str(&format!("query_shapes={shapes:?}\n"));
     }
+    if let Some(shapes) = &entity_meta.mutation_shapes {
+        signature.push_str(&format!("mutation_shapes={shapes:?}\n"));
+    }
     for field in field_signatures {
         signature.push_str(&field);
         signature.push('\n');
@@ -1276,12 +1279,13 @@ pub(crate) fn generate_graphql_operations(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let output = generate_graphql_operations_unfiltered(input)?;
     let metadata = parse_entity_metadata(&input.attrs)?;
-    let Some(shapes) = metadata.query_shapes else {
+    if metadata.query_shapes.is_none() && metadata.mutation_shapes.is_none() {
         return Ok(output);
-    };
+    }
     // Object's skipped methods retain ordinary Rust signatures. Removing a
     // disabled method also removes its GraphQL-only parameter attributes.
     let queries_name = format!("{}Queries", input.ident);
+    let mutations_name = format!("{}Mutations", input.ident);
     let mut generated: syn::File = syn::parse2(output)?;
     for item in &mut generated.items {
         let syn::Item::Impl(implementation) = item else {
@@ -1290,29 +1294,48 @@ pub(crate) fn generate_graphql_operations(
         let syn::Type::Path(target) = implementation.self_ty.as_ref() else {
             continue;
         };
-        if !target
+        let Some(target) = target
             .path
             .segments
             .last()
-            .is_some_and(|segment| segment.ident == queries_name)
-        {
+            .map(|segment| segment.ident.to_string())
+        else {
             continue;
+        };
+        if let (Some(shapes), true) = (&metadata.query_shapes, target == queries_name) {
+            implementation.items.retain(|item| {
+                let syn::ImplItem::Fn(method) = item else {
+                    return true;
+                };
+                let shape = match method.sig.ident.to_string().as_str() {
+                    "get_by_id" => "single",
+                    "list" => "list",
+                    "keyset" => "keyset",
+                    "authorized_scan" => "scan",
+                    "search" => "search",
+                    "aggregate" => "aggregate",
+                    _ => return true,
+                };
+                shapes.iter().any(|selected| selected == shape)
+            });
         }
-        implementation.items.retain(|item| {
-            let syn::ImplItem::Fn(method) = item else {
-                return true;
-            };
-            let shape = match method.sig.ident.to_string().as_str() {
-                "get_by_id" => "single",
-                "list" => "list",
-                "keyset" => "keyset",
-                "authorized_scan" => "scan",
-                "search" => "search",
-                "aggregate" => "aggregate",
-                _ => return true,
-            };
-            shapes.iter().any(|selected| selected == shape)
-        });
+        if let (Some(shapes), true) = (&metadata.mutation_shapes, target == mutations_name) {
+            // The generated object method names are the selector names, so a
+            // selector and its resolver cannot drift apart.
+            implementation.items.retain(|item| {
+                let syn::ImplItem::Fn(method) = item else {
+                    return true;
+                };
+                let name = method.sig.ident.to_string();
+                if !matches!(
+                    name.as_str(),
+                    "create" | "upsert" | "update" | "update_many" | "delete" | "delete_many"
+                ) {
+                    return true;
+                }
+                shapes.contains(&name)
+            });
+        }
     }
     Ok(quote! { #generated })
 }
@@ -3724,6 +3747,48 @@ fn generate_graphql_operations_unfiltered(
     generated_category_required("update_many", generates_standard_write_surface)?;
     generated_category_required("delete", generates_standard_write_surface)?;
     generated_category_required("delete_many", generates_standard_write_surface)?;
+    if let Some(shapes) = &entity_meta.mutation_shapes {
+        for shape in shapes {
+            let available = match shape.as_str() {
+                "create" => entity_meta.append_only || generates_standard_write_surface,
+                "upsert" => generates_standard_write_surface && graphql_upsert_enabled,
+                _ => generates_standard_write_surface,
+            };
+            if !available {
+                let reason = if entity_meta.append_only {
+                    "append_only entities generate only create"
+                } else if shape == "upsert" && generates_standard_write_surface {
+                    "configure graphql_entity upsert = \"field, ...\" to generate it"
+                } else {
+                    "this entity does not generate standard GraphQL mutations"
+                };
+                return Err(syn::Error::new_spanned(
+                    struct_name,
+                    format!("mutation_shapes selects unavailable {shape} mutation: {reason}"),
+                ));
+            }
+        }
+        // A policy for an operation that is not in the schema can never apply,
+        // so it is almost certainly a stale declaration.
+        for category in operation_authorizations
+            .keys()
+            .map(String::as_str)
+            .chain(entity_meta.ai_mutations.keys().map(String::as_str))
+        {
+            let is_mutation = matches!(
+                category,
+                "create" | "upsert" | "update" | "update_many" | "delete" | "delete_many"
+            );
+            if is_mutation && !shapes.iter().any(|selected| selected == category) {
+                return Err(syn::Error::new_spanned(
+                    struct_name,
+                    format!(
+                        "`{category}` is declared for operation authorization or AI mutation policy but mutation_shapes does not select it"
+                    ),
+                ));
+            }
+        }
+    }
     // Every supported entity profile emits a real Changed subscription,
     // independently of whether it can generate standard GraphQL mutations.
     let resolver_schema_signature = generated_resolver_schema_signature(
@@ -7299,6 +7364,32 @@ fn generate_graphql_operations_unfiltered(
                 && [#(#disabled_query_fields),*].contains(&operation.field_name())));
         }
     };
+    let disabled_mutation_fields = entity_meta
+        .mutation_shapes
+        .as_ref()
+        .map(|selected| {
+            [
+                ("create", create_mutation_name.as_str()),
+                ("upsert", upsert_mutation_name.as_str()),
+                ("update", update_mutation_name.as_str()),
+                ("update_many", update_many_mutation_name.as_str()),
+                ("delete", delete_mutation_name.as_str()),
+                ("delete_many", delete_many_mutation_name.as_str()),
+            ]
+            .into_iter()
+            .filter(|(shape, _)| !selected.iter().any(|name| name == shape))
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mutation_shape_metadata_filter = if disabled_mutation_fields.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            operations.retain(|operation| !(operation.kind() == ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation
+                && [#(#disabled_mutation_fields),*].contains(&operation.field_name())));
+        }
+    };
     let operation_metadata_impl = quote! {
         impl ::graphql_orm::graphql::orm::GraphqlOperationMetadata for #struct_name {
             fn generated_graphql_operations(
@@ -7311,6 +7402,7 @@ fn generate_graphql_operations_unfiltered(
                         #(#operation_descriptors),*
                     ];
                     #query_shape_metadata_filter
+                    #mutation_shape_metadata_filter
                     operations.sort_by(|left, right| {
                         (
                             left.kind(),

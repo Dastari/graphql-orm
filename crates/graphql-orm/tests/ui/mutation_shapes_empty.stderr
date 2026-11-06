@@ -1,0 +1,5 @@
+error: mutation_shapes must select at least one shape; omit it to keep every mutation, or remove the entity's mutations with schema_roots! generated_mutations
+ --> tests/ui/mutation_shapes_empty.rs:4:54
+  |
+4 | #[graphql_entity(table = "shaped", mutation_shapes = "")]
+  |                                                      ^^

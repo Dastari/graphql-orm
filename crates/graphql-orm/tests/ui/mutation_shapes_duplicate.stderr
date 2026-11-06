@@ -1,0 +1,5 @@
+error: mutation_shapes must not repeat a shape
+ --> tests/ui/mutation_shapes_duplicate.rs:4:54
+  |
+4 | #[graphql_entity(table = "shaped", mutation_shapes = "create,create")]
+  |                                                      ^^^^^^^^^^^^^^^
