@@ -691,3 +691,8 @@ the default propagates the handler error after commit. Repository/MutationContex
 paths have no GraphQL context and retain their existing notification-free behavior.
 
 Host read policies can use `ReadPredicate::column::<Backend, Entity>(physical_name, ReadPredicateOp::Gt, SqlValue::Int(bound))` for validated private persisted columns without exposing public filters. `.not()?` preserves SQL NULL/UNKNOWN as denied; use `exists_any.not()?.or(exists_matching)?` for absent-or-matching relations.
+
+Single-row mutations and propagating `notify_with` mask callback errors whose
+`async_graphql::Error.source` is populated and whose extensions lack a string
+`code`, matching bulk. Use `Error::new` or a string `code` for authored client text.
+Custom `From` conversions leaving `source` empty retain all refusal extensions.

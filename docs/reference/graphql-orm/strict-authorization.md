@@ -115,6 +115,16 @@ to receive the callback code (null if absent). Only unexpected failures are mask
 database/driver text cannot forge a refusal through a string prefix. The SQLx
 compatibility path uses a private typed carrier. Refresh pinned SDL and client
 code generation for the additive bulk result field.
+Single-row generated mutations, generated entity/field policy checks, residual
+single-row read checks and default propagating `notify_with` errors use
+that same classifier. An error whose own `async_graphql::Error.source` field is
+`Some` without a string `code` is masked; the wrapped error need not have a nested
+`std::error::Error::source()`. Use `Error::new` or set a string `code` for an authored
+refusal. Custom `From` conversions leaving that field empty preserve their text
+and extensions. Direct SQLx sources retain their safe bulk category; other
+sources become `INTERNAL_ERROR`. Internal details use the existing opt-in
+`GRAPHQL_ORM_LOG_INTERNAL_ERRORS` server path. No data migration is needed.
+
 Optional create/upsert fields are checked even when absent, as before;
 updates check only supplied fields, including explicit nulls.
 

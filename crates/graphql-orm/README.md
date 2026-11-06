@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.94.0 masks source-bearing callback failures without a string `code` in generated
+single-row mutations, matching bulk. Authored refusals retain their message and extensions.
+See the root migration guide; no data migration is needed.
+
 Version 0.93.0 documents `MutationContext::defer` as the after-commit callback and pins it with tests;
 there is no API or behaviour change.
 

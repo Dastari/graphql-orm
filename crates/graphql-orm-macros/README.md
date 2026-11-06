@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.94.0 masks source-bearing callback failures without a string `code` in generated
+single-row mutations, matching bulk. Authored refusals retain their message and extensions.
+See the root migration guide; no data migration is needed.
+
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 
 Version 0.93.0 runs write input transforms once per input row, including each

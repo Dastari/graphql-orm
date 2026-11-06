@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- **Breaking (ORM/macros 0.94.0):** mask source-bearing callback failures without a string `code` in generated single-row mutations and default propagating notifications, matching bulk. Authored refusals retain their messages and extensions. No data migration is needed. Fixes #328.
+
 AI **0.122.0**, ORM runtime/macros **0.93.0**, tool profiles **0.21.0**.
 
 - **Docs and tests (ORM/macros 0.93.0):** `MutationContext::defer` is the after-commit callback for mutation hooks and `Database::transaction`. It already existed, so there is no new API and no behaviour change. It now has rustdoc, a documented ordering (commit, `Changed` events, deferred actions, then `notify_with`), and tests for each write path, for never running after a rollback, and for failures reaching `PostCommitErrorHandler`. The new `defer-after-commit` lane in `scripts/run-owned-database-lanes.sh` runs them on SQLite, PostgreSQL and MSSQL. The usage guide and write-path reference describe the "durable job in the transaction, wake a worker after commit" pattern and say the callback is at most once and lost by a crash after commit. No migration is needed. Fixes [#338](https://github.com/Dastari/graphql-orm/issues/338).
