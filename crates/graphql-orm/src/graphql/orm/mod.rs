@@ -1,3 +1,6 @@
+mod generated_filter;
+#[doc(hidden)]
+pub use generated_filter::*;
 mod authorized_pagination;
 pub use authorized_pagination::*;
 mod backend;
