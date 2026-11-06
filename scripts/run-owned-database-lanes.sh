@@ -133,6 +133,8 @@ run_field_write_denial() {
 case "${lane}" in
   bulk-refusals)
     for backend in sqlite postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+        --lib application_refusal_roundtrips_but_prefix_text_is_not_trusted
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" --test bulk_refusals --test field_write_denial -- --include-ignored --test-threads=1
     done
     ;;
