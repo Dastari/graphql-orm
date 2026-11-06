@@ -487,7 +487,7 @@ appear in the operation catalogue.
 
 | To limit | Use | Notes |
 | --- | --- | --- |
-| Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Repository APIs are unaffected |
+| Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Omit `keyset` for policies always returning `Prefilter` or `CallbackOnly`; use bounded `scan`. Repository APIs are unaffected |
 | All of an entity's mutations | `generated_mutations` with `generated_mutation_allowlist` or `generated_mutation_denylist` in `schema_roots!` | Repository writes and `Changed` stay |
 | Update and delete | `append_only = true` | |
 | All writes | `schema_policy = "external_read_only"` | `Changed` stays in the schema |
@@ -624,3 +624,5 @@ Run this against any graphql-orm service. The commands use `rg` from the service
 - [ ] **Confirm clients handle continuity errors on their real delivery path**, with a test that feeds
       in `SUBSCRIPTION_CONTINUITY_LOST` and checks that the client resubscribes and then refetches.
 - [ ] **Decide how clients learn of deletes:** `can_read_deleted_preimage`, a refetch, or both.
+
+Host read policies can use `ReadPredicate::column::<Backend, Entity>(physical_name, ReadPredicateOp::Gt, SqlValue::Int(bound))` for validated private persisted columns without exposing public filters. `.not()?` preserves SQL NULL/UNKNOWN as denied; use `exists_any.not()?.or(exists_matching)?` for absent-or-matching relations.

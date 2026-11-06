@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.91.2 pairs with the runtime read-predicate additions; generated code is unchanged.
+
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.
 

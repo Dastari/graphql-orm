@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|read-predicate|ai-postgres|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|ai-postgres|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|read-predicate|ai-postgres|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -44,6 +44,7 @@ run_sqlite() {
 }
 
 run_postgres() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test read_predicate -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql \
     --lib --test runtime_graphql --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
     --test migration_planner --test migration_apply --test legacy_migration_history \
@@ -93,6 +94,7 @@ run_postgres_legacy() {
     --test postgres_compat \
     --test postgres_rls \
     --test propagated_subscriptions \
+    --test read_predicate \
     --test read_projections \
     --test recursive_relations \
     --test relation_delete_policy \
@@ -111,7 +113,7 @@ run_postgres_legacy() {
 
 run_mssql() {
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_integration --test read_predicate --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }
@@ -122,7 +124,13 @@ run_ai_postgres() {
     -- --test-threads=1
 }
 
+run_read_predicate() {
+  cargo test -p graphql-orm --locked --no-default-features --features mssql \
+    --test read_predicate -- --include-ignored --test-threads=1
+}
+
 case "${lane}" in
+  read-predicate) run_read_predicate ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;

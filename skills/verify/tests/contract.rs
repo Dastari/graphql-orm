@@ -1433,3 +1433,30 @@ async fn an_upsert_needs_a_state_machine_transaction() {
         .await;
     assert!(machine.is_ok());
 }
+
+#[test]
+fn private_read_predicate_is_validated_and_negatable() {
+    let predicate = ReadPredicate::column::<SqliteBackend, Profile>(
+        "hidden_note",
+        ReadPredicateOp::Eq,
+        SqlValue::String("host-owned".into()),
+    )
+    .unwrap()
+    .not()
+    .unwrap();
+    let (sql, values) = EntityQuery::<Profile>::new()
+        .with_read_visibility(&ReadVisibility::Complete(predicate))
+        .unwrap()
+        .build_delete_sql();
+    assert!(sql.contains("NOT ("));
+    assert!(!sql.contains("host-owned"));
+    assert_eq!(values, vec![SqlValue::String("host-owned".into())]);
+    assert!(
+        ReadPredicate::column::<SqliteBackend, Profile>(
+            "missing",
+            ReadPredicateOp::Eq,
+            SqlValue::Null,
+        )
+        .is_err()
+    );
+}

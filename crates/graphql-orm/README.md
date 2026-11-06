@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.91.2 adds validated private-column and NULL-preserving negated read predicates.
+
 Version 0.89.0 adds full-text search to runtime collections: an IR declaration, managed storage with
 readiness and a resumable backfill, write maintenance, and a ranked runtime GraphQL `search` argument.
 See [runtime search](../../docs/reference/graphql-orm/runtime-search.md).

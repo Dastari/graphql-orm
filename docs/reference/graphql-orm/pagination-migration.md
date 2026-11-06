@@ -125,7 +125,21 @@ let predicate = ReadPredicate::from_filter::<SqliteBackend, _>(&filter)?;
 Ok(ReadVisibility::Complete(predicate))
 ```
 
+`ReadPredicate::column::<Backend, Entity>(column, ReadPredicateOp::Gt,
+SqlValue::Int(bound))` validates the physical name against `Entity::columns()`,
+quotes it, and binds the value. It accepts private (`read = false, filter = false`)
+persisted columns without adding them to `WhereInput`. Operators are `Eq`, `Ne`,
+`Lt`, `Lte`, `Gt`, and `Gte`; NULL comparisons use ordinary SQL semantics.
+
 `ReadPredicate::and` and `or` compose predicates for the same entity/backend.
+`predicate.not()?` uses SQL `NOT`: TRUE becomes FALSE, FALSE becomes TRUE,
+and NULL/UNKNOWN remains UNKNOWN (denied in WHERE). It never treats UNKNOWN as
+FALSE before negating. Empty SQL fragments and empty conjunctions fail closed; an empty disjunction
+is the supported constant FALSE. Relation
+EXISTS is two-valued: `exists_any.not()?.or(exists_matching)?` means absent or
+matching. For a present related row whose comparison is UNKNOWN, matching does
+not grant access. Avoid `not(exists(not(matches)))` when NULL must be denied:
+NULL comparisons inside EXISTS do not match rows.
 `ReadPredicate::related::<Backend, Source, Target>(&[("source_column",
 "target_column")], target_predicate)` provides a validated, parameterized
 EXISTS equality relation, including composite key mappings. Column names are

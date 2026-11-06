@@ -591,7 +591,13 @@ Enable at most one in each group:
 `#[graphql_entity(query_shapes = "list,keyset,scan")]` selects generated query
 shapes for the entity. The available selectors are `single`, `list`, `keyset`,
 `scan`, `search`, and `aggregate`; optional capabilities must be configured.
-Omission preserves all current generated queries. Disabled shapes are absent
+Omission preserves all current generated queries.
+If a row policy can only return `Prefilter` or `CallbackOnly`, omit `keyset`,
+for example `query_shapes = "single,list,scan"`, and install finite scan bounds.
+Keyset requires `Complete` or `Unrestricted`; residual-only policies otherwise
+fail every keyset request with `AUTHORIZATION_MISCONFIGURED`. This is explicit
+shape guidance rather than a registration diagnostic because policy decisions
+are request-dependent; working keyset entities keep their existing behavior. Disabled shapes are absent
 from both SDL and operation metadata. This selection does not alter repository
 APIs, relations, mutations, subscriptions or authorization. See the
 [migration guide](../../../MIGRATION.md#0590-to-0600-generated-query-shape-selection).

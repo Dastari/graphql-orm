@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.91.2** adds `ReadPredicate::column` with persisted-column validation and bound values, and SQL NULL-preserving `ReadPredicate::not`. Private policy columns remain absent from public filters. Keyset shape guidance covers residual-only policies. Fixes #318.
+
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
 
 - **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).
