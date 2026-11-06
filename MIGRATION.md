@@ -186,6 +186,24 @@ non-compliant wrapper behavior. Nested relation
 selections on Changed snapshots remain rejected at admission.
 
 ## 0.91.1 to 0.92.0: relation-bearing identity fields
+## Child-delete parent invalidations (0.92.0)
+
+No data migration is needed. Consumers of `Changed` on relations configured with
+`propagate_change = "up"` now receive child-delete invalidations when they can
+read the current parent, even if they cannot read the child. Refresh authorized
+parent queries on `changeKind: PROPAGATED`, including `action: DELETED`. Use
+`changeKind` to distinguish a child invalidation from a direct parent deletion;
+do not remove the parent solely because the action is `DELETED`. Detect
+this case by null `sourceEntity` and `sourceId`; `id`/`key` identify only the parent.
+Remove parent-touch hooks or client signals added as a #290 workaround to avoid
+redundant refreshes. A bulk deletion of N children emits N events per parent/path,
+matching current updates; no transaction coalescing is introduced. Subsequent hops
+still require current intermediate rows and relation authorization, within the
+existing 16-hop/256-target bounds. Missing or deleted parents emit nothing.
+Direct deleted-preimage authorization is unchanged; no key-only direct-delete
+opt-in is added.
+
+## Relation-bearing identity fields (0.91.2)
 
 No data migration is needed. Complex entities deriving `GraphQLRelations` can
 opt into `node_id` and automatically serve a readable managed version as

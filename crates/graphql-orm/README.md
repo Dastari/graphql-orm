@@ -38,6 +38,8 @@ Version 0.92.0 adds opt-in authorized static collection filters with `#[relation
 Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
 See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
 Version 0.92.0 adds validated private-column and NULL-preserving negated read predicates.
+Version 0.92.0 delivers parent-authorized invalidations after child deletes (#290);
+public delete provenance contains no child identity. No data migration is needed.
 
 Version 0.89.0 adds full-text search to runtime collections: an IR declaration, managed storage with
 readiness and a resumable backfill, write maintenance, and a ranked runtime GraphQL `search` argument.

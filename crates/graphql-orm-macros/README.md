@@ -37,6 +37,8 @@ Version 0.92.0 adds opt-in authorized static collection filters with `#[relation
 Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
 See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
 Version 0.92.0 pairs with the runtime read-predicate additions; generated code is unchanged.
+Version 0.92.0 delivers parent-authorized invalidations after child deletes (#290);
+public delete provenance contains no child identity. No data migration is needed.
 
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.

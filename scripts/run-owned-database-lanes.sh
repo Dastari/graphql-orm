@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -176,6 +176,11 @@ case "${lane}" in
   denied-relations) run_denied_relations ;;
   static-related-filter) run_static_related_filter ;;
   read-predicate) run_read_predicate ;;
+  delete-propagation)
+    for backend in postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" --test delete_propagation -- --include-ignored --test-threads=1
+    done
+    ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;

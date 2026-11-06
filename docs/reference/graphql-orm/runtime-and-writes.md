@@ -475,13 +475,14 @@ an external write made outside the ORM is not automatically observed.
 The runtime uses request-local event senders attached to `Database`. Subscriptions observe changes emitted by generated write paths.
 
 `#[relation(propagate_change = "up")]` also delivers a `PROPAGATED` event to the parent's `Changed`
-subscribers when a child is created or updated. Deletes are narrower:
+subscribers when a child is created, updated or deleted. Delete release differs:
 
 - A direct `DELETED` event reaches a GraphQL subscriber only when the host grants
   `RowPolicy::can_read_deleted_preimage`, which denies by default. See
   [subscription release authorization](entities-and-relations.md#subscription-release-authorization).
-- A deleted child doesn't notify its parent, because a deleted row can't prove the relation that would
-  authorize the event. [#290](https://github.com/Dastari/graphql-orm/issues/290) tracks this.
+- A child delete captures the parent tuple inside the transaction and authorizes against
+  the current parent. No child read grant is required; public source identity is null.
+  See [subscription release authorization](entities-and-relations.md#subscription-release-authorization).
 
 ## Relation Delete Policy
 
