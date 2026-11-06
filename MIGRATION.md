@@ -172,6 +172,10 @@ No data migration is needed; AI schema module remains `0.76.0`.
 Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
 require committed evidence that no turn in the whole run may have dispatched.
 A clean last turn cannot authorize replay of an earlier possible effect.
+## AI 0.121.0 to 0.121.1: catalogue-change regression coverage
+
+No consumer action or data migration is needed. This patch adds regression tests
+only; runtime behavior and AI schema module version remain unchanged.
 
 ## AI 0.120.2 to 0.121.0: finite provider session cleanup
 
