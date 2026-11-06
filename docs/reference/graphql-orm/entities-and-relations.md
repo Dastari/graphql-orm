@@ -463,8 +463,14 @@ filter signature, sort signature, page signature, and auth context. Belongs-to r
 same grouped loader with a single-row result per parent key.
 
 Paged relation connections are pushed into SQL with `ROW_NUMBER() OVER (PARTITION BY ...)` and a
-grouped count on SQLite, Postgres, and MSSQL-capable relation reads. This avoids loading every child
-row for every selected parent when a nested field asks for the first page of a large relation. When a
+grouped count on SQLite, Postgres, and MSSQL-capable relation reads. The window projects only the
+complete primary key and parent identity; the bounded keys join back to the entity table for full
+page rows. Non-ordering payload columns stay out of the partition window. With an index covering
+the parent, sort and key columns, ranking can use a covering scan and fetch wide rows by primary
+key only for the page. Ranking and exact totals still inspect matching keys; arbitrary filters or
+sorts on wide columns can still require reading those columns. Read predicates, auth context,
+primary-key tie breakers and batched multi-parent behavior are preserved. Count-only GraphQL
+selections still execute the page query. When a
 relation has no page argument, the loader keeps the simpler batched query and groups the returned
 rows in memory.
 

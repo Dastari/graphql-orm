@@ -164,6 +164,43 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
 
     let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(&connection_string).await?;
     let database = graphql_orm::db::Database::new(pool);
+    // Execute the paginated batched relation SQL on a schema-qualified table,
+    // including its narrow-key window and join back to the full entity.
+    {
+        use graphql_orm::async_graphql::dataloader::Loader;
+        use graphql_orm::graphql::loaders::{
+            CompositeRelationQueryKey, RelationKey, RelationKeyPartKind, RelationLoader,
+        };
+        use graphql_orm::graphql::orm::{PaginationRequest, SqlValue};
+        let keys = [10, 20].map(|id| {
+            let values = vec![SqlValue::Int(id)];
+            CompositeRelationQueryKey {
+                relation: "paged_customers",
+                parent_key: RelationKey::from_sql_values(&values),
+                parent_values: values,
+                fk_columns: vec!["[CustomerId]"],
+                key_part_kinds: vec![RelationKeyPartKind::Int],
+                where_signature: None,
+                order_signature: None,
+                page_signature: Some("first".into()),
+                filter: None,
+                sorts: vec![],
+                pagination: Some(PaginationRequest {
+                    limit: Some(1),
+                    offset: 0,
+                }),
+                auth_context: None,
+            }
+        });
+        let loader = RelationLoader::<MssqlCustomer>::new(database.clone());
+        let results = loader.load(&keys).await?;
+        for (key, id) in keys.iter().zip([10, 20]) {
+            let page = &results[key];
+            assert_eq!(page.total_count, 1);
+            assert_eq!(page.entities.len(), 1);
+            assert_eq!(page.entities[0].id, id);
+        }
+    }
     let projected = MssqlCustomerMoneyProjection::query(&database)
         .limit(4)
         .fetch_all()

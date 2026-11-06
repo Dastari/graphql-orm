@@ -629,6 +629,104 @@ fn relation_key_alias(index: usize) -> String {
     format!("__gom_relation_key_{index}")
 }
 
+fn render_relation_page(
+    dialect: DatabaseBackend,
+    query: crate::graphql::orm::SelectQuery,
+    primary_keys: &[&str],
+    partition_columns: &str,
+    sort_sql: &str,
+    relation_key_columns: &[String],
+    pagination: &crate::graphql::orm::PaginationRequest,
+) -> crate::graphql::orm::RenderedQuery {
+    use crate::graphql::orm::SqlDialect;
+
+    // Keep payload columns out of the window's sort/materialization. The complete
+    // primary key identifies exactly one entity even for composite identities.
+    let mut paged_columns = primary_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            format!(
+                "{} AS __gom_relation_pk_{index}",
+                dialect.render_identifier_path(key)
+            )
+        })
+        .chain(relation_key_columns.iter().cloned())
+        .collect::<Vec<_>>();
+    paged_columns.push(format!(
+                "ROW_NUMBER() OVER (PARTITION BY {partition_columns} ORDER BY {sort_sql}) AS __gom_relation_row_number"
+            ));
+
+    let rendered_inner = crate::graphql::orm::render_select_query(
+        dialect,
+        &crate::graphql::orm::SelectQuery {
+            table: query.table,
+            columns: paged_columns,
+            filter: query.filter.clone(),
+            sorts: Vec::new(),
+            pagination: None,
+            count_only: false,
+        },
+    );
+
+    let start = pagination.offset.max(0);
+    let mut row_values = rendered_inner.values.clone();
+    let mut row_sql = format!(
+        "SELECT * FROM ({}) __gom_relation_page WHERE __gom_relation_row_number > {}",
+        rendered_inner.sql,
+        dialect.placeholder(row_values.len() + 1)
+    );
+    row_values.push(crate::graphql::orm::SqlValue::Int(start));
+    if let Some(limit) = pagination.limit {
+        let end = start.saturating_add(limit.max(0));
+        row_sql.push_str(&format!(
+            " AND __gom_relation_row_number <= {}",
+            dialect.placeholder(row_values.len() + 1)
+        ));
+        row_values.push(crate::graphql::orm::SqlValue::Int(end));
+    }
+    // Bounds apply to narrow ranked keys before full rows are fetched. The
+    // outer projection restores the original column namespace for order clauses.
+    let join = primary_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| {
+            format!(
+                "__gom_relation_entity.{} = __gom_relation_page.__gom_relation_pk_{index}",
+                dialect.render_identifier_path(key)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_aliases = (0..relation_key_columns.len())
+        .map(|index| format!("__gom_relation_page.{}", relation_key_alias(index)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let entity_columns = query
+        .columns
+        .iter()
+        .map(|column| {
+            format!(
+                "__gom_relation_entity.{}",
+                dialect.render_identifier_path(column)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    row_sql = format!(
+        "SELECT * FROM (SELECT {entity_columns}, {key_aliases}, __gom_relation_page.__gom_relation_row_number FROM ({row_sql}) __gom_relation_page INNER JOIN {} __gom_relation_entity ON {join}) __gom_relation_rows",
+        dialect.render_identifier_path(query.table),
+    );
+    row_sql.push_str(" ORDER BY ");
+    row_sql.push_str(sort_sql);
+    row_sql.push_str(", __gom_relation_row_number ASC");
+
+    crate::graphql::orm::RenderedQuery {
+        sql: row_sql,
+        values: row_values,
+    }
+}
+
 async fn load_composite_relation_keys<T, B>(
     db: crate::db::Database<B>,
     keys: Vec<CompositeRelationQueryKey>,
@@ -638,8 +736,8 @@ where
     T: BatchLoadEntity<B>,
 {
     use crate::graphql::orm::{
-        FilterExpression, PaginationRequest, SelectQuery, SortExpression, SqlDialect,
-        render_filter_expression, render_select_query,
+        FilterExpression, PaginationRequest, SelectQuery, SortExpression, render_filter_expression,
+        render_select_query,
     };
 
     if keys.is_empty() {
@@ -722,49 +820,28 @@ where
 
         if let Some(PaginationRequest { limit, offset }) = sample.pagination.clone() {
             let partition_columns = sample.fk_columns.join(", ");
-            let mut paged_columns = T::column_names()
-                .iter()
-                .map(|column| (*column).to_string())
-                .chain(relation_key_columns.clone())
-                .collect::<Vec<_>>();
-            paged_columns.push(format!(
-                "ROW_NUMBER() OVER (PARTITION BY {partition_columns} ORDER BY {sort_sql}) AS __gom_relation_row_number"
-            ));
-            paged_columns.push(format!(
-                "COUNT(*) OVER (PARTITION BY {partition_columns}) AS __gom_relation_total_count"
-            ));
-
-            let rendered_inner = render_select_query(
+            let rendered = render_relation_page(
                 B::DIALECT,
-                &SelectQuery {
+                SelectQuery {
                     table: T::TABLE_NAME,
-                    columns: paged_columns,
+                    columns: T::column_names()
+                        .iter()
+                        .map(|column| (*column).to_string())
+                        .collect(),
                     filter: Some(filter.clone()),
                     sorts: Vec::new(),
                     pagination: None,
                     count_only: false,
                 },
+                T::PRIMARY_KEYS,
+                &partition_columns,
+                &sort_sql,
+                &relation_key_columns,
+                &PaginationRequest { limit, offset },
             );
-
             let start = offset.max(0);
-            let mut row_values = rendered_inner.values.clone();
-            let mut row_sql = format!(
-                "SELECT * FROM ({}) __gom_relation_page WHERE __gom_relation_row_number > {}",
-                rendered_inner.sql,
-                B::DIALECT.placeholder(row_values.len() + 1)
-            );
-            row_values.push(crate::graphql::orm::SqlValue::Int(start));
-            if let Some(limit) = limit {
-                let end = start.saturating_add(limit.max(0));
-                row_sql.push_str(&format!(
-                    " AND __gom_relation_row_number <= {}",
-                    B::DIALECT.placeholder(row_values.len() + 1)
-                ));
-                row_values.push(crate::graphql::orm::SqlValue::Int(end));
-            }
-            row_sql.push_str(" ORDER BY ");
-            row_sql.push_str(&sort_sql);
-            row_sql.push_str(", __gom_relation_row_number ASC");
+            let row_sql = rendered.sql;
+            let row_values = rendered.values;
 
             let mut count_values = Vec::new();
             let mut next_index = 1usize;
@@ -789,7 +866,7 @@ where
             count_sql.push_str(" GROUP BY ");
             count_sql.push_str(&partition_columns);
 
-            let (count_rows, rows) = B::fetch_rows_pair_with_auth(
+            let (count_rows, rows) = crate::graphql::orm::fetch_rows_pair_with_auth::<B>(
                 db.pool(),
                 &count_sql,
                 &count_values,
@@ -1315,5 +1392,128 @@ where
 
             Ok(results)
         }
+    }
+}
+
+#[cfg(test)]
+mod relation_page_tests {
+    use super::*;
+    use crate::graphql::orm::{PaginationRequest, SelectQuery, SqlValue};
+
+    fn page(dialect: DatabaseBackend) -> crate::graphql::orm::RenderedQuery {
+        render_relation_page(
+            dialect,
+            SelectQuery {
+                table: "items",
+                columns: ["tenant", "id", "owner", "rank", "payload"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                filter: Some(relation_key_filter(
+                    &["tenant", "owner"],
+                    &[
+                        vec![SqlValue::Int(1), SqlValue::Int(2)],
+                        vec![SqlValue::Int(1), SqlValue::Int(3)],
+                    ],
+                )),
+                sorts: vec![],
+                pagination: None,
+                count_only: false,
+            },
+            &["tenant", "id"],
+            "tenant, owner",
+            "tenant ASC, owner ASC, rank DESC, id ASC",
+            &[
+                format!(
+                    "{} AS __gom_relation_key_0",
+                    relation_key_projection(dialect, "tenant", RelationKeyPartKind::Int)
+                ),
+                format!(
+                    "{} AS __gom_relation_key_1",
+                    relation_key_projection(dialect, "owner", RelationKeyPartKind::Int)
+                ),
+            ],
+            &PaginationRequest {
+                limit: Some(1),
+                offset: 1,
+            },
+        )
+    }
+
+    #[test]
+    fn relation_page_sql_ranks_keys_only_for_all_backends() {
+        for dialect in [
+            DatabaseBackend::Sqlite,
+            DatabaseBackend::Postgres,
+            DatabaseBackend::Mssql,
+        ] {
+            let rendered = page(dialect);
+            let window = rendered
+                .sql
+                .split("ROW_NUMBER()")
+                .next()
+                .unwrap()
+                .rsplit("SELECT ")
+                .next()
+                .unwrap();
+            assert!(!rendered.sql.contains("COUNT(*) OVER"), "{}", rendered.sql);
+            // Full entities appear only in the join, outside the ranked subquery.
+            assert!(!window.contains("payload"), "{}", rendered.sql);
+            assert!(rendered.sql.contains("__gom_relation_pk_0"));
+            assert!(rendered.sql.contains("__gom_relation_pk_1"));
+            assert!(rendered.sql.contains(
+                "PARTITION BY tenant, owner ORDER BY tenant ASC, owner ASC, rank DESC, id ASC"
+            ));
+            assert_eq!(
+                rendered.values,
+                vec![
+                    SqlValue::Int(1),
+                    SqlValue::Int(2),
+                    SqlValue::Int(1),
+                    SqlValue::Int(3),
+                    SqlValue::Int(1),
+                    SqlValue::Int(2)
+                ]
+            );
+            use crate::graphql::orm::SqlDialect;
+            assert!(rendered.sql.contains(&format!(
+                "__gom_relation_row_number > {}",
+                dialect.placeholder(5)
+            )));
+            assert!(rendered.sql.contains(&format!(
+                "__gom_relation_row_number <= {}",
+                dialect.placeholder(6)
+            )));
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn relation_page_plan_reads_wide_rows_by_key_after_covering_window() {
+        use sqlx::Row;
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE items (tenant INTEGER, id INTEGER, owner INTEGER, rank INTEGER, payload TEXT, PRIMARY KEY (tenant, id))").execute(&pool).await.unwrap();
+        sqlx::query("CREATE INDEX relation_order ON items (tenant, owner, rank DESC, id ASC)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let rendered = page(DatabaseBackend::Sqlite);
+        let plans = sqlx::query(&format!("EXPLAIN QUERY PLAN {}", rendered.sql))
+            .bind(1)
+            .bind(2)
+            .bind(1)
+            .bind(3)
+            .bind(1)
+            .bind(2)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let plan = plans
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plan.contains("COVERING INDEX relation_order"), "{plan}");
+        assert!(plan.contains("SEARCH __gom_relation_entity USING INDEX sqlite_autoindex_items_1 (tenant=? AND id=?)"), "{plan}");
+        eprintln!("{plan}");
     }
 }

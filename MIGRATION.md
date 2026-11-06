@@ -178,6 +178,9 @@ No data migration is needed. Existing policies and working keyset roots are unch
 ## ORM 0.91.1 to 0.91.2: aggregate counts from two subgraphs, test only
 
 No action is required, and no data migration. This release adds a test and changes no runtime behaviour. A consumer who set `aggregate = false` on an entity only to avoid the aggregate result-type collision between two subgraphs can restore `aggregate = true`: the shared result objects have been `@shareable` since 0.82.0. A generated aggregate still needs a row policy whose `read_visibility` is `Complete` or `Unrestricted`; with a callback-only policy it is refused, which is intended.
+## 0.91.1 to 0.91.2: narrow relation pagination windows
+
+No consumer action or data migration is needed. SQL-pushed static paginated relations on SQLite, PostgreSQL and MSSQL fetch full entities only for the requested page. GraphQL schemas, rows, totals, ordering and read policies are unchanged. Hosts can identify the optimization by the primary-key join outside the relation window in emitted SQL. Count-only GraphQL selections still load the requested page; selection-aware loading is a separate change.
 
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
