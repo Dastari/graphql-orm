@@ -61,7 +61,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
 | `index`, `unique_index` | `"a,b"` or `(name = "…", columns = ["…"], directions = ["asc" | "desc"])` | at least one column; direction count must match columns |
 | `federation_key` | marker, or `(fields = ["GraphQLField", …], assume_unique = bool)` | repeatable; rejected on `repository_entity` and schema-only entities |
-| `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only and `#[graphql(complex)]` entities and on float, nullable or read-policy primary-key fields |
+| `node_id` | marker | generates the global `NodeId: ID!` field and a resolvable `@key(fields: "NodeId")`; see [global NodeId](federation.md#global-nodeid); rejected on `repository_entity`, schema-only entities and on float, nullable or read-policy primary-key fields |
 
 The bare `federation_key` keys on the primary key in declaration order.
 `fields` names exported GraphQL fields, which must be readable, non-null,
@@ -231,9 +231,12 @@ impl BatchLoadEntity for Account {
 }
 ```
 
-Because `node_id` and `RecordVersion` need the generated object, an entity can't currently combine
-them with generated relation fields. See [#270](https://github.com/Dastari/graphql-orm/issues/270) and
-[#288](https://github.com/Dastari/graphql-orm/issues/288).
+`GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
+`RecordVersion` (for an exported managed version) to its complex object.
+They use the same encoding and declared version-field policy as generated objects.
+Both are available in `Changed` snapshots; relations and arbitrary computed fields
+still require a query refresh. Selecting `NodeId` requires every primary-key field
+to remain subscribable and pass its read policy.
 
 `target`, `from`, and `to` are relation metadata. `from` and `to` take either
 one string or an array of string literals for a composite key. `multiple`
@@ -287,8 +290,9 @@ relations through an internal flattened object, so handwritten fields and
 batched relation resolvers share the one `async_graphql::ComplexObject` trait
 implementation required by `SimpleObject`.
 
-`compose_complex_object` still counts as `#[graphql(complex)]`, so it doesn't lift the `node_id` and
-`RecordVersion` restrictions.
+Composed objects also include the generated identity fields. Existing handwritten
+`RecordVersion` resolvers remain compatible, but equivalent resolvers can be removed.
+The declared managed column controls subscription preflight policy.
 
 Polymorphic references can add one fixed discriminator condition:
 
@@ -672,9 +676,9 @@ type Ticket {
 - It resolves the declared field's value and applies the same field read policy and subscription
   availability. Generated `Changed` payloads may select it.
 - It has no column and no input, filter, order or aggregate entry.
-- CAS-only `version` fields, repository-only and schema-only entities, and legacy
-  `#[graphql(complex)]` entities do not get it. Add it to a complex entity's `ComplexObject` by
-  hand if clients need it.
+- CAS-only `version` fields and repository-only and schema-only entities do not get it.
+  Complex entities deriving `GraphQLRelations` receive it through their relation object;
+  standalone handwritten complex objects still need their own resolver.
 - A field whose GraphQL name is `RecordVersion` on an entity with a managed version is a compile
   error.
 

@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## Relation-bearing identity fields (0.91.2)
+
+No data migration is needed. Complex entities deriving `GraphQLRelations` can
+opt into `node_id` and automatically serve a readable managed version as
+`RecordVersion`, including Changed snapshots. Existing composed handwritten
+version fields remain supported. Consumers can remove an equivalent handwritten
+`RecordVersion` resolver; its declared version column still controls read policy
+and subscription availability. Inspect the entity SDL for `NodeId`,
+`RecordVersion` and `@key(fields: "NodeId")` to detect the generated contract.
+
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
 Update if you run Codex 0.166.0: earlier AI releases fail its turns. No API, schema, configuration or data change. ORM and macros 0.91.1 change no code. See the [AI migration note](crates/graphql-orm-ai/MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).

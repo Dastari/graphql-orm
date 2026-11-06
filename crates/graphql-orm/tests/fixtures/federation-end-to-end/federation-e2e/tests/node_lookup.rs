@@ -127,7 +127,7 @@ async fn post(
 }
 
 const SELECTION: &str = "__typename NodeId \
-    ... on Zone { id name } \
+    ... on Zone { id name RecordVersion selfZone { NodeId } } \
     ... on Sensor { id name } \
     ... on Calibration { sensorId slot label }";
 
@@ -211,6 +211,8 @@ async fn node_and_nodes_resolve_each_type_from_its_owning_subgraph() {
     let nodes = many["data"]["nodes"].as_array().expect("nodes list");
     assert_eq!(nodes[0]["__typename"], "Zone");
     assert_eq!(nodes[0]["name"], "north");
+    assert!(nodes[0]["RecordVersion"].is_i64(), "{many}");
+    assert_eq!(nodes[0]["selfZone"]["NodeId"], zone_north);
     assert_eq!(nodes[1]["__typename"], "Sensor");
     assert_eq!(nodes[1]["name"], "colliding sensor");
     assert_eq!(nodes[2]["label"], "high");
