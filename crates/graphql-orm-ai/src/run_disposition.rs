@@ -118,6 +118,17 @@ impl AiRunRetryRefusal {
         }
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres", test))]
+    pub(crate) const fn into_error(self) -> AiError {
+        use crate::AiRetryRefusalReason as Reason;
+        AiError::RetryRefused(match self {
+            Self::NotFailed => Reason::NotFailed,
+            Self::Uncertain => Reason::Uncertain,
+            Self::AlreadyAnswered => Reason::AlreadyAnswered,
+            Self::AlreadyDisposed => Reason::AlreadyDisposed,
+        })
+    }
+
     /// Maps a refusing admission to its public reason.
     pub const fn from_admission(admission: AiRunRetryAdmission) -> Option<Self> {
         match admission {
@@ -145,7 +156,7 @@ pub trait AiRunDispositionService: Send + Sync {
     ///
     /// Returns [`AiError::Forbidden`] for an unauthorized principal,
     /// [`AiError::NotFound`] for an invisible session or run, and
-    /// [`AiError::Conflict`] when retry is refused or another disposition
+    /// [`AiError::RetryRefused`] when retry is refused or another disposition
     /// already won.
     async fn retry_run(
         &self,
@@ -171,4 +182,37 @@ pub trait AiRunDispositionService: Send + Sync {
         principal: &AuthPrincipal,
         input: AcknowledgeAiRunFailureInput,
     ) -> Result<AiRunDispositionView, AiError>;
+}
+
+#[cfg(test)]
+mod retry_extension_tests {
+    use super::*;
+    use async_graphql::{EmptyMutation, EmptySubscription, ErrorExtensions, Object, Schema};
+
+    struct Query(AiRunRetryRefusal);
+    #[Object]
+    impl Query {
+        async fn retry(&self) -> async_graphql::Result<bool> {
+            Err(self.0.into_error().extend())
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_refusal_graphql_response_contains_only_stable_reason() {
+        for reason in [
+            AiRunRetryRefusal::NotFailed,
+            AiRunRetryRefusal::Uncertain,
+            AiRunRetryRefusal::AlreadyAnswered,
+            AiRunRetryRefusal::AlreadyDisposed,
+        ] {
+            let schema = Schema::build(Query(reason), EmptyMutation, EmptySubscription).finish();
+            let response = serde_json::to_value(schema.execute("{ retry }").await).unwrap();
+            assert_eq!(
+                response["errors"][0]["extensions"],
+                serde_json::json!({
+                    "code": "AI_CONFLICT", "retryRefusal": reason.as_str()
+                })
+            );
+        }
+    }
 }

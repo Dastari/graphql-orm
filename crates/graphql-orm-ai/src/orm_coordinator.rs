@@ -2638,7 +2638,8 @@ enum ProviderTurnFailure {
 ///
 /// The budget reservation is taken before the transport boundary and inside
 /// the same call that later dispatches. A budget denial or a typed adapter
-/// pre-dispatch rejection therefore proves that no bytes crossed the provider
+/// pre-dispatch rejection, protected-source withholding, or locally proven
+/// preflight refusal therefore proves that no business input crossed the provider
 /// boundary, that no provider turn was consumed, and that the atomic
 /// reservation transaction left nothing held. A stateless
 /// native-item refusal is separately proof-bearing only after the
@@ -2648,7 +2649,9 @@ enum ProviderTurnFailure {
 const fn classify_provider_turn_failure(error: &AiError) -> ProviderTurnFailure {
     match error {
         AiError::PreTransportBudgetDenied => ProviderTurnFailure::BudgetDenied,
-        AiError::PreTransportProviderFailed => ProviderTurnFailure::PreTransportProvider,
+        AiError::PreTransportProviderFailed | AiError::PreTransportToolSourceUnavailable => {
+            ProviderTurnFailure::PreTransportProvider
+        }
         AiError::StatelessNativeItemRejected => ProviderTurnFailure::StatelessNativeItemRejected,
         AiError::ProviderExecutionLimit => {
             ProviderTurnFailure::Provider("provider_turn_limit_reached_uncertain")
@@ -4115,61 +4118,66 @@ mod tests {
 
     #[tokio::test]
     async fn pre_transport_provider_rejection_fails_cleanly_and_is_retryable() {
-        let lease = AiRunLease::test_running(principal_reference());
-        let run = Arc::new(TestRunControl::new());
-        let provider = Arc::new(TestProviderExecutor {
-            responses: Mutex::new(VecDeque::from([Err(AiError::PreTransportProviderFailed)])),
-            delay: None,
-        });
-        let planner = Arc::new(TestChatPlanner {
-            scope: test_scope(),
-            continuation_count: AtomicUsize::new(0),
-        });
-        let forbidden = Arc::new(ChatForbiddenBoundaries::default());
-        let coordinator = AiReadOnlyAgentCoordinator::new(
-            run.clone(),
-            provider.clone(),
-            forbidden.clone(),
-            Arc::new(TestOutputWriter),
-            forbidden.clone(),
-            Arc::new(TestCheckpointWriter),
-            Arc::new(TestRuleResolver),
-            planner,
-            limits(50),
-        );
+        for error in [
+            AiError::PreTransportProviderFailed,
+            AiError::PreTransportToolSourceUnavailable,
+        ] {
+            let lease = AiRunLease::test_running(principal_reference());
+            let run = Arc::new(TestRunControl::new());
+            let provider = Arc::new(TestProviderExecutor {
+                responses: Mutex::new(VecDeque::from([Err(error)])),
+                delay: None,
+            });
+            let planner = Arc::new(TestChatPlanner {
+                scope: test_scope(),
+                continuation_count: AtomicUsize::new(0),
+            });
+            let forbidden = Arc::new(ChatForbiddenBoundaries::default());
+            let coordinator = AiReadOnlyAgentCoordinator::new(
+                run.clone(),
+                provider.clone(),
+                forbidden.clone(),
+                Arc::new(TestOutputWriter),
+                forbidden.clone(),
+                Arc::new(TestCheckpointWriter),
+                Arc::new(TestRuleResolver),
+                planner,
+                limits(50),
+            );
 
-        let outcome = coordinator
-            .execute_claimed(&lease)
-            .await
-            .expect("a proven pre-transport rejection is a clean terminal failure");
+            let outcome = coordinator
+                .execute_claimed(&lease)
+                .await
+                .expect("a proven pre-transport rejection is a clean terminal failure");
 
-        assert_eq!(
-            outcome,
-            Failed {
-                provider_turns: 0,
-                total_tool_calls: 0,
-            }
-        );
-        assert_eq!(run.final_states(), vec![AiRunState::Failed]);
-        assert_eq!(
-            run.final_codes(),
-            vec!["provider_pre_transport_failed".to_owned()]
-        );
-        assert!(run.scheduled_retry_codes().is_empty());
-        assert_eq!(provider.remaining_responses(), 0);
-        assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            crate::classify_run_retry(
-                crate::AiRunRetryEvidence {
-                    terminal: crate::AiRunTerminalEvent::Failed,
-                    produced_assistant_output: false,
-                    provider_dispatch_possible: false,
-                },
-                Some("provider_pre_transport_failed"),
-            ),
-            crate::AiRunRetryAdmission::Allowed
-        );
+            assert_eq!(
+                outcome,
+                Failed {
+                    provider_turns: 0,
+                    total_tool_calls: 0,
+                }
+            );
+            assert_eq!(run.final_states(), vec![AiRunState::Failed]);
+            assert_eq!(
+                run.final_codes(),
+                vec!["provider_pre_transport_failed".to_owned()]
+            );
+            assert!(run.scheduled_retry_codes().is_empty());
+            assert_eq!(provider.remaining_responses(), 0);
+            assert_eq!(forbidden.tool_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(forbidden.provider_checkpoints.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                crate::classify_run_retry(
+                    crate::AiRunRetryEvidence {
+                        terminal: crate::AiRunTerminalEvent::Failed,
+                        produced_assistant_output: false,
+                        provider_dispatch_possible: false,
+                    },
+                    Some("provider_pre_transport_failed"),
+                ),
+                crate::AiRunRetryAdmission::Allowed
+            );
+        }
     }
 
     #[tokio::test]
@@ -5597,6 +5605,11 @@ mod tests {
     async fn provider_failure_is_closed_as_recovery_required() {
         for (error, expected_code) in [
             (AiError::ProviderFailed, "provider_turn_uncertain"),
+            (AiError::PersistenceFailed, "provider_turn_uncertain"),
+            (
+                AiError::InvalidInput("unknown origin".into()),
+                "provider_turn_uncertain",
+            ),
             (
                 AiError::ProviderExecutionLimit,
                 "provider_turn_limit_reached_uncertain",

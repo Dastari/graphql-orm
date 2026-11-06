@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.20.0 to 0.21.0: retry refusal reasons
+
+Retry refusals retain `AI_CONFLICT` and add `extensions.retryRefusal` (`not_failed`, `uncertain`, `already_answered`, `already_disposed`). Rust callers may match `AiError::RetryRefused(AiRetryRefusalReason)`. No data migration is needed; AI schema module remains `0.76.0`.
+
 ## 0.19.0 to 0.20.0: operation catalogue 0.7.0
 
 Adopt profiles 0.20.0 with operation catalogue 0.7.0 from one reviewed

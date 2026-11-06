@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- AI 0.122.0 / tool profiles 0.21.0: preserve proven pre-transport audit failure classification and expose closed GraphQL retry refusal reasons (Fixes #327). Possible provider effects remain uncertain.
+
 - AI 0.121.0: **provider session cleanup now converges.** Real Codex `thread/list` pages carry `readStates`, which its generated schema omits, so the strict absence scan refused every real page on 0.165.0 and 0.166.0. A delete that returned `-32600` ("no rollout found for thread id") could therefore never settle, and retried about once a minute forever. The scan now admits `readStates` as a bounded, discarded map; arbitrary `-32600` is still not success. Backoff also grows, and a retry budget ends in visible `cleanup_exhausted` (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
 
 AI **0.120.2**, ORM runtime/macros **0.91.1**.

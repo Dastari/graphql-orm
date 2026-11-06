@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.121.0 to 0.122.0: failure classification and retry refusal
+
+GraphQL retry refusals retain `AI_CONFLICT` and add the content-free
+`extensions.retryRefusal` reason. Rust callers can match `AiError::RetryRefused`.
+Closed local preflight refusals (validation, authorization, context, attachments,
+and audits) now report `provider_pre_transport_failed` after
+capacity is released. Generic persistence failures remain uncertain.
+No data migration is needed; AI schema module remains `0.76.0`.
+
+Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
+require committed evidence that no turn in the whole run may have dispatched.
+A clean last turn cannot authorize replay of an earlier possible effect.
+
 ## AI 0.120.2 to 0.121.0: finite provider session cleanup
 
 Handle `AiProviderSessionState::CleanupExhausted` in exhaustive matches and apply
