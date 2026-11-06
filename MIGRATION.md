@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.120.2 to 0.121.0: finite provider session cleanup
+
+Handle `AiProviderSessionState::CleanupExhausted` in exhaustive matches and apply
+AI schema module `0.76.0` before restarting all workers. No row data migration is needed.
+Custom Codex process adapters must implement bounded absence confirmation.
+Cleanup retries grow and stop, retaining the protected cursor for investigation;
+see the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
+
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
 Update if you run Codex 0.166.0: earlier AI releases fail its turns. No API, schema, configuration or data change. ORM and macros 0.91.1 change no code. See the [AI migration note](crates/graphql-orm-ai/MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).

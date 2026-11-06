@@ -2483,38 +2483,34 @@ impl AiCodexAppServerRunPool {
         )
         .await
         .map_err(|_| provider_timeout_error())??;
-        let deletion = match tokio::time::timeout(
+        // A delete acknowledgement or error code alone is not the cleanup
+        // proof. Always confirm through a fresh content-discarding index scan.
+        let _ = tokio::time::timeout(
             self.inner.limits.shutdown_timeout,
             process.delete_thread(cursor),
         )
-        .await
-        {
-            Ok(deletion) => deletion,
-            Err(_) => Err(provider_timeout_error()),
-        };
+        .await;
         let _ = tokio::time::timeout(
             self.inner.limits.shutdown_timeout,
             process.shutdown(AiProviderRunCloseReason::Completed),
         )
         .await;
         drop(process);
-        if deletion.is_ok() {
-            drop(permit);
-            return Ok(());
-        }
-
         let process = tokio::time::timeout(
             self.inner.limits.startup_timeout,
             self.inner.factory.launch(registration),
         )
         .await
         .map_err(|_| provider_timeout_error())??;
-        let confirmation = tokio::time::timeout(
+        let confirmation = match tokio::time::timeout(
             self.inner.limits.startup_timeout,
             process.confirm_thread_absent(cursor),
         )
         .await
-        .map_err(|_| provider_timeout_error())?;
+        {
+            Ok(result) => result,
+            Err(_) => Err(provider_timeout_error()),
+        };
         let _ = tokio::time::timeout(
             self.inner.limits.shutdown_timeout,
             process.shutdown(AiProviderRunCloseReason::Completed),
@@ -10560,6 +10556,27 @@ pub(crate) mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn detached_cleanup_requires_absence_even_after_delete_acknowledgement() {
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-test",
+        )
+        .unwrap();
+        let counters = Arc::new(Counters::new());
+        counters.absence_confirmed.store(false, Ordering::SeqCst);
+        let deletion_pool = pool(counters.clone(), 2, 4);
+        assert!(
+            deletion_pool
+                .delete_or_confirm_detached_thread_absent(registration("1.0.0"), &cursor,)
+                .await
+                .is_err()
+        );
+        assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.absence_confirmations.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.shutdowns.load(Ordering::SeqCst), 2);
+    }
+
     fn cleanup_request(
         descriptor: crate::AiProviderSessionDescriptor,
         cursor: crate::AiProviderSessionCursor,
@@ -10607,7 +10624,7 @@ pub(crate) mod tests {
             .delete_or_confirm_absent(&cleanup_request(retired, cursor.clone()))
             .await
             .expect("the stable provider-state namespace should admit cleanup");
-        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 2);
         assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
 
         for rejected in [
@@ -10657,7 +10674,7 @@ pub(crate) mod tests {
                 .await,
             Err(ProviderError::Rejected)
         ));
-        assert_eq!(counters.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -15960,6 +15977,102 @@ pub(crate) mod tests {
             bound_to_another_thread.delete_thread(&cursor),
             Err(ProviderError::Rejected)
         ));
+    }
+
+    /// Opt-in, content-discarding repeated-delete check. Use a synthetic absent
+    /// cursor and a disposable home only; this sends no model turn.
+    #[test]
+    #[ignore = "requires a Codex binary, disposable home and synthetic absent thread cursor"]
+    fn live_codex_cleanup_confirms_absence_after_rejected_delete() {
+        fn peer() -> (LiveCodexProcess, AiCodexAppServerProtocolActor) {
+            let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_LIVE_BIN").unwrap();
+            let home = PathBuf::from(std::env::var_os("GRAPHQL_ORM_AI_CODEX_LIVE_HOME").unwrap());
+            assert!(PathBuf::from(&executable).is_absolute());
+            let mut process = LiveCodexProcess::launch(&executable, home);
+            let mut actor = AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).unwrap();
+            process.send(
+                &actor
+                    .initialize_with_dynamic_tools(
+                        "graphql_orm_ai_cleanup_test",
+                        "Cleanup test",
+                        "0.121.0",
+                    )
+                    .unwrap(),
+            );
+            let mut initialized = false;
+            for _ in 0..4 {
+                match actor.accept(&process.receive()).unwrap() {
+                    AiCodexAppServerInbound::Response {
+                        method: "initialize",
+                        ..
+                    } => {
+                        initialized = true;
+                        break;
+                    }
+                    AiCodexAppServerInbound::RemoteControlDisabled => {}
+                    _ => panic!("unexpected initialization outcome"),
+                }
+            }
+            assert!(initialized);
+            process.send(&actor.initialized().unwrap());
+            (process, actor)
+        }
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            std::env::var("GRAPHQL_ORM_AI_CODEX_ABSENT_THREAD").unwrap(),
+        )
+        .unwrap();
+        let (mut process, mut actor) = peer();
+        process.send(&actor.delete_thread(&cursor).unwrap());
+        assert!(
+            actor.accept(&process.receive()).is_err(),
+            "use a known absent synthetic thread to exercise rejected deletion"
+        );
+        drop(process);
+        let (mut process, mut actor) = peer();
+        process.send(&actor.begin_thread_absence_confirmation(&cursor).unwrap());
+        let started = std::time::Instant::now();
+        for _ in 0..MAXIMUM_THREAD_STATE_INDEX_PAGES + 4 {
+            assert!(started.elapsed() < Duration::from_secs(30));
+            match actor.accept(&process.receive()).unwrap() {
+                AiCodexAppServerInbound::ThreadAbsenceScanContinue => {
+                    process.send(&actor.continue_thread_absence_confirmation().unwrap())
+                }
+                AiCodexAppServerInbound::ThreadAbsenceConfirmed => return,
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                _ => panic!("absence was not authoritatively confirmed"),
+            }
+        }
+        panic!("absence scan did not converge within its bound");
+    }
+
+    #[test]
+    fn detached_cleanup_never_interprets_invalid_request_as_absence() {
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-absent",
+        )
+        .unwrap();
+        for message in [
+            "no rollout found",
+            "invalid request",
+            "secret provider payload",
+        ] {
+            let mut actor = initialized_protocol_actor();
+            actor.delete_thread(&cursor).unwrap();
+            let frame = serde_json::to_vec(&json!({
+                "id": 2, "error": {"code": -32600, "message": message},
+            }))
+            .unwrap();
+            assert!(actor.accept(&frame).is_err());
+            // The failed actor is discarded. A fresh actor must prove absence;
+            // an arbitrary error in that scan must also remain fail-closed.
+            let mut confirmation = initialized_protocol_actor();
+            confirmation
+                .begin_thread_absence_confirmation(&cursor)
+                .unwrap();
+            assert!(confirmation.accept(&frame).is_err());
+        }
     }
 
     #[test]

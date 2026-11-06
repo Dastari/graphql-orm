@@ -116,6 +116,7 @@ pub(crate) struct AiProviderSessionBindingRecord {
     pub cleanup_generation: i64,
     #[filterable(type = "number")]
     pub cleanup_lease_expires_at: Option<i64>,
+    /// Cleanup attempts consumed, including expired worker leases. Reset on rebind.
     pub cleanup_retry_count: i64,
     #[filterable(type = "number")]
     pub cleanup_next_attempt_at: Option<i64>,
@@ -2332,6 +2333,7 @@ mod service {
             let worker_id = worker_id.to_owned();
             let limit = i64::try_from(self.limits.maximum_candidate_scan())
                 .map_err(|_| AiError::InvalidConfiguration("invalid cleanup limit".to_owned()))?;
+            let maximum_retries = i64::from(self.limits.maximum_retries());
             let record = self
                 .database
                 .transaction(TransactionMode::StateMachine, move |tx| {
@@ -2500,9 +2502,47 @@ mod service {
                                 AiProviderSessionState::CleanupInProgress => candidate
                                     .cleanup_lease_expires_at
                                     .is_some_and(|value| value <= now.unix_timestamp()),
-                                AiProviderSessionState::Deleted => false,
+                                AiProviderSessionState::Deleted
+                                | AiProviderSessionState::CleanupExhausted => false,
                             };
                             if !ready {
+                                continue;
+                            }
+                            // Lease expiry consumes an attempt too: repeated worker death
+                            // must not bypass the finite provider-call budget. Historical
+                            // saturated counters converge after at most one final retry.
+                            if candidate.cleanup_retry_count > maximum_retries {
+                                let outcome = tx
+                                    .compare_and_swap::<AiProviderSessionBindingRecord>(
+                                        &candidate.id,
+                                        candidate.row_version,
+                                        AiProviderSessionBindingRecordWhereInput::default(),
+                                        UpdateAiProviderSessionBindingRecordInput {
+                                            state: Some(
+                                                AiProviderSessionState::CleanupExhausted
+                                                    .as_str()
+                                                    .to_owned(),
+                                            ),
+                                            cleanup_owner: Some(None),
+                                            cleanup_lease_expires_at: Some(None),
+                                            cleanup_next_attempt_at: Some(None),
+                                            ..Default::default()
+                                        },
+                                    )
+                                    .await
+                                    .map_err(OrmPublicError::from)?;
+                                if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                                    return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                                }
+                                append_audit(
+                                    tx,
+                                    "ai.provider_session.cleanup_exhausted",
+                                    candidate.id,
+                                    "provider_session_cleanup_attempts_exhausted",
+                                    candidate.last_run_id.unwrap_or(candidate.session_id),
+                                    now,
+                                )
+                                .await?;
                                 continue;
                             }
                             let generation = candidate
@@ -2527,6 +2567,14 @@ mod service {
                                         claim_expires_at: Some(None),
                                         cleanup_owner: Some(Some(worker_id.clone())),
                                         cleanup_generation: Some(generation),
+                                        cleanup_retry_count: Some(
+                                            candidate
+                                                .cleanup_retry_count
+                                                .checked_add(1)
+                                                .ok_or_else(|| {
+                                                    OrmPublicError::new(OrmErrorCode::Conflict)
+                                                })?,
+                                        ),
                                         cleanup_lease_expires_at: Some(Some(
                                             expiry.unix_timestamp(),
                                         )),
@@ -2670,10 +2718,10 @@ mod service {
                 ));
             }
             let now = canonical_second(self.clock.now());
-            let next_attempt_at = now.checked_add(delay).ok_or(AiError::PersistenceFailed)?;
             let claim = claim.clone();
             let reason_code = reason_code.to_owned();
             let maximum_retries = self.limits.maximum_retries();
+            let maximum_delay = self.limits.maximum_retry_delay();
             self.database
                 .transaction(TransactionMode::StateMachine, move |tx| {
                     Box::pin(async move {
@@ -2683,11 +2731,23 @@ mod service {
                             .map_err(OrmPublicError::from)?
                             .ok_or_else(OrmPublicError::not_found)?;
                         validate_cleanup_claim(&record, &claim, now)?;
-                        let retry_count = record
-                            .cleanup_retry_count
-                            .checked_add(1)
-                            .ok_or_else(|| OrmPublicError::new(OrmErrorCode::Conflict))?
-                            .min(i64::from(maximum_retries));
+                        let retry_count = record.cleanup_retry_count;
+                        let exhausted = retry_count > i64::from(maximum_retries);
+                        let retry_delay = delay
+                            .max(Duration::minutes(1))
+                            .saturating_mul(1_i32 << (retry_count - 1).clamp(0, 30) as u32)
+                            .min(maximum_delay);
+                        let next_attempt_at = if exhausted {
+                            None
+                        } else {
+                            Some(
+                                now.checked_add(retry_delay)
+                                    .ok_or_else(|| {
+                                        OrmPublicError::new(OrmErrorCode::InternalError)
+                                    })?
+                                    .unix_timestamp(),
+                            )
+                        };
                         let outcome = tx
                             .compare_and_swap::<AiProviderSessionBindingRecord>(
                                 &record.id,
@@ -2695,14 +2755,18 @@ mod service {
                                 AiProviderSessionBindingRecordWhereInput::default(),
                                 UpdateAiProviderSessionBindingRecordInput {
                                     state: Some(
-                                        AiProviderSessionState::CleanupBackoff.as_str().to_owned(),
+                                        if exhausted {
+                                            AiProviderSessionState::CleanupExhausted
+                                        } else {
+                                            AiProviderSessionState::CleanupBackoff
+                                        }
+                                        .as_str()
+                                        .to_owned(),
                                     ),
                                     cleanup_owner: Some(None),
                                     cleanup_lease_expires_at: Some(None),
                                     cleanup_retry_count: Some(retry_count),
-                                    cleanup_next_attempt_at: Some(Some(
-                                        next_attempt_at.unix_timestamp(),
-                                    )),
+                                    cleanup_next_attempt_at: Some(next_attempt_at),
                                     ..Default::default()
                                 },
                             )
@@ -2711,7 +2775,11 @@ mod service {
                         if matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
                             append_audit(
                                 tx,
-                                "ai.provider_session.cleanup_retry_scheduled",
+                                if exhausted {
+                                    "ai.provider_session.cleanup_exhausted"
+                                } else {
+                                    "ai.provider_session.cleanup_retry_scheduled"
+                                },
                                 record.id,
                                 &reason_code,
                                 record.last_run_id.unwrap_or(record.session_id),
@@ -3700,6 +3768,7 @@ mod service {
             }
             AiProviderSessionState::CleanupRequired
             | AiProviderSessionState::CleanupBackoff
+            | AiProviderSessionState::CleanupExhausted
             | AiProviderSessionState::RestoreQuarantined => {
                 record.protected_cursor.is_some()
                     && record.claimed_run_id.is_none()
@@ -3732,7 +3801,11 @@ mod service {
                     && record.cleanup_owner.is_none()
             }
         };
-        if common_valid && state_valid {
+        let exhausted_valid = state != AiProviderSessionState::CleanupExhausted
+            || (record.cleanup_next_attempt_at.is_none()
+                && record.cleanup_retry_count > 0
+                && record.provider_absence_observed_at.is_none());
+        if common_valid && state_valid && exhausted_valid {
             Ok(())
         } else {
             Err(OrmPublicError::new(OrmErrorCode::InternalError))

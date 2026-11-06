@@ -2146,6 +2146,7 @@ impl OrmAiSessionRetentionService {
                         "cleanup_required"
                         | "cleanup_in_progress"
                         | "cleanup_backoff"
+                        | "cleanup_exhausted"
                         | "restore_quarantined"
                         | "deleted" => Ok(ProviderSessionCleanupOutcome::Blocked),
                         _ => Err(OrmPublicError::new(OrmErrorCode::InternalError)),
@@ -8688,6 +8689,7 @@ mod tests {
             "parked",
             "claimed",
             "cleanup_pending",
+            "cleanup_exhausted",
             "wrong_wait",
             "wrong_source_hash",
         ] {
@@ -8790,6 +8792,34 @@ mod tests {
                         .await
                         .unwrap()
                         .is_some()
+                );
+            }
+            if state == "cleanup_exhausted" {
+                let session_id = fixture.session;
+                fixture
+                    .database
+                    .transaction(TransactionMode::StateMachine, move |tx| {
+                        Box::pin(async move {
+                            tx.update_by_id::<AiSessionRecord>(
+                                &session_id,
+                                UpdateAiSessionRecordInput {
+                                    state: Some("deleting".to_owned()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            Ok(())
+                        })
+                    })
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    native_raw_service(&fixture, 2)
+                        .request_provider_session_cleanup(fixture.session, now().unix_timestamp())
+                        .await
+                        .unwrap(),
+                    ProviderSessionCleanupOutcome::Blocked
                 );
             }
         }

@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased
+
+- AI 0.121.0: provider session cleanup now enforces exponential backoff and a finite retry budget, retaining failed cursors in visible `cleanup_exhausted` state (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
+
 ## 0.120.2
 
 - **Fix (urgent):** Codex 0.166.0 turns no longer fail closed at the first

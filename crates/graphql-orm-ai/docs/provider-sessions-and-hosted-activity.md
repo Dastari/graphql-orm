@@ -601,6 +601,35 @@ A managed cleanup loop performs:
    the cursor and retains a private absence-proven `Deleted` tombstone; or
 5. `schedule_cleanup_retry` with a bounded safe reason and delay.
 
+The ORM uses the larger of one minute and the caller's requested base delay,
+doubles it per failed attempt, and caps it at `maximum_retry_delay`. `maximum_retries` allows that many retries after the initial attempt;
+the next failure persists `CleanupExhausted`, clears scheduling and emits
+`ai.provider_session.cleanup_exhausted` once. Expired cleanup leases also consume
+the finite attempt budget. Exhaustion retains the protected cursor, remains
+unavailable to runs and is never selected by automatic cleanup. Operators must
+investigate rather than treating exhaustion as proof of deletion.
+
+Codex cleanup now always confirms absence through a fresh bounded, content-discarding
+state-index scan, including after a successful delete acknowledgement. Custom
+process adapters must implement `AiCodexAppServerRunProcess::confirm_thread_absent`;
+the default remains fail-closed. Both active and archived partitions must be
+exhausted without the exact cursor before issuing an absence proof.
+
+To check rejected deletion against a real peer without sending a model turn, use
+a disposable home and a synthetic thread already known absent from that home.
+This opt-in check was not run for the cleanup change; fixtures and fake peers
+cover the protocol. It never treats an error code alone as proof of absence:
+
+```bash
+GRAPHQL_ORM_AI_CODEX_LIVE_BIN=/absolute/path/to/codex \
+GRAPHQL_ORM_AI_CODEX_LIVE_HOME=/absolute/path/to/disposable/home \
+GRAPHQL_ORM_AI_CODEX_ABSENT_THREAD=synthetic-already-deleted-thread \
+CARGO_BUILD_JOBS=3 CARGO_TARGET_DIR=/home/toby/dev/cargo-target/wo-item-10 \
+systemd-run --user --scope -q -p MemoryHigh=11G -p MemoryMax=14G -p MemorySwapMax=4G -- \
+cargo test -p graphql-orm-ai --features provider-codex-app-server --lib -- --ignored --exact \
+  providers::codex_app_server::tests::live_codex_cleanup_confirms_absence_after_rejected_delete
+```
+
 An ordinary later run may replace only that exact absence-proven tombstone.
 Expiry, process death, transport failure, cleanup backoff, and restore
 quarantine remain unavailable. If creation of the replacement empty thread

@@ -10,6 +10,35 @@ supersedes: []
 
 # Migration Guide
 
+## 0.120.2 to 0.121.0: finite provider session cleanup
+
+Add an exhaustive match arm for `AiProviderSessionState::CleanupExhausted`.
+For example, `AiProviderSessionRunDisposition::Unavailable(AiProviderSessionState::CleanupExhausted)`
+means operator intervention is required; it never permits resume or rebind.
+Pass the initial base delay to `schedule_cleanup_retry`; the ORM now applies
+the exponential multiplier itself, with a one-minute minimum base and the
+configured maximum retry delay as a cap.
+After the configured retries, cleanup stops in persisted `cleanup_exhausted`
+with its protected cursor retained and a safe audit event. Inspect unavailable
+session dispositions and `ai.provider_session.cleanup_exhausted` audit events.
+Do not clear the cursor or manufacture absence; investigate provider availability
+before a separately reviewed maintenance intervention. Exhaustion never grants
+deletion or rebind authority. This release adds no reset API for exhausted bindings.
+
+Codex cleanup now always confirms absence through a fresh bounded, content-discarding
+state-index scan, including after a successful delete acknowledgement. Custom
+process adapters must implement `AiCodexAppServerRunProcess::confirm_thread_absent`;
+the default remains fail-closed. Both active and archived partitions must be
+exhausted without the exact cursor before issuing an absence proof.
+
+Apply the normal `AiSchemaModule` migration to version `0.76.0` before starting
+workers. No row data migration is needed; existing backoff counts are honored, including
+counts already at the old ceiling. This persistent lifecycle change requires all
+workers to upgrade together. Codex `-32600` is still an error unless the existing
+bounded state-index scan proves exact absence across active and archived threads;
+the original incident payload was unavailable, so its particular provider cause
+is not asserted here.
+
 ## 0.120.1 to 0.120.2: Codex 0.166.0 lifecycle timing
 
 No Rust API, configuration, schema, authorization or data change. Update to run

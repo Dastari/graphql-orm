@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- AI 0.121.0: provider session cleanup now enforces exponential backoff and a finite retry budget, retaining failed cursors in visible `cleanup_exhausted` state (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
+
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
 
 - **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).
