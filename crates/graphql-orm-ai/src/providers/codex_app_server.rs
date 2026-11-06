@@ -86,8 +86,11 @@ fn codex_dispatch_outcome(
     }
 }
 
-const OPTED_OUT_NOTIFICATION_METHODS: [&str; 6] = [
+const OPTED_OUT_NOTIFICATION_METHODS: [&str; 8] = [
     "thread/status/changed",
+    // Peer read-marker state, observed mid-turn on persistent threads on 0.165.0
+    // and 0.166.0. It carries no turn settlement or execution authority.
+    "thread/readState/changed",
     "thread/settings/updated",
     "thread/goal/cleared",
     "mcpServer/startupStatus/updated",
@@ -95,12 +98,20 @@ const OPTED_OUT_NOTIFICATION_METHODS: [&str; 6] = [
     // Account-status broadcasts are not execution authority. Suppression leaves
     // correlated authentication errors and failed turns authoritative.
     "account/updated",
+    // Peer moderation classifier output, observed on 0.165.0 and 0.166.0. It is
+    // not execution authority: a blocked turn still ends through turn/completed.
+    // Suppression also keeps classifier detail out of the host.
+    "turn/moderationMetadata",
 ];
 const REMOTE_CONTROL_STATUS_CHANGED: &str = "remoteControl/status/changed";
 const RUNTIME_WARNING: &str = "warning";
 const DEPRECATION_NOTICE: &str = "deprecationNotice";
 const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
 const CODE_MODE_HOST_FEATURE: &str = "code_mode_host";
+/// Largest nested item timing the actor admits, in milliseconds since the Unix
+/// epoch. The peer's values are display metadata, so a value outside the range
+/// a JSON number can represent exactly is malformed rather than merely late.
+const MAXIMUM_ITEM_TIMING_MS: i64 = 9_007_199_254_740_991;
 
 const DYNAMIC_TOOLS_ONLY_DISABLED_FEATURES: &[&str] = &[
     "apps",
@@ -3752,6 +3763,7 @@ pub struct AiCodexAppServerProtocolActor {
     responded_dynamic_calls: BTreeMap<String, String>,
     readiness_probe_tool_id: Option<String>,
     started_items: BTreeMap<String, String>,
+    started_item_timings: BTreeMap<String, i64>,
     completed_items: BTreeMap<String, String>,
     accepted_item_lifecycle_starts: usize,
     initialization_complete: bool,
@@ -3803,6 +3815,7 @@ impl AiCodexAppServerProtocolActor {
             responded_dynamic_calls: BTreeMap::new(),
             readiness_probe_tool_id: None,
             started_items: BTreeMap::new(),
+            started_item_timings: BTreeMap::new(),
             completed_items: BTreeMap::new(),
             accepted_item_lifecycle_starts: 0,
             initialization_complete: false,
@@ -4826,6 +4839,7 @@ impl AiCodexAppServerProtocolActor {
             self.active_web_search_maximum_calls = None;
             self.started_web_search_calls = 0;
             self.started_items.clear();
+            self.started_item_timings.clear();
             self.completed_items.clear();
             self.accepted_item_lifecycle_starts = 0;
         }
@@ -4833,6 +4847,26 @@ impl AiCodexAppServerProtocolActor {
             method: method.to_owned(),
             params,
         })
+    }
+
+    /// Validates an item's optional nested timing and binds its completion to the
+    /// start time observed for the same item. See [`validate_item_timing`].
+    fn bind_item_timing(
+        &mut self,
+        method: &str,
+        item_id: &str,
+        item: &serde_json::Map<String, Value>,
+    ) -> Result<(), ProviderError> {
+        let started_at = validate_item_timing(method, item)?;
+        if method == "item/started" {
+            if let Some(started_at) = started_at {
+                self.started_item_timings
+                    .insert(item_id.to_owned(), started_at);
+            }
+        } else if self.started_item_timings.remove(item_id) != started_at {
+            return Err(ProviderError::Rejected);
+        }
+        Ok(())
     }
 
     fn accept_dynamic_tool_lifecycle(
@@ -4874,10 +4908,12 @@ impl AiCodexAppServerProtocolActor {
             !matches!(
                 key.as_str(),
                 "arguments"
+                    | "completedAtMs"
                     | "contentItems"
                     | "durationMs"
                     | "id"
                     | "namespace"
+                    | "startedAtMs"
                     | "status"
                     | "success"
                     | "tool"
@@ -4893,6 +4929,7 @@ impl AiCodexAppServerProtocolActor {
             .and_then(Value::as_str)
             .filter(|value| valid_reference(value))
             .ok_or(ProviderError::Rejected)?;
+        self.bind_item_timing(method, call_id, item)?;
         let provider_name = item
             .get("tool")
             .and_then(Value::as_str)
@@ -4974,6 +5011,11 @@ impl AiCodexAppServerProtocolActor {
             kind: SleepKind,
             #[serde(rename = "durationMs")]
             _duration_ms: u64,
+            // Validated below by `bind_item_timing`, which also reads absence.
+            #[serde(default, rename = "startedAtMs")]
+            _started_at_ms: Option<Value>,
+            #[serde(default, rename = "completedAtMs")]
+            _completed_at_ms: Option<Value>,
         }
         #[derive(Deserialize)]
         enum SleepKind {
@@ -4987,6 +5029,14 @@ impl AiCodexAppServerProtocolActor {
         if !valid_reference(&item.id) {
             return Err(ProviderError::Rejected);
         }
+        self.bind_item_timing(
+            method,
+            &item.id,
+            object
+                .get("item")
+                .and_then(Value::as_object)
+                .ok_or(ProviderError::Rejected)?,
+        )?;
         // Reuse exact turn/item identity and shared lifecycle flood accounting.
         self.accept_notification_binding(method, params)?;
         Ok(AiCodexAppServerInbound::Notification {
@@ -5023,10 +5073,12 @@ impl AiCodexAppServerProtocolActor {
             .get("item")
             .and_then(Value::as_object)
             .ok_or(ProviderError::Rejected)?;
-        if item
-            .keys()
-            .any(|key| !matches!(key.as_str(), "content" | "id" | "summary" | "type"))
-            || item.get("type").and_then(Value::as_str) != Some("reasoning")
+        if item.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "completedAtMs" | "content" | "id" | "startedAtMs" | "summary" | "type"
+            )
+        }) || item.get("type").and_then(Value::as_str) != Some("reasoning")
             || item
                 .get("content")
                 .is_some_and(|content| content.as_array().is_none_or(|content| !content.is_empty()))
@@ -5041,6 +5093,7 @@ impl AiCodexAppServerProtocolActor {
             .and_then(Value::as_str)
             .filter(|item_id| valid_reference(item_id))
             .ok_or(ProviderError::Rejected)?;
+        self.bind_item_timing(method, item_id, item)?;
         let completed = method == "item/completed";
         if completed {
             if self.started_items.remove(item_id).as_deref() != Some("reasoning")
@@ -5094,10 +5147,12 @@ impl AiCodexAppServerProtocolActor {
             .get("item")
             .and_then(Value::as_object)
             .ok_or(ProviderError::Rejected)?;
-        if item
-            .keys()
-            .any(|key| !matches!(key.as_str(), "action" | "id" | "query" | "results" | "type"))
-            || item.get("type").and_then(Value::as_str) != Some("webSearch")
+        if item.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "action" | "completedAtMs" | "id" | "query" | "results" | "startedAtMs" | "type"
+            )
+        }) || item.get("type").and_then(Value::as_str) != Some("webSearch")
         {
             return Err(ProviderError::Rejected);
         }
@@ -5107,6 +5162,7 @@ impl AiCodexAppServerProtocolActor {
             .filter(|value| valid_reference(value))
             .ok_or(ProviderError::Rejected)?
             .to_owned();
+        self.bind_item_timing(method, &call_id, item)?;
         let completed = method == "item/completed";
         if !completed {
             let maximum_calls = self
@@ -6182,6 +6238,46 @@ fn web_search_domain_allowed(domain: &str, domain_policy: &ModelWebSearchDomainP
                     .is_some_and(|prefix| prefix.ends_with('.'))
         }),
         ModelWebSearchDomainPolicy::BlockedDomains { .. } => false,
+    }
+}
+
+/// Validates the optional nested timing Codex 0.166.0 added to lifecycle items.
+///
+/// Codex 0.165.0 and earlier omit both fields, and the generated 0.166.0 schema
+/// still does not list them, so absence stays valid. When they are present:
+///
+/// - `item/started` carries a positive integer `startedAtMs`, and `completedAtMs`
+///   is null or absent.
+/// - `item/completed` carries both as positive integers, with `completedAtMs` no
+///   earlier than `startedAtMs`.
+/// - Both are at most [`MAXIMUM_ITEM_TIMING_MS`].
+///
+/// Returns the item's start time so the caller can require the completion to
+/// report the same one the start did. The values are display metadata; admitting
+/// them grants nothing and no deadline or budget reads them.
+fn validate_item_timing(
+    method: &str,
+    item: &serde_json::Map<String, Value>,
+) -> Result<Option<i64>, ProviderError> {
+    let timing = |value: &Value| {
+        value
+            .as_i64()
+            .filter(|timing| (1..=MAXIMUM_ITEM_TIMING_MS).contains(timing))
+            .ok_or(ProviderError::Rejected)
+    };
+    match (item.get("startedAtMs"), item.get("completedAtMs")) {
+        (None, None) => Ok(None),
+        (Some(started_at), None | Some(Value::Null)) if method == "item/started" => {
+            timing(started_at).map(Some)
+        }
+        (Some(started_at), Some(completed_at)) if method == "item/completed" => {
+            let started_at = timing(started_at)?;
+            if timing(completed_at)? < started_at {
+                return Err(ProviderError::Rejected);
+            }
+            Ok(Some(started_at))
+        }
+        _ => Err(ProviderError::Rejected),
     }
 }
 
@@ -12254,11 +12350,13 @@ pub(crate) mod tests {
     fn protocol_initialization_uses_only_the_closed_notification_opt_out_profile() {
         let expected_opt_outs = json!([
             "thread/status/changed",
+            "thread/readState/changed",
             "thread/settings/updated",
             "thread/goal/cleared",
             "mcpServer/startupStatus/updated",
             "account/rateLimits/updated",
             "account/updated",
+            "turn/moderationMetadata",
         ]);
 
         let mut text_actor =
@@ -13043,6 +13141,537 @@ pub(crate) mod tests {
             )),
             Err(ProviderError::Rejected)
         ));
+    }
+
+    fn reasoning_with_item_timing(
+        method: &str,
+        item_id: &str,
+        started_at_ms: Option<Value>,
+        completed_at_ms: Option<Value>,
+    ) -> Vec<u8> {
+        let mut frame: Value = serde_json::from_slice(&reasoning_lifecycle_notification(
+            method,
+            item_id,
+            json!([]),
+            json!([]),
+        ))
+        .expect("reasoning fixture should be JSON");
+        let item = frame
+            .pointer_mut("/params/item")
+            .and_then(Value::as_object_mut)
+            .expect("reasoning fixture should carry an item");
+        if let Some(value) = started_at_ms {
+            item.insert("startedAtMs".to_owned(), value);
+        }
+        if let Some(value) = completed_at_ms {
+            item.insert("completedAtMs".to_owned(), value);
+        }
+        serde_json::to_vec(&frame).expect("reasoning fixture should encode")
+    }
+
+    #[test]
+    fn protocol_admits_codex_0166_nested_reasoning_timing() {
+        let mut actor = active_protocol_actor();
+        // The exact 0.166.0 shapes: outer and nested timing, 53-byte item ID.
+        let item_id = "rs_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(item_id.len(), 53);
+        let started = serde_json::to_vec(&json!({
+            "method": "item/started",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 1_793_910_000_000_u64,
+                "item": {
+                    "id": item_id,
+                    "type": "reasoning",
+                    "content": [],
+                    "summary": [],
+                    "startedAtMs": 1_793_910_000_000_u64,
+                    "completedAtMs": null,
+                },
+            },
+        }))
+        .expect("start fixture should encode");
+        let completed = serde_json::to_vec(&json!({
+            "method": "item/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "completedAtMs": 1_793_910_002_000_u64,
+                "item": {
+                    "id": item_id,
+                    "type": "reasoning",
+                    "content": [],
+                    "summary": [],
+                    "startedAtMs": 1_793_910_000_000_u64,
+                    "completedAtMs": 1_793_910_002_000_u64,
+                },
+            },
+        }))
+        .expect("completion fixture should encode");
+        assert_eq!(
+            actor.accept(&started).expect("0.166.0 start should pass"),
+            AiCodexAppServerInbound::ReasoningLifecycle { completed: false }
+        );
+        assert_eq!(
+            actor
+                .accept(&completed)
+                .expect("0.166.0 completion should pass"),
+            AiCodexAppServerInbound::ReasoningLifecycle { completed: true }
+        );
+        assert!(actor.started_item_timings.is_empty());
+    }
+
+    #[test]
+    fn protocol_keeps_accepting_pre_0166_reasoning_without_nested_timing() {
+        let mut actor = active_protocol_actor();
+        actor
+            .accept(&reasoning_with_item_timing(
+                "item/started",
+                "reasoning-1",
+                None,
+                None,
+            ))
+            .expect("four-key start should pass");
+        actor
+            .accept(&reasoning_with_item_timing(
+                "item/completed",
+                "reasoning-1",
+                None,
+                None,
+            ))
+            .expect("four-key completion should pass");
+    }
+
+    #[test]
+    fn protocol_rejects_malformed_nested_reasoning_timing_on_start() {
+        for (started_at, completed_at) in [
+            (Some(json!(null)), Some(json!(null))),
+            (Some(json!("1")), Some(json!(null))),
+            (Some(json!(1.5)), Some(json!(null))),
+            (Some(json!(true)), Some(json!(null))),
+            (Some(json!({})), Some(json!(null))),
+            (Some(json!(0)), Some(json!(null))),
+            (Some(json!(-1)), Some(json!(null))),
+            (Some(json!(MAXIMUM_ITEM_TIMING_MS + 1)), Some(json!(null))),
+            (Some(json!(u64::MAX)), Some(json!(null))),
+            // A start cannot already have a completion time.
+            (Some(json!(1)), Some(json!(2))),
+            (None, Some(json!(null))),
+            (None, Some(json!(2))),
+        ] {
+            let mut actor = active_protocol_actor();
+            assert!(
+                matches!(
+                    actor.accept(&reasoning_with_item_timing(
+                        "item/started",
+                        "reasoning-1",
+                        started_at.clone(),
+                        completed_at.clone(),
+                    )),
+                    Err(ProviderError::Rejected)
+                ),
+                "start timing should be rejected: {started_at:?} {completed_at:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_rejects_malformed_nested_reasoning_timing_on_completion() {
+        for (started_at, completed_at) in [
+            // Completion must carry both timestamps as positive integers.
+            (Some(json!(100)), None),
+            (Some(json!(100)), Some(json!(null))),
+            (None, Some(json!(100))),
+            (Some(json!(100)), Some(json!(0))),
+            (Some(json!(100)), Some(json!(-1))),
+            (Some(json!(100)), Some(json!("101"))),
+            (Some(json!(100)), Some(json!(101.5))),
+            (Some(json!(100)), Some(json!(MAXIMUM_ITEM_TIMING_MS + 1))),
+            // A completion cannot precede the start it reports.
+            (Some(json!(100)), Some(json!(99))),
+            // The start time must match the one observed on item/started.
+            (Some(json!(101)), Some(json!(200))),
+        ] {
+            let mut actor = active_protocol_actor();
+            actor
+                .accept(&reasoning_with_item_timing(
+                    "item/started",
+                    "reasoning-1",
+                    Some(json!(100)),
+                    Some(json!(null)),
+                ))
+                .expect("timed start should pass");
+            assert!(
+                matches!(
+                    actor.accept(&reasoning_with_item_timing(
+                        "item/completed",
+                        "reasoning-1",
+                        started_at.clone(),
+                        completed_at.clone(),
+                    )),
+                    Err(ProviderError::Rejected)
+                ),
+                "completion timing should be rejected: {started_at:?} {completed_at:?}"
+            );
+        }
+
+        // An untimed start cannot gain timing at completion.
+        let mut actor = active_protocol_actor();
+        actor
+            .accept(&reasoning_with_item_timing(
+                "item/started",
+                "reasoning-1",
+                None,
+                None,
+            ))
+            .expect("untimed start should pass");
+        assert!(matches!(
+            actor.accept(&reasoning_with_item_timing(
+                "item/completed",
+                "reasoning-1",
+                Some(json!(1)),
+                Some(json!(2)),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_keeps_timed_reasoning_strict_on_everything_else() {
+        let timed_params = |item: Value| {
+            json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "startedAtMs": 1,
+                "item": item,
+            })
+        };
+        let timed_item = || {
+            json!({
+                "id": "reasoning-1",
+                "type": "reasoning",
+                "content": [],
+                "summary": [],
+                "startedAtMs": 1,
+                "completedAtMs": null,
+            })
+        };
+
+        for (key, value) in [
+            ("extra", json!(true)),
+            ("durationMs", json!(1)),
+            ("content", json!(["hidden reasoning"])),
+            ("summary", json!(["unrequested summary"])),
+            ("id", json!("has spaces\n")),
+        ] {
+            let mut item = timed_item();
+            item.as_object_mut()
+                .expect("item should be an object")
+                .insert(key.to_owned(), value);
+            let mut actor = active_protocol_actor();
+            assert!(
+                matches!(
+                    actor.accept(&lifecycle_notification("item/started", timed_params(item))),
+                    Err(ProviderError::Rejected)
+                ),
+                "{key} should be rejected on a timed item"
+            );
+        }
+
+        for (thread_id, turn_id) in [("thread-other", "turn-1"), ("thread-1", "turn-other")] {
+            let mut actor = active_protocol_actor();
+            assert!(matches!(
+                actor.accept(&lifecycle_notification(
+                    "item/started",
+                    json!({
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "startedAtMs": 1,
+                        "item": timed_item(),
+                    }),
+                )),
+                Err(ProviderError::Rejected)
+            ));
+        }
+
+        // A duplicate start, a duplicate completion, and a completion without
+        // a start all stay fatal when timing is present.
+        let start = reasoning_with_item_timing(
+            "item/started",
+            "reasoning-1",
+            Some(json!(1)),
+            Some(json!(null)),
+        );
+        let complete = reasoning_with_item_timing(
+            "item/completed",
+            "reasoning-1",
+            Some(json!(1)),
+            Some(json!(2)),
+        );
+        let mut actor = active_protocol_actor();
+        actor.accept(&start).expect("first start should pass");
+        assert!(matches!(actor.accept(&start), Err(ProviderError::Rejected)));
+        let mut actor = active_protocol_actor();
+        actor.accept(&start).expect("start should pass");
+        actor.accept(&complete).expect("completion should pass");
+        assert!(matches!(
+            actor.accept(&complete),
+            Err(ProviderError::Rejected)
+        ));
+        let mut actor = active_protocol_actor();
+        actor.accept(&start).expect("start should pass");
+        actor.accept(&complete).expect("completion should pass");
+        assert!(matches!(actor.accept(&start), Err(ProviderError::Rejected)));
+        let mut actor = active_protocol_actor();
+        assert!(matches!(
+            actor.accept(&complete),
+            Err(ProviderError::Rejected)
+        ));
+
+        // The shared lifecycle flood ceiling still applies to timed items.
+        let mut actor = active_protocol_actor();
+        for index in 0..MAXIMUM_TEXT_BLOCKS {
+            actor
+                .accept(&reasoning_with_item_timing(
+                    "item/started",
+                    &format!("reasoning-{index}"),
+                    Some(json!(1)),
+                    Some(json!(null)),
+                ))
+                .expect("starts below the ceiling should pass");
+        }
+        assert!(matches!(
+            actor.accept(&reasoning_with_item_timing(
+                "item/started",
+                "reasoning-over",
+                Some(json!(1)),
+                Some(json!(null)),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn protocol_admits_codex_0166_nested_timing_on_dynamic_tool_items() {
+        let definition = dynamic_tool();
+        let start = |actor: &mut AiCodexAppServerProtocolActor| {
+            let thread_id = start_bound_dynamic_thread(actor, std::slice::from_ref(&definition));
+            let input = AiCodexAppServerTurnInput::try_from_retained_dynamic_request(
+                ModelRequest {
+                    instructions: Vec::new(),
+                    continuation_mode: ModelContinuationMode::ProviderRetained,
+                    tools: vec![definition.clone()],
+                    ..model_request()
+                },
+                &AiCodexAppServerBootstrapInstructions::disabled(),
+            )
+            .expect("retained dynamic input should validate");
+            start_bound_dynamic_turn(actor, &thread_id, &input, "turn-timed", 3);
+            thread_id
+        };
+        let lifecycle = |thread_id: &str, started_at: Value| {
+            lifecycle_notification(
+                "item/started",
+                json!({
+                    "threadId": thread_id,
+                    "turnId": "turn-timed",
+                    "startedAtMs": 5,
+                    "item": {
+                        "arguments": {"Limit": 3},
+                        "contentItems": null,
+                        "durationMs": null,
+                        "id": "call-timed",
+                        "namespace": null,
+                        "status": "inProgress",
+                        "success": null,
+                        "tool": "inventory_count",
+                        "type": "dynamicToolCall",
+                        "startedAtMs": started_at,
+                        "completedAtMs": null,
+                    },
+                }),
+            )
+        };
+
+        let mut actor = initialized_protocol_actor();
+        let thread_id = start(&mut actor);
+        assert!(matches!(
+            actor.accept(&lifecycle(&thread_id, json!(5))),
+            Ok(AiCodexAppServerInbound::DynamicToolLifecycle {
+                completed: false,
+                ..
+            })
+        ));
+        assert_eq!(actor.started_item_timings.get("call-timed"), Some(&5));
+
+        for malformed in [json!(0), json!(-1), json!("5"), json!(1.5), Value::Null] {
+            let mut actor = initialized_protocol_actor();
+            let thread_id = start(&mut actor);
+            assert!(matches!(
+                actor.accept(&lifecycle(&thread_id, malformed)),
+                Err(ProviderError::Rejected)
+            ));
+        }
+    }
+
+    #[test]
+    fn validate_item_timing_documents_the_admitted_shapes() {
+        let item = |value: Value| value.as_object().expect("item should be an object").clone();
+        let empty = item(json!({}));
+        assert_eq!(validate_item_timing("item/started", &empty).unwrap(), None);
+        assert_eq!(
+            validate_item_timing("item/completed", &empty).unwrap(),
+            None
+        );
+        assert_eq!(
+            validate_item_timing(
+                "item/started",
+                &item(json!({"startedAtMs": 5, "completedAtMs": null}))
+            )
+            .unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            validate_item_timing("item/started", &item(json!({"startedAtMs": 5}))).unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            validate_item_timing(
+                "item/completed",
+                &item(json!({"startedAtMs": 5, "completedAtMs": 5}))
+            )
+            .unwrap(),
+            Some(5)
+        );
+        assert_eq!(
+            validate_item_timing(
+                "item/completed",
+                &item(json!({
+                    "startedAtMs": MAXIMUM_ITEM_TIMING_MS,
+                    "completedAtMs": MAXIMUM_ITEM_TIMING_MS,
+                }))
+            )
+            .unwrap(),
+            Some(MAXIMUM_ITEM_TIMING_MS)
+        );
+    }
+
+    #[test]
+    fn protocol_admits_codex_0166_nested_timing_on_web_search_items() {
+        let mut actor = active_web_search_protocol_actor(ModelWebSearchDomainPolicy::PublicWeb, 2);
+        let frame = |method: &str, outer: &str, item: Value| {
+            lifecycle_notification(
+                method,
+                json!({"threadId": "thread-1", "turnId": "turn-1", outer: 5, "item": item}),
+            )
+        };
+        let start = json!({
+            "id": "ws-1", "type": "webSearch", "query": "", "action": null, "results": null,
+            "startedAtMs": 5, "completedAtMs": null,
+        });
+        actor
+            .accept(&frame("item/started", "startedAtMs", start))
+            .expect("0.166.0 web-search start should pass");
+        let completed = |started_at: i64| {
+            json!({
+                "id": "ws-1", "type": "webSearch", "query": "rust", "action": null, "results": null,
+                "startedAtMs": started_at, "completedAtMs": 7,
+            })
+        };
+        actor
+            .accept(&frame("item/completed", "completedAtMs", completed(5)))
+            .expect("0.166.0 web-search completion should pass");
+        assert!(actor.started_item_timings.is_empty());
+
+        let mut actor = active_web_search_protocol_actor(ModelWebSearchDomainPolicy::PublicWeb, 2);
+        actor
+            .accept(&frame(
+                "item/started",
+                "startedAtMs",
+                json!({
+                    "id": "ws-1", "type": "webSearch", "query": "", "action": null,
+                    "results": null, "startedAtMs": 5, "completedAtMs": null,
+                }),
+            ))
+            .expect("0.166.0 web-search start should pass");
+        assert!(matches!(
+            actor.accept(&frame("item/completed", "completedAtMs", completed(6))),
+            Err(ProviderError::Rejected)
+        ));
+
+        let mut actor = active_web_search_protocol_actor(ModelWebSearchDomainPolicy::PublicWeb, 2);
+        assert!(matches!(
+            actor.accept(&frame(
+                "item/started",
+                "startedAtMs",
+                json!({
+                    "id": "ws-1", "type": "webSearch", "query": "", "action": null,
+                    "results": null, "startedAtMs": "5", "completedAtMs": null,
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
+    }
+
+    #[test]
+    fn native_sleep_admits_codex_0166_nested_timing_and_binds_completion() {
+        let timed = |thread: &str, method: &str, started_at: Value, completed_at: Value| {
+            let mut frame: Value =
+                serde_json::from_slice(&sleep_notification(thread, method, json!(1000))).unwrap();
+            frame["params"]["item"]["startedAtMs"] = started_at;
+            frame["params"]["item"]["completedAtMs"] = completed_at;
+            serde_json::to_vec(&frame).unwrap()
+        };
+        let (mut actor, thread) = actor_after_native_control_replies();
+        actor
+            .accept(&timed(&thread, "item/started", json!(5), Value::Null))
+            .expect("0.166.0 sleep start should pass");
+        actor
+            .accept(&timed(&thread, "item/completed", json!(5), json!(6)))
+            .expect("0.166.0 sleep completion should pass");
+        assert!(actor.started_item_timings.is_empty());
+
+        let (mut actor, thread) = actor_after_native_control_replies();
+        actor
+            .accept(&timed(&thread, "item/started", json!(5), Value::Null))
+            .expect("0.166.0 sleep start should pass");
+        assert!(
+            actor
+                .accept(&timed(&thread, "item/completed", json!(4), json!(6)))
+                .is_err()
+        );
+
+        let (mut actor, thread) = actor_after_native_control_replies();
+        assert!(
+            actor
+                .accept(&timed(&thread, "item/started", json!("5"), Value::Null))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn nested_reasoning_timing_does_not_leak_across_turns() {
+        let mut actor = active_protocol_actor();
+        actor
+            .accept(&reasoning_with_item_timing(
+                "item/started",
+                "reasoning-1",
+                Some(json!(1)),
+                Some(json!(null)),
+            ))
+            .expect("timed start should pass");
+        assert_eq!(actor.started_item_timings.len(), 1);
+        actor
+            .accept(&lifecycle_notification(
+                "turn/completed",
+                json!({
+                    "threadId": "thread-1",
+                    "turn": {"id": "turn-1", "status": "completed", "items": [], "error": null},
+                }),
+            ))
+            .expect("turn completion should pass");
+        assert!(actor.started_item_timings.is_empty());
     }
 
     #[test]
@@ -14248,6 +14877,22 @@ pub(crate) mod tests {
         actor
             .start_turn("thread-retained-1", &input)
             .expect("frozen definitions should remain usable");
+    }
+
+    #[test]
+    fn moderation_metadata_opt_out_still_fails_closed_if_the_peer_ignores_it() {
+        let mut actor = active_protocol_actor();
+        assert!(matches!(
+            actor.accept(&lifecycle_notification(
+                "turn/moderationMetadata",
+                json!({
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "metadata": {"generation": {}, "prompt": {}, "tool_call": {}, "tool_response": {}},
+                }),
+            )),
+            Err(ProviderError::Rejected)
+        ));
     }
 
     #[test]
@@ -15950,6 +16595,262 @@ pub(crate) mod tests {
             }
         }
         assert!(delete_response_observed);
+    }
+
+    /// Writes one raw peer frame for later shape review. Only the disposable
+    /// path the operator names receives it; nothing is logged otherwise.
+    fn record_live_frame(log: &mut Option<std::fs::File>, frame: &[u8]) {
+        if let Some(log) = log {
+            log.write_all(frame).expect("frame log should write");
+            log.write_all(b"\n").expect("frame log should write");
+        }
+    }
+
+    /// Real read-only turn through the strict actor on any installed Codex.
+    ///
+    /// Reasoning is the assertion: a prompt that emits none proves nothing about
+    /// the lifecycle frames, so the test fails rather than passing vacuously.
+    ///
+    /// ```text
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_BIN=/absolute/path/to/codex
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_HOME=/absolute/path/to/disposable/home
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_MODEL=<model>          # required
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_SCENARIO=reasoning     # or dynamic, web_search, sleep
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_FRAME_LOG=/absolute/path/frames.jsonl  # optional
+    /// ```
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "requires an installed Codex CLI and a disposable configured home"]
+    async fn live_codex_turn_reaches_authoritative_completion_through_strict_actor() {
+        let executable = std::env::var("GRAPHQL_ORM_AI_CODEX_LIVE_BIN")
+            .expect("set GRAPHQL_ORM_AI_CODEX_LIVE_BIN to an absolute binary path");
+        assert!(PathBuf::from(&executable).is_absolute());
+        let configured_home = PathBuf::from(
+            std::env::var_os("GRAPHQL_ORM_AI_CODEX_LIVE_HOME")
+                .expect("set GRAPHQL_ORM_AI_CODEX_LIVE_HOME to a disposable configured home"),
+        );
+        let model = std::env::var("GRAPHQL_ORM_AI_CODEX_LIVE_MODEL")
+            .expect("set GRAPHQL_ORM_AI_CODEX_LIVE_MODEL to a model the account can use");
+        let scenario = std::env::var("GRAPHQL_ORM_AI_CODEX_LIVE_SCENARIO")
+            .unwrap_or_else(|_| "reasoning".to_owned());
+        let mut frame_log = std::env::var_os("GRAPHQL_ORM_AI_CODEX_LIVE_FRAME_LOG")
+            .map(|path| std::fs::File::create(path).expect("frame log should be creatable"));
+
+        let mut request = dynamic_model_request();
+        request.model = model;
+        request.reasoning_effort = ModelReasoningEffort::Medium;
+        request.maximum_output_tokens = Some(4_096);
+        let reasoning_prompt = "A farmer has 17 sheep. All but 9 run away, then he buys twice as \
+            many as remain and sells a third of the total. Work it out carefully and answer with \
+            the final count only.";
+        let profile = AiCodexAppServerLaunchProfile::experimental_dynamic_tools_only_v1(
+            AiCodexAppServerModelToolMode::Direct,
+        )
+        .expect("direct-tool live profile should validate");
+        let (profile, prompt) = match scenario.as_str() {
+            "reasoning" => {
+                request.tools = Vec::new();
+                (
+                    AiCodexAppServerLaunchProfile::strict_text_only_v1(),
+                    reasoning_prompt.to_owned(),
+                )
+            }
+            "dynamic" => (
+                profile,
+                "Call inventory_count exactly once with Limit set to 3, then report the count."
+                    .to_owned(),
+            ),
+            "sleep" => (
+                profile,
+                "Call the clock.sleep tool to wait one second before answering, then say done."
+                    .to_owned(),
+            ),
+            "web_search" => {
+                request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
+                    domains: ModelWebSearchDomainPolicy::PublicWeb,
+                }];
+                request.maximum_builtin_tool_calls = Some(4);
+                (
+                    profile.with_web_search(true),
+                    "Use web search to find the current stable Rust version, then state it."
+                        .to_owned(),
+                )
+            }
+            other => panic!("unknown live scenario: {other}"),
+        };
+        request.input = vec![ModelInputBlock::Text { text: prompt }];
+        let bootstrap = bootstrap_instructions();
+        request.instructions.clear();
+        let input = if request.tools.is_empty() {
+            AiCodexAppServerTurnInput::try_from_retained_model_request(request, &bootstrap)
+        } else {
+            AiCodexAppServerTurnInput::try_from_retained_dynamic_request(request, &bootstrap)
+        }
+        .expect("live retained input should validate");
+
+        let mut process =
+            LiveCodexProcess::launch_with_profile(&executable, configured_home, profile);
+        let mut actor =
+            AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).expect("actor should validate");
+        process.send(
+            &actor
+                .initialize_with_dynamic_tools(
+                    "graphql_orm_ai_live_test",
+                    "GraphQL ORM AI live test",
+                    "1.0.0",
+                )
+                .expect("initialize should encode"),
+        );
+        loop {
+            let frame = process.receive();
+            record_live_frame(&mut frame_log, &frame);
+            match actor
+                .accept(&frame)
+                .expect("initialization frame should be strictly admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "initialize",
+                    ..
+                } => break,
+                AiCodexAppServerInbound::RemoteControlDisabled => {}
+                other => panic!("unexpected initialization frame: {other:?}"),
+            }
+        }
+        process.send(
+            &actor
+                .initialized()
+                .expect("initialized notification should encode"),
+        );
+        process.send(
+            &actor
+                .start_persistent_empty_thread_with_web_search(
+                    input.model(),
+                    input.reasoning_effort(),
+                    &bootstrap,
+                    input.tools(),
+                    input.web_search(),
+                )
+                .expect("persistent thread start should encode"),
+        );
+        let mut response_thread_id = None;
+        let mut notification_thread_id = None;
+        for _ in 0..8 {
+            let frame = process.receive();
+            record_live_frame(&mut frame_log, &frame);
+            match actor
+                .accept(&frame)
+                .expect("thread frame should be admitted")
+            {
+                AiCodexAppServerInbound::Response {
+                    method: "thread/start",
+                    result,
+                    ..
+                } => {
+                    response_thread_id = Some(
+                        nested_reference(&result, "thread", "id")
+                            .expect("response thread identity should validate")
+                            .to_owned(),
+                    );
+                }
+                AiCodexAppServerInbound::Notification { method, params }
+                    if method == "thread/started" =>
+                {
+                    notification_thread_id = Some(
+                        nested_reference(&params, "thread", "id")
+                            .expect("notification thread identity should validate")
+                            .to_owned(),
+                    );
+                }
+                _ => {}
+            }
+            if response_thread_id.is_some() && notification_thread_id.is_some() {
+                break;
+            }
+        }
+        assert_eq!(response_thread_id, notification_thread_id);
+        let thread_id = response_thread_id.expect("both thread lifecycle frames should arrive");
+        process.send(
+            &actor
+                .start_turn(&thread_id, &input)
+                .expect("live turn should encode"),
+        );
+
+        let mut reasoning_completions = 0_u32;
+        let mut dynamic_completions = 0_u32;
+        let mut web_search_completions = 0_u32;
+        let mut agent_message_completions = 0_u32;
+        let mut sleep_completions = 0_u32;
+        let mut turn_status = None;
+        for _ in 0..4_096 {
+            let frame = process
+                .frames
+                .recv_timeout(Duration::from_secs(180))
+                .expect("app-server should finish the turn within the live-test bound");
+            record_live_frame(&mut frame_log, &frame);
+            let inbound = actor.accept(&frame).unwrap_or_else(|error| {
+                let envelope: Value =
+                    serde_json::from_slice(&frame).expect("rejected frame should be JSON");
+                let item = envelope.pointer("/params/item");
+                panic!(
+                    "live frame was rejected: {error:?}; method={:?}; item_type={:?}; item_keys={:?}",
+                    envelope.get("method").and_then(Value::as_str),
+                    item.and_then(|item| item.get("type")).and_then(Value::as_str),
+                    item.and_then(Value::as_object)
+                        .map(|item| item.keys().cloned().collect::<Vec<_>>()),
+                )
+            });
+            match inbound {
+                AiCodexAppServerInbound::ReasoningLifecycle { completed: true } => {
+                    reasoning_completions += 1;
+                }
+                AiCodexAppServerInbound::DynamicToolLifecycle {
+                    completed: true, ..
+                } => dynamic_completions += 1,
+                AiCodexAppServerInbound::WebSearchLifecycle {
+                    completed: true, ..
+                } => web_search_completions += 1,
+                AiCodexAppServerInbound::DynamicToolCall {
+                    request_id, call, ..
+                } => {
+                    let result = LiveDynamicResponder
+                        .respond(call)
+                        .await
+                        .expect("live responder should bind to the exact canonical call");
+                    process.send(
+                        &actor
+                            .dynamic_tool_response(request_id, &result)
+                            .expect("live dynamic response should encode"),
+                    );
+                }
+                AiCodexAppServerInbound::Notification { method, params } => {
+                    if method == "item/completed" {
+                        match params.pointer("/item/type").and_then(Value::as_str) {
+                            Some("agentMessage") => agent_message_completions += 1,
+                            Some("sleep") => sleep_completions += 1,
+                            _ => {}
+                        }
+                    }
+                    if method == "turn/completed" {
+                        turn_status = params
+                            .pointer("/turn/status")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(turn_status.as_deref(), Some("completed"));
+        assert!(agent_message_completions > 0, "no agent message completed");
+        match scenario.as_str() {
+            "reasoning" => assert!(
+                reasoning_completions > 0,
+                "prompt emitted no reasoning, so this run proves nothing"
+            ),
+            "dynamic" => assert_eq!(dynamic_completions, 1),
+            "web_search" => assert!(web_search_completions > 0, "no web search completed"),
+            _ => assert!(sleep_completions > 0, "no sleep item completed"),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

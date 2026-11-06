@@ -16,6 +16,11 @@ for historical context.
 
 ## Unreleased
 
+AI **0.120.2**, ORM runtime/macros **0.91.1**.
+
+- **Fix:** every Codex 0.166.0 turn reaching a `reasoning`, `dynamicToolCall`, `webSearch` or `sleep` item failed closed with `provider_rejection`, because 0.166.0 adds nested `item.startedAtMs` and `item.completedAtMs`. The actor now admits them as optional, typed, bounded metadata and keeps every other check. It also opts out of `turn/moderationMetadata` and `thread/readState/changed`, which real turns showed on 0.165.0 and 0.166.0. See the [AI changelog](crates/graphql-orm-ai/CHANGELOG.md#01202).
+- ORM and macros 0.91.1 change no code. Fixture lockfiles record the AI version, so they need a new package identity to release alongside it.
+
 ORM runtime/macros version: **0.91.0**. Runtime full-text search: ranking isolated from hidden rows, and a fenced backfill. See [runtime search](docs/reference/graphql-orm/runtime-search.md).
 
 - **SQLite ranking is per document.** SQLite now scores a match from the row's own document only: `1.0·nA + 0.7·nB + 0.4·nC + 0.1·nD`, the weighted number of matched phrase instances in each weight, counted with FTS5's built-in `highlight()`. It replaces `bm25`, whose row count, average length and document frequencies covered rows the host's grant hides. That let a caller estimate how many hidden rows contain a term, and made the order of visible rows and `minScore` results depend on hidden rows. Now a visible row's score, the order of visible rows, `minScore` results and `totalCount` do not change when hidden rows are added or removed. PostgreSQL `ts_rank_cd` already depended only on the row and is unchanged. See [ranking isolation](docs/reference/graphql-orm/runtime-search.md#ranking-isolation) for the parity analysis.

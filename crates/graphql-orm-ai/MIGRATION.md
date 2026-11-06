@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.120.1 to 0.120.2: Codex 0.166.0 lifecycle timing
+
+No Rust API, configuration, schema, authorization or data change. Update to run
+Codex 0.166.0: earlier AI releases reject its lifecycle items and fail the turn with
+`provider_rejection`. The closed method allow-list gains two entries in the
+negotiated opt-out profile (`turn/moderationMetadata`, `thread/readState/changed`),
+so a host that pins the exact `initialize` frame in its own tests updates that pin.
+No data migration is needed; `AI_SCHEMA_MODULE_VERSION` remains unchanged. Runs that
+closed for recovery with `supervised_provider_turn_uncertain` on 0.166.0 stay closed;
+start a new run rather than expecting them to resume.
+
 ## 0.120.0 to 0.120.1: documentation package identity
 
 No Rust API, configuration, schema, authorization or provider change is introduced. The patch records the provider-files documentation review-date update under a fresh immutable package tag. No data migration is needed; `AI_SCHEMA_MODULE_VERSION` remains unchanged. Select all workspace packages from the same published workspace release.
