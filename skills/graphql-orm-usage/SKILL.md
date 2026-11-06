@@ -624,3 +624,10 @@ Run this against any graphql-orm service. The commands use `rg` from the service
 - [ ] **Confirm clients handle continuity errors on their real delivery path**, with a test that feeds
       in `SUBSCRIPTION_CONTINUITY_LOST` and checks that the client resubscribes and then refetches.
 - [ ] **Decide how clients learn of deletes:** `can_read_deleted_preimage`, a refetch, or both.
+
+Generated GraphQL bulk writes invoke configured `notify_with` per row after commit
+(maximum 1,000 rows for notified writes). Select `notificationErrors { message code }`
+and the committed count; `success: true` means do not retry the write. Single-row
+`notify_on_error = "report"` reports via `PostCommitErrorHandler` and returns success;
+the default propagates the handler error after commit. Repository/MutationContext
+paths have no GraphQL context and retain their existing notification-free behavior.

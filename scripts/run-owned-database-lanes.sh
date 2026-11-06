@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -131,6 +131,11 @@ run_field_write_denial() {
 }
 
 case "${lane}" in
+  notify-bulk)
+    for backend in sqlite postgres mssql; do
+      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" --test notify_bulk -- --include-ignored --test-threads=1
+    done
+    ;;
   bulk-refusals)
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \

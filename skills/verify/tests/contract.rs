@@ -1433,3 +1433,11 @@ async fn an_upsert_needs_a_state_machine_transaction() {
         .await;
     assert!(machine.is_ok());
 }
+
+#[test]
+fn bulk_notification_payload_is_additive() {
+    let result = UpdateTicketsResult::ok(3);
+    assert!(result.success);
+    assert_eq!(result.affected_count, 3);
+    assert!(result.notification_errors.is_none());
+}

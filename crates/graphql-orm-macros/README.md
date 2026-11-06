@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.92.2 runs post-commit notifications for GraphQL bulk writes and adds
+`notify_on_error = "report"` for single-row success after notification failures.
+
 Version 0.92.1 preserves application refusal messages and codes in generated bulk
 write payloads, including denied fields. Bulk result SDL adds nullable `errorCode`.
 

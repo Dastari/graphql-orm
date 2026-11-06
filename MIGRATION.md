@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.92.1 to 0.92.2: bulk post-commit notifications
+
+**ORM/macros 0.92.2:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
+
 ## 0.92.0 to 0.92.1: bulk refusal payloads
 
 Two details of this rule. A callback failure that reached its `async_graphql::Error` through `?`, so with a source and no `code` extension, is not an authored refusal: its text stays private, and the bulk client sees the safe category. Give a refusal a message with `Error::new`, or set a `code`, to have it reach the client. And repository callers that matched `sqlx::Error::Protocol` to find a public refusal should use `OrmPublicError::from_sqlx`, because a refusal now travels as a private type inside `sqlx::Error::Decode`. Its text still contains the stable `graphql-orm-public:<CODE>`.
