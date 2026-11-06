@@ -2529,6 +2529,21 @@ pub trait EntityPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 pub trait FieldPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
+    /// Restore legacy omission of policy-denied generated mutation inputs.
+    ///
+    /// Return `true` for selected GraphQL entity/field names, or unconditionally
+    /// for a global opt-out. Defaults to `false`: denial fails the mutation.
+    /// Applies to optional create/upsert fields and supplied update fields;
+    /// required create/upsert fields and repository checks remain strict.
+    /// Policy errors always propagate, regardless of this setting.
+    fn ignore_denied_field_write(
+        &self,
+        _entity_name: &'static str,
+        _field_name: &'static str,
+    ) -> bool {
+        false
+    }
+
     fn can_read_field<'a>(
         &'a self,
         ctx: &'a async_graphql::Context<'_>,

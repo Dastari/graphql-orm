@@ -2568,7 +2568,7 @@ fn generate_graphql_operations_unfiltered(
             let create_policy_check = if let Some(policy_key) = &meta.write_policy {
                 if is_option_type(field_type) {
                     quote! {
-                        if !db.can_write_field(
+                        if !db.check_field_write(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
@@ -2634,7 +2634,7 @@ fn generate_graphql_operations_unfiltered(
                         if upsert_update_candidate {
                             quote! {
                                 let __gom_field_write_allowed = if let Some(current_entity) = current_entity.as_ref() {
-                                    db.can_write_field(
+                                    db.check_field_write(
                                         ctx,
                                         #entity_name_lit,
                                         #graphql_name,
@@ -2643,7 +2643,7 @@ fn generate_graphql_operations_unfiltered(
                                         Some(&input.#field_name as &(dyn ::std::any::Any + Send + Sync)),
                                     ).await?
                                 } else {
-                                    db.can_write_field(
+                                    db.check_field_write(
                                         ctx,
                                         #entity_name_lit,
                                         #graphql_name,
@@ -2659,7 +2659,7 @@ fn generate_graphql_operations_unfiltered(
                         } else {
                             quote! {
                                 if current_entity.is_none()
-                                    && !db.can_write_field(
+                                    && !db.check_field_write(
                                         ctx,
                                         #entity_name_lit,
                                         #graphql_name,
@@ -3068,7 +3068,7 @@ fn generate_graphql_operations_unfiltered(
             let update_policy_check = if let Some(policy_key) = &meta.write_policy {
                 quote! {
                     let __gom_field_write_allowed = if let Some(ref val) = input.#field_name {
-                        db.can_write_field(
+                        db.check_field_write(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
@@ -3090,14 +3090,14 @@ fn generate_graphql_operations_unfiltered(
             if let Some(policy_key) = &meta.write_policy {
                 update_runtime_policy_checks.push(quote! {
                     let __gom_field_write_allowed = if let Some(ref val) = input.#field_name {
-                        db.can_write_field(
+                        db.check_field_write(
                             ctx,
                             #entity_name_lit,
                             #graphql_name,
                             Some(#policy_key),
                             Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                             Some(val as &(dyn ::std::any::Any + Send + Sync)),
-                        ).await.map_err(|e| Self::__gom_runtime_error(format!("{e:?}")))?
+                        ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?
                     } else {
                         true
                     };
@@ -8525,7 +8525,13 @@ fn generate_graphql_operations_unfiltered(
 
                 match #struct_name::__gom_update_where_with_auth(db, filter.clone(), input, auth_context.as_ref(), Some(ctx)).await {
                     Ok(affected_count) => Ok(#update_many_result_type::ok(affected_count)),
-                    Err(e) => Ok(#update_many_result_type::err(::graphql_orm::graphql::errors::graphql_error_from_sqlx(e).message)),
+                    Err(e) => {
+                        let error = ::graphql_orm::graphql::errors::graphql_error_from_sqlx(e);
+                        if error.extensions.as_ref().is_some_and(|extensions| extensions.get("deniedWriteField").is_some()) {
+                            return Err(error);
+                        }
+                        Ok(#update_many_result_type::err(error.message))
+                    },
                 }
             }
 

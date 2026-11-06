@@ -88,6 +88,7 @@ pub struct OrmPublicError {
     /// Internal diagnostic text never exposed by default GraphQL extensions.
     pub(crate) internal: Option<String>,
     pub(crate) retryable: bool,
+    denied_write_field: Option<String>,
     pub(crate) runtime_mutation_code: Option<&'static str>,
 }
 
@@ -127,6 +128,7 @@ impl OrmPublicError {
             internal: None,
             retryable: false,
             runtime_mutation_code: None,
+            denied_write_field: None,
         }
     }
 
@@ -139,6 +141,7 @@ impl OrmPublicError {
             internal: None,
             retryable: false,
             runtime_mutation_code: None,
+            denied_write_field: None,
         }
     }
 
@@ -174,6 +177,16 @@ impl OrmPublicError {
         Self::new(OrmErrorCode::Forbidden)
     }
 
+    /// Forbidden write naming only the public GraphQL field that was refused.
+    pub fn field_write_denied(field: &str) -> Self {
+        let mut error = Self::with_message(
+            OrmErrorCode::Forbidden,
+            format!("write denied for field {field}"),
+        );
+        error.denied_write_field = Some(field.to_owned());
+        error
+    }
+
     /// Not-found decision that does not reveal cross-tenant existence.
     pub fn not_found() -> Self {
         Self::new(OrmErrorCode::NotFound)
@@ -187,6 +200,9 @@ impl OrmPublicError {
     /// Map a backend SQL error into a public error without leaking SQL text.
     pub fn from_sqlx(error: &sqlx::Error) -> Self {
         if let sqlx::Error::Protocol(message) = error {
+            if let Some(field) = message.strip_prefix("graphql-orm-public:FIELD_WRITE_DENIED:") {
+                return Self::field_write_denied(field);
+            }
             if let Some(code) = message.strip_prefix("graphql-orm-public:") {
                 let code = match code {
                     "INVALID_INPUT" => Some(OrmErrorCode::InvalidInput),
@@ -244,6 +260,9 @@ impl OrmPublicError {
         let mut error = async_graphql::Error::new(self.message.clone());
         error = error.extend_with(|_, extensions| {
             extensions.set("code", self.code.as_str());
+            if let Some(field) = &self.denied_write_field {
+                extensions.set("deniedWriteField", field.clone());
+            }
             if let Some(correlation_id) = &self.correlation_id {
                 extensions.set("correlationId", correlation_id.clone());
             }
@@ -299,6 +318,9 @@ fn public_error_transport(error: OrmPublicError) -> String {
     if let Some(internal) = &error.internal {
         tracing_log_internal(&error.code, internal);
     }
+    if let Some(field) = &error.denied_write_field {
+        return format!("graphql-orm-public:FIELD_WRITE_DENIED:{field}");
+    }
     format!("graphql-orm-public:{}", error.code.as_str())
 }
 
@@ -330,6 +352,14 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
             async_graphql::Value::String(value) => Some(value.as_str()),
             _ => None,
         });
+    if code == Some("FORBIDDEN")
+        && let Some(async_graphql::Value::String(field)) = error
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("deniedWriteField"))
+    {
+        return sqlx_error_from_public(OrmPublicError::field_write_denied(field));
+    }
     let public = match code {
         Some("INVALID_INPUT") => OrmPublicError::new(OrmErrorCode::InvalidInput),
         Some("UNAUTHENTICATED") => OrmPublicError::new(OrmErrorCode::Unauthenticated),
