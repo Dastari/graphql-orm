@@ -11,6 +11,9 @@ supersedes: []
 # `graphql-orm-macros`
 
 Version 0.92.0 runs post-commit notifications for GraphQL bulk writes and adds
+Version 0.92.3 is the companion of graphql-orm 0.92.3; macro generation is unchanged.
+
+Version 0.92.2 runs post-commit notifications for GraphQL bulk writes and adds
 `notify_on_error = "report"` for single-row success after notification failures.
 
 Version 0.92.0 preserves application refusal messages and codes in generated bulk

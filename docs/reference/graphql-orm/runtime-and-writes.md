@@ -265,12 +265,9 @@ A generated write runs in this order, after its entity and row policy checks:
 4. The `After` hook, inside the transaction.
 5. Commit. An error from either hook rolls back instead.
 6. Queued `Changed` events.
-7. Actions registered with `MutationContext::defer`, in order.
-
-Deferred actions run only after a successful commit, and they're awaited before the write returns, so
-a slow action delays the response. They run at most once and aren't persisted: a crash after commit
-loses them. A failure doesn't fail the committed write; it goes to the `PostCommitErrorHandler` from
-`set_post_commit_error_handler`, or to stderr if none is installed.
+7. Actions registered with `MutationContext::defer`, in registration order.
+8. For generated GraphQL mutations, the entity's `notify_with` handler. Single-row writes call it once;
+   bulk updates and deletes call it once per row, after the whole bulk transaction commits.
 
 | Write path | Hooks | GraphQL context in the hook | `Changed` |
 | --- | --- | --- | --- |
@@ -287,6 +284,64 @@ validate a bulk update against the existing row.
 
 A hook sees the event, not the mutation's arguments. Generated mutations have no typed transient input;
 [#221](https://github.com/Dastari/graphql-orm/issues/221) tracks that capability.
+
+### After-commit work
+
+`MutationContext::defer` is the after-commit callback. There is no other name for it and no second
+API: it takes `FnOnce(Database<B>) -> impl Future<Output = Result<(), E>>` where `E: Display`, and
+registers it on the transaction.
+
+```rust
+// In a `MutationHook::on_mutation`, or in a `Database::transaction` callback.
+// 1. The durable job commits or rolls back with the write.
+hook_ctx
+    .insert::<Job>(CreateJobInput { kind: "reindex".into(), subject: id.to_string() })
+    .await
+    .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+// 2. After commit, wake whatever processes the job rows.
+let wake = worker_wake.clone();
+hook_ctx.defer(move |_db| async move {
+    wake.notify_one();
+    Ok::<(), String>(())
+});
+```
+
+The job row is the guarantee. The callback is only a hint that a row is ready, so a worker should also
+poll for pending jobs on a timer and on startup, which covers a lost wake-up.
+
+Guarantees, each pinned by `crates/graphql-orm/tests/after_commit_defer.rs` on SQLite, PostgreSQL and
+MSSQL:
+
+- **Available on every commit path.** Hooks reach it on generated GraphQL create, update, delete,
+  upsert, `update_many` and `delete_many`; on repository helpers including `insert_many`,
+  `update_where`, `delete_where`, their bounded forms and `delete_all`; and on writes inside
+  `Database::transaction`. A transaction callback can also call `tx.defer(...)` directly.
+- **Only after a successful commit.** The action runs once per registration and sees committed data:
+  a read through the `Database` it receives, taken from the pool rather than the transaction, returns
+  the new rows, and a deleted row is gone.
+- **Never after a rollback.** A hook refusal (including after the same hook deferred an action), a
+  database failure such as a unique-constraint violation, and a callback error all discard the
+  registered actions, and so does a failed commit. A bulk write is one transaction, so a refusal or
+  failure on a later row discards the actions registered for earlier rows.
+- **Failures are contained.** An action that returns `Err` doesn't change the committed result: a
+  GraphQL mutation still returns `success: true`, a repository call returns `Ok`, and `transaction`
+  returns the callback's value. The error text goes to `PostCommitErrorHandler` through
+  `report_post_commit_error`, or to stderr if none is installed. The remaining actions of that commit
+  still run.
+- **Order.** After the commit: `Changed` events for every row, then every deferred action, then
+  `notify_with`. For a bulk GraphQL write that is all rows' events, all rows' actions, then all rows'
+  handler calls. Repository helpers and `Database::transaction` have no `notify_with`, so their order is
+  events and then actions.
+- **Awaited, at most once, not persisted.** Actions run one at a time before the write returns, so a
+  slow action delays the response. They are not retried, and nothing records them. The callback isn't
+  durable: a crash after commit loses it. That is why the durable job goes in the transaction and the
+  callback only wakes the worker.
+
+Don't spawn a delayed task by hand from a hook, such as `tokio::spawn` with a sleep, to approximate
+this. A hook runs before the commit and can't know whether the transaction will commit, so no fixed
+delay is right: a short one can fire before the commit and find no job row, or after a rollback for a
+write that never happened, and a long one adds latency to every write. `defer` runs after the commit
+decision and only on commit.
 
 Runtime collections use the separate `RuntimeMutationHook`; see
 [runtime mutations](runtime-mutations.md).

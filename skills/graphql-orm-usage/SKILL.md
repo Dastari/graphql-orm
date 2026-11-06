@@ -237,6 +237,7 @@ A generated write runs in this order. Entity and row policy checks come first, a
 4. **`After` hook.** Still inside the transaction. An error rolls back.
 5. **Commit.**
 6. **`Changed` events**, then **deferred actions**, registered with `hook_ctx.defer`.
+7. **`notify_with`**, for generated GraphQL mutations only. See [Deferred actions](#deferred-actions).
 
 One `MutationHook` is installed per `Database`, with `set_mutation_hook`. It sees every entity, so
 check `event.entity_name` first. `event.before::<T>()` returns `Err` for any other entity, so `?` on it
@@ -259,18 +260,58 @@ These writes reach your policies with `ctx = None`, so they need a policy that a
 | Reject a delete | `Before` hook | Transforms don't run for deletes |
 | Change other rows | Hook, through `hook_ctx` | Commits or rolls back with the write |
 | Stop a process, delete files, call a network service | `hook_ctx.defer` | A rollback can't undo it, and slow work in a transaction holds locks |
-| Work that must happen | Insert a job row in the hook, and run it from a worker | Survives a crash and can retry |
+| Work that must happen | Insert a job row in the hook, run it from a worker, and wake the worker with `hook_ctx.defer` | Survives a crash and can retry |
 
-Deferred actions have limits you should design around:
+### Deferred actions
 
-- They run **before the response returns**, one at a time. After commit doesn't mean in the
-  background, so long work still delays the client. Start it from a job row.
-- They run **at most once**. A crash after commit loses them.
-- A failure doesn't fail the mutation, because it has committed. It goes to the
-  `PostCommitErrorHandler` from `set_post_commit_error_handler`, or to stderr if none is set.
+`MutationContext::defer` is the after-commit callback. Use that name; there is no second API for it.
+It takes a closure that receives a `Database` and returns a future of `Result<(), E>` where
+`E: Display`. It works from a `MutationHook` on every write path (generated GraphQL single-row and
+bulk writes, repository helpers, `Database::transaction`), and a `Database::transaction` callback can
+call `tx.defer(...)` directly.
+
+The pattern for work that must happen: **write a durable job row in the transaction, and wake a worker
+after commit.** The row commits or rolls back with the write, so it can't describe a write that didn't
+happen. The callback only tells the worker a row is ready.
+
+```rust,ignore
+// Inside `on_mutation` (or a `db.transaction` callback), for the After phase of a create.
+hook_ctx
+    .insert::<Job>(CreateJobInput { kind: "reindex".into(), subject: id.to_string() })
+    .await
+    .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+let wake = worker_wake.clone(); // for example an `Arc<tokio::sync::Notify>`
+hook_ctx.defer(move |_db| async move {
+    wake.notify_one();
+    Ok::<(), String>(())
+});
+```
+
+**The callback isn't durable.** It is held in memory and a crash after commit loses it, which is why
+the job row is the guarantee and the worker must also look for pending jobs on startup and on a timer.
+
+Behaviour to design around:
+
+- **Order:** commit, then every queued `Changed` event, then every deferred action in registration
+  order, then `notify_with` for generated GraphQL mutations (a bulk write: all events, all actions,
+  then one handler call per row). Repository helpers and `Database::transaction` have no
+  `notify_with`.
+- **Never after a rollback.** A hook refusal, a database failure and a callback error discard the
+  registered actions. A bulk write is one transaction, so a refusal on a later row discards the
+  actions of earlier rows.
+- **At most once, not persisted.** No retry, no record that it was registered.
+- **Before the response returns, one at a time.** After commit doesn't mean in the background, so long
+  work still delays the client. Start it from a job row.
+- **Committed data is visible.** A read through the `Database` the closure receives sees the write.
+- **A failure doesn't fail the mutation**, because it has committed, and it doesn't stop the other
+  actions. The error goes to the `PostCommitErrorHandler` from `set_post_commit_error_handler`, or to
+  stderr if none is set.
 - The closure gets a `Database`, not the request. Copy what it needs from the event first.
 - A call that times out may still have happened. Give external calls an idempotency key, and
   reconcile an uncertain result rather than retrying it as if it never ran.
+- **Don't spawn a delayed task by hand** (`tokio::spawn` plus a sleep) to approximate this. The hook
+  can't know whether the transaction will commit, so any delay is racy: it can fire before the commit,
+  or after a rollback.
 
 ### Which write paths run hooks
 
@@ -572,7 +613,8 @@ Only for services that use them:
 | Custom resolver with a generated name | It compiles, the generated resolver wins, and yours never runs. The only signal is a panic from `graphql_orm_semantic_catalog()` ([#282](https://github.com/Dastari/graphql-orm/issues/282)) | Hook or transform. Pick a distinct name only for a genuine action |
 | Validation inside a custom resolver | Generated writes and repository writes bypass it | Field validators or the transform |
 | Irreversible or slow side effect in a hook | A rollback can't undo it, and it holds locks | `hook_ctx.defer`, or a job row |
-| Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row for anything that must happen |
+| Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row in the transaction for anything that must happen, with `defer` only to wake the worker |
+| A hand-spawned delayed task from a hook | Racy: it can run before the commit or after a rollback | `hook_ctx.defer` |
 | Manual child cleanup where nothing observes the children | More code, and easy to miss a path | `on_delete` |
 | `cascade` where children have hooks or live viewers | Children vanish with no hooks or events | Delete them in a `Before` hook |
 | Hand-computed parent invalidation | Duplicates `propagate_change` and drifts as relations change | `propagate_change = "up"`. Child deletes are the exception, see #290 |

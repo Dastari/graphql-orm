@@ -11,6 +11,15 @@ supersedes: []
 # Migration Guide
 
 ## 0.91.1 to 0.92.0: bulk post-commit notifications
+## 0.92.2 to 0.92.3: after-commit callback documented
+
+No action and no data migration is needed. `MutationContext::defer` keeps its signature and behaviour; it
+gains rustdoc and tests. Applications that spawn a delayed task from a hook to wake a worker can switch
+to `hook_ctx.defer`, which runs after the commit and never after a rollback, and should keep the durable
+job row in the transaction because the callback is lost by a crash after commit. See
+[After-commit work](docs/reference/graphql-orm/runtime-and-writes.md#after-commit-work).
+
+## 0.92.1 to 0.92.2: bulk post-commit notifications
 
 **ORM/macros 0.92.0:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
 

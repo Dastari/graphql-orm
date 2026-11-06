@@ -1434,6 +1434,8 @@ where
             .await
     }
 
+    /// Queue a typed event to be emitted on the [`Database`](crate::db::Database)'s event channel after
+    /// this transaction commits. A rollback drops it.
     pub fn queue_event<T>(&mut self, event: T)
     where
         T: Clone + Send + Sync + 'static,
@@ -1441,6 +1443,30 @@ where
         self.deferred_events.push(Box::new(DeferredEvent { event }));
     }
 
+    /// Register an action to run once, after this transaction commits.
+    ///
+    /// This is the after-commit callback for mutation hooks and for
+    /// [`Database::transaction`](crate::db::Database::transaction) callbacks. Use it for work a rollback
+    /// cannot undo or that must not hold the transaction open, such as waking a worker or calling a
+    /// service. It is available on every write path that commits through a `MutationContext`: generated
+    /// GraphQL creates, updates, deletes, upserts and bulk writes, repository helpers, and explicit
+    /// transactions.
+    ///
+    /// - It never runs when the transaction rolls back, whether because a hook or the callback returned
+    ///   an error, the database refused a write, or the commit failed. A bulk write is one transaction,
+    ///   so a later row's failure discards the actions registered for earlier rows.
+    /// - After a successful commit, queued `Changed` events are emitted first, then actions run one at a
+    ///   time in registration order, and the write returns only after they finish. Generated GraphQL
+    ///   resolvers call `notify_with` after that, so a handler runs after the actions.
+    /// - The action receives a [`Database`](crate::db::Database), so reads through it see the committed
+    ///   data. Copy anything it needs from the event before registering it, since it outlives the hook.
+    /// - It runs at most once and is not persisted: a crash after commit loses it. Put work that must
+    ///   happen in a durable job row written in the same transaction, and use the action only to wake
+    ///   whatever processes that row.
+    /// - A returned error does not change the committed result and does not stop the remaining
+    ///   actions. Its text goes to [`PostCommitErrorHandler`] through
+    ///   [`Database::report_post_commit_error`](crate::db::Database::report_post_commit_error), or to
+    ///   stderr if no handler is installed.
     pub fn defer<F, Fut, E>(&mut self, action: F)
     where
         F: FnOnce(crate::db::Database<B>) -> Fut + Send + 'static,
