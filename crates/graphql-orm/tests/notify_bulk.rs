@@ -449,14 +449,20 @@ async fn notification_bound_refuses_before_writing() {
         .data(calls.clone())
         .finish();
     for operation in [
-        r#"updateWriteRecords(where: {recordKey: {startsWith: "key"}}, input: {other: "after"}) { success affectedCount }"#,
-        r#"deleteWriteRecords(where: {recordKey: {startsWith: "key"}}) { success deletedCount }"#,
+        r#"updateWriteRecords(where: {recordKey: {startsWith: "key"}}, input: {other: "after"}) { success error errorCode affectedCount }"#,
+        r#"deleteWriteRecords(where: {recordKey: {startsWith: "key"}}) { success error errorCode deletedCount }"#,
     ] {
         let response = schema.execute(format!("mutation {{ {operation} }}")).await;
         assert!(response.errors.is_empty(), "{response:?}");
         let data = response.data.into_json().unwrap();
         let payload = data.as_object().unwrap().values().next().unwrap();
         assert_eq!(payload["success"], false);
+        // A new refusal for writes that used to succeed has to say why.
+        assert_eq!(
+            payload["error"],
+            "notify_with bulk writes are limited to 1000 rows"
+        );
+        assert_eq!(payload["errorCode"], "INVALID_INPUT");
         assert_eq!(values(&db).await, vec!["before"; 1001]);
     }
     assert!(calls.rows.lock().unwrap().is_empty());

@@ -9547,7 +9547,12 @@ fn generate_graphql_operations_unfiltered(
                     .await?;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
-                    return Err(Self::__gom_runtime_error("notify_with bulk writes are limited to 1000 rows"));
+                    return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
+                        ::graphql_orm::graphql::errors::OrmPublicError::with_message(
+                            ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                            "notify_with bulk writes are limited to 1000 rows",
+                        ),
+                    ));
                 }
                 if matched_entities.is_empty() {
                     return Ok(0);
@@ -9957,7 +9962,12 @@ fn generate_graphql_operations_unfiltered(
                     .await?;
 
                 if #has_notify_handler && graphql_ctx.is_some() && matched_entities.len() > 1000 {
-                    return Err(Self::__gom_runtime_error("notify_with bulk writes are limited to 1000 rows"));
+                    return Err(::graphql_orm::graphql::errors::sqlx_error_from_public(
+                        ::graphql_orm::graphql::errors::OrmPublicError::with_message(
+                            ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                            "notify_with bulk writes are limited to 1000 rows",
+                        ),
+                    ));
                 }
                 if matched_entities.is_empty() {
                     return Ok(0);
