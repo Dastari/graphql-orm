@@ -71,3 +71,5 @@ guidance for the core ORM package.
 
 - [Runtime GraphQL reads and checked composition](runtime-graphql.md)
 - [Full-text search on runtime collections](runtime-search.md)
+
+- [Dedicated schema export builds](schema-export.md)

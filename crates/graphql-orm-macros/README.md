@@ -459,3 +459,7 @@ Version 0.91.0 scores SQLite runtime search from each row's own document, so
 hidden rows cannot affect visible scores, and fences the runtime search
 backfill against a stale schema. See
 [the migration guide](../../MIGRATION.md#0901-to-0910-isolated-runtime-search-ranking-and-fenced-backfill).
+
+Version 0.92.0 adds the off-by-default macro `schema-export-only` feature for dedicated
+SDL export builds. Runtime builds must leave it disabled; see
+[schema export](../../docs/reference/graphql-orm/schema-export.md).

@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.91.1 to 0.92.0: dedicated schema export builds
+
+No data migration is needed. Normal builds require no changes. Export tools may
+opt into the macro crate `schema-export-only` feature only in a dedicated build.
+Cargo unifies features: one dependency enabling it stubs all consumers of the same
+macro package in that build graph. Inspect `cargo tree -e features -i graphql-orm-macros`
+and remove it from production graphs. See [schema export](docs/reference/graphql-orm/schema-export.md).
+
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
 Update if you run Codex 0.166.0: earlier AI releases fail its turns. No API, schema, configuration or data change. ORM and macros 0.91.1 change no code. See the [AI migration note](crates/graphql-orm-ai/MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).

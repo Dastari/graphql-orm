@@ -116,6 +116,15 @@ jobs:
       - run: cargo clippy -p graphql-orm --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc -p graphql-orm -p graphql-orm-macros --no-deps
 
+  schema-export:
+    name: Dedicated schema export
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/check-schema-export.sh
+
   orm-fixtures:
     name: ORM fixture workspaces
     runs-on: ubuntu-latest
