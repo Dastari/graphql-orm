@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.92.0 rejects generated policy-denied field writes by default.
+Use `FieldPolicy::ignore_denied_field_write` to retain legacy omission for selected fields.
+
 Version 0.89.0 adds full-text search to runtime collections: an IR declaration, managed storage with
 readiness and a resumable backfill, write maintenance, and a ranked runtime GraphQL `search` argument.
 See [runtime search](../../docs/reference/graphql-orm/runtime-search.md).

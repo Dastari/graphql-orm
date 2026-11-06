@@ -10,6 +10,33 @@ supersedes: []
 
 # Migration Guide
 
+## 0.91.1 to 0.92.0: rejected field writes fail the mutation
+
+No data migration or schema change is needed. Consumers are affected if a generated
+mutation with a field `write_policy` receives `false` from `can_write_field` and
+previously relied on success after dropping that input. Search entity declarations
+for `write_policy`, inspect their `FieldPolicy` implementations, and test denied
+optional create/upsert inputs and denied optional or required update inputs.
+
+By default these writes now fail with a forbidden error naming the GraphQL field,
+including bulk updates, and write nothing. These denials are GraphQL errors with
+`extensions.code = "FORBIDDEN"` and `extensions.deniedWriteField` containing the
+public field name; bulk callers must also handle this error channel. Adjust clients to handle refusal or
+stop sending fields they cannot write. To preserve legacy omission deliberately,
+add this method to your existing `impl FieldPolicy`:
+
+```rust,ignore
+fn ignore_denied_field_write(&self, entity: &'static str, field: &'static str) -> bool {
+    entity == "Record" && field == "note"
+}
+```
+
+Return `true` unconditionally for a global compatibility opt-out. It applies only
+to generated paths that previously dropped inputs: optional create/upsert fields
+and supplied update fields of either nullability. Required create/upsert fields
+still fail on denial. Policy errors and missing-provider errors still propagate;
+repository field authorization remains strict. Omitted update fields remain untouched.
+
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 
 Update if you run Codex 0.166.0: earlier AI releases fail its turns. No API, schema, configuration or data change. ORM and macros 0.91.1 change no code. See the [AI migration note](crates/graphql-orm-ai/MIGRATION.md#01201-to-01202-codex-01660-lifecycle-timing).

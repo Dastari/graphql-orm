@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|ai-postgres|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -35,7 +35,7 @@ run_sqlite() {
     --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir \
     -- --test-threads=1
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --locked
+    --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
   cargo test --manifest-path \
@@ -75,6 +75,7 @@ run_postgres_legacy() {
     --test conditional_indexes \
     --test contract_gaps \
     --test entity_policy \
+    --test field_write_denial \
     --test generated_subscriptions \
     --test generated_upserts \
     --test graphql_case_features \
@@ -111,7 +112,7 @@ run_postgres_legacy() {
 
 run_mssql() {
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }
@@ -122,7 +123,15 @@ run_ai_postgres() {
     -- --test-threads=1
 }
 
+run_field_write_denial() {
+  for backend in sqlite postgres mssql; do
+    cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+      --test field_write_denial -- --include-ignored --test-threads=1
+  done
+}
+
 case "${lane}" in
+  field-write-denial) run_field_write_denial ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;

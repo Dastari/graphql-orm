@@ -210,11 +210,15 @@ async fn field_policy_callbacks_gate_generated_read_and_write_paths()
             }",
         )
         .await;
-    assert!(denied_write.errors.is_empty(), "{:?}", denied_write.errors);
-    let denied_write_json = denied_write.data.into_json()?;
+    assert_eq!(denied_write.errors.len(), 1, "{denied_write:?}");
+    assert!(denied_write.errors[0].message.contains("emailAddress"));
     assert_eq!(
-        denied_write_json["createUser"]["success"].as_bool(),
-        Some(true)
+        denied_write.errors[0]
+            .extensions
+            .as_ref()
+            .unwrap()
+            .get("code"),
+        Some(&async_graphql::Value::from("FORBIDDEN")),
     );
 
     policy.allow_write("user.email.write");

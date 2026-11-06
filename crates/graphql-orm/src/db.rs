@@ -819,6 +819,35 @@ impl<B: OrmBackend> Database<B> {
         }
     }
 
+    /// Check a generated mutation input, rejecting denial unless its field
+    /// policy explicitly opts into legacy input omission.
+    ///
+    /// Returns `false` only when the caller must discard the denied input.
+    /// Policy errors always propagate; the opt-out never grants a field write.
+    pub async fn check_field_write(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        entity_name: &'static str,
+        field_name: &'static str,
+        policy_key: Option<&'static str>,
+        record: Option<&(dyn Any + Send + Sync)>,
+        value: Option<&(dyn Any + Send + Sync)>,
+    ) -> async_graphql::Result<bool> {
+        let allowed = self
+            .can_write_field(ctx, entity_name, field_name, policy_key, record, value)
+            .await?;
+        if allowed
+            || self
+                .field_policy
+                .as_ref()
+                .is_some_and(|policy| policy.ignore_denied_field_write(entity_name, field_name))
+        {
+            Ok(allowed)
+        } else {
+            Err(OrmPublicError::field_write_denied(field_name).into_graphql_error())
+        }
+    }
+
     pub async fn ensure_readable_field(
         &self,
         ctx: &async_graphql::Context<'_>,
@@ -852,7 +881,7 @@ impl<B: OrmBackend> Database<B> {
         {
             Ok(())
         } else {
-            Err(OrmPublicError::forbidden().into_graphql_error())
+            Err(OrmPublicError::field_write_denied(field_name).into_graphql_error())
         }
     }
 

@@ -100,3 +100,24 @@ let access = AccessContext::Principal(&db_auth);
 ## Subscriptions
 
 Under `ExplicitPolicyForAllExposedOperations`, subscription surfaces deny when no entity policy is registered. Prefer explicit enablement plus policy even in legacy mode.
+
+## Denied generated field writes
+
+A `false` field write decision fails generated create, update, upsert and bulk
+update before any row changes, using the forbidden error and naming the GraphQL
+field (`extensions.code = "FORBIDDEN"`, `extensions.deniedWriteField` names the
+field). This also uses the GraphQL error channel for bulk field denials.
+Optional create/upsert fields are checked even when absent, as before;
+updates check only supplied fields, including explicit nulls.
+
+`FieldPolicy::ignore_denied_field_write(entity_name, field_name)` defaults to
+`false`. Override it to return `true` for selected GraphQL fields (or all fields)
+to restore legacy input omission. Required create/upsert inputs still fail on
+denial. Errors from a policy and missing policy providers are never ignored.
+Repository field checks retain their existing fail-closed contract. See the
+[migration guide](../../../MIGRATION.md#0911-to-0920-rejected-field-writes-fail-the-mutation).
+
+Run the cross-backend field-denial regression suite through
+`scripts/run-owned-database-lanes.sh field-write-denial`; PostgreSQL and MSSQL
+use test-owned disposable containers. The MSSQL fixture explicitly declares
+`schema_policy = "external_writable"` on both its entity and roots.

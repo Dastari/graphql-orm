@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.92.0 rejects generated policy-denied field writes by default.
+Use `FieldPolicy::ignore_denied_field_write` to retain legacy omission for selected fields.
+
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.
 
