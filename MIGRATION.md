@@ -10,15 +10,14 @@ supersedes: []
 
 # Migration Guide
 
-## 0.91.1 to 0.92.0: bulk post-commit notifications
-## 0.92.2 to 0.92.3: after-commit callback documented
+## 0.92.0 to 0.93.0: after-commit callback documented
 
 No action and no data migration is needed. `MutationContext::defer` keeps its signature and behaviour; it
 gains rustdoc and tests. Applications that spawn a delayed task from a hook to wake a worker can switch
 to `hook_ctx.defer`, which runs after the commit and never after a rollback, and should keep the durable
 job row in the transaction because the callback is lost by a crash after commit. See
 [After-commit work](docs/reference/graphql-orm/runtime-and-writes.md#after-commit-work).
-## 0.92.2 to 0.93.0: transforms once per input row
+## 0.92.0 to 0.93.0: transforms once per input row
 
 This is a breaking behavior change: ORM/macros move together to 0.93.0.
 No data migration is needed. Search for `WriteInputTransform` implementations.
@@ -35,7 +34,7 @@ report `Repository`; `InternalMutationHook` is reserved for writes executing
 inside mutation hooks. Do not use origin to compensate for duplicate calls.
 External side effects are not transactional; defer them until after commit.
 Fixes #284.
-## 0.92.2 to 0.92.3: generated mutation shape selection
+## 0.92.0 to 0.93.0: generated mutation shape selection
 
 Nothing changes unless you add `mutation_shapes`. An application that refuses unwanted generated mutations at run time can now remove them from the schema instead:
 
@@ -46,7 +45,41 @@ struct Order { /* ... */ }
 
 The schema then has `createOrder` and `updateOrder` only. Selectors are `create`, `upsert`, `update`, `update_many`, `delete` and `delete_many`. Disabled mutations vanish from the SDL and the operation and semantic catalogues (so AI tool profiles and router exports omit them), along with input and result types that only they used. Clients must refresh pinned SDL and generated types only for entities that opt in, and any client still calling a removed mutation now gets a validation error. Repository APIs, relations, hooks, `Changed` subscriptions and authorization are unchanged. `schema_roots!` `generated_mutations` still removes an entity's whole mutation object and wins over `mutation_shapes`; `append_only` entities accept only `create`. A selector the entity cannot generate, or an `operation_authorization` or `ai_mutations` category the selection removes, fails to compile. No data or schema migration is needed.
 
-## 0.92.1 to 0.92.2: bulk post-commit notifications
+## AI 0.121.0 to 0.122.0: failure classification and retry refusal
+
+GraphQL retry refusals retain `AI_CONFLICT` and add the content-free
+`extensions.retryRefusal` reason. Rust callers can match `AiError::RetryRefused`.
+Closed local preflight refusals (validation, authorization, context, attachments,
+and audits) now report `provider_pre_transport_failed` after
+capacity is released. Generic persistence failures remain uncertain.
+No data migration is needed; AI schema module remains `0.76.0`.
+
+Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
+require committed evidence that no turn in the whole run may have dispatched.
+A clean last turn cannot authorize replay of an earlier possible effect.
+## AI 0.121.0 to 0.122.0: catalogue-change regression coverage
+
+No consumer action or data migration is needed. This patch adds regression tests
+only; runtime behavior and AI schema module version remain unchanged.
+
+## 0.92.0 to 0.93.0: child-delete parent invalidations
+
+No data migration is needed. Consumers of `Changed` on relations configured with
+`propagate_change = "up"` now receive child-delete invalidations when they can
+read the current parent, even if they cannot read the child. Refresh authorized
+parent queries on `changeKind: PROPAGATED`, including `action: DELETED`. Use
+`changeKind` to distinguish a child invalidation from a direct parent deletion;
+do not remove the parent solely because the action is `DELETED`. Detect
+this case by null `sourceEntity` and `sourceId`; `id`/`key` identify only the parent.
+Remove parent-touch hooks or client signals added as a #290 workaround to avoid
+redundant refreshes. A bulk deletion of N children emits N events per parent/path,
+matching current updates; no transaction coalescing is introduced. Subsequent hops
+still require current intermediate rows and relation authorization, within the
+existing 16-hop/256-target bounds. Missing or deleted parents emit nothing.
+Direct deleted-preimage authorization is unchanged; no key-only direct-delete
+opt-in is added.
+
+## 0.91.1 to 0.92.0: bulk post-commit notifications
 
 **ORM/macros 0.92.0:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
 
@@ -160,23 +193,6 @@ further discrepancies. Keyset paging uses this same stored ordering and key tie
 breakers. Normalize values before relying on chronological pages; discard old
 cursors after normalization and restart paging. No migration is needed for integer
 columns or applications intentionally retaining existing text representations.
-## AI 0.121.0 to 0.122.0: failure classification and retry refusal
-
-GraphQL retry refusals retain `AI_CONFLICT` and add the content-free
-`extensions.retryRefusal` reason. Rust callers can match `AiError::RetryRefused`.
-Closed local preflight refusals (validation, authorization, context, attachments,
-and audits) now report `provider_pre_transport_failed` after
-capacity is released. Generic persistence failures remain uncertain.
-No data migration is needed; AI schema module remains `0.76.0`.
-
-Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
-require committed evidence that no turn in the whole run may have dispatched.
-A clean last turn cannot authorize replay of an earlier possible effect.
-## AI 0.121.0 to 0.121.1: catalogue-change regression coverage
-
-No consumer action or data migration is needed. This patch adds regression tests
-only; runtime behavior and AI schema module version remain unchanged.
-
 ## AI 0.120.2 to 0.121.0: finite provider session cleanup
 
 Handle `AiProviderSessionState::CleanupExhausted` in exhaustive matches and apply
@@ -203,24 +219,6 @@ non-compliant wrapper behavior. Nested relation
 selections on Changed snapshots remain rejected at admission.
 
 ## 0.91.1 to 0.92.0: relation-bearing identity fields
-## Child-delete parent invalidations (0.92.0)
-
-No data migration is needed. Consumers of `Changed` on relations configured with
-`propagate_change = "up"` now receive child-delete invalidations when they can
-read the current parent, even if they cannot read the child. Refresh authorized
-parent queries on `changeKind: PROPAGATED`, including `action: DELETED`. Use
-`changeKind` to distinguish a child invalidation from a direct parent deletion;
-do not remove the parent solely because the action is `DELETED`. Detect
-this case by null `sourceEntity` and `sourceId`; `id`/`key` identify only the parent.
-Remove parent-touch hooks or client signals added as a #290 workaround to avoid
-redundant refreshes. A bulk deletion of N children emits N events per parent/path,
-matching current updates; no transaction coalescing is introduced. Subsequent hops
-still require current intermediate rows and relation authorization, within the
-existing 16-hop/256-target bounds. Missing or deleted parents emit nothing.
-Direct deleted-preimage authorization is unchanged; no key-only direct-delete
-opt-in is added.
-
-## Relation-bearing identity fields (0.91.2)
 
 No data migration is needed. Complex entities deriving `GraphQLRelations` can
 opt into `node_id` and automatically serve a readable managed version as

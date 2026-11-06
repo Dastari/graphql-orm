@@ -655,7 +655,7 @@ This exposes `createOrder` and `updateOrder` but not `deleteOrder`,
   `upsert` ...), relations, hooks, `Changed` subscriptions, propagation and
   authorization behave exactly as before.
 
-See the [migration guide](../../../MIGRATION.md#0922-to-0923-generated-mutation-shape-selection).
+See the [migration guide](../../../MIGRATION.md#0920-to-0930-generated-mutation-shape-selection).
 
 ## Implicit timestamps
 

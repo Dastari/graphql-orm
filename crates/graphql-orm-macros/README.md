@@ -10,15 +10,19 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.92.0 runs post-commit notifications for GraphQL bulk writes and adds
-Version 0.92.3 is the companion of graphql-orm 0.92.3; macro generation is unchanged.
+Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
+
 Version 0.93.0 runs write input transforms once per input row, including each
 existing row in bulk updates, with independent outputs and atomic refusal.
 Ordinary transaction writes report Repository; hook writes report InternalMutationHook.
-Version 0.92.3 adds `mutation_shapes`, which selects the generated mutations an entity
+
+Version 0.93.0 adds `mutation_shapes`, which selects the generated mutations an entity
 exposes; omission changes nothing.
 
-Version 0.92.2 runs post-commit notifications for GraphQL bulk writes and adds
+Version 0.93.0 delivers parent-authorized invalidations after child deletes (#290);
+public delete provenance contains no child identity. No data migration is needed.
+
+Version 0.92.0 runs post-commit notifications for GraphQL bulk writes and adds
 `notify_on_error = "report"` for single-row success after notification failures.
 
 Version 0.92.0 preserves application refusal messages and codes in generated bulk
@@ -37,8 +41,6 @@ Version 0.92.0 adds opt-in authorized static collection filters with `#[relation
 Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
 See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
 Version 0.92.0 pairs with the runtime read-predicate additions; generated code is unchanged.
-Version 0.92.0 delivers parent-authorized invalidations after child deletes (#290);
-public delete provenance contains no child identity. No data migration is needed.
 
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.
