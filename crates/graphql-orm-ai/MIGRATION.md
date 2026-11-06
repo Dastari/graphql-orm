@@ -25,6 +25,13 @@ Do not clear the cursor or manufacture absence; investigate provider availabilit
 before a separately reviewed maintenance intervention. Exhaustion never grants
 deletion or rebind authority. This release adds no reset API for exhausted bindings.
 
+Why bindings did not converge: real `thread/list` pages carry a `readStates` map, absent
+from Codex's generated schema, and the absence scan refused any page containing it. So a
+delete returning `-32600` ("no rollout found for thread id") could never settle. The scan now
+admits `readStates` as an object of at most one page of objects keyed by thread ID, reads only
+the IDs, and treats an entry naming the target as present. Stuck bindings settle on their next
+attempt with no action, as long as their retry budget remains.
+
 Codex cleanup now always confirms absence through a fresh bounded, content-discarding
 state-index scan, including after a successful delete acknowledgement. Custom
 process adapters must implement `AiCodexAppServerRunProcess::confirm_thread_absent`;
