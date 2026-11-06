@@ -2662,6 +2662,21 @@ fn convert_default(raw: &str, kind: RuntimeValueKind) -> Option<RuntimeDefault> 
     if EPOCH_DEFAULT_EXPRESSIONS.contains(&raw) {
         return (kind == RuntimeValueKind::Integer).then_some(RuntimeDefault::CurrentTimestamp);
     }
+    if kind == RuntimeValueKind::DateTime
+        && (matches!(raw, "NOW()" | "SYSUTCDATETIME()")
+            || [
+                super::DatabaseBackend::Sqlite,
+                super::DatabaseBackend::Postgres,
+                super::DatabaseBackend::Mssql,
+            ]
+            .into_iter()
+            .any(|backend| {
+                super::dialect::implicit_timestamp_defaults(backend)
+                    .is_some_and(|(_, text)| raw == text)
+            }))
+    {
+        return Some(RuntimeDefault::CurrentTimestamp);
+    }
     if let Some(quoted) = raw
         .strip_prefix('\'')
         .and_then(|value| value.strip_suffix('\''))

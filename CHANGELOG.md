@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,7 @@ for historical context.
 - **Fix (ORM/macros 0.92.1):** preserve application refusal messages and codes in bulk update/delete payloads, including field denials. Bulk results add nullable `errorCode`; refresh pinned SDL. Private typed transport prevents driver text from forging public errors. No data migration. Fixes [#316](https://github.com/Dastari/graphql-orm/issues/316).
 
 - **Breaking (ORM/macros 0.92.0):** generated create, update, upsert and bulk update reject policy-denied field writes before writing, naming the field. `FieldPolicy::ignore_denied_field_write` explicitly restores legacy omission for selected fields; required create/upsert fields remain mandatory. Fixes [#307](https://github.com/Dastari/graphql-orm/issues/307).
+- ORM/macros 0.92.0: implicit String timestamp defaults and generated `updated_at` writes use RFC 3339 UTC; integers retain epoch seconds. Preserve legacy stored defaults and rows on reopen. Catalog equivalences apply only during comparison; existing canonical default-expression hash inputs retain their identities. MSSQL introspection now retains NVARCHAR lengths to avoid false reopen plans; regenerate saved MSSQL plans whose physical hashes included these columns. Fixes #308.
 
 AI **0.120.2**, ORM runtime/macros **0.92.0**.
 

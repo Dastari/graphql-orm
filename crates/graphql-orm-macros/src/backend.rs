@@ -147,6 +147,30 @@ pub(crate) fn backend_current_epoch_expr(backend: BackendKind) -> &'static str {
     }
 }
 
+pub(crate) fn backend_current_timestamp_expr(
+    backend: BackendKind,
+    native_date: bool,
+) -> &'static str {
+    if native_date {
+        match backend {
+            BackendKind::Postgres => return "NOW()",
+            BackendKind::Mssql => return "SYSUTCDATETIME()",
+            BackendKind::Sqlite => {}
+        }
+    }
+    backend_current_text_timestamp_expr(backend)
+}
+
+pub(crate) fn backend_current_text_timestamp_expr(backend: BackendKind) -> &'static str {
+    match backend {
+        BackendKind::Postgres => {
+            r#"to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#
+        }
+        BackendKind::Mssql => "(CONVERT(varchar(27), SYSUTCDATETIME(), 126) + 'Z')",
+        BackendKind::Sqlite => "strftime('%Y-%m-%dT%H:%M:%f000Z','now')",
+    }
+}
+
 pub(crate) fn backend_quote_identifier(backend: BackendKind, identifier: &str) -> String {
     if backend == BackendKind::Mssql {
         if (identifier.starts_with('[') && identifier.ends_with(']'))

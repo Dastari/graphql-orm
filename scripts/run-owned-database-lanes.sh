@@ -37,7 +37,7 @@ run_sqlite() {
   cargo test -p graphql-orm --no-default-features --features sqlite \
     --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked
   cargo test -p graphql-orm --no-default-features --features sqlite \
-    --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --locked
+    --test grouped_aggregates --test complete_group_pages --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features sqlite --locked
@@ -58,7 +58,7 @@ run_postgres() {
     --no-default-features --features postgres --locked --test runtime_strings \
     -- --ignored --test-threads=1
   cargo test -p graphql-orm --no-default-features --features postgres \
-    --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --locked -- --ignored --test-threads=1
+    --test grouped_aggregates_postgres --test portable_group_pages --test host_timestamps --test implicit_timestamp_defaults --locked -- --ignored --test-threads=1
   cargo test --manifest-path \
     crates/graphql-orm/tests/fixtures/repository-aggregate-consumer/Cargo.toml \
     --no-default-features --features postgres --locked --test owned_backend --test portable_groups --test host_timestamps \
@@ -112,7 +112,7 @@ run_postgres_legacy() {
 
 run_mssql() {
   cargo test -p graphql-orm --no-default-features --features mssql \
-    --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --locked -- --ignored --test-threads=1
+    --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_mssql
 }

@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -57,6 +57,73 @@ to generated paths that previously dropped inputs: optional create/upsert fields
 and supplied update fields of either nullability. Required create/upsert fields
 still fail on denial. Policy errors and missing-provider errors still propagate;
 repository field authorization remains strict. Omitted update fields remain untouched.
+## 0.91.1 to 0.92.0: type-aware implicit timestamps
+
+String (including optional String) fields named `created_at` or `updated_at` with
+no explicit default now get an RFC 3339 UTC SQL default on newly created columns.
+Integer fields still use Unix epoch seconds. String `#[date_field]` columns use
+native timestamp expressions on PostgreSQL/MSSQL and RFC 3339 on SQLite; static
+DateTime defaults convert to runtime `CurrentTimestamp`. Generated writes to a non-host-managed
+physical `updated_at` column also use the field type, even when the caller omits it.
+Raw SQL UPDATE does not fire a default. Host-managed timestamps retain supplied
+values; explicit SQL defaults and `default = false` keep their existing meaning.
+
+No automatic data migration is performed: existing rows are never rewritten.
+Catalog equivalences are comparison-only: the shared default canonicalizer and
+existing default-expression hash inputs remain unchanged.
+
+MSSQL introspection now retains NVARCHAR lengths (including MAX), which it
+previously omitted. Physical schema hashes containing NVARCHAR columns therefore
+change, and any saved MSSQL migration plan using the old source hash must be
+regenerated from the live catalog before use via
+`db.schema().plan_migration_to_entities(...)` under `PlanOnly` or
+`ExternalWritable` schema policy. Inspect `CHARACTER_MAXIMUM_LENGTH`
+in `INFORMATION_SCHEMA.COLUMNS` to detect these columns. No rows or defaults are
+changed by this catalog correction; integer-only schemas retain their hashes.
+
+Reopening accepts the exact old epoch default on a text column in place of the new
+implicit expression, without rebuilding the table or altering its default. Thus
+omitted inserts into existing columns continue to produce digit strings until an
+operator explicitly changes the stored default. This compatibility rule also
+applies when those exact expressions are explicitly declared; use an explicit SQL
+migration to change between them on an existing text column.
+
+Detect affected columns by inspecting entity metadata for String fields with the
+Rust names `created_at`/`updated_at`, no explicit default, and database catalog
+defaults (`PRAGMA table_info` on SQLite, `information_schema.columns.column_default`
+on PostgreSQL, `sys.default_constraints` on MSSQL). The old expressions are
+`unixepoch()`, `EXTRACT(EPOCH FROM NOW())::bigint`, and
+`DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())`, respectively. Audit stored
+values too: digit-only strings indicate legacy epoch seconds; RFC 3339 parsing
+identifies timestamp strings. A supplied application value may use either format.
+
+Consumers that need uniform values must explicitly migrate the default and, if
+wanted, convert only validated epoch-second rows to UTC timestamps in an owned,
+reviewed data migration (SQLite requires a table rebuild to change a default).
+Alternatively declare `timestamp = "host"` and supply canonical strings yourself.
+For example, replace the identifiers below with the inspected table/column:
+
+```sql
+-- PostgreSQL: changes future omitted inserts only.
+ALTER TABLE records ALTER COLUMN created_at SET DEFAULT
+  to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"');
+-- MSSQL: first drop the inspected sys.default_constraints constraint, then:
+ALTER TABLE records ADD DEFAULT
+  (CONVERT(varchar(27), SYSUTCDATETIME(), 126) + 'Z') FOR created_at;
+```
+
+For SQLite, rebuild the table in a transaction with the same schema, indexes and
+foreign keys, changing only the default to
+`(strftime('%Y-%m-%dT%H:%M:%f000Z','now'))`; copy every existing column verbatim,
+validate foreign keys, then swap tables. Do not convert row values implicitly.
+
+Mixed digit/RFC 3339 text sorts by the database's text collation, not instant: under
+binary ordering modern epoch strings starting with `1` precede ISO dates starting
+with `2`, regardless of their actual time; different digit lengths and offsets add
+further discrepancies. Keyset paging uses this same stored ordering and key tie
+breakers. Normalize values before relying on chronological pages; discard old
+cursors after normalization and restart paging. No migration is needed for integer
+columns or applications intentionally retaining existing text representations.
 
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 

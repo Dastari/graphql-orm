@@ -1009,8 +1009,38 @@ struct LegacyTime {
     #[graphql_orm(auto_generated = false)]
     id: String,
     #[date_field]
+    #[graphql_orm(default = "unixepoch()")]
     created_at: String,
 }
+#[cfg(feature = "sqlite")]
+#[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql_entity(backend = "sqlite", table = "new_times", plural = "NewTimes")]
+struct NewTime {
+    #[primary_key]
+    #[graphql_orm(auto_generated = false)]
+    id: String,
+    #[date_field]
+    created_at: String,
+}
+
+#[cfg(feature = "sqlite")]
+#[test]
+fn implicit_text_datetime_default_converts_to_runtime_timestamp() {
+    let runtime = RuntimeSchema::from_static_entities(&[NewTime::metadata()])
+        .unwrap()
+        .validate()
+        .unwrap();
+    let target = runtime
+        .physical_schema::<SqliteBackend>(Default::default())
+        .unwrap();
+    let field = target.tables()[0]
+        .columns()
+        .iter()
+        .find(|c| c.name == "created_at")
+        .unwrap();
+    assert!(field.default.as_deref().unwrap().starts_with("strftime("));
+}
+
 #[cfg(feature = "sqlite")]
 #[derive(GraphQLSchemaEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[graphql_entity(

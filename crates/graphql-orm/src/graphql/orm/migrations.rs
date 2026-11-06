@@ -35,15 +35,44 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
-fn defaults_equivalent(before: &Option<String>, after: &Option<String>) -> bool {
-    match (before, after) {
-        (None, None) => true,
-        (Some(left), Some(right)) => {
-            super::dialect::canonicalize_column_default_expression(left)
-                == super::dialect::canonicalize_column_default_expression(right)
-        }
-        _ => false,
+// Comparison-only catalog equivalences: never feed these spellings into persisted hashes.
+fn timestamp_default_for_comparison(backend: DatabaseBackend, default: &str) -> String {
+    let value = super::dialect::canonicalize_column_default_expression(default);
+    // Catalog deparsing of these exact ORM expressions only. Quoted format
+    // literals remain case-sensitive; no arbitrary SQL is interpreted.
+    let postgres_text =
+        r#"to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'::text)"#;
+    if backend == DatabaseBackend::Postgres && value == postgres_text {
+        return super::dialect::implicit_timestamp_defaults(DatabaseBackend::Postgres)
+            .unwrap()
+            .1
+            .into();
     }
+    if backend == DatabaseBackend::Mssql
+        && (value == "datediff_big(second,'1970-01-01',sysutcdatetime())"
+            || value == "datediff_big([second],'1970-01-01',sysutcdatetime())")
+    {
+        return super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+            .unwrap()
+            .0
+            .into();
+    }
+    if backend == DatabaseBackend::Mssql
+        && (value == "CONVERT([varchar](27),sysutcdatetime(),(126))+'Z'"
+            || value == "CONVERT([varchar](27),sysutcdatetime(),126)+'Z'")
+    {
+        return super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+            .unwrap()
+            .1
+            .into();
+    }
+
+    if (backend == DatabaseBackend::Postgres && value.eq_ignore_ascii_case("NOW()"))
+        || (backend == DatabaseBackend::Mssql && value.eq_ignore_ascii_case("SYSUTCDATETIME()"))
+    {
+        return value.to_ascii_uppercase();
+    }
+    value
 }
 
 // PostgreSQL adds ::text when deparsing a TEXT literal default. Compare only
@@ -96,6 +125,41 @@ fn postgres_text_default_literal(default: &str) -> Option<String> {
 #[cfg(test)]
 mod sqlite_add_column_default_tests {
     use super::*;
+
+    #[test]
+    fn timestamp_catalog_equivalences_are_comparison_only_and_literal_sensitive() {
+        use super::timestamp_default_for_comparison as compare;
+        for (backend, catalog, expected) in [
+            (
+                DatabaseBackend::Postgres,
+                r#"to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'::text)"#,
+                super::super::dialect::implicit_timestamp_defaults(DatabaseBackend::Postgres)
+                    .unwrap()
+                    .1,
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(CONVERT([varchar](27),sysutcdatetime(),(126))+'Z')",
+                super::super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+                    .unwrap()
+                    .1,
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(datediff_big(second,'1970-01-01',sysutcdatetime()))",
+                super::super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+                    .unwrap()
+                    .0,
+            ),
+        ] {
+            assert_eq!(compare(backend, catalog), expected);
+            let different = catalog
+                .replace("'UTC'", "'utc'")
+                .replace("'Z'", "'z'")
+                .replace("'1970-01-01'", "'2000-01-01'");
+            assert_ne!(compare(backend, &different), expected);
+        }
+    }
 
     #[test]
     fn only_constant_defaults_are_added_in_place() {
@@ -163,6 +227,43 @@ mod postgres_text_default_tests {
             is_primary_key: false,
             is_unique: false,
             default: Some(default.into()),
+        }
+    }
+
+    #[test]
+    fn legacy_text_timestamp_defaults_are_directionally_compatible_on_every_backend() {
+        for backend in [
+            DatabaseBackend::Sqlite,
+            DatabaseBackend::Postgres,
+            DatabaseBackend::Mssql,
+        ] {
+            let (epoch, text) =
+                super::super::dialect::implicit_timestamp_defaults(backend).unwrap();
+            let mut old = column(epoch);
+            let mut new = column(text);
+            if backend == DatabaseBackend::Mssql {
+                old.sql_type = "NVARCHAR(MAX)".into();
+                new.sql_type = "NVARCHAR(MAX)".into();
+            }
+            assert!(!column_changed_for_backend(backend, &old, &new));
+            if backend == DatabaseBackend::Postgres {
+                let mut deparsed = old.clone();
+                deparsed.default = Some("((EXTRACT(epoch FROM now()))::bigint)::text".into());
+                assert!(!column_changed_for_backend(backend, &deparsed, &new));
+            }
+            assert!(!column_changed_for_backend(backend, &new, &new));
+            // No global equivalence, and no suppressing unrelated changes.
+            assert!(column_changed_for_backend(backend, &new, &old));
+            assert_ne!(
+                super::super::dialect::canonicalize_column_default_expression(epoch),
+                super::super::dialect::canonicalize_column_default_expression(text)
+            );
+            let mut unrelated = new.clone();
+            unrelated.default = Some("'fixed'".into());
+            assert!(column_changed_for_backend(backend, &old, &unrelated));
+            old.sql_type = "BIGINT".into();
+            new.sql_type = "BIGINT".into();
+            assert!(column_changed_for_backend(backend, &old, &new));
         }
     }
 
@@ -977,9 +1078,34 @@ pub(super) fn column_changed_with(
         return true;
     }
 
-    if defaults_equivalent(&before.default, &after.default) {
+    let live_default = before
+        .default
+        .as_deref()
+        .map(|default| timestamp_default_for_comparison(backend, default));
+    let target_default = after
+        .default
+        .as_deref()
+        .map(|default| timestamp_default_for_comparison(backend, default));
+    if live_default == target_default {
         return false;
     }
+
+    // Retain pre-0.92 text timestamp defaults in existing databases. This is a
+    // directional compatibility rule, not SQL expression equivalence: changing
+    // an existing default between these exact forms requires explicit SQL.
+    if (after.sql_type.eq_ignore_ascii_case("TEXT")
+        || after.sql_type.eq_ignore_ascii_case("NVARCHAR(MAX)"))
+        && let (Some(live), Some(target)) = (&live_default, &target_default)
+        && let Some((epoch, text)) = super::dialect::implicit_timestamp_defaults(backend)
+        && target == text
+        && (live == epoch
+            || (backend == DatabaseBackend::Postgres
+                && (live.eq_ignore_ascii_case("((extract(epoch from now()))::bigint)::text")
+                    || live.eq_ignore_ascii_case("(extract(epoch from now())::bigint)::text"))))
+    {
+        return false;
+    }
+
     if backend == DatabaseBackend::Postgres
         && before.sql_type.eq_ignore_ascii_case("TEXT")
         && after.sql_type.eq_ignore_ascii_case("TEXT")
@@ -3813,7 +3939,10 @@ pub async fn introspect_mssql_schema(
         let column_rows = super::MssqlBackend::fetch_rows(
             pool,
             "SELECT COLUMN_NAME AS column_name,
-                    DATA_TYPE AS data_type,
+                    CASE WHEN DATA_TYPE = 'nvarchar' THEN
+                        DATA_TYPE + '(' + CASE WHEN CHARACTER_MAXIMUM_LENGTH = -1
+                            THEN 'max' ELSE CONVERT(varchar(10), CHARACTER_MAXIMUM_LENGTH) END + ')'
+                        ELSE DATA_TYPE END AS data_type,
                     IS_NULLABLE AS is_nullable,
                     COLUMN_DEFAULT AS column_default
              FROM INFORMATION_SCHEMA.COLUMNS

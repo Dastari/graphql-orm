@@ -33,6 +33,24 @@ impl DatabaseBackend {
     }
 }
 
+// Keep these canonical expressions aligned with the derive backend helpers.
+pub(crate) fn implicit_timestamp_defaults(
+    backend: DatabaseBackend,
+) -> Option<(&'static str, &'static str)> {
+    match backend {
+        DatabaseBackend::Sqlite => Some(("unixepoch()", "strftime('%Y-%m-%dT%H:%M:%f000Z','now')")),
+        DatabaseBackend::Postgres => Some((
+            "EXTRACT(EPOCH FROM NOW())::bigint",
+            r#"to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')"#,
+        )),
+        DatabaseBackend::Mssql => Some((
+            "DATEDIFF_BIG(second, '1970-01-01', SYSUTCDATETIME())",
+            "CONVERT(varchar(27), SYSUTCDATETIME(), 126) + 'Z'",
+        )),
+        DatabaseBackend::Mysql => None,
+    }
+}
+
 /// Canonicalize a column default expression for schema comparison and hashing.
 ///
 /// SQLite stores `DEFAULT (unixepoch())` as `dflt_value = unixepoch()`, while
