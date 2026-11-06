@@ -35,6 +35,46 @@ fn is_internal_graphql_orm_table(table_name: &str) -> bool {
     table_name.starts_with("__graphql_orm_") || table_name == "spatial_ref_sys"
 }
 
+// Comparison-only catalog equivalences: never feed these spellings into persisted hashes.
+fn timestamp_default_for_comparison(backend: DatabaseBackend, default: &str) -> String {
+    let value = super::dialect::canonicalize_column_default_expression(default);
+    // Catalog deparsing of these exact ORM expressions only. Quoted format
+    // literals remain case-sensitive; no arbitrary SQL is interpreted.
+    let postgres_text =
+        r#"to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'::text)"#;
+    if backend == DatabaseBackend::Postgres && value == postgres_text {
+        return super::dialect::implicit_timestamp_defaults(DatabaseBackend::Postgres)
+            .unwrap()
+            .1
+            .into();
+    }
+    if backend == DatabaseBackend::Mssql
+        && (value == "datediff_big(second,'1970-01-01',sysutcdatetime())"
+            || value == "datediff_big([second],'1970-01-01',sysutcdatetime())")
+    {
+        return super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+            .unwrap()
+            .0
+            .into();
+    }
+    if backend == DatabaseBackend::Mssql
+        && (value == "CONVERT([varchar](27),sysutcdatetime(),(126))+'Z'"
+            || value == "CONVERT([varchar](27),sysutcdatetime(),126)+'Z'")
+    {
+        return super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+            .unwrap()
+            .1
+            .into();
+    }
+
+    if (backend == DatabaseBackend::Postgres && value.eq_ignore_ascii_case("NOW()"))
+        || (backend == DatabaseBackend::Mssql && value.eq_ignore_ascii_case("SYSUTCDATETIME()"))
+    {
+        return value.to_ascii_uppercase();
+    }
+    value
+}
+
 // PostgreSQL adds ::text when deparsing a TEXT literal default. Compare only
 // complete literals here: changing the shared canonicalizer would change
 // persisted physical/plan hash identities. E-strings emitted by PostgreSQL's
@@ -85,6 +125,41 @@ fn postgres_text_default_literal(default: &str) -> Option<String> {
 #[cfg(test)]
 mod sqlite_add_column_default_tests {
     use super::*;
+
+    #[test]
+    fn timestamp_catalog_equivalences_are_comparison_only_and_literal_sensitive() {
+        use super::timestamp_default_for_comparison as compare;
+        for (backend, catalog, expected) in [
+            (
+                DatabaseBackend::Postgres,
+                r#"to_char((now() AT TIME ZONE 'UTC'::text), 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'::text)"#,
+                super::super::dialect::implicit_timestamp_defaults(DatabaseBackend::Postgres)
+                    .unwrap()
+                    .1,
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(CONVERT([varchar](27),sysutcdatetime(),(126))+'Z')",
+                super::super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+                    .unwrap()
+                    .1,
+            ),
+            (
+                DatabaseBackend::Mssql,
+                "(datediff_big(second,'1970-01-01',sysutcdatetime()))",
+                super::super::dialect::implicit_timestamp_defaults(DatabaseBackend::Mssql)
+                    .unwrap()
+                    .0,
+            ),
+        ] {
+            assert_eq!(compare(backend, catalog), expected);
+            let different = catalog
+                .replace("'UTC'", "'utc'")
+                .replace("'Z'", "'z'")
+                .replace("'1970-01-01'", "'2000-01-01'");
+            assert_ne!(compare(backend, &different), expected);
+        }
+    }
 
     #[test]
     fn only_constant_defaults_are_added_in_place() {
@@ -1006,11 +1081,11 @@ pub(super) fn column_changed_with(
     let live_default = before
         .default
         .as_deref()
-        .map(super::dialect::canonicalize_column_default_expression);
+        .map(|default| timestamp_default_for_comparison(backend, default));
     let target_default = after
         .default
         .as_deref()
-        .map(super::dialect::canonicalize_column_default_expression);
+        .map(|default| timestamp_default_for_comparison(backend, default));
     if live_default == target_default {
         return false;
     }
@@ -3864,7 +3939,10 @@ pub async fn introspect_mssql_schema(
         let column_rows = super::MssqlBackend::fetch_rows(
             pool,
             "SELECT COLUMN_NAME AS column_name,
-                    DATA_TYPE AS data_type,
+                    CASE WHEN DATA_TYPE = 'nvarchar' THEN
+                        DATA_TYPE + '(' + CASE WHEN CHARACTER_MAXIMUM_LENGTH = -1
+                            THEN 'max' ELSE CONVERT(varchar(10), CHARACTER_MAXIMUM_LENGTH) END + ')'
+                        ELSE DATA_TYPE END AS data_type,
                     IS_NULLABLE AS is_nullable,
                     COLUMN_DEFAULT AS column_default
              FROM INFORMATION_SCHEMA.COLUMNS

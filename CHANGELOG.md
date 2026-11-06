@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased
 
-- ORM/macros 0.92.0: implicit String timestamp defaults and generated `updated_at` writes use RFC 3339 UTC; integers retain epoch seconds. Preserve legacy stored defaults and rows on reopen. Fixes #308.
+- ORM/macros 0.92.0: implicit String timestamp defaults and generated `updated_at` writes use RFC 3339 UTC; integers retain epoch seconds. Preserve legacy stored defaults and rows on reopen. Catalog equivalences apply only during comparison; existing canonical default-expression hash inputs retain their identities. MSSQL introspection now retains NVARCHAR lengths to avoid false reopen plans; regenerate saved MSSQL plans whose physical hashes included these columns. Fixes #308.
 
 AI **0.120.2**, ORM runtime/macros **0.92.0**.
 

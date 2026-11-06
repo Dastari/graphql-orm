@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-04
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -22,6 +22,18 @@ Raw SQL UPDATE does not fire a default. Host-managed timestamps retain supplied
 values; explicit SQL defaults and `default = false` keep their existing meaning.
 
 No automatic data migration is performed: existing rows are never rewritten.
+Catalog equivalences are comparison-only: the shared default canonicalizer and
+existing default-expression hash inputs remain unchanged.
+
+MSSQL introspection now retains NVARCHAR lengths (including MAX), which it
+previously omitted. Physical schema hashes containing NVARCHAR columns therefore
+change, and any saved MSSQL migration plan using the old source hash must be
+regenerated from the live catalog before use via
+`db.schema().plan_migration_to_entities(...)` under `PlanOnly` or
+`ExternalWritable` schema policy. Inspect `CHARACTER_MAXIMUM_LENGTH`
+in `INFORMATION_SCHEMA.COLUMNS` to detect these columns. No rows or defaults are
+changed by this catalog correction; integer-only schemas retain their hashes.
+
 Reopening accepts the exact old epoch default on a text column in place of the new
 implicit expression, without rebuilding the table or altering its default. Thus
 omitted inserts into existing columns continue to produce digit strings until an
