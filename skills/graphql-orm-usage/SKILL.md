@@ -691,3 +691,13 @@ the default propagates the handler error after commit. Repository/MutationContex
 paths have no GraphQL context and retain their existing notification-free behavior.
 
 Host read policies can use `ReadPredicate::column::<Backend, Entity>(physical_name, ReadPredicateOp::Gt, SqlValue::Int(bound))` for validated private persisted columns without exposing public filters. `.not()?` preserves SQL NULL/UNKNOWN as denied; use `exists_any.not()?.or(exists_matching)?` for absent-or-matching relations.
+
+## Exact delegated receiver requests
+
+For private direct delegated HTTP queries, enable `receiver-admission`, register reviewed
+`AgqlReceiverContract` values in an immutable `AgqlReceiverRegistry`, and admit the
+bounded raw body before obtaining scopes or creating request context. Dispatch
+only `AgqlAdmittedReceiverRequest::into_request`. Supply authoritative parent
+sessions and current scope/tenant policy; this proof does not establish MFA or
+replace row/field authorization. WebSocket is refused. See
+[receiver admission](../../docs/reference/receiver-admission.md).

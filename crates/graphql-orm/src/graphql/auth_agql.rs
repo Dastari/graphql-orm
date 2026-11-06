@@ -1,6 +1,7 @@
 //! Optional bridge from `agql-auth` principals into ORM authorization contexts.
 //!
-//! Enable the `auth-agql` feature to compile this module. The bridge is a
+//! Enable the `auth-agql` feature to compile this module. Exact receiver-purpose
+//! admission additionally requires the `receiver-admission` feature. The bridge is a
 //! one-way dependency: `graphql-orm` does not require `agql-auth` by default,
 //! and `agql-auth` must never depend on `graphql-orm`.
 //! It projects an already accepted [`agql_auth::AuthPrincipal`] and offers
@@ -634,3 +635,8 @@ mod tests {
         }
     }
 }
+
+#[cfg(feature = "receiver-admission")]
+mod receiver_admission;
+#[cfg(feature = "receiver-admission")]
+pub use receiver_admission::*;

@@ -165,6 +165,8 @@ pub use domain::*;
 pub use egress::*;
 pub use execution::*;
 pub use graphql_orm_ai_tool_profiles::*;
+// Disambiguate the public helper from the crate-private ORM wrapper.
+pub use graphql_orm_ai_tool_profiles::canonical_json_hash;
 pub use inbox::*;
 pub use live_delta::*;
 #[cfg(feature = "local-harness")]

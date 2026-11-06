@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version `0.93.1` keeps runtime/macros aligned for opt-in receiver admission. Generated code is unchanged; no data migration is needed.
+
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 
 Version 0.93.0 runs write input transforms once per input row, including each

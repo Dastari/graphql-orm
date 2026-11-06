@@ -17,3 +17,5 @@ supersedes: []
 
 Component-specific references are linked from the central
 [documentation index](../README.md).
+
+- [Exact receiver-purpose admission](receiver-admission.md)

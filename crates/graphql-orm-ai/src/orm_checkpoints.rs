@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use graphql_orm::graphql::errors::OrmPublicError;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use time::Duration;
 use uuid::Uuid;
 
@@ -2500,26 +2499,7 @@ fn enforce_size(value: &serde_json::Value, maximum: usize) -> Result<(), AiError
 }
 
 fn canonical_json_hash(value: &serde_json::Value) -> Result<String, AiError> {
-    let encoded =
-        serde_json::to_vec(&canonical_json(value)).map_err(|_| AiError::PersistenceFailed)?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(values) => serde_json::Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), canonical_json(value)))
-                .collect::<BTreeMap<_, _>>()
-                .into_iter()
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
+    Ok(graphql_orm_ai_tool_profiles::canonical_json_hash(value))
 }
 
 const fn classification_value(value: crate::DataClassification) -> &'static str {

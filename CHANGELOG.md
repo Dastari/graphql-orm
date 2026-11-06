@@ -16,7 +16,9 @@ for historical context.
 
 ## Unreleased
 
-AI **0.122.0**, ORM runtime/macros **0.93.0**, tool profiles **0.21.0**.
+- Add opt-in exact receiver-purpose admission and shared versioned signed-purpose bindings (ORM/macros 0.93.1, catalogue 0.7.1, profiles 0.21.1, AI 0.122.1). Private-remote hashes keep their existing encoding; non-users retain existing behavior. Fixes #352. No data migration is needed.
+
+AI **0.122.1**, ORM runtime/macros **0.93.1**, tool profiles **0.21.1**, catalogue **0.7.1**.
 
 - **Docs and tests (ORM/macros 0.93.0):** `MutationContext::defer` is the after-commit callback for mutation hooks and `Database::transaction`. It already existed, so there is no new API and no behaviour change. It now has rustdoc, a documented ordering (commit, `Changed` events, deferred actions, then `notify_with`), and tests for each write path, for never running after a rollback, and for failures reaching `PostCommitErrorHandler`. The new `defer-after-commit` lane in `scripts/run-owned-database-lanes.sh` runs them on SQLite, PostgreSQL and MSSQL. The usage guide and write-path reference describe the "durable job in the transaction, wake a worker after commit" pattern and say the callback is at most once and lost by a crash after commit. No migration is needed. Fixes [#338](https://github.com/Dastari/graphql-orm/issues/338).
 - **Breaking (ORM/macros 0.93.0):** run repository insert transforms once and bulk update transforms once per existing row, retaining independent row outputs and atomic refusal. Correct `InternalMutationHook` to identify hook execution only. No data migration. Fixes [#284](https://github.com/Dastari/graphql-orm/issues/284).
