@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.92.1 preserves application refusal messages and codes in generated bulk
+write payloads, including denied fields. Bulk result SDL adds nullable `errorCode`.
+
 Version 0.92.0 rejects generated policy-denied field writes by default.
 Use `FieldPolicy::ignore_denied_field_write` to retain legacy omission for selected fields.
 

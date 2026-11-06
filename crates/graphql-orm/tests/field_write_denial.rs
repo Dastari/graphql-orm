@@ -200,7 +200,10 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
         .unwrap();
     }
     db.set_field_policy(Deny { legacy, fail });
-    let schema = schema_builder(db.clone()).data(field.to_string()).finish();
+    let schema = schema_builder(db.clone())
+        .data(AuthSubject::new("test-principal"))
+        .data(field.to_string())
+        .finish();
     let input = if operation == "create" || operation.starts_with("upsert") {
         let key = if operation == "upsert_existing" {
             "existing"
@@ -228,7 +231,14 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
         _ => unreachable!(),
     };
     let response = schema
-        .execute(format!("mutation {{ {call} {{ success error }} }}"))
+        .execute(format!(
+            "mutation {{ {call} {{ success error {} }} }}",
+            if operation.starts_with("bulk") {
+                "errorCode"
+            } else {
+                ""
+            }
+        ))
         .await;
     let data = response.data.into_json().unwrap();
     let ignored =
@@ -257,10 +267,20 @@ async fn run(operation: &str, field: &str, legacy: bool, fail: bool) {
             assert!(diagnostic.contains(field), "{diagnostic}");
         }
         if !fail {
-            assert_eq!(
-                response.errors[0].extensions.as_ref().unwrap().get("code"),
-                Some(&async_graphql::Value::from("FORBIDDEN"))
-            );
+            if operation.starts_with("bulk") {
+                assert!(response.errors.is_empty());
+                assert!(
+                    data.as_object()
+                        .unwrap()
+                        .values()
+                        .all(|v| v["errorCode"] == "FORBIDDEN")
+                );
+            } else {
+                assert_eq!(
+                    response.errors[0].extensions.as_ref().unwrap().get("code"),
+                    Some(&async_graphql::Value::from("FORBIDDEN"))
+                );
+            }
         }
     }
     let rows = <DefaultBackend as OrmBackend>::fetch_rows(
