@@ -500,7 +500,7 @@ appear in the operation catalogue.
 
 | To limit | Use | Notes |
 | --- | --- | --- |
-| Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Repository APIs are unaffected |
+| Queries | `query_shapes = "single,list"` | Also `keyset`, `scan`, `search`, `aggregate`. Omit `keyset` for policies always returning `Prefilter` or `CallbackOnly`; use bounded `scan`. Repository APIs are unaffected |
 | All of an entity's mutations | `generated_mutations` with `generated_mutation_allowlist` or `generated_mutation_denylist` in `schema_roots!` | Repository writes and `Changed` stay |
 | Update and delete | `append_only = true` | |
 | All writes | `schema_policy = "external_read_only"` | `Changed` stays in the schema |
@@ -641,3 +641,5 @@ and the committed count; `success: true` means do not retry the write. Single-ro
 `notify_on_error = "report"` reports via `PostCommitErrorHandler` and returns success;
 the default propagates the handler error after commit. Repository/MutationContext
 paths have no GraphQL context and retain their existing notification-free behavior.
+
+Host read policies can use `ReadPredicate::column::<Backend, Entity>(physical_name, ReadPredicateOp::Gt, SqlValue::Int(bound))` for validated private persisted columns without exposing public filters. `.not()?` preserves SQL NULL/UNKNOWN as denied; use `exists_any.not()?.or(exists_matching)?` for absent-or-matching relations.

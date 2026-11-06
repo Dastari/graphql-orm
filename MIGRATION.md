@@ -172,6 +172,9 @@ first and use supported key-based mutations when needed. No data migration is ne
 No data migration is needed. Opt in with `#[relation(..., multiple, filter)]` on an unconditional public collection relation. Its generated Where field accepts a list of target Where alternatives, including nested opted-in collections. Every traversed entity must provide `Complete` SQL read visibility or `Unrestricted`; callback-only/prefilter policies are rejected. Relation field policies and spatial combinations are unsupported and fail closed. Existing declarations require no changes.
 
 Filtered keyset cursors now bind the caller-visible typed filter input. Clients must restart filtered keyset pagination after upgrading (old cursors return `cursor_invalid`), when changing filters. Unfiltered cursors retain their identity. Private SQL visibility parameters are excluded from cursor fingerprints; ordinary per-request authorization still applies. Generated GraphQL list, keyset/scan and aggregate roots prepare relation filters under request authority; unprepared filters in context-free repository helpers are rejected. The preparation budget is eight levels and 128 filter nodes, with at most 512 binds per related predicate.
+## 0.91.1 to 0.91.2: private and negated read predicates
+
+No data migration is needed. Existing policies and working keyset roots are unchanged. Policies may opt into `ReadPredicate::column::<Backend, Entity>("column", ReadPredicateOp::Gt, SqlValue::Int(bound))` for private persisted columns and `.not()?` for SQL negation. UNKNOWN remains UNKNOWN and does not authorize a row. Policies that always return `Prefilter` or `CallbackOnly` should omit `keyset` from `query_shapes` and use bounded `scan` instead; detect these by `AUTHORIZATION_MISCONFIGURED` on every keyset request.
 
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 

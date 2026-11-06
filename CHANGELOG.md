@@ -36,6 +36,7 @@ ORM runtime/macros **0.92.0**.
 
 - Add opt-in `#[relation(filter)]` collection predicates to static generated `WhereInput` and list, keyset, and aggregate count roots (#314). Parameterized `EXISTS` intersects complete target/link SQL read visibility before paging and counting; empty alternatives match no rows. Residual authorization and spatial combinations fail closed.
 - Bind filtered keyset cursors to the caller-visible typed filter input. Previously issued filtered cursors must restart; no data migration is needed.
+ORM runtime/macros **0.91.2** adds `ReadPredicate::column` with persisted-column validation and bound values, and SQL NULL-preserving `ReadPredicate::not`. Private policy columns remain absent from public filters. Keyset shape guidance covers residual-only policies. Fixes #318.
 
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
 - ORM/macros **0.92.0**: callback-denied to-one relations now resolve like absent targets, without existence-revealing errors; generated relation-field `read_policy` checks fail closed before target loading (#325).

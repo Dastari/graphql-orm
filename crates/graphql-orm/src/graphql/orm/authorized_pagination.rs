@@ -26,6 +26,24 @@ pub trait ReadVisibilityFilter: DatabaseFilter {
     fn backend() -> DatabaseBackend;
 }
 
+/// Closed set of scalar comparisons for trusted read policy columns.
+/// Operands use SQL three-valued logic, including when the value is NULL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadPredicateOp {
+    /// Equal (`=`).
+    Eq,
+    /// Not equal (`<>`).
+    Ne,
+    /// Less than (`<`).
+    Lt,
+    /// Less than or equal (`<=`).
+    Lte,
+    /// Greater than (`>`).
+    Gt,
+    /// Greater than or equal (`>=`).
+    Gte,
+}
+
 /// Entity- and backend-bound authorization predicate, built from the same typed
 /// filters used by ordinary queries (including supported relation predicates).
 /// An empty filter is rejected: use `ReadVisibility::Unrestricted` deliberately.
@@ -36,6 +54,70 @@ pub struct ReadPredicate {
     expression: FilterExpression,
 }
 impl ReadPredicate {
+    /// Compare a validated persisted physical column with a bound value.
+    /// Private and non-filterable columns are accepted; this does not expose
+    /// them in GraphQL inputs or grant any field access. Unknown names fail closed.
+    pub fn column<B: OrmBackend, T: Entity + 'static>(
+        column: &str,
+        op: ReadPredicateOp,
+        value: SqlValue,
+    ) -> async_graphql::Result<Self> {
+        if !T::columns()
+            .iter()
+            .any(|definition| definition.name == column)
+        {
+            return Err(invalid());
+        }
+        let operator = match op {
+            ReadPredicateOp::Eq => "=",
+            ReadPredicateOp::Ne => "<>",
+            ReadPredicateOp::Lt => "<",
+            ReadPredicateOp::Lte => "<=",
+            ReadPredicateOp::Gt => ">",
+            ReadPredicateOp::Gte => ">=",
+        };
+        Ok(Self {
+            entity: TypeId::of::<T>(),
+            backend: B::DIALECT,
+            expression: FilterExpression::trusted_fragment(
+                format!("{} {operator} ?", B::DIALECT.quote_identifier(column)),
+                vec![value],
+            ),
+        })
+    }
+
+    /// SQL negation: UNKNOWN (NULL) remains UNKNOWN and cannot authorize a row.
+    /// EXISTS relations negate to NOT EXISTS. To allow absent or matching rows,
+    /// compose `exists_any.not()?.or(exists_matching)?`. Empty inner fragments
+    /// are refused rather than interpreted as an authorization grant.
+    #[allow(clippy::should_implement_trait)] // Fallible policy construction.
+    pub fn not(self) -> async_graphql::Result<Self> {
+        fn supported(expression: &FilterExpression) -> bool {
+            match expression {
+                FilterExpression::Raw { clause, .. }
+                | FilterExpression::TrustedFragment { clause, .. } => !clause.trim().is_empty(),
+                FilterExpression::And(children) => {
+                    !children.is_empty() && children.iter().all(supported)
+                }
+                FilterExpression::Or(children) => children.iter().all(supported),
+            }
+        }
+        if !supported(&self.expression) {
+            return Err(invalid());
+        }
+        let mut values = Vec::new();
+        let clause = render_filter_expression(
+            DatabaseBackend::Sqlite,
+            &self.expression,
+            &mut 1,
+            &mut values,
+        );
+        Ok(Self {
+            expression: FilterExpression::trusted_fragment(format!("NOT ({clause})"), values),
+            ..self
+        })
+    }
+
     /// Reject filters requiring residual Rust matching on this backend. A partial
     /// policy must supply a SQL-only prefilter and retain its row callback.
     pub fn from_filter<B: OrmBackend, F: ReadVisibilityFilter>(
@@ -1015,5 +1097,26 @@ where
                 total_count,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod predicate_tests {
+    use super::*;
+
+    #[test]
+    fn negation_refuses_empty_inner_shapes() {
+        for expression in [
+            FilterExpression::And(vec![]),
+            FilterExpression::trusted_fragment("", vec![]),
+            FilterExpression::Or(vec![FilterExpression::trusted_fragment("", vec![])]),
+        ] {
+            let predicate = ReadPredicate {
+                entity: TypeId::of::<()>(),
+                backend: DatabaseBackend::Sqlite,
+                expression,
+            };
+            assert!(predicate.not().is_err());
+        }
     }
 }
