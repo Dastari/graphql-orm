@@ -36,6 +36,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) write_policy: Option<String>,
     /// Optional async hook path invoked after create/update/delete mutations.
     pub(crate) notify_handler: Option<String>,
+    pub(crate) notify_report_errors: bool,
     pub(crate) upsert: Option<Vec<String>>,
     pub(crate) unique_composite: Vec<Vec<String>>,
     pub(crate) indexes: Vec<OrdinaryIndexMetadata>,
@@ -321,6 +322,13 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
                     metadata.notify_handler = Some(lit.value());
+                } else if meta.path.is_ident("notify_on_error") {
+                    let lit: syn::LitStr = meta.value()?.parse()?;
+                    metadata.notify_report_errors = match lit.value().as_str() {
+                        "report" => true,
+                        "propagate" => false,
+                        _ => return Err(syn::Error::new(lit.span(), "notify_on_error must be propagate or report")),
+                    };
                 } else if meta.path.is_ident("upsert") {
                     if metadata.upsert.is_some() {
                         return Err(syn::Error::new(

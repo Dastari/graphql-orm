@@ -56,6 +56,7 @@ surface. In a build with more than one backend feature, `backend` is required.
 | `ai_mutations` | `(create = "…", upsert = "…", update = "…", update_many = "…", delete = "…", delete_many = "…")` | each value is `"automatic"`, `"approval_required"`, or `"prohibited"`; omitted categories are prohibited |
 | `retention_purge` | nonempty policy-key string | absent |
 | `keyset`, `read_policy`, `write_policy`, `notify`, `notify_with` | string | absent |
+| `notify_on_error` | `"propagate"` or `"report"` | `"propagate"`; single-row GraphQL notification failure policy |
 | `backup_export_order`, `backup_restore_order` | integer | absent |
 | `upsert` | comma-separated columns | at least one column; may appear once |
 | `unique_composite` | comma-separated columns | at least two columns; repeatable |
@@ -754,3 +755,40 @@ policy-suppressed and propagated subscriptions all behave the same way:
 - The `GraphQLOperations` resolver method returns
   `Stream<Item = async_graphql::Result<ChangedPayload<_>>>`. The SDL type of the subscription field
   is unchanged.
+
+## Post-commit notifications
+
+`notify_with = "handler"` (alias `notify`) calls
+`async fn(&Context<'_>, &Pool, &Entity, ChangeAction) -> async_graphql::Result<()>`
+after a generated GraphQL create, update, delete, upsert, update-many or
+delete-many commits. Bulk update passes the updated row; delete passes the
+deleted pre-image. Every selected row is notified even if earlier calls fail.
+Rollbacks and refusals call no notifications.
+
+Single-row failures propagate through `?` by default, after commit.
+Opt into `notify_on_error = "report"` to send failures through
+`Database::report_post_commit_error` / `PostCommitErrorHandler` and return
+the normal success response. Install that handler to observe these failures.
+
+Bulk responses in both modes retain `success: true` and the committed
+`affectedCount` (update) or `deletedCount` (delete). Nullable
+`notificationErrors` contains every failed call's safe message and nullable
+code; null means no failures. These failures also reach the post-commit
+error handler. Clients must not retry a committed write. Error text follows
+the same authored-message/code rule as bulk refusals; source-bearing
+`?` conversions without an authored code are masked.
+
+GraphQL bulk writes on entities with notifications reject more than 1,000
+matched rows before writing. Split larger work into explicit requests.
+Handlers run sequentially; a separate batch API is unnecessary within this
+bound. This bounds handler calls, not the cost or duration of each handler.
+
+Repository writes have no GraphQL `Context` and do not call this
+GraphQL-specific callback, matching existing single-row repository behavior.
+This includes insert_many/upsert_many/replace_all,
+update_where/delete_where/delete_all, bounded bulk update and
+delete (single and composite keys), retention purge, and every
+`MutationContext` path. Inside `Database::transaction`, use existing deferred
+post-commit actions for repository side effects; they run only after the outer
+commit and are discarded on rollback. Do not invoke this callback before
+the outer commit.

@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- **ORM/macros 0.92.2:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. Bulk writes with handlers are limited to 1,000 rows and return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
+
 - **Fix (ORM/macros 0.92.1):** preserve application refusal messages and codes in bulk update/delete payloads, including field denials. Bulk results add nullable `errorCode`; refresh pinned SDL. Private typed transport prevents driver text from forging public errors. No data migration. Fixes [#316](https://github.com/Dastari/graphql-orm/issues/316).
 
 - **Breaking (ORM/macros 0.92.0):** generated create, update, upsert and bulk update reject policy-denied field writes before writing, naming the field. `FieldPolicy::ignore_denied_field_write` explicitly restores legacy omission for selected fields; required create/upsert fields remain mandatory. Fixes [#307](https://github.com/Dastari/graphql-orm/issues/307).
