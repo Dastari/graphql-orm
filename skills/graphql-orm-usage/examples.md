@@ -16,9 +16,9 @@ tests.
 ## A write input transform
 
 A transform shapes and validates input on every generated create, update and upsert path, so a client
-can't skip it by choosing a different write. Keep it idempotent, because `Entity::insert` runs it twice
-([#284](https://github.com/Dastari/graphql-orm/issues/284)). Implement `before_update` and
-`before_upsert` the same way. Field validators such as `#[graphql_orm(min_length = 2)]` are simpler
+can't skip it by choosing a different write. It runs once per input row. Bulk updates pass each
+existing row to `before_update` with an independent copy of the original input; a refusal rolls back
+the entire write. Implement `before_update` and `before_upsert` as needed. Field validators such as `#[graphql_orm(min_length = 2)]` are simpler
 when they're enough.
 
 ```rust

@@ -10,6 +10,24 @@ supersedes: []
 
 # Migration Guide
 
+## 0.92.2 to 0.93.0: transforms once per input row
+
+This is a breaking behavior change: ORM/macros move together to 0.93.0.
+No data migration is needed. Search for `WriteInputTransform` implementations.
+Review non-idempotent transforms (appending, counting, allocating, or external
+side effects): repository insert now calls once instead of twice; bulk update
+calls once per matched row instead of once for the first row. Each row starts
+with the original input, and row-dependent outputs are written independently.
+Remove duplicate-call compensation. Applications can remove blanket bulk-update
+refusals or duplicate per-row hook validation added solely because transforms
+could not see every existing row. Keep the actual validation in `before_update`.
+A refusal rolls back the whole bulk write and GraphQL returns `success: false`,
+the authored message and `errorCode`. Ordinary transaction/helper writes now
+report `Repository`; `InternalMutationHook` is reserved for writes executing
+inside mutation hooks. Do not use origin to compensate for duplicate calls.
+External side effects are not transactional; defer them until after commit.
+Fixes #284.
+
 ## 0.92.1 to 0.92.2: bulk post-commit notifications
 
 **ORM/macros 0.92.2:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.

@@ -298,12 +298,16 @@ a custom resolver. Runtime collections use the separate
   the owner, attempt, fencing token, deadline and version together; see
   [fenced leases](../../docs/architecture/schema-modules-and-leases.md#fenced-lease-transitions).
 
-### Transform traps
+### Transform invocation contract
 
-- `Entity::insert` runs the transform **twice**, so it must be idempotent
-  ([#284](https://github.com/Dastari/graphql-orm/issues/284)).
-- A bulk update runs it **once**, with only the first matched row as `existing_row`. Don't validate
-  a bulk update against the existing row there; do it per row in a `Before` hook.
+- Repository insert runs the transform once, inside its transaction.
+- Bulk updates run `before_update` once per matched row, with that existing row
+  and a fresh clone of the original input. Row-dependent outputs are supported.
+- A refusal on any row rolls back the entire write. Bulk GraphQL refusals return
+  `success: false`, the authored `error`, and `errorCode`.
+- Unbounded bulk transforms finish before mutation `Before` hooks; bounded
+  updates retain their per-row hook order. Use post-commit actions for external side effects. Ordinary transaction writes report
+  `Repository`; only writes executing inside a hook report `InternalMutationHook`.
 
 ### Options a hook can't receive
 

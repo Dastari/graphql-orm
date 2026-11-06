@@ -2510,6 +2510,7 @@ fn generate_graphql_operations_unfiltered(
     let mut create_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut update_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut update_runtime_policy_checks: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut update_bulk_omission_checks: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut upsert_policy_checks_graphql: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut upsert_policy_checks_repo: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut upsert_update_columns: Vec<String> = Vec::new();
@@ -3124,6 +3125,12 @@ fn generate_graphql_operations_unfiltered(
                         true
                     };
                     if !__gom_field_write_allowed {
+                        __gom_omitted_fields.insert(#graphql_name);
+                        input.#field_name = None;
+                    }
+                });
+                update_bulk_omission_checks.push(quote! {
+                    if __gom_omitted_fields.contains(#graphql_name) {
                         input.#field_name = None;
                     }
                 });
@@ -8950,7 +8957,7 @@ fn generate_graphql_operations_unfiltered(
             async fn __gom_update_where_with_mutation_context<'a>(
                 hook_ctx: &'a mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
                 where_input: #where_input,
-                mut input: #update_input,
+                input: #update_input,
             ) -> ::graphql_orm::Result<i64> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery, FromSqlRow, SqlValue};
 
@@ -8976,47 +8983,56 @@ fn generate_graphql_operations_unfiltered(
                         entity as &(dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
-                if let Some(first_entity) = matched_entities.first() {
+                let original_input = input;
+                let mut row_plans = Vec::with_capacity(matched_entities.len());
+                for policy_entity in &matched_entities {
+                    let mut input = original_input.clone();
                     let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::internal(
                         #entity_name_lit,
                         hook_ctx,
                     );
                     db.run_before_update_with_context(
                         &mut write_ctx,
-                        Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                         &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    for policy_entity in &matched_entities {
-                        <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
-                            &db,
-                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                            &input as &(dyn ::std::any::Any + Send + Sync),
-                        ).await?;
+                    <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                        &db,
+                        Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
+                        &input as &(dyn ::std::any::Any + Send + Sync),
+                    ).await?;
+
+                    let mut set_clauses: Vec<String> = Vec::new();
+                    let mut changed_fields: Vec<&str> = Vec::new();
+                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+
+                    #(#update_field_checks_repo)*
+
+                    if #has_updated_at_column {
+                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
                     }
+                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                        set_clauses.push(assignment);
+                    }
+
+                    if set_clauses.is_empty() {
+                        return Err(Self::__gom_runtime_error("No fields to update"));
+                    }
+
+                    let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                    let sql = Self::__gom_rebind_sql(&format!(
+                        "UPDATE {} SET {} WHERE {} = ?{}",
+                        #sql_table_name,
+                        set_clauses.join(", "),
+                        #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
+                        Self::__gom_managed_version_guard(),
+                    ), 1);
+                    row_plans.push((sql, values, mutation_changes));
                 }
-
-                let mut set_clauses: Vec<String> = Vec::new();
-                let mut changed_fields: Vec<&str> = Vec::new();
-                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
-
-                #(#update_field_checks_repo)*
-
-                if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
-                }
-                if let Some(assignment) = Self::__gom_managed_version_assignment() {
-                    set_clauses.push(assignment);
-                }
-
-                if set_clauses.is_empty() {
-                    return Err(Self::__gom_runtime_error("No fields to update"));
-                }
-
-                let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 for entity in &matched_entities {
                     Self::__gom_require_managed_version_headroom(entity)?;
                 }
-                for entity in &matched_entities {
+                for (entity, (_, _, mutation_changes)) in matched_entities.iter().zip(&row_plans) {
                     hook_ctx.run_mutation_hook(
                         None,
                         &::graphql_orm::graphql::orm::MutationEvent {
@@ -9035,18 +9051,11 @@ fn generate_graphql_operations_unfiltered(
                     .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
 
-                let sql = Self::__gom_rebind_sql(&format!(
-                    "UPDATE {} SET {} WHERE {} = ?{}",
-                    #sql_table_name,
-                    set_clauses.join(", "),
-                    #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
-                    Self::__gom_managed_version_guard(),
-                ), 1);
                 let mut affected = 0_i64;
-                for entity in &matched_entities {
+                for (entity, (sql, values, _)) in matched_entities.iter().zip(&row_plans) {
                     let mut row_values = values.clone();
                     row_values.push(#pk_bind_value_for_entity);
-                    let result = hook_ctx.execute(&sql, &row_values).await?;
+                    let result = hook_ctx.execute(sql, &row_values).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
                         return Err(Self::__gom_runtime_error("authorized bulk update did not affect an exact locked row"));
                     }
@@ -9054,7 +9063,7 @@ fn generate_graphql_operations_unfiltered(
                         .ok_or_else(|| Self::__gom_runtime_error("bulk update affected-row count overflow"))?;
                 }
 
-                for previous in matched_entities {
+                for (previous, (_, _, mutation_changes)) in matched_entities.into_iter().zip(row_plans) {
                     let entity = Self::__gom_fetch_by_id_on(hook_ctx, &previous.#pk_field).await?
                         .ok_or_else(|| Self::__gom_runtime_error("authorized bulk update row disappeared before after-hook"))?;
                         hook_ctx.run_mutation_hook(
@@ -9252,7 +9261,7 @@ fn generate_graphql_operations_unfiltered(
             /// Insert a new entity record using the generated create input.
             pub async fn insert<P>(
                 provider: &P,
-                mut input: #create_input,
+                input: #create_input,
             ) -> ::graphql_orm::Result<Self>
             where
                 P: ::graphql_orm::graphql::orm::PoolProvider<#backend_marker> + ::std::any::Any,
@@ -9266,11 +9275,6 @@ fn generate_graphql_operations_unfiltered(
                         <Self as ::graphql_orm::graphql::orm::Entity>::metadata().write_policy,
                         ::graphql_orm::graphql::orm::EntityAccessKind::Write,
                         ::graphql_orm::graphql::orm::EntityAccessSurface::Repository,
-                    ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                    db.run_before_create(
-                        None,
-                        #entity_name_lit,
-                        &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                     let mut hook_ctx = ::graphql_orm::graphql::orm::MutationContext::<#backend_marker>::begin(
                     db,
@@ -9512,7 +9516,7 @@ fn generate_graphql_operations_unfiltered(
             pub(crate) async fn __gom_update_where_with_auth(
                 db: &::graphql_orm::db::Database<#backend_marker>,
                 where_input: #where_input,
-                mut input: #update_input,
+                input: #update_input,
                 auth_context: Option<&::graphql_orm::graphql::orm::DbAuthContext>,
                 graphql_ctx: Option<&::graphql_orm::async_graphql::Context<'_>>,
                 notification_rows: Option<&mut Vec<Self>>,
@@ -9566,7 +9570,12 @@ fn generate_graphql_operations_unfiltered(
                         entity as &(dyn ::std::any::Any + Send + Sync),
                     ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
-                if let Some(first_entity) = matched_entities.first() {
+                let original_input = input;
+                let mut row_inputs = Vec::with_capacity(matched_entities.len());
+                #[allow(unused_mut)]
+                let mut __gom_omitted_fields: ::std::collections::HashSet<&'static str> = ::std::collections::HashSet::new();
+                for policy_entity in &matched_entities {
+                    let mut input = original_input.clone();
                     if let Some(ctx) = graphql_ctx {
                         let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::graphql_in_transaction(
                             ctx,
@@ -9575,12 +9584,10 @@ fn generate_graphql_operations_unfiltered(
                         );
                         db.run_before_update_with_context(
                             &mut write_ctx,
-                            Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
+                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                             &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                        for policy_entity in &matched_entities {
-                            #(#update_runtime_policy_checks)*
-                        }
+                        #(#update_runtime_policy_checks)*
                     } else {
                         let mut write_ctx = ::graphql_orm::graphql::orm::WriteInputContext::repository_in_transaction(
                             #entity_name_lit,
@@ -9588,41 +9595,56 @@ fn generate_graphql_operations_unfiltered(
                         );
                         db.run_before_update_with_context(
                             &mut write_ctx,
-                            Some(first_entity as &(dyn ::std::any::Any + Send + Sync)),
+                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
                             &mut input as &mut (dyn ::std::any::Any + Send + Sync),
                         ).await.map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
-                        for policy_entity in &matched_entities {
-                            <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
-                                db,
-                                Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
-                                &input as &(dyn ::std::any::Any + Send + Sync),
-                            ).await?;
-                        }
+                        <Self as ::graphql_orm::graphql::orm::Entity>::authorize_repository_update_fields(
+                            db,
+                            Some(policy_entity as &(dyn ::std::any::Any + Send + Sync)),
+                            &input as &(dyn ::std::any::Any + Send + Sync),
+                        ).await?;
                     }
+
+                    row_inputs.push(input);
                 }
+                let mut row_plans = Vec::with_capacity(matched_entities.len());
+                for input in row_inputs {
+                    #[allow(unused_mut)]
+                    let mut input = input;
+                    // Preserve legacy operation-wide omission without repeating callbacks.
+                    #(#update_bulk_omission_checks)*
 
-                let mut set_clauses: Vec<String> = Vec::new();
-                let mut changed_fields: Vec<&str> = Vec::new();
-                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                    let mut set_clauses: Vec<String> = Vec::new();
+                    let mut changed_fields: Vec<&str> = Vec::new();
+                    let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
 
-                #(#update_field_checks_repo)*
+                    #(#update_field_checks_repo)*
 
-                if #has_updated_at_column {
-                    set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    if #has_updated_at_column {
+                        set_clauses.push(format!("updated_at = {}", Self::__gom_current_epoch_expr()));
+                    }
+                    if let Some(assignment) = Self::__gom_managed_version_assignment() {
+                        set_clauses.push(assignment);
+                    }
+
+                    if set_clauses.is_empty() {
+                        return Err(Self::__gom_runtime_error("No fields to update"));
+                    }
+
+                    let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
+                    let sql = Self::__gom_rebind_sql(&format!(
+                        "UPDATE {} SET {} WHERE {} = ?{}",
+                        #sql_table_name,
+                        set_clauses.join(", "),
+                        #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
+                        Self::__gom_managed_version_guard(),
+                    ), 1);
+                    row_plans.push((sql, values, mutation_changes));
                 }
-                if let Some(assignment) = Self::__gom_managed_version_assignment() {
-                    set_clauses.push(assignment);
-                }
-
-                if set_clauses.is_empty() {
-                    return Err(Self::__gom_runtime_error("No fields to update"));
-                }
-
-                let mutation_changes = ::graphql_orm::graphql::orm::mutation_changes(&changed_fields, &values);
                 for entity in &matched_entities {
                     Self::__gom_require_managed_version_headroom(entity)?;
                 }
-                for entity in &matched_entities {
+                for (entity, (_, _, mutation_changes)) in matched_entities.iter().zip(&row_plans) {
                     hook_ctx.run_mutation_hook(
                         graphql_ctx,
                         &::graphql_orm::graphql::orm::MutationEvent {
@@ -9641,18 +9663,11 @@ fn generate_graphql_operations_unfiltered(
                     .map_err(::graphql_orm::graphql::errors::sqlx_error_from_graphql)?;
                 }
 
-                let sql = Self::__gom_rebind_sql(&format!(
-                    "UPDATE {} SET {} WHERE {} = ?{}",
-                    #sql_table_name,
-                    set_clauses.join(", "),
-                    #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
-                    Self::__gom_managed_version_guard(),
-                ), 1);
                 let mut affected = 0_i64;
-                for entity in &matched_entities {
+                for (entity, (sql, values, _)) in matched_entities.iter().zip(&row_plans) {
                     let mut row_values = values.clone();
                     row_values.push(#pk_bind_value_for_entity);
-                    let result = hook_ctx.execute(&sql, &row_values).await?;
+                    let result = hook_ctx.execute(sql, &row_values).await?;
                     if <#backend_marker as ::graphql_orm::graphql::orm::WriteBackend>::rows_affected(&result) != 1 {
                         return Err(Self::__gom_runtime_error("authorized bulk update did not affect an exact locked row"));
                     }
@@ -9661,7 +9676,7 @@ fn generate_graphql_operations_unfiltered(
                 }
 
                 let mut committed_rows = Vec::new();
-                for previous in matched_entities {
+                for (previous, (_, _, mutation_changes)) in matched_entities.into_iter().zip(row_plans) {
                     let entity = Self::__gom_fetch_by_id_on(&mut hook_ctx, &previous.#pk_field).await?
                         .ok_or_else(|| Self::__gom_runtime_error("authorized bulk update row disappeared before after-hook"))?;
                         hook_ctx.run_mutation_hook(

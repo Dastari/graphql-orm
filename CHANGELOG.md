@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- **Breaking (ORM/macros 0.93.0):** run repository insert transforms once and bulk update transforms once per existing row, retaining independent row outputs and atomic refusal. Correct `InternalMutationHook` to identify hook execution only. No data migration. Fixes [#284](https://github.com/Dastari/graphql-orm/issues/284).
+
 - **ORM/macros 0.92.2:** existing `notify_with` handlers now run once per committed GraphQL bulk row. Search for `notify_with` (or `notify`) on entities using bulk mutations and review handler cost and idempotency. A GraphQL bulk write matching more than 1,000 rows on an entity with a handler used to succeed and now refuses before writing, with `success: false` and `errorCode: INVALID_INPUT`, so split larger batches. Otherwise bulk writes with handlers return committed counts plus nullable `notificationErrors`; do not retry when `success` is true. Single-row callers can opt into `notify_on_error = "report"` and install `PostCommitErrorHandler`. Refresh pinned SDL/client types and initialize `notification_errors` in bulk result struct literals (or use constructors). No data migration is needed. Fixes #330 and #331.
 
 - **Fix (ORM/macros 0.92.1):** preserve application refusal messages and codes in bulk update/delete payloads, including field denials. Bulk results add nullable `errorCode`; refresh pinned SDL. Private typed transport prevents driver text from forging public errors. No data migration. Fixes [#316](https://github.com/Dastari/graphql-orm/issues/316).
