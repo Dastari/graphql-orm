@@ -2277,7 +2277,7 @@ fn generate_graphql_operations_unfiltered(
         };
     let subscription_key_method = quote! {
         #[doc(hidden)]
-        fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
+        #subscription_key_visibility fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
             -> ::graphql_orm::async_graphql::Result<()> {
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
             #subscription_scope_enforcement
@@ -2386,8 +2386,8 @@ fn generate_graphql_operations_unfiltered(
                 change_kind: ::graphql_orm::graphql::orm::ChangeKind::Propagated,
                 id: #propagated_event_id,
                 #subscription_key_initializer
-                source_entity: Some(source_entity.to_string()),
-                source_id: Some(source_id.to_string()),
+                source_entity: (action != ::graphql_orm::graphql::orm::ChangeAction::Deleted).then(|| source_entity.to_string()),
+                source_id: (action != ::graphql_orm::graphql::orm::ChangeAction::Deleted).then(|| source_id.to_string()),
                 path,
                 entity: parent_entity.cloned(),
             };
@@ -2449,9 +2449,17 @@ fn generate_graphql_operations_unfiltered(
                         let mut next_path = path.clone();
                         next_path.push(#relation_name.to_string());
                         let mut next_provenance = provenance.to_vec();
-                        next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
-                            Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*], Self::__gom_authorize_changed_operation,
-                        ));
+                        if action == ::graphql_orm::graphql::orm::ChangeAction::Deleted && provenance.is_empty() {
+                            // The FK tuple came from the deleted preimage inside this transaction.
+                            // Retain only the surviving parent's identity and authority.
+                            next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_delete_target::<#target_type>(
+                                parent_keys.clone(), #relation_name, <#target_type>::__gom_authorize_changed_operation,
+                            ));
+                        } else {
+                            next_provenance.push(::graphql_orm::graphql::subscriptions::SubscriptionEventSource::<#backend_marker>::new_relation::<Self, #target_type>(
+                                Self::__gom_subscription_key_values(entity), #relation_name, vec![#((#source_names, #target_fields)),*], Self::__gom_authorize_changed_operation,
+                            ));
+                        }
                         let dedupe_key = ::graphql_orm::serde_json::to_string(&(
                             <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
                             parent_id_string, source_entity, source_id,

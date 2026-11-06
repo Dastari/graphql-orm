@@ -16,6 +16,13 @@ for historical context.
 
 ## Unreleased
 
+- **Behaviour change (ORM/macros 0.92.0):** child deletes now deliver `PROPAGATED`
+  invalidations to authorized current parents for `propagate_change = "up"` (#290).
+  Parent-only readers receive them; deleted child identities and values are omitted.
+  Bulk deletes emit one event per row/path, matching updates. Remove redundant
+  parent-touch workarounds and detect the change via `DELETED`/`PROPAGATED` with
+  null `sourceEntity`/`sourceId`. No data migration is needed.
+
 - Fix generated `NodeId` and managed `RecordVersion` on relation-bearing complex entities, including composed objects and Changed snapshots (#270, #288).
 
 AI **0.120.2**, ORM runtime/macros **0.91.2**.

@@ -112,6 +112,7 @@ pub struct SubscriptionEventSource<B: OrmBackend = DefaultBackend> {
     relation_fields: Vec<(&'static str, &'static str)>,
     relation_check: Option<RelationSourceCheck<B>>,
     check: SourceCheck<B>,
+    deleted_origin: bool,
 }
 impl<B: OrmBackend> std::fmt::Debug for SubscriptionEventSource<B> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,7 +159,24 @@ impl<B: OrmBackend> SubscriptionEventSource<B> {
             relation_fields: Vec::new(),
             relation_check: None,
             check: check_source::<T, B>,
+            deleted_origin: false,
         }
+    }
+
+    /// Capture the first surviving parent of a transactional delete.
+    /// No deleted key or snapshot is retained; delivery requires current parent access.
+    pub fn new_delete_target<T>(
+        keys: Vec<SqlValue>,
+        relation: &'static str,
+        operation_authority: for<'ctx> fn(&Context<'ctx>) -> async_graphql::Result<()>,
+    ) -> Self
+    where
+        T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+    {
+        let mut source = Self::new::<T>(keys, relation, "", operation_authority);
+        source.deleted_origin = true;
+        source.check = check_delete_target::<T, B>;
+        source
     }
 
     /// Bind an upward relation to its complete source/target column mapping.
@@ -238,8 +256,12 @@ impl<E: Clone, B: OrmBackend> SubscriptionEvent<E, B> {
         }
         if self.sources.len() != path.len()
             || self.sources.len() > MAX_SUBSCRIPTION_PROVENANCE_HOPS
-            || source_entity != Some(self.sources[0].entity)
-            || source_id != Some(self.sources[0].id.as_str())
+            || if self.sources[0].deleted_origin {
+                source_entity.is_some() || source_id.is_some()
+            } else {
+                source_entity != Some(self.sources[0].entity)
+                    || source_id != Some(self.sources[0].id.as_str())
+            }
         {
             return Err(OrmPublicError::forbidden().into_graphql_error());
         }
@@ -467,6 +489,26 @@ where
     db.ensure_readable_field(ctx, T::entity_name(), api_name, policy, Some(row))
         .await
 }
+fn check_delete_target<'a, 'ctx, T, B>(
+    db: &'a Database<B>,
+    ctx: &'a Context<'ctx>,
+    keys: &'a [SqlValue],
+    _: &'a [SqlValue],
+    _: &'static str,
+    _: &'static str,
+) -> BoxFuture<'a, async_graphql::Result<()>>
+where
+    B: OrmBackend,
+    T: Entity + FromSqlRow<B> + Clone + Send + Sync + 'static,
+{
+    Box::pin(async move {
+        let row = authorize_subscription_row::<T, B>(db, ctx, keys, None)
+            .await?
+            .ok_or_else(|| OrmPublicError::forbidden().into_graphql_error())?;
+        authorize_subscription_keys::<T, B>(db, ctx, &row).await
+    })
+}
+
 fn check_source<'a, 'ctx, T, B>(
     db: &'a Database<B>,
     ctx: &'a Context<'ctx>,

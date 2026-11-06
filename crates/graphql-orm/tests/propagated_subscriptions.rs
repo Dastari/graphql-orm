@@ -860,7 +860,7 @@ async fn multi_parent_propagation_retains_distinct_paths_to_same_parent()
     feature = "postgres",
     ignore = "requires test-owned PostgreSQL container"
 )]
-async fn delete_propagation_requires_a_current_source() -> Result<(), Box<dyn std::error::Error>> {
+async fn delete_propagation_requires_a_current_parent() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = test_mutex().lock().await;
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::new(pool);
@@ -924,11 +924,19 @@ async fn delete_propagation_requires_a_current_source() -> Result<(), Box<dyn st
         .await;
     assert!(deleted.errors.is_empty(), "{:?}", deleted.errors);
 
+    let json = next_json(&mut stream).await;
+    let event = &json["recordChanged"];
+    assert_eq!(event["action"], "DELETED");
+    assert_eq!(event["changeKind"], "PROPAGATED");
+    assert_eq!(event["record"]["id"], record.id.to_string());
+    assert!(event["sourceEntity"].is_null());
+    assert!(event["sourceId"].is_null());
+    assert!(!json.to_string().contains(&note.id.to_string()));
+    assert!(!json.to_string().contains("Hello"));
     assert!(
         timeout(Duration::from_millis(250), stream.next())
             .await
-            .is_err(),
-        "deleted source cannot prove current provenance authority"
+            .is_err()
     );
 
     Ok(())

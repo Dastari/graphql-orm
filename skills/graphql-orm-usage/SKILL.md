@@ -375,11 +375,11 @@ first if you waited for `After`.
 
 - `DELETED` doesn't reach GraphQL subscribers unless the host grants
   `RowPolicy::can_read_deleted_preimage`, which denies by default.
-- Deleting a child doesn't notify its parent, even with `propagate_change = "up"`. This is a gap,
-  tracked in [#290](https://github.com/Dastari/graphql-orm/issues/290). Have the client that deleted
-  the row refetch the parent. For other viewers, the workaround is to touch the parent in the child's
-  hook, with an `update_by_id` that sets no fields, which emits its `Updated` event. Remove that when
-  #290 lands.
+- Child deletes with `propagate_change = "up"` notify current readable parents, even
+  for subscribers unable to read the child. Refresh the parent on `PROPAGATED`/
+  `DELETED`; `sourceEntity` and `sourceId` are null to withhold child identity.
+  Remove old parent-touch workarounds. Bulk writes emit one event per row/path.
+
 
 ### Continuity
 
@@ -562,7 +562,7 @@ Only for services that use them:
 | Treating `defer` as background or guaranteed | It delays the response, and a crash loses it | A job row for anything that must happen |
 | Manual child cleanup where nothing observes the children | More code, and easy to miss a path | `on_delete` |
 | `cascade` where children have hooks or live viewers | Children vanish with no hooks or events | Delete them in a `Before` hook |
-| Hand-computed parent invalidation | Duplicates `propagate_change` and drifts as relations change | `propagate_change = "up"`. Child deletes are the exception, see #290 |
+| Hand-computed parent invalidation | Duplicates `propagate_change` and drifts as relations change | `propagate_change = "up"`. Child deletes authorize against the current parent (#290) |
 | Hand-written `somethingUpdated` signal subscription | Duplicates `Changed` and loses its authorization and continuity guarantees | `<entity>Changed` with `key` or `keys` |
 | Writing around the ORM | No events, hooks, version bump or search update | Repository or `hook_ctx` writes |
 | Executing GraphQL strings internally | The compiler can't check them | Typed repository calls |

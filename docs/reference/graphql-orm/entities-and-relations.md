@@ -311,7 +311,15 @@ entity, row and selected-field authority before every event. Live payloads are
 fresh authorized rows, not historical snapshots. Errors or denials suppress the
 whole event, including its outer identifier and provenance. Propagated events
 also require current authorization of each source primary key, foreign key and
-relationship; absent/deleted sources suppress invalidations. Source proofs hold
+relationship for creates and updates. Deletes capture the parent tuple from the
+child preimage inside the transaction and require the first parent's current row,
+operation and key authority instead of child authority. `sourceEntity` and
+`sourceId` are null: even the deleted entity type is withheld, along with all child
+keys and values. Event `id`/`key` and payload describe only the authorized parent.
+Later hops require current intermediate rows and authorized relationships; missing
+parents suppress delivery. Rollbacks publish nothing. Bulk writes emit one event
+per affected row and path, without coalescing, for both updates and deletes.
+Source proofs hold
 only typed keys and are limited to 16 hops; live/propagated GraphQL witnesses
 retain no row snapshot and denied subscribers do not clone one. Propagation
 examines at most 256
@@ -324,7 +332,7 @@ with `INVALID_INPUT`: their
 late resolver decisions cannot prove release of outer metadata. Subscribe to
 invalidation metadata and refresh separately authorized queries for richer data.
 
-Repository-only entities cannot authorize GraphQL subscription provenance, so any such source suppresses the event even for a public target. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
+Repository-only entities cannot authorize GraphQL subscription provenance for creates or updates, so such a source suppresses those events even for a public target. Delete invalidations instead start authority at the current parent. Target-owned propagation emission preserves the target repository event redaction and creates no repository GraphQL witness; trusted Rust observers retain their original event channel.
 
 Direct generated deleted preimages default to suppression. They require an
 explicit `RowPolicy::can_read_deleted_preimage` opt-in under callback-only or

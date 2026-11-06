@@ -1239,7 +1239,7 @@ async fn a_deleted_row_reaches_subscribers_only_with_the_preimage_opt_in() {
 }
 
 #[tokio::test]
-async fn a_deleted_child_does_not_propagate_to_its_parent() {
+async fn a_deleted_child_invalidates_its_current_authorized_parent() {
     let mut db = database().await;
     db.set_row_policy(DeletedPreimageRows);
     let (_, order, line) = seed(&db).await;
@@ -1247,7 +1247,9 @@ async fn a_deleted_child_does_not_propagate_to_its_parent() {
         r#"subscription {{ orderChanged(key: "{}") {{ action changeKind }} }}"#,
         order.id
     );
-    assert_eq!(next_after_delete(&db, &subscription, line.id).await, None);
+    let event = next_after_delete(&db, &subscription, line.id).await.unwrap();
+    assert_eq!(event["orderChanged"]["action"], "DELETED");
+    assert_eq!(event["orderChanged"]["changeKind"], "PROPAGATED");
 }
 
 #[tokio::test]
