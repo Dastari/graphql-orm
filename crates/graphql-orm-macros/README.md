@@ -475,6 +475,8 @@ Changed roots and fixes generated descriptions. It adds no migration steps; see
 
 Version 0.91.2 keeps this crate aligned with `graphql-orm` 0.91.2. Generated code matches 0.91.0.
 
+Version 0.91.1 keeps this crate aligned with `graphql-orm` 0.91.1. Generated code matches 0.91.0.
+
 Version 0.91.0 scores SQLite runtime search from each row's own document, so
 hidden rows cannot affect visible scores, and fences the runtime search
 backfill against a stale schema. See
