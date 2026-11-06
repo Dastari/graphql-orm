@@ -1247,7 +1247,9 @@ async fn a_deleted_child_invalidates_its_current_authorized_parent() {
         r#"subscription {{ orderChanged(key: "{}") {{ action changeKind }} }}"#,
         order.id
     );
-    let event = next_after_delete(&db, &subscription, line.id).await.unwrap();
+    let event = next_after_delete(&db, &subscription, line.id)
+        .await
+        .unwrap();
     assert_eq!(event["orderChanged"]["action"], "DELETED");
     assert_eq!(event["orderChanged"]["changeKind"], "PROPAGATED");
 }
