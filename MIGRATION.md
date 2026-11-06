@@ -18,6 +18,23 @@ gains rustdoc and tests. Applications that spawn a delayed task from a hook to w
 to `hook_ctx.defer`, which runs after the commit and never after a rollback, and should keep the durable
 job row in the transaction because the callback is lost by a crash after commit. See
 [After-commit work](docs/reference/graphql-orm/runtime-and-writes.md#after-commit-work).
+## 0.92.2 to 0.93.0: transforms once per input row
+
+This is a breaking behavior change: ORM/macros move together to 0.93.0.
+No data migration is needed. Search for `WriteInputTransform` implementations.
+Review non-idempotent transforms (appending, counting, allocating, or external
+side effects): repository insert now calls once instead of twice; bulk update
+calls once per matched row instead of once for the first row. Each row starts
+with the original input, and row-dependent outputs are written independently.
+Remove duplicate-call compensation. Applications can remove blanket bulk-update
+refusals or duplicate per-row hook validation added solely because transforms
+could not see every existing row. Keep the actual validation in `before_update`.
+A refusal rolls back the whole bulk write and GraphQL returns `success: false`,
+the authored message and `errorCode`. Ordinary transaction/helper writes now
+report `Repository`; `InternalMutationHook` is reserved for writes executing
+inside mutation hooks. Do not use origin to compensate for duplicate calls.
+External side effects are not transactional; defer them until after commit.
+Fixes #284.
 
 ## 0.92.1 to 0.92.2: bulk post-commit notifications
 

@@ -592,6 +592,7 @@ pub enum MutationPhase {
 pub enum WriteOrigin {
     GraphqlMutation,
     Repository,
+    /// A generated write executed while a mutation hook is running.
     InternalMutationHook,
 }
 
@@ -884,6 +885,7 @@ pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     pub(crate) runtime_state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,
     deferred_actions: Vec<Box<dyn PostCommitActionRunner<B>>>,
+    hook_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Narrow transaction-bound capability for regulated retention maintenance.
@@ -1113,7 +1115,15 @@ where
         Self {
             graphql_ctx: None,
             entity_name,
-            origin: WriteOrigin::InternalMutationHook,
+            origin: if hook_ctx
+                .hook_depth
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            {
+                WriteOrigin::InternalMutationHook
+            } else {
+                WriteOrigin::Repository
+            },
             database: None,
             mutation_ctx: Some(hook_ctx),
         }
@@ -1311,6 +1321,7 @@ where
             runtime_state: Default::default(),
             deferred_events: Vec::new(),
             deferred_actions: Vec::new(),
+            hook_depth: Default::default(),
         }
     }
 
@@ -1505,6 +1516,7 @@ where
             runtime_state: _,
             deferred_events,
             deferred_actions,
+            hook_depth: _,
         } = self;
         B::commit_write_transaction(tx).await?;
         for event in deferred_events {
@@ -1531,6 +1543,16 @@ where
     ) -> async_graphql::Result<()>
 where {
         if let Some(hook) = self.db.mutation_hook() {
+            // Restore the origin even on refusal or cancellation, including nested hooks.
+            struct HookDepth(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+            impl Drop for HookDepth {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            self.hook_depth
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _depth = HookDepth(self.hook_depth.clone());
             hook.on_mutation(ctx, self, event).await?;
         }
         #[cfg(any(
@@ -2714,6 +2736,10 @@ pub trait RowPolicy<B: OrmBackend = DefaultBackend>: Send + Sync {
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
+/// Shapes or validates generated write inputs once per row, before mutation hooks.
+/// Bulk updates receive each locked existing row and an independent copy of the
+/// original input; different rows may produce different values. A refusal aborts
+/// the transaction. External side effects must be deferred until after commit.
 pub trait WriteInputTransform<B: WriteBackend = DefaultWriteBackend>: Send + Sync {
     fn before_create_with_context<'a>(
         &'a self,

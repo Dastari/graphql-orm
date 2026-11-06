@@ -277,10 +277,53 @@ A generated write runs in this order, after its entity and row policy checks:
 | Through `MutationContext` in a hook | Per row | No | After commit |
 | Database foreign-key actions, raw SQL, and any other write outside the ORM | No | | No |
 
-Field validators and `WriteInputTransform` differ by path. `Entity::insert` runs the transform twice
-and a bulk update runs it once, passing only the first matched row as the existing row, as tracked in
-[#284](https://github.com/Dastari/graphql-orm/issues/284). A transform must be idempotent and must not
-validate a bulk update against the existing row.
+Generated writes run `WriteInputTransform` once per input row. Repository `insert`
+uses the transaction helper's single call. Bulk updates pass every locked existing
+row to `before_update`, each with a fresh clone of the original input. Different
+rows may produce different values; the ORM retains a separate SQL plan per row.
+The explicit legacy field-policy opt-out still omits a field for the entire
+unbounded bulk operation if any row denies it, without repeating callbacks.
+For unbounded bulk updates, all transforms and field checks finish before mutation
+`Before` hooks, then
+all row writes run, followed by `After` hooks and commit. A refusal rolls back the
+whole write, including writes made through the transform's transaction context.
+Bounded updates retain their per-row transform/`Before`/write/`After` order.
+External side effects cannot be rolled back; use post-commit actions for those.
+There is no transform for deletes or for raw pool/SQL writes.
+
+This costs one transform invocation and one retained input/SQL plan per matched
+row. Bulk writes already execute by locked primary key, so it adds no update SQL
+round trips. The existing 1,000-row bound for GraphQL `notify_with` bulk writes
+is unchanged; other bulk writes gain no new bound. `InternalMutationHook` means
+a write made while a mutation hook is executing; ordinary transaction helpers
+report `Repository`.
+
+Transform invocation audit (N matched/input rows; successful ORM writes using a
+Database, not a raw pool). Upserts use `before_upsert` in either branch, not an
+additional create/update transform. Before counts are from the pre-0.93 generated
+paths; after counts are pinned by `bulk_refusals` and the skill contract suite.
+
+| Write path | Before | After |
+| --- | ---: | ---: |
+| GraphQL create | 1 | 1 |
+| Repository insert | 2 | 1 |
+| GraphQL / repository single update | 1 | 1 |
+| GraphQL upsert, insert / update branch | 1 / 1 | 1 / 1 |
+| Repository upsert, insert / update branch | 1 / 1 | 1 / 1 |
+| Repository insert_many | N | N |
+| Repository upsert_many, mixed branches | N | N |
+| Repository replace_all (inserted rows) | N | N |
+| GraphQL / repository bulk update | 1 (first row) | N |
+| Repository bounded update | N | N |
+| MutationContext insert / single update | 1 / 1 | 1 / 1 |
+| MutationContext upsert, insert / update branch | 1 / 1 | 1 / 1 |
+| MutationContext bulk update | 1 (first row) | N |
+| MutationContext bounded update | N | N |
+| Deletes / empty bulk match | 0 | 0 |
+
+Additional source audit: conditional update, compare-and-swap, and
+insert-if-absent each retain one transform call per attempt (including attempts
+that do not write). Composite-key helpers have no duplicate wrapper/helper call.
 
 A hook sees the event, not the mutation's arguments. Generated mutations have no typed transient input;
 [#221](https://github.com/Dastari/graphql-orm/issues/221) tracks that capability.

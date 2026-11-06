@@ -860,7 +860,7 @@ async fn a_custom_root_with_a_generated_name_never_runs() {
 }
 
 #[tokio::test]
-async fn transforms_run_twice_on_repository_insert_and_once_for_a_bulk_update() {
+async fn transforms_run_once_per_insert_and_per_bulk_row() {
     let transform = RecordingTransform::default();
     let log = transform.0.clone();
     let mut db = database().await;
@@ -875,7 +875,7 @@ async fn transforms_run_twice_on_repository_insert_and_once_for_a_bulk_update() 
     )
     .await
     .unwrap();
-    assert_eq!(take(&log), ["create Customer", "create Customer"]);
+    assert_eq!(take(&log), ["create Customer"]);
 
     let order = Order::insert(
         &db,
@@ -906,7 +906,7 @@ async fn transforms_run_twice_on_repository_insert_and_once_for_a_bulk_update() 
         ))
         .await;
     assert!(bulk.errors.is_empty(), "{:?}", bulk.errors);
-    assert_eq!(take(&log), ["update OrderLine"]);
+    assert_eq!(take(&log), ["update OrderLine", "update OrderLine"]);
 
     let graphql = schema
         .execute(as_user(format!(

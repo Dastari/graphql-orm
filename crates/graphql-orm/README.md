@@ -13,6 +13,9 @@ supersedes: []
 Version 0.92.0 runs post-commit notifications for GraphQL bulk writes and adds
 Version 0.92.3 documents `MutationContext::defer` as the after-commit callback and pins it with tests;
 there is no API or behaviour change.
+Version 0.93.0 runs write input transforms once per input row, including each
+existing row in bulk updates, with independent outputs and atomic refusal.
+Ordinary transaction writes report Repository; hook writes report InternalMutationHook.
 
 Version 0.92.2 runs post-commit notifications for GraphQL bulk writes and adds
 `notify_on_error = "report"` for single-row success after notification failures.
