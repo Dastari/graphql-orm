@@ -25,6 +25,11 @@ for historical context.
 
 AI **0.120.2**, ORM runtime/macros **0.92.0**.
 - AI 0.121.0: **provider session cleanup now converges.** Real Codex `thread/list` pages carry `readStates`, which its generated schema omits, so the strict absence scan refused every real page on 0.165.0 and 0.166.0. A delete that returned `-32600` ("no rollout found for thread id") could therefore never settle, and retried about once a minute forever. The scan now admits `readStates` as a bounded, discarded map; arbitrary `-32600` is still not success. Backoff also grows, and a retry budget ends in visible `cleanup_exhausted` (fixes #309). Codex cleanup now requires a fresh bounded, content-discarding absence scan even after a successful deletion acknowledgement.
+ORM runtime/macros **0.93.0**.
+
+- **Fix:** keyset cursors are now bound to everything they must resume on (#326). Cursors for a configured order were not bound to their entity, so a cursor from one entity with the same key columns resumed on another. `recordsScan` continuations and the `MutationContext::keyset_page` / `keyset_connection_page` methods ignored the caller's filter, so a changed filter resumed silently. All generated paths now share `bind_keyset_fingerprint` and refuse a mismatch with `CURSOR_INVALID`. Protected runtime GraphQL cursors authenticate a digest of the caller's `where` input as well. Cursors never contain the filter, only a hash. Cursors issued before the upgrade are refused once; clients restart from the first page. No data migration.
+- Document that value drift while paging is inherent to keyset, and pin it with a test. See [what a keyset cursor is bound to](docs/reference/graphql-orm/pagination-migration.md#what-a-keyset-cursor-is-bound-to).
+
 - Reject related-row filters in every bulk write entry point and fail closed in direct in-memory matching (#314). Qualify generated relation reads on owned MSSQL and PostgreSQL.
 
 ORM runtime/macros **0.92.0**.

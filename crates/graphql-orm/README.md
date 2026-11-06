@@ -22,6 +22,9 @@ Version 0.92.0 uses RFC 3339 UTC implicit defaults for String timestamp fields;
 integer timestamps retain epoch seconds. Existing defaults and rows are preserved.
 See the [migration guide](../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
 Version 0.92.0 makes callback-denied to-one relations indistinguishable from absent targets and enforces relation-field read policies.
+Version 0.93.0 binds keyset cursors to their entity and caller filter on every generated path; restart in-flight keyset paging.
+See [keyset cursor binding](../../docs/reference/graphql-orm/pagination-migration.md#what-a-keyset-cursor-is-bound-to).
+
 Version 0.92.0 adds opt-in authorized static collection filters with `#[relation(filter)]`.
 Filtered keyset cursors are bound to caller-visible typed filter input; restart older filtered cursors.
 See [related filters](../../docs/reference/graphql-orm/entities-and-relations.md#authorized-collection-filters).
