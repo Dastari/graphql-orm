@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.93.0 to 0.93.1: relations beside a generated object
+
+No data migration. Entities that already compile need no change, with one exception: a
+`GraphQLSchemaEntity` that also derives `GraphQLRelations` and has relation fields now fails to compile
+with a message naming `schema_only = true`; add `schema_only = true` to its `#[graphql_entity(...)]`.
+An entity that derives `GraphQLEntity` with `GraphQLRelations` and relation fields but no
+`#[graphql(complex)]` never compiled; it now reports one error. Derive `async_graphql::SimpleObject`,
+add `#[graphql(complex)]` and `#[graphql(skip)]` on each relation field, and give each target a
+`BatchLoadEntity` impl; `node_id` and a managed version then work on that entity. See
+[relations and foreign keys](docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
+Detect it with `cargo check`: the error starts "GraphQLRelations needs a complex object".
+
 ## 0.92.0 to 0.93.0: after-commit callback documented
 
 No action and no data migration is needed. `MutationContext::defer` keeps its signature and behaviour; it

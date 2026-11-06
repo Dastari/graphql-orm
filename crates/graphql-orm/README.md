@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.93.1 documents the whole `NodeId`, managed-version and generated-relation declaration and pins it
+with tests under default and Pascal-case names. `GraphQLRelations` without `#[graphql(complex)]` now reports one
+compile error naming the fix; no data migration.
+
 Version 0.93.0 documents `MutationContext::defer` as the after-commit callback and pins it with tests;
 there is no API or behaviour change.
 

@@ -1352,13 +1352,29 @@ pub(crate) fn generate_graphql_relations(
                     #(#relation_resolvers)*
                 }
             }
-        } else {
+        } else if entity_meta.schema_only {
+            // A schema-only entity has no generated object, so the relation
+            // resolvers are the only fields of its GraphQL object.
             quote! {
                 #[::graphql_orm::async_graphql::Object(extends)]
                 impl #struct_name {
                     #(#relation_resolvers)*
                 }
             }
+        } else {
+            // `GraphQLEntity` always emits `#[Object]` for this type, so a second
+            // object implementation can only produce conflicting `OutputType`,
+            // `ContainerType` and `ObjectType` implementations. Say what to
+            // declare instead of letting those surface.
+            return Err(syn::Error::new(
+                struct_name.span(),
+                format!(
+                    "GraphQLRelations needs a complex object: `{struct_name}` has generated relation fields, but the generated GraphQL object of GraphQLEntity cannot also carry them. \
+                     Derive `async_graphql::SimpleObject` and add `#[graphql(complex)]` (with `#[graphql(skip)]` on each relation field); \
+                     GraphQLRelations then adds the relation fields, and `NodeId` and `RecordVersion` when declared, to that object. \
+                     For an entity with no GraphQL object, set `schema_only = true` in `#[graphql_entity(...)]`."
+                ),
+            ));
         }
     } else {
         quote! {}

@@ -1,0 +1,5 @@
+error: GraphQLRelations needs a complex object: `ProbeParent` has generated relation fields, but the generated GraphQL object of GraphQLEntity cannot also carry them. Derive `async_graphql::SimpleObject` and add `#[graphql(complex)]` (with `#[graphql(skip)]` on each relation field); GraphQLRelations then adds the relation fields, and `NodeId` and `RecordVersion` when declared, to that object. For an entity with no GraphQL object, set `schema_only = true` in `#[graphql_entity(...)]`.
+  --> tests/ui/relations_without_complex.rs:38:8
+   |
+38 | struct ProbeParent {
+   |        ^^^^^^^^^^^

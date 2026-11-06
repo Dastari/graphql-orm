@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.93.1 makes `GraphQLRelations` without `#[graphql(complex)]` on an entity that derives `GraphQLEntity`
+report one compile error that names the fix, instead of three conflicting-implementation errors. An entity with
+`schema_only = true` is exempt; a `GraphQLSchemaEntity` with relation fields now needs `schema_only = true`.
+Generated code for every other entity is unchanged.
+
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 
 Version 0.93.0 runs write input transforms once per input row, including each
