@@ -88,8 +88,8 @@ pub struct OrmPublicError {
     /// Internal diagnostic text never exposed by default GraphQL extensions.
     pub(crate) internal: Option<String>,
     pub(crate) retryable: bool,
-    denied_write_field: Option<String>,
-    application_error: Option<async_graphql::Error>,
+    denied_write_field: Option<Box<str>>,
+    application_error: Option<Box<async_graphql::Error>>,
     pub(crate) runtime_mutation_code: Option<&'static str>,
 }
 
@@ -186,7 +186,7 @@ impl OrmPublicError {
             OrmErrorCode::Forbidden,
             format!("write denied for field {field}"),
         );
-        error.denied_write_field = Some(field.to_owned());
+        error.denied_write_field = Some(field.into());
         error
     }
 
@@ -245,13 +245,13 @@ impl OrmPublicError {
     /// Infrastructure failures expose only safe ORM extensions.
     pub fn into_graphql_error(self) -> async_graphql::Error {
         if let Some(error) = self.application_error {
-            return error;
+            return *error;
         }
         let mut error = async_graphql::Error::new(self.message.clone());
         error = error.extend_with(|_, extensions| {
             extensions.set("code", self.code.as_str());
             if let Some(field) = &self.denied_write_field {
-                extensions.set("deniedWriteField", field.clone());
+                extensions.set("deniedWriteField", field.to_string());
             }
             if let Some(correlation_id) = &self.correlation_id {
                 extensions.set("correlationId", correlation_id.clone());
@@ -389,7 +389,7 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
             .unwrap_or(OrmErrorCode::InternalError),
     );
     public.message = error.message.clone();
-    public.application_error = Some(error);
+    public.application_error = Some(Box::new(error));
     sqlx_error_from_public(public)
 }
 
