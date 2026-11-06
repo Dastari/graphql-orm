@@ -485,3 +485,6 @@ backfill against a stale schema. See
 Version 0.91.2 pairs the runtime and macros for narrow-key paginated relation windows.
 
 Version 0.91.3 pairs the runtime and macros for selection-aware static offset connections.
+Version 0.92.0 adds the off-by-default macro `schema-export-only` feature for dedicated
+SDL export builds. Runtime builds must leave it disabled; see
+[schema export](../../docs/reference/graphql-orm/schema-export.md).

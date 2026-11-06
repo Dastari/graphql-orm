@@ -185,6 +185,13 @@ No consumer action or data migration is needed. Upgrade ORM and macros together.
 ## 0.91.1 to 0.91.2: narrow relation pagination windows
 
 No consumer action or data migration is needed. SQL-pushed static paginated relations on SQLite, PostgreSQL and MSSQL fetch full entities only for the requested page. GraphQL schemas, rows, totals, ordering and read policies are unchanged. Hosts can identify the optimization by the primary-key join outside the relation window in emitted SQL. Count-only GraphQL selections still load the requested page; selection-aware loading is a separate change.
+## 0.91.1 to 0.92.0: dedicated schema export builds
+
+No data migration is needed. Normal builds require no changes. Export tools may
+opt into the macro crate `schema-export-only` feature only in a dedicated build.
+Cargo unifies features: one dependency enabling it stubs all consumers of the same
+macro package in that build graph. Inspect `cargo tree -e features -i graphql-orm-macros`
+and remove it from production graphs. See [schema export](docs/reference/graphql-orm/schema-export.md).
 
 ## AI 0.120.1 to 0.120.2: Codex 0.166.0, and ORM 0.91.0 to 0.91.1
 

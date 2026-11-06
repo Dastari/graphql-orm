@@ -20,6 +20,9 @@ for historical context.
 - ORM runtime/macros **0.91.3**: fix [#313](https://github.com/Dastari/graphql-orm/issues/313). Static offset connections use the selection (including fragments and aliases) to omit unused count or row queries. Page probes use one extra row when `hasNextPage` is selected without a total. Residual row authorization still scans readable rows before computing totals.
 
 - ORM runtime/macros **0.91.2**: fix [#306](https://github.com/Dastari/graphql-orm/issues/306). Paginated static relation connections rank only primary keys and parent identities, then join back for page rows. Wide payloads no longer pass through the full partition window; grouped counts, batching, ordering and read authorization are preserved. Relation page row/count statements now participate in query-count instrumentation.
+- ORM runtime/macros **0.92.0**: opt-in macro `schema-export-only` replaces generated
+  async/Future/Stream operation and relation bodies with panics for dedicated SDL
+  builds, preserving schema declarations. Normal expansion is untouched. Fixes #317.
 
 AI **0.120.2**, ORM runtime/macros **0.91.1**.
 

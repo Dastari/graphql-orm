@@ -8,8 +8,9 @@ publish = false
 
 [features]
 default = ["sqlite"]
-sqlite = ["graphql-orm-macros/sqlite"]
-postgres = ["graphql-orm-macros/postgres"]
+sqlite = ["graphql-orm/sqlite", "graphql-orm-macros/sqlite"]
+postgres = ["graphql-orm/postgres", "graphql-orm-macros/postgres"]
+schema-export-only = ["graphql-orm-macros/schema-export-only"]
 
 [dependencies]
 async-graphql = { version = "7", default-features = false, features = ["dataloader", "uuid", "decimal"] }
@@ -24,3 +25,5 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "postgre
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 uuid = { version = "1", features = ["v4"] }
+
+graphql-orm = { path = "../../../graphql-orm", default-features = false }
