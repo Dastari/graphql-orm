@@ -304,6 +304,37 @@ The first implementation records relation search metadata and keeps local search
 through generated writes. For relation-heavy documents, run an explicit search rebuild after large
 related-data changes until deeper propagation is enabled.
 
+## Denied and absent relation targets
+
+Generated to-one fields are nullable, independent of the source foreign key's
+nullability. A callback row denial and a target excluded by SQL read visibility
+resolve to null without errors, exactly like a physically absent target. Collection
+relations omit denied targets and count only visible targets. Callback policy
+errors still fail closed; they are never converted to null or empty collections.
+
+Target entity read denials and relation-field `read_policy` denials are explicit
+`FORBIDDEN` errors. Relation-field policy checks run on the source record before
+looking up targets, including absent ones. Missing policy providers retain
+`AUTHORIZATION_MISCONFIGURED`. These operation/field denials are independent of
+row existence. Public errors are sanitized at the relation boundary.
+
+A handwritten non-null relation cannot promise availability under visibility
+filtering. Prefer the generated nullable field. If a host exposes a non-null
+wrapper, report identical unavailability for denied and absent targets and let
+GraphQL propagate errors to the nearest nullable boundary. The pinned runtime
+currently omits failed fields while retaining siblings in the handwritten wrapper
+fixture, even for a non-null field; this is not compliant null propagation.
+Generated relations therefore make no non-null availability promise. Hosts should
+use the nullable generated field instead of relying on that wrapper behavior.
+Never substitute a
+hidden target to satisfy a non-null schema promise. Changed snapshots reject
+nested relation selections at admission, as described below.
+
+The regression matrix is in `tests/denied_relations.rs`: single, list and
+connection parents, nullable to-one, a handwritten non-null wrapper, collections,
+and Changed admission. Tests compare complete serialized denied/absent responses
+and the instrumented query counter; this does not claim constant wall-clock time.
+
 ## Subscription release authorization
 
 Generated ordinary and append-only subscriptions recheck current request,

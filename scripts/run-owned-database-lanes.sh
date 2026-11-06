@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -130,6 +130,13 @@ run_field_write_denial() {
   done
 }
 
+run_denied_relations() {
+  for backend in sqlite postgres mssql; do
+    cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+      --test denied_relations -- --include-ignored --test-threads=1 --nocapture
+  done
+}
+
 case "${lane}" in
   notify-bulk)
     for backend in sqlite postgres mssql; do
@@ -144,6 +151,7 @@ case "${lane}" in
     done
     ;;
   field-write-denial) run_field_write_denial ;;
+  denied-relations) run_denied_relations ;;
   sqlite) run_sqlite ;;
   postgres) run_postgres ;;
   postgres-legacy) run_postgres_legacy ;;

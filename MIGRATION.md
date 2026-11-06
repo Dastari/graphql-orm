@@ -131,6 +131,24 @@ AI schema module `0.76.0` before restarting all workers. No row data migration i
 Custom Codex process adapters must implement bounded absence confirmation.
 Cleanup retries grow and stop, retaining the protected cursor for investigation;
 see the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
+## Relation denial contract (0.92.0)
+
+No data migration is needed. Find queries selecting generated to-one relations
+and clients inspecting `FORBIDDEN` at those relation paths: a target rejected
+by `can_read_row` now returns null without errors, matching a physically absent
+target. Collections still exclude rejected rows. Entity denials and relation-field
+`read_policy` denials remain errors, including when the target is absent.
+Declared relation-field read policies are now enforced before loading targets;
+a missing provider remains a fail-closed configuration error. Audit relation
+fields bearing `#[graphql_orm(read_policy = "...")]` and supply their FieldPolicy.
+Generated to-one fields remain nullable; a handwritten non-null wrapper must
+handle unavailability with the same error for denied and absent targets, and
+GraphQL requires propagation to the nearest nullable boundary; the pinned
+runtime currently omits a failed handwritten non-null field while retaining
+siblings. Use the generated nullable relation rather than relying on that
+non-compliant wrapper behavior. Nested relation
+selections on Changed snapshots remain rejected at admission.
+
 ## Relation-bearing identity fields (0.91.2)
 
 No data migration is needed. Complex entities deriving `GraphQLRelations` can

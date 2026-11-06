@@ -320,6 +320,13 @@ inputs. `deleteOrder(keepInvoice: true)` can't be expressed. This is a gap, trac
 
 ## Relationships
 
+Generated to-one relation fields are nullable: row denial or SQL visibility
+exclusion returns null like an absent target; collections exclude hidden rows.
+Entity and relation-field `read_policy` denials remain explicit errors even for
+absent targets, and policy failures stay errors. Do not wrap a nullable relation
+as non-null unless denied and absent targets have identical unavailability.
+Changed snapshots reject nested relations; refresh an authorized query.
+
 Declare relations rather than leaving bare `*_id` fields. A relation gives you a typed GraphQL field,
 batched loading, a foreign key in managed schemas, and optional propagation. Declare the inverse when
 clients walk both ways.

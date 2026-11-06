@@ -1442,3 +1442,47 @@ fn bulk_notification_payload_is_additive() {
     assert_eq!(result.affected_count, 3);
     assert!(result.notification_errors.is_none());
 }
+
+struct HiddenCustomers;
+impl RowPolicy for HiddenCustomers {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move { Ok(entity != "Customer") })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn Any + Send + Sync),
+    ) -> BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
+#[tokio::test]
+async fn a_hidden_to_one_target_is_null_without_losing_the_parent() {
+    let mut db = database().await;
+    let (_, order, _) = seed(&db).await;
+    db.set_row_policy(HiddenCustomers);
+    let schema = schema_builder(db).finish();
+    let response = schema
+        .execute(as_user(format!(
+            "{{ order(id: \"{}\") {{ id customer {{ id }} }} }}",
+            order.id
+        )))
+        .await;
+    assert!(response.errors.is_empty(), "{response:?}");
+    let data = response.data.into_json().unwrap();
+    assert_eq!(data["order"]["id"], order.id.to_string());
+    assert!(data["order"]["customer"].is_null());
+}

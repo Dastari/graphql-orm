@@ -21,6 +21,7 @@ Use `FieldPolicy::ignore_denied_field_write` to retain legacy omission for selec
 Version 0.92.0 uses RFC 3339 UTC implicit defaults for String timestamp fields;
 integer timestamps retain epoch seconds. Existing defaults and rows are preserved.
 See the [migration guide](../../MIGRATION.md#0911-to-0920-type-aware-implicit-timestamps).
+Version 0.92.0 makes callback-denied to-one relations indistinguishable from absent targets and enforces relation-field read policies.
 
 Version 0.89.0 is the companion of graphql-orm 0.89.0 (runtime collection search); macro generation
 is unchanged.
