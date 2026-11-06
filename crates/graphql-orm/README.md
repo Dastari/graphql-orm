@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.92.0 makes callback-denied to-one relations indistinguishable from absent targets and enforces relation-field read policies.
+
 Version 0.89.0 adds full-text search to runtime collections: an IR declaration, managed storage with
 readiness and a resumable backfill, write maintenance, and a ranked runtime GraphQL `search` argument.
 See [runtime search](../../docs/reference/graphql-orm/runtime-search.md).

@@ -15,6 +15,7 @@ use syn::spanned::Spanned;
 struct RelationDef {
     field_name: syn::Ident,
     graphql_name: String,
+    read_policy: Option<String>,
     description: String,
     target_type_str: String,
     source_columns: Vec<String>,
@@ -420,6 +421,7 @@ pub(crate) fn generate_graphql_relations(
 
         relations.push(RelationDef {
             field_name,
+            read_policy: meta.read_policy.clone(),
             graphql_name,
             description: meta
                 .description
@@ -490,6 +492,18 @@ pub(crate) fn generate_graphql_relations(
         .map(|r| -> syn::Result<proc_macro2::TokenStream> {
         let field_name = &r.field_name;
         let graphql_name = &r.graphql_name;
+        let relation_read_check = if let Some(policy) = &r.read_policy {
+            let record = if legacy_graphql_complex && entity_meta.compose_complex_object {
+                quote! { &**self }
+            } else {
+                quote! { self }
+            };
+            quote! {
+                db.ensure_readable_field(ctx, stringify!(#struct_name), #graphql_name,
+                    Some(#policy), Some(#record)).await
+                    .map_err(::graphql_orm::graphql::loaders::relation_authorization_error)?;
+            }
+        } else { quote! {} };
         let relation_loader_identity = format!("{struct_name}::{graphql_name}");
         let description = &r.description;
         let fk_columns_sql = r
@@ -773,6 +787,7 @@ pub(crate) fn generate_graphql_relations(
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_multiple_guard
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    #relation_read_check
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                         .cloned();
@@ -918,6 +933,7 @@ pub(crate) fn generate_graphql_relations(
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #source_condition_single_guard
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
+                    #relation_read_check
                     let auth_context = ctx
                         .data_opt::<::graphql_orm::graphql::orm::DbAuthContext>()
                         .cloned();
@@ -969,7 +985,7 @@ pub(crate) fn generate_graphql_relations(
                                 <#target_type as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                 ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlRelation, row,
                             ).await.map_err(::graphql_orm::graphql::loaders::relation_authorization_error)? {
-                                return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                                return Ok(None);
                             }
                         }
                     }

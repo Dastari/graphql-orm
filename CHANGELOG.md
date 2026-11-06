@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- ORM/macros **0.92.0**: callback-denied to-one relations now resolve like absent targets, without existence-revealing errors; generated relation-field `read_policy` checks fail closed before target loading (#325).
+
 - Fix generated `NodeId` and managed `RecordVersion` on relation-bearing complex entities, including composed objects and Changed snapshots (#270, #288).
 
 AI **0.120.2**, ORM runtime/macros **0.91.2**.

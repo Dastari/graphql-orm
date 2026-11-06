@@ -657,12 +657,19 @@ mod tests {
             assert!(data["sessions"][1]["link"].is_null());
             assert!(data["sessions"][2]["link"].is_null());
 
-            for policy in [&entity_allowed, &row_allowed] {
+            for (policy, row_denial) in [(&entity_allowed, false), (&row_allowed, true)] {
                 policy.store(false, Ordering::SeqCst);
                 let denied = schema
                     .execute(async_graphql::Request::new(CHILD).data(identity("one")))
                     .await;
-                assert_eq!(denied.data.into_json()?["sessions"][0]["id"], "parent");
+                let data = denied.data.into_json()?;
+                assert_eq!(data["sessions"][0]["id"], "parent");
+                assert!(data["sessions"][0]["link"].is_null());
+                if row_denial {
+                    assert!(denied.errors.is_empty(), "{:?}", denied.errors);
+                    policy.store(true, Ordering::SeqCst);
+                    continue;
+                }
                 assert!(!denied.errors.is_empty());
                 assert!(
                     denied
@@ -678,7 +685,11 @@ mod tests {
                 .execute(async_graphql::Request::new(CHILD).data(identity("two")))
                 .await;
             assert!(denied_identity.data.into_json()?["sessions"][0]["link"].is_null());
-            assert_eq!(denied_identity.errors.len(), 1);
+            assert!(
+                denied_identity.errors.is_empty(),
+                "{:?}",
+                denied_identity.errors
+            );
 
             let mut field_denied = identity("one");
             field_denied.name_allowed = false;
