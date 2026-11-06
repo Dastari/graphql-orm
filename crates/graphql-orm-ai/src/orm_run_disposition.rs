@@ -240,7 +240,12 @@ impl OrmAiRunDispositionService {
             AiRunState::Failed => AiRunTerminalEvent::Failed,
             AiRunState::RecoveryRequired => AiRunTerminalEvent::RecoveryRequired,
             AiRunState::Cancelled => AiRunTerminalEvent::Cancelled,
-            _ => return Err(AiError::Conflict),
+            _ => {
+                return Err(disposition_refusal(
+                    disposition,
+                    crate::AiRunRetryRefusal::NotFailed,
+                ));
+            }
         };
 
         // Reauthorize immediately before the durable write so a revocation
@@ -362,7 +367,10 @@ impl OrmAiRunDispositionService {
                         .await
                         .map_err(OrmPublicError::from)?;
                     if !existing.is_empty() {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        // No writes precede this refusal. Carry the closed reason
+                        // through a successful read-only transaction; commit failures
+                        // still use the ordinary persistence error path.
+                        return Ok(Err(crate::AiRunRetryRefusal::AlreadyDisposed));
                     }
 
                     if let Some(retry_run_id) = retry_run_id {
@@ -377,10 +385,10 @@ impl OrmAiRunDispositionService {
                             provider_dispatch_possible: run_provider_dispatch_possible(tx, run_id)
                                 .await?,
                         };
-                        if classify_run_retry(evidence, run.error_code.as_deref())
-                            != AiRunRetryAdmission::Allowed
-                        {
-                            return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                        let admission = classify_run_retry(evidence, run.error_code.as_deref());
+                        if admission != AiRunRetryAdmission::Allowed {
+                            return Ok(Err(crate::AiRunRetryRefusal::from_admission(admission)
+                                .expect("refusing admission has a reason")));
                         }
                         let message = tx
                             .find_by_id::<AiMessageRecord>(&input_message_id)
@@ -494,12 +502,20 @@ impl OrmAiRunDispositionService {
                         },
                     )
                     .await?;
-                    Ok(record)
+                    Ok(Ok(record))
                 })
             })
             .await
-            .map_err(map_transaction)?;
+            .map_err(map_transaction)?
+            .map_err(|reason| disposition_refusal(disposition, reason))?;
         disposition_view(&record)
+    }
+}
+
+fn disposition_refusal(disposition: AiRunDisposition, reason: crate::AiRunRetryRefusal) -> AiError {
+    match disposition {
+        AiRunDisposition::Retried => reason.into_error(),
+        AiRunDisposition::Acknowledged => AiError::Conflict,
     }
 }
 

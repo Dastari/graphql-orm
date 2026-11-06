@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.122.0` adopts tool profiles `0.21.0`, preserves proven pre-transport failure classification and exposes closed retry refusal reasons. No data migration is needed.
+
 Version `0.121.0` bounds provider session cleanup with growing delays and visible
 `CleanupExhausted` failures. Codex cleanup requires bounded absence confirmation
 even after a delete acknowledgement. Upgrade all workers and apply AI schema module

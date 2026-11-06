@@ -3,6 +3,31 @@
 use async_graphql::ErrorExtensions;
 use thiserror::Error;
 
+/// Closed content-free reason an owner retry was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiRetryRefusalReason {
+    /// The run is not terminally failed.
+    NotFailed,
+    /// Safe re-execution is unproven.
+    Uncertain,
+    /// An answer already exists.
+    AlreadyAnswered,
+    /// Another disposition already won.
+    AlreadyDisposed,
+}
+
+impl AiRetryRefusalReason {
+    /// Stable GraphQL extension value.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFailed => "not_failed",
+            Self::Uncertain => "uncertain",
+            Self::AlreadyAnswered => "already_answered",
+            Self::AlreadyDisposed => "already_disposed",
+        }
+    }
+}
+
 /// Stable library error.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -19,6 +44,9 @@ pub enum AiError {
     /// Current state changed or an idempotency/CAS precondition failed.
     #[error("AI operation conflicts with current state")]
     Conflict,
+    /// Owner retry was refused using only a closed public reason.
+    #[error("AI operation conflicts with current state")]
+    RetryRefused(AiRetryRefusalReason),
     /// Current principal is not authorized.
     #[error("AI operation forbidden")]
     Forbidden,
@@ -42,10 +70,11 @@ pub enum AiError {
     /// Provider execution failed before the request crossed its dispatch boundary.
     ///
     /// This is a proof-bearing execution classification, not a generic provider
-    /// error. It may be returned only after the adapter reports
-    /// `RejectedBeforeDispatch` and the executor durably releases the unstarted
-    /// budget reservation. A failure after possible dispatch must use
-    /// [`Self::ProviderFailed`] and remain recovery-required.
+    /// error. It may be returned only for a local pre-transport failure or after
+    /// the adapter reports `RejectedBeforeDispatch`, once the executor proves
+    /// no reservation exists or durably releases the unstarted reservation.
+    /// A failure after possible dispatch
+    /// must use [`Self::ProviderFailed`] and remain recovery-required.
     #[error("AI provider operation failed before dispatch")]
     PreTransportProviderFailed,
     /// Retained protected tool content became unavailable before provider dispatch. The
@@ -118,7 +147,7 @@ impl AiError {
             Self::InvalidConfiguration(_) => "AI_INVALID_CONFIGURATION",
             Self::AlreadyExists(_) => "AI_ALREADY_EXISTS",
             Self::NotFound => "AI_NOT_FOUND",
-            Self::Conflict => "AI_CONFLICT",
+            Self::Conflict | Self::RetryRefused(_) => "AI_CONFLICT",
             Self::Forbidden => "AI_FORBIDDEN",
             Self::RecentMfaRequired => "AI_RECENT_MFA_REQUIRED",
             Self::EgressDenied => "AI_EGRESS_DENIED",
@@ -158,6 +187,7 @@ impl AiError {
             Self::AlreadyExists(_) => "already_exists",
             Self::NotFound => "not_found",
             Self::Conflict => "conflict",
+            Self::RetryRefused(_) => "retry_refused",
             Self::Forbidden => "forbidden",
             Self::RecentMfaRequired => "recent_mfa_required",
             Self::EgressDenied => "egress_denied",
@@ -188,6 +218,9 @@ impl ErrorExtensions for AiError {
     fn extend(&self) -> async_graphql::Error {
         async_graphql::Error::new(self.to_string()).extend_with(|_, extensions| {
             extensions.set("code", self.public_code());
+            if let Self::RetryRefused(reason) = self {
+                extensions.set("retryRefusal", reason.as_str());
+            }
         })
     }
 }
@@ -261,6 +294,7 @@ mod tests {
             AiError::AlreadyExists("secret-resource".to_owned()),
             AiError::NotFound,
             AiError::Conflict,
+            AiError::RetryRefused(AiRetryRefusalReason::Uncertain),
             AiError::Forbidden,
             AiError::RecentMfaRequired,
             AiError::EgressDenied,

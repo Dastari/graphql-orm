@@ -3866,7 +3866,10 @@ impl AiProviderCallExecutor {
     /// Fails closed for runtime readiness, stale/bad plan binding, current
     /// principal or access denial, budget denial, egress/audit denial, provider
     /// error, custom-tool output, missing completion/usage, output bounds, or
-    /// reconciliation failure.
+    /// reconciliation failure. Closed local preflight refusals return
+    /// [`AiError::PreTransportProviderFailed`] only before reservation or after
+    /// durable release, before transport. Budget transaction errors, unknown
+    /// variants, and errors after possible dispatch retain uncertainty.
     pub async fn execute(
         &self,
         lease: &AiRunLease,
@@ -3907,7 +3910,7 @@ impl AiProviderCallExecutor {
             || plan.request.continuation.is_some()
             || plan.request.continuation_mode != ModelContinuationMode::ProviderRetained
         {
-            return Err(AiError::Conflict);
+            return Err(classify_unstarted_provider_error(AiError::Conflict));
         }
         Box::pin(self.execute_inner(lease, plan, Some(execution), None, None, 0)).await
     }
@@ -3945,7 +3948,9 @@ impl AiProviderCallExecutor {
         dynamic_execution: Option<Arc<dyn AiProviderDynamicToolExecution>>,
     ) -> Result<AiProviderCallResult, AiError> {
         if let Some(offering) = &plan.capability_offering {
-            offering.validate()?;
+            offering
+                .validate()
+                .map_err(classify_unstarted_provider_error)?;
         }
         // A per-turn-share admission is redeemable only when the registered adapter freezes
         // its retained tool surface; refuse before any session claim or thread creation.
@@ -3972,16 +3977,19 @@ impl AiProviderCallExecutor {
                             )
                         })))
         {
-            return Err(AiError::Conflict);
+            return Err(classify_unstarted_provider_error(AiError::Conflict));
         }
         let lease = lease_state.lock().await.clone();
-        let binding = crate::AiProviderRunBinding::from_lease(&lease)?;
+        let binding = crate::AiProviderRunBinding::from_lease(&lease)
+            .map_err(classify_unstarted_provider_error)?;
         if let Some(context) = &plan.task_context {
             self.tool_result_source_service
                 .as_ref()
-                .ok_or(AiError::RuntimeNotReady)?
+                .ok_or(AiError::RuntimeNotReady)
+                .map_err(classify_unstarted_provider_error)?
                 .validate_task_continuation_context(&lease, &plan.budget.scope, context)
-                .await?;
+                .await
+                .map_err(classify_unstarted_provider_error)?;
         }
         if let Some(evidence) = &plan.native_reset_evidence
             && plan.task_context.is_some()
@@ -4387,7 +4395,9 @@ impl AiProviderCallExecutor {
         historical_image_units: u64,
     ) -> Result<AiProviderCallResult, AiError> {
         if let Some(offering) = &plan.capability_offering {
-            offering.validate()?;
+            offering
+                .validate()
+                .map_err(classify_unstarted_provider_error)?;
         }
         // Without a bound retained session the whole surface may travel with this turn, so a
         // per-turn-share admission is refused here, before any reservation or transport.
@@ -4403,9 +4413,11 @@ impl AiProviderCallExecutor {
         if let Some(context) = &plan.task_context {
             self.tool_result_source_service
                 .as_ref()
-                .ok_or(AiError::RuntimeNotReady)?
+                .ok_or(AiError::RuntimeNotReady)
+                .map_err(classify_unstarted_provider_error)?
                 .validate_task_continuation_context(&lease, &plan.budget.scope, context)
-                .await?;
+                .await
+                .map_err(classify_unstarted_provider_error)?;
         }
         if !self.runtime.start_gate().is_ready()
             || lease.state() != AiRunState::Running
@@ -4418,13 +4430,14 @@ impl AiProviderCallExecutor {
                 .maximum_builtin_tool_calls
                 .is_some_and(|calls| calls > self.limits.maximum_builtin_tool_calls as u64)
         {
-            return Err(AiError::Conflict);
+            return Err(classify_unstarted_provider_error(AiError::Conflict));
         }
 
         let principal = self
             .runtime
             .resolve_current_principal(lease.principal_reference())
-            .await?;
+            .await
+            .map_err(classify_unstarted_provider_error)?;
         let scope_access = self
             .runtime
             .access_policy()
@@ -4444,7 +4457,7 @@ impl AiProviderCallExecutor {
             )
             .await;
         if !scope_access.is_allowed() || !session_access.is_allowed() {
-            return Err(AiError::Forbidden);
+            return Err(classify_unstarted_provider_error(AiError::Forbidden));
         }
 
         let reservation = match self
@@ -4489,10 +4502,7 @@ impl AiProviderCallExecutor {
             Ok(context) => context,
             Err(error) => {
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(match error {
-                    AiError::BudgetDenied => AiError::PreTransportBudgetDenied,
-                    error => error,
-                });
+                return Err(classify_unstarted_provider_error(error));
             }
         };
 
@@ -4516,7 +4526,7 @@ impl AiProviderCallExecutor {
             Ok(current) => current,
             Err(error) => {
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(error);
+                return Err(classify_unstarted_provider_error(error));
             }
         };
         if !self
@@ -4541,7 +4551,7 @@ impl AiProviderCallExecutor {
                 .is_allowed()
         {
             self.release_unstarted(&lease, &reservation).await?;
-            return Err(AiError::Forbidden);
+            return Err(classify_unstarted_provider_error(AiError::Forbidden));
         }
         if plan
             .request
@@ -4551,7 +4561,7 @@ impl AiProviderCallExecutor {
         {
             let Some(resolver) = &self.attachment_resolver else {
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(AiError::RuntimeNotReady);
+                return Err(AiError::PreTransportProviderFailed);
             };
             let resolved = match self
                 .resolve_provider_attachments(
@@ -4566,14 +4576,16 @@ impl AiProviderCallExecutor {
                 Ok(resolved) => resolved,
                 Err(error) => {
                     self.release_unstarted(&lease, &reservation).await?;
-                    return Err(error);
+                    return Err(classify_unstarted_provider_error(error));
                 }
             };
             context = match context.with_resolved_attachments(&plan.request, resolved) {
                 Ok(context) => context,
                 Err(_) => {
                     self.release_unstarted(&lease, &reservation).await?;
-                    return Err(AiError::ReauthorizationFailed);
+                    return Err(classify_unstarted_provider_error(
+                        AiError::ReauthorizationFailed,
+                    ));
                 }
             };
             current = match self
@@ -4584,7 +4596,7 @@ impl AiProviderCallExecutor {
                 Ok(current) => current,
                 Err(error) => {
                     self.release_unstarted(&lease, &reservation).await?;
-                    return Err(error);
+                    return Err(classify_unstarted_provider_error(error));
                 }
             };
             if !self
@@ -4609,7 +4621,7 @@ impl AiProviderCallExecutor {
                     .is_allowed()
             {
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(AiError::Forbidden);
+                return Err(classify_unstarted_provider_error(AiError::Forbidden));
             }
         }
         if let Some(provider_session) = provider_session {
@@ -4617,7 +4629,7 @@ impl AiProviderCallExecutor {
                 Ok(context) => context,
                 Err(error) => {
                     self.release_unstarted(&lease, &reservation).await?;
-                    return Err(error);
+                    return Err(classify_unstarted_provider_error(error));
                 }
             };
         }
@@ -4626,7 +4638,7 @@ impl AiProviderCallExecutor {
                 Ok(context) => context,
                 Err(error) => {
                     self.release_unstarted(&lease, &reservation).await?;
-                    return Err(error);
+                    return Err(classify_unstarted_provider_error(error));
                 }
             };
         }
@@ -4653,7 +4665,7 @@ impl AiProviderCallExecutor {
                 Ok(delivery) => delivery,
                 Err(error) => {
                     self.release_unstarted(&lease, &reservation).await?;
-                    return Err(error);
+                    return Err(classify_unstarted_provider_error(error));
                 }
             };
             context = context.with_tool_source_delivery(delivery);
@@ -4688,7 +4700,7 @@ impl AiProviderCallExecutor {
             Some(manifest) => manifest,
             None => {
                 self.release_unstarted(&lease, &reservation).await?;
-                return Err(AiError::EgressDenied);
+                return Err(classify_unstarted_provider_error(AiError::EgressDenied));
             }
         };
         let previous_response_id =
@@ -5672,6 +5684,27 @@ impl AiProviderCallExecutor {
     }
 }
 
+/// Classifies only closed local refusals from an execution path that has not
+/// called transport. Call only before reservation, or after durable release.
+/// Reservation/release failures and all post-dispatch errors bypass this helper.
+fn classify_unstarted_provider_error(error: AiError) -> AiError {
+    match error {
+        AiError::BudgetDenied => AiError::PreTransportBudgetDenied,
+        AiError::InvalidConfiguration(_)
+        | AiError::InvalidInput(_)
+        | AiError::NotFound
+        | AiError::Conflict
+        | AiError::Forbidden
+        | AiError::EgressDenied
+        | AiError::ReauthorizationFailed
+        | AiError::RuntimeNotReady
+        | AiError::PersistenceFailed => AiError::PreTransportProviderFailed,
+        // An unknown callback error is not proof of a clean refusal. In
+        // particular, a generic provider/tool failure may describe an effect.
+        error => error,
+    }
+}
+
 fn valid_provider_call_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 1_024
@@ -6219,6 +6252,19 @@ mod tests {
             _decision: &AiEgressDecision,
         ) -> Result<(), AiError> {
             Err(AiError::PersistenceFailed)
+        }
+    }
+
+    struct PreflightAuditFailure(fn() -> AiError);
+
+    #[async_trait]
+    impl AiEgressDecisionAudit for PreflightAuditFailure {
+        async fn record(
+            &self,
+            _manifest: &AiEgressManifest,
+            _decision: &AiEgressDecision,
+        ) -> Result<(), AiError> {
+            Err((self.0)())
         }
     }
 
@@ -11719,6 +11765,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn possible_dispatch_failure_never_releases_the_reservation() {
+        for category in [
+            AiProviderFailureCategory::ExecutionLimit,
+            AiProviderFailureCategory::ProviderRejection,
+        ] {
+            let fixture =
+                fixture_with_provider(MockProvider::new(Vec::new()).with_stream_failure(category))
+                    .await;
+            let executor = AiProviderCallExecutor::new(
+                fixture.runtime.clone(),
+                fixture.budget_service.clone(),
+                fixture.audit.clone(),
+                Arc::new(TestUsageAccounting),
+                Arc::new(SystemClock),
+                AiProviderCallLimits::new(64, 8_192, 64 * 1_024).unwrap(),
+            );
+            let error = executor
+                .execute(&fixture.lease, plan(&fixture))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                AiError::ProviderFailed | AiError::ProviderExecutionLimit
+            ));
+            assert_eq!(reservation_state(&fixture.database).await, "uncertain");
+        }
+    }
+
+    #[tokio::test]
     async fn adapter_rejection_before_dispatch_releases_capacity_and_is_retryable() {
         let fixture = fixture_with_provider(
             MockProvider::new(Vec::new())
@@ -12617,6 +12692,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_plan_binding_fails_before_reservation_or_transport() {
+        let fixture = fixture(Vec::new()).await;
+        let executor = AiProviderCallExecutor::new(
+            fixture.runtime.clone(),
+            fixture.budget_service.clone(),
+            fixture.audit.clone(),
+            Arc::new(TestUsageAccounting),
+            Arc::new(SystemClock),
+            AiProviderCallLimits::new(64, 8_192, 64 * 1_024).unwrap(),
+        );
+        let mut candidate = plan(&fixture);
+        candidate.budget.session_id = AiSessionId(Uuid::new_v4());
+        assert!(matches!(
+            executor.execute(&fixture.lease, candidate).await,
+            Err(AiError::PreTransportProviderFailed)
+        ));
+        assert_eq!(fixture.mock.request_count(), 0);
+        assert_eq!(reservation_count(&fixture.database).await, 0);
+    }
+
+    #[tokio::test]
+    async fn local_preflight_refusals_release_before_reporting_no_dispatch() {
+        type ErrorFactory = fn() -> AiError;
+        let errors: [(ErrorFactory, &str); 13] = [
+            (
+                || AiError::InvalidConfiguration("fixture".into()),
+                "pre_transport_provider_failed",
+            ),
+            (
+                || AiError::InvalidInput("fixture".into()),
+                "pre_transport_provider_failed",
+            ),
+            (|| AiError::NotFound, "pre_transport_provider_failed"),
+            (|| AiError::Conflict, "pre_transport_provider_failed"),
+            (|| AiError::Forbidden, "pre_transport_provider_failed"),
+            (|| AiError::EgressDenied, "pre_transport_provider_failed"),
+            (
+                || AiError::ReauthorizationFailed,
+                "pre_transport_provider_failed",
+            ),
+            (|| AiError::RuntimeNotReady, "pre_transport_provider_failed"),
+            (
+                || AiError::PersistenceFailed,
+                "pre_transport_provider_failed",
+            ),
+            (
+                || AiError::PreTransportToolSourceUnavailable,
+                "pre_transport_tool_source_unavailable",
+            ),
+            (|| AiError::BudgetDenied, "pre_transport_budget_denied"),
+            (|| AiError::ProviderFailed, "provider_failed"),
+            (|| AiError::ToolExecutionFailed, "tool_execution_failed"),
+        ];
+        for (error, expected) in errors {
+            let fixture = fixture(Vec::new()).await;
+            let executor = AiProviderCallExecutor::new(
+                fixture.runtime.clone(),
+                fixture.budget_service.clone(),
+                Arc::new(PreflightAuditFailure(error)),
+                Arc::new(TestUsageAccounting),
+                Arc::new(SystemClock),
+                AiProviderCallLimits::new(64, 8_192, 64 * 1_024).unwrap(),
+            );
+            let result = executor.execute(&fixture.lease, plan(&fixture)).await;
+            let returned = result.unwrap_err();
+            assert_eq!(
+                returned.classification(),
+                expected,
+                "{}",
+                error().classification()
+            );
+            assert_eq!(fixture.mock.request_count(), 0);
+            assert_eq!(reservation_state(&fixture.database).await, "released");
+        }
+    }
+
+    #[tokio::test]
     async fn failed_egress_audit_prevents_transport_and_releases_capacity() {
         let fixture = fixture(vec![ProviderEvent::Unknown {
             event_type: "must_not_run".to_owned(),
@@ -12633,7 +12785,7 @@ mod tests {
         );
         assert!(matches!(
             executor.execute(&fixture.lease, plan(&fixture)).await,
-            Err(AiError::PersistenceFailed)
+            Err(AiError::PreTransportProviderFailed)
         ));
         assert_eq!(fixture.mock.request_count(), 0);
         assert_eq!(reservation_state(&fixture.database).await, "released");
@@ -12660,7 +12812,7 @@ mod tests {
             executor
                 .execute(&fixture.lease, attachment_plan(&fixture, &bytes))
                 .await,
-            Err(AiError::RuntimeNotReady)
+            Err(AiError::PreTransportProviderFailed)
         ));
         assert_eq!(fixture.mock.request_count(), 0);
         assert_eq!(reservation_state(&fixture.database).await, "released");

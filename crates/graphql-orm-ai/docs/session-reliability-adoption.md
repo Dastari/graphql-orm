@@ -134,11 +134,41 @@ meaningful. Read the flag rather than the event type.
 An absent or unrecognized failure code is refused. The allowlist is opt-in, so
 adding a new failure classification cannot silently make it retryable.
 
+### Dispatch proof and reservation lifecycle
+
+Closed local preflight refusals (`InvalidConfiguration`, `InvalidInput`,
+`NotFound`, `Conflict`, `Forbidden`, `EgressDenied`, `ReauthorizationFailed`,
+`RuntimeNotReady`, and `PersistenceFailed`) become `PreTransportProviderFailed`
+only before reservation or after durable release, before the dispatch call.
+This includes audit persistence failures and missing attachment reopeners.
+The existing `PreTransportToolSourceUnavailable` also carries a released,
+unstarted proof. A generic error category alone is insufficient: the same
+variant may occur after dispatch. Unknown variants and budget transaction
+failures retain their uncertain classification. Codex still promotes only typed
+newly-bound/retained pre-turn rejections to `RejectedBeforeDispatch`.
+
+Budget denial creates no reservation. A proven unstarted rejection releases an
+existing reservation. Possible dispatch marks it uncertain before consuming the
+stream; incomplete completion retains that hold. Authoritative complete usage
+commits it. Evidence-based retry admission therefore remains useful for unstarted
+failures, without releasing capacity while external work might still be in flight.
+A provider's own `max_turns_reached` is an execution-limit diagnostic after possible
+dispatch, not proof of the local `agent_turn_limit_reached` retry condition.
+
+Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
+require committed evidence that no turn in the whole run may have dispatched.
+A clean last turn cannot authorize replay of an earlier possible effect.
+
 ## Retry and acknowledge
 
 `retryAiRun` and `acknowledgeAiRunFailure` require
 `Arc<dyn AiRunDispositionService>` in schema data;
 `OrmAiRunDispositionService` is the generated-ORM implementation.
+
+Classified retry refusals preserve `extensions.code = "AI_CONFLICT"` and add
+`extensions.retryRefusal`: `not_failed`, `uncertain`, `already_answered`, or
+`already_disposed`. These are stable codes with no provider text. Missing or
+unauthorized resources retain their ordinary invisible/forbidden errors.
 
 Retry authors a new `queued` run over the **same** `input_message_id`. It never
 duplicates the prompt, never resumes the source run, and carries a fresh

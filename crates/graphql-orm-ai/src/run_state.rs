@@ -377,7 +377,10 @@ pub struct AiRunRetryEvidence {
 ///   exactly the case where safety cannot be proven. A failure while building
 ///   the initial provider plan (see [`is_initial_planning_failure_code`]) is
 ///   additionally admitted when committed rows prove that no provider dispatch
-///   was possible, under the same evidence rule as `RecoveryRequired`.
+///   was possible, under the same evidence rule as `RecoveryRequired`. The
+///   `provider_pre_transport_failed` and `provider_budget_denied` codes also
+///   require this whole-run absence proof: they prove only the last turn was
+///   unstarted and cannot erase an earlier possible provider/tool effect.
 pub fn classify_run_retry(
     evidence: AiRunRetryEvidence,
     outcome_code: Option<&str>,
@@ -405,6 +408,13 @@ pub fn classify_run_retry(
                 return AiRunRetryAdmission::RefusedAlreadyAnswered;
             }
             match outcome_code {
+                // A clean last turn does not prove an earlier turn or tool effect
+                // in the same run was unstarted. Require the whole-run absence proof.
+                Some("provider_pre_transport_failed" | "provider_budget_denied")
+                    if evidence.provider_dispatch_possible =>
+                {
+                    AiRunRetryAdmission::RefusedUncertain
+                }
                 Some(code) if is_retryable_failure_code(code) => AiRunRetryAdmission::Allowed,
                 Some(code)
                     if is_initial_planning_failure_code(code)
