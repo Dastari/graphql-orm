@@ -703,3 +703,8 @@ Filtered keyset cursors bind caller-visible typed filter input, excluding privat
 SQL visibility parameters. Authorization is still evaluated on each request. Restart
 pagination when filters change or when upgrading from a version that issued unbound
 filtered cursors. No data migration is needed.
+
+Related-row filters are read-only. Bulk updates and deletes (including bounded repository
+and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
+or `not` with `invalid_input` before writing. Select authorized rows through a read
+first and use supported key-based mutations when needed. No data migration is needed.

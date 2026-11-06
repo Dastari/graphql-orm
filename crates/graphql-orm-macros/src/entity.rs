@@ -5462,6 +5462,17 @@ fn generate_entity_impl(
                     Ok(())
                 })
             }
+            #[doc(hidden)]
+            pub(crate) fn __gom_require_scalar_write_filter(&self) -> ::std::result::Result<(), ::graphql_orm::graphql::errors::OrmPublicError> {
+                if self.__gom_has_related_filters() {
+                    return Err(::graphql_orm::graphql::errors::OrmPublicError::with_message(
+                            ::graphql_orm::graphql::errors::OrmErrorCode::InvalidInput,
+                            "Related-row filters are not supported for bulk writes",
+                    ));
+                }
+                Ok(())
+            }
+
             fn __gom_has_related_filters(&self) -> bool {
                 false #(|| #related_present)*
                     || self.and.as_ref().is_some_and(|fs| fs.iter().any(Self::__gom_has_related_filters))
@@ -5544,6 +5555,9 @@ fn generate_entity_impl(
                 entity: &#struct_name,
                 calendar_today: ::graphql_orm::chrono::NaiveDate,
             ) -> ::graphql_orm::Result<Option<bool>> {
+                // Refuse the entire tree: Or/Not must not turn an unsupported
+                // relation predicate into a successful in-memory match.
+                if self.__gom_has_related_filters() { return Ok(None); }
                 let mut _gom_unknown = false;
                 #(#filter_to_entity_match)*
 

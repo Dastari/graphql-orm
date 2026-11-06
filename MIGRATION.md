@@ -12,6 +12,11 @@ supersedes: []
 
 ## 0.91.1 to 0.92.0: authorized static collection filters
 
+Related-row filters are read-only. Bulk updates and deletes (including bounded repository
+and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
+or `not` with `invalid_input` before writing. Select authorized rows through a read
+first and use supported key-based mutations when needed. No data migration is needed.
+
 No data migration is needed. Opt in with `#[relation(..., multiple, filter)]` on an unconditional public collection relation. Its generated Where field accepts a list of target Where alternatives, including nested opted-in collections. Every traversed entity must provide `Complete` SQL read visibility or `Unrestricted`; callback-only/prefilter policies are rejected. Relation field policies and spatial combinations are unsupported and fail closed. Existing declarations require no changes.
 
 Filtered keyset cursors now bind the caller-visible typed filter input. Clients must restart filtered keyset pagination after upgrading (old cursors return `cursor_invalid`), when changing filters. Unfiltered cursors retain their identity. Private SQL visibility parameters are excluded from cursor fingerprints; ordinary per-request authorization still applies. Generated GraphQL list, keyset/scan and aggregate roots prepare relation filters under request authority; unprepared filters in context-free repository helpers are rejected. The preparation budget is eight levels and 128 filter nodes, with at most 512 binds per related predicate.

@@ -198,6 +198,9 @@ where
         },
     )?;
     let mut values = Vec::new();
+    // Keep anonymous placeholders in this composable fragment. EntityQuery
+    // rebases them after preceding scalar/policy binds using B::DIALECT.
+    // Identifiers inside the EXISTS are already quoted by ReadPredicate::related.
     let clause = render_filter_expression(
         DatabaseBackend::Sqlite,
         &predicate.expression,
