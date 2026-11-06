@@ -416,8 +416,8 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
 /// category. Authored refusals retain their message and all extensions. Internal
 /// diagnostics use the same opt-in server reporting path as repository failures.
 #[doc(hidden)]
-pub fn graphql_error_from_callback(error: async_graphql::Error) -> async_graphql::Error {
-    graphql_error_from_sqlx(sqlx_error_from_graphql(error))
+pub fn graphql_error_from_callback(error: impl Into<async_graphql::Error>) -> async_graphql::Error {
+    graphql_error_from_sqlx(sqlx_error_from_graphql(error.into()))
 }
 
 /// Map a repository/SQL error into a GraphQL error with safe public fields.

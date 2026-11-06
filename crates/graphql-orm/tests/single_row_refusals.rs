@@ -310,14 +310,23 @@ impl EntityPolicy for Callback {
         })
     }
 }
+// Notification handlers historically accept any error convertible into GraphQL.
+struct NotifyFailure(async_graphql::Error);
+impl From<NotifyFailure> for async_graphql::Error {
+    fn from(error: NotifyFailure) -> Self {
+        error.0
+    }
+}
 async fn notify(
     ctx: &async_graphql::Context<'_>,
     _: &<DefaultBackend as OrmBackend>::Pool,
     _: &WriteRecord,
     _: ChangeAction,
-) -> async_graphql::Result<()> {
+) -> std::result::Result<(), NotifyFailure> {
     if let Some(mode) = ctx.data_opt::<Mode>() {
-        fail(ctx.data_unchecked::<Database>(), *mode).await?;
+        fail(ctx.data_unchecked::<Database>(), *mode)
+            .await
+            .map_err(NotifyFailure)?;
     }
     Ok(())
 }
