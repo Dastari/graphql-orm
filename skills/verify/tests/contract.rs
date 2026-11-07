@@ -1532,3 +1532,31 @@ fn private_read_predicate_is_validated_and_negatable() {
         .is_err()
     );
 }
+
+#[test]
+fn callback_error_privacy_preserves_authored_refusals() {
+    use async_graphql::ErrorExtensions;
+    use graphql_orm::graphql::errors::graphql_error_from_callback;
+    let masked = graphql_error_from_callback(async_graphql::Error::from(std::io::Error::other(
+        "private driver diagnostic",
+    )));
+    assert_eq!(masked.message, "internal error");
+    assert_eq!(
+        masked.extensions.unwrap().get("code"),
+        Some(&async_graphql::Value::from("INTERNAL_ERROR"))
+    );
+    for error in [
+        async_graphql::Error::new("authored refusal"),
+        async_graphql::Error::from(std::io::Error::other("authored refusal")).extend_with(
+            |_, ext| {
+                ext.set("code", "CUSTOM_REFUSAL");
+                ext.set("detail", "preserved");
+            },
+        ),
+    ] {
+        let expected_extensions = error.extensions.clone();
+        let actual = graphql_error_from_callback(error);
+        assert_eq!(actual.message, "authored refusal");
+        assert_eq!(actual.extensions, expected_extensions);
+    }
+}

@@ -24,6 +24,33 @@ add `#[graphql(complex)]` and `#[graphql(skip)]` on each relation field, and giv
 `BatchLoadEntity` impl; `node_id` and a managed version then work on that entity. See
 [relations and foreign keys](docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 Detect it with `cargo check`: the error starts "GraphQLRelations needs a complex object".
+## 0.93.0 to 0.94.0: single-row callback error privacy
+
+This security-improving public error contract change is breaking for consumers
+reading driver text from generated single-row create, update, upsert or delete
+errors, including default propagating `notify_with` failures. Generated field-policy and
+entity-policy callback boundaries and generated single-row row-read callbacks
+follow the same rule; clients reading their driver text are also affected. Those callbacks now
+use the bulk refusal classifier: when `async_graphql::Error.source` is `Some`
+and there is no string `extensions.code`, the client receives the safe ORM
+category/message/code. Direct SQLx sources use the same SQLx category mapping as
+bulk; other sources receive `internal error` / `INTERNAL_ERROR`.
+
+Here “source” means the error's own type-erased `source` field is populated,
+not that `std::error::Error::source()` on the wrapped value returns another error.
+The blanket `From<T: Display>` used by `?` populates it even for a leaf error.
+A host's custom `From` returning `Error::new` leaves it empty and remains an
+authored refusal, even without a code. Authored messages, codes and all extensions
+are preserved, including source-bearing errors with an explicit string code.
+
+Audit callback `?` conversions and client assertions that match database text.
+For text intentionally safe for clients, explicitly return `Error::new(message)`
+or set a string `code` extension. Detect the change by testing failing callbacks:
+responses now carry safe ORM codes instead of driver details. Internal diagnostics
+follow the existing bulk server-only reporting path controlled by
+`GRAPHQL_ORM_LOG_INTERNAL_ERRORS`; no new logging destination is added.
+Notifications still run after commit, so a propagated notification error does
+not undo a committed write. No data migration or SDL change is needed.
 
 ## 0.92.0 to 0.93.0: after-commit callback documented
 

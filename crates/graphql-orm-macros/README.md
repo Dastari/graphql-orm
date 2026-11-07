@@ -15,6 +15,9 @@ Version 0.93.1 makes `GraphQLRelations` without `#[graphql(complex)]` on an enti
 report one compile error that names the fix, instead of three conflicting-implementation errors. An entity with
 `schema_only = true` is exempt; a `GraphQLSchemaEntity` with relation fields now needs `schema_only = true`.
 Generated code for every other entity is unchanged.
+Version 0.94.0 masks source-bearing callback failures without a string `code` in generated
+single-row mutations, matching bulk. Authored refusals retain their message and extensions.
+See the root migration guide; no data migration is needed.
 
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 
