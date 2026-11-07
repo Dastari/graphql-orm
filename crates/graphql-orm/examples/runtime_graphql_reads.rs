@@ -2,7 +2,10 @@
 //! Run with exactly one backend and `runtime-graphql`; PostgreSQL uses owned Docker.
 #[cfg(all(
     feature = "runtime-graphql",
-    any(feature = "sqlite", feature = "postgres")
+    any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    )
 ))]
 mod example {
     use chacha20poly1305::{
@@ -298,7 +301,10 @@ mod example {
 mod owned_postgres;
 #[cfg(all(
     feature = "runtime-graphql",
-    any(feature = "sqlite", feature = "postgres")
+    any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    )
 ))]
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -317,7 +323,10 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 #[cfg(not(all(
     feature = "runtime-graphql",
-    any(feature = "sqlite", feature = "postgres")
+    any(
+        all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))),
+        all(feature = "postgres", not(any(feature = "sqlite", feature = "mssql")))
+    )
 )))]
 pub fn main() {
     eprintln!("enable runtime-graphql and exactly one SQLite/PostgreSQL backend");

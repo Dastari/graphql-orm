@@ -16,7 +16,9 @@ for historical context.
 
 ## Unreleased
 
-AI **0.123.0**, ORM runtime/macros **0.94.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
+AI **0.123.0**, ORM runtime/macros **0.94.1**, tool profiles **0.21.1**, operation catalog **0.7.1**.
+
+- **Fixed (ORM/macros 0.94.1):** searchable runtime list operations now describe `search: RuntimeSearchInput` in their semantic catalog, so runtime-schema hosts can compose them for the AI query compiler. Non-searchable lists and relation pages are unchanged. The single-backend runtime GraphQL example is also gated out of mixed SQLite/MSSQL builds with `runtime-graphql`; CI now checks and lints that configuration. Related to #368.
 
 - **Breaking (ORM/macros 0.94.0):** generated single-row mutations and default propagating `notify_with` failures now mask callback errors that have a source and no string `code`, matching bulk. Generated entity and field policy callbacks and single-row row-read callbacks follow the same rule. Authored refusals keep their message and extensions. Fixes #328.
 - **Fixed (ORM/macros 0.94.0):** a paginated relation returned `INTERNAL_ERROR` when its target had a column read through a SQL expression, such as MSSQL `mssql_money`. This was a regression in 0.92.0 and 0.93.0 from the narrow relation window. Fixes #265 (found by restoring the native MSSQL lane).

@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.94.0"
+version = "0.94.1"
 dependencies = [
  "async-graphql",
  "base64",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.94.0"
+version = "0.94.1"
 dependencies = [
  "convert_case",
  "proc-macro2",

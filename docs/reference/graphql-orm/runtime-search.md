@@ -136,6 +136,8 @@ query {
   - `RuntimeSearchInput { query: String!, mode: RuntimeSearchMode, minScore: Float }`, with `RuntimeSearchMode` `PLAIN`, `PHRASE`, `WEB` or `PREFIX`. Modes and `minScore` behave as for static entities.
   - These two types are registered only when a collection declares search.
   - Relation lists have no `search` argument.
+  - The semantic operation catalog declares the same optional root argument and description as SDL, so a runtime-schema host can use `finish_with_semantic_catalog` with searchable collections. Regenerate stored catalogs after adopting 0.94.1.
+  - Runtime collection reads and writes support SQLite and PostgreSQL. MSSQL runtime row decoding is unsupported and runtime GraphQL composition refuses it with `unsupported_backend`; the native MSSQL entity lane does not enable runtime collections.
 - **Score.** Each `Edge` of a searchable collection has a nullable `score: Float`, which is null without `search`. A score is computed from the row's own document only; see [ranking isolation](#ranking-isolation).
   - The input members and `score` follow the configured `field-case-*` feature, like the static `SearchInput`. For example `Query`, `MinScore` and `Score` under Pascal case.
 - **Evaluation order.** The host's grant predicate, `where`, `minScore` and the match are one SQL condition. Policies and filters therefore apply before ranking and counting, and `totalCount` counts only matching rows the caller may see.
