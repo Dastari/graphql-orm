@@ -24,6 +24,9 @@ AI **0.123.1**, ORM runtime/macros **0.95.0**, tool profiles **0.21.1**, operati
 
 - **Fixed (ORM/macros 0.94.1):** searchable runtime list operations now describe `search: RuntimeSearchInput` in their semantic catalog, so runtime-schema hosts can compose them for the AI query compiler. Non-searchable lists and relation pages are unchanged. The single-backend runtime GraphQL example is also gated out of mixed SQLite/MSSQL builds with `runtime-graphql`; CI now checks and lints that configuration. Related to #368.
 - **Tests (AI 0.123.1):** isolate media fixtures sharing the bounded decoder pool so CPU contention does not turn unrelated tests into overload tests (#367). Production busy-pool refusal, authorization, budgets and effect replay rules are unchanged. No data migration is needed.
+- **Packaging (ORM/macros 0.94.1):** fresh identities for fixture lockfiles recording AI 0.124.0; runtime and generated code are unchanged. Related to #278. No data migration.
+
+- AI **0.124.0**: optional, typed and bounded Codex read-marker tolerance; default wire bytes and strict admission are unchanged. Unknown effect-capable methods remain refused. See the migration guide for opt-in, method-only tracing and counters, and version readiness (Related to #333). No data migration. Fixes #369.
 
 AI **0.123.0**, ORM runtime/macros **0.94.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 

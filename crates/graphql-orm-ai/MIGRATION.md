@@ -23,6 +23,32 @@ No consumer action or data migration is needed. Only tests change: media fixture
 share a guard around the process-wide bounded decoder pool. Real turns still
 refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
 provider failure; no authorization, budget, lease or effect-replay rule changes.
+## AI 0.123.0 to 0.124.0: optional Codex read-marker tolerance
+
+This release also adopts ORM/macros 0.94.1 package identities for companion
+fixture lockfiles. Their runtime and generated code are unchanged. Related to #278.
+
+AI 0.124.0 adds an actor-policy opt-in for ignored read-marker notifications (issue #369).
+`AiCodexAppServerProtocolActor::with_ignored_read_state_notifications()` admits only
+`thread/readState/changed` with the reviewed, closed read-marker payload for the
+current fully bound thread. This is a narrow compatibility exception, not tolerance
+for arbitrary future methods. Unknown requests, item kinds, methods (including new
+`item/*` and `turn/*`), moderation metadata, extra payload fields and malformed or
+oversized frames remain refused. Deletion and absence scans remain strict.
+
+Default admission and both initialize frames are unchanged. Process adapters may
+opt in when constructing their turn actor and must discard
+`AiCodexAppServerInbound::IgnoredNotification` without emitting events, resetting
+peer-liveness timers, or changing deadlines, budgets, approval, retries or effect
+replay. The actor exposes `ignored_notification_count()` and emits a tracing warning
+with only the fixed method name, never params. Ignored frames also have an 8 KiB ceiling (including whitespace). At most 32 frames are ignored per
+actor lifetime; the next rejects, so a flood cannot run indefinitely. Recreate the
+actor through its normal lifecycle rather than resetting the counter.
+
+This does not replace executable version readiness (Related to #333): undeclared
+versions remain not ready and launch admission still applies. Hosts should keep
+reviewed version declarations. No data migration is needed; persistent schema and
+`AI_SCHEMA_MODULE_VERSION` are unchanged.
 
 ## 0.122.0 to 0.123.0: exact receiver-purpose admission (opt in)
 
