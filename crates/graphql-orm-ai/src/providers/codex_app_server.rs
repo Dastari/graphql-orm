@@ -10,6 +10,10 @@
 
 #![cfg_attr(feature = "mssql", allow(dead_code))]
 
+use super::{
+    AiCodexAppServerSupportedVersions, AiCodexAppServerVersionObservation,
+    AiCodexAppServerVersionReadiness,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -79,7 +83,8 @@ fn codex_dispatch_outcome(
     match result {
         Ok(stream) => AiProviderDispatchOutcome::Dispatched(stream),
         Err(
-            error @ (ProviderError::NewlyBoundTurnRejected(_)
+            error @ (ProviderError::CodexVersionRefused(_)
+            | ProviderError::NewlyBoundTurnRejected(_)
             | ProviderError::RetainedTurnRejected(_)),
         ) => AiProviderDispatchOutcome::RejectedBeforeDispatch(error),
         Err(error) => AiProviderDispatchOutcome::FailedAfterPossibleDispatch(error),
@@ -422,6 +427,7 @@ pub struct AiCodexAppServerRegistration {
     logical_model: String,
     executable_sha256: String,
     executable_version: String,
+    supported_versions: Option<AiCodexAppServerSupportedVersions>,
     sandbox_profile: String,
     protocol_version: String,
     launch_profile: AiCodexAppServerLaunchProfile,
@@ -471,6 +477,7 @@ impl AiCodexAppServerRegistration {
             logical_model,
             executable_sha256,
             executable_version,
+            supported_versions: None,
             sandbox_profile,
             protocol_version,
             launch_profile,
@@ -482,6 +489,32 @@ impl AiCodexAppServerRegistration {
         };
         registration.refresh_identity();
         Ok(registration)
+    }
+
+    /// Installs an exact compatibility declaration and invalidates capability bindings.
+    /// No declaration preserves legacy model admission. This is not authorization.
+    #[must_use]
+    pub fn with_supported_versions(mut self, versions: AiCodexAppServerSupportedVersions) -> Self {
+        self.supported_versions = Some(versions);
+        self.refresh_identity();
+        self
+    }
+
+    /// Optional model-admission policy. Factories may skip optional version observation
+    /// when absent; they must leave policy enforcement to the pool for cleanup launches.
+    pub fn supported_versions(&self) -> Option<&AiCodexAppServerSupportedVersions> {
+        self.supported_versions.as_ref()
+    }
+
+    fn version_readiness(
+        &self,
+        observation: &AiCodexAppServerVersionObservation,
+    ) -> AiCodexAppServerVersionReadiness {
+        observation.check(
+            self.supported_versions.as_ref(),
+            self.executable_sha256(),
+            self.executable_version(),
+        )
     }
 
     /// Applies one closed reviewed app-server launch profile.
@@ -1913,6 +1946,7 @@ pub struct AiCodexAppServerLaunchedProcess {
     process: Arc<dyn AiCodexAppServerRunProcess>,
     kill_on_drop: Arc<dyn Fn() + Send + Sync>,
     kill_requested: AtomicBool,
+    version_observation: AiCodexAppServerVersionObservation,
 }
 
 impl std::fmt::Debug for AiCodexAppServerLaunchedProcess {
@@ -1938,7 +1972,20 @@ impl AiCodexAppServerLaunchedProcess {
             process,
             kill_on_drop,
             kill_requested: AtomicBool::new(false),
+            version_observation: AiCodexAppServerVersionObservation::missing(),
         }
+    }
+
+    /// Attests fresh version evidence bound to this exact launched executable image.
+    /// The trusted factory must preserve the immutable verified image through probing
+    /// and execution; an observation of a replaceable path is insufficient.
+    #[must_use]
+    pub fn with_version_observation(
+        mut self,
+        observation: AiCodexAppServerVersionObservation,
+    ) -> Self {
+        self.version_observation = observation;
+        self
     }
 
     fn force_kill(&self) {
@@ -2057,6 +2104,18 @@ impl Drop for AiCodexAppServerLaunchedProcess {
 /// Trusted deployment seam that launches one reviewed app-server process.
 #[async_trait]
 pub trait AiCodexAppServerRunProcessFactory: Send + Sync {
+    /// Observes the factory-owned verified image without credentials or a model turn.
+    /// Follow the isolation, bounds and immutable-image contract on
+    /// [`AiCodexAppServerVersionObservation`]. Cancellation must kill the probe tree.
+    /// Advisory only: launch must independently attach fresh evidence to its wrapper.
+    /// Legacy factories remain compatible until a version declaration is installed.
+    async fn observe_version(
+        &self,
+        _registration: &AiCodexAppServerRegistration,
+    ) -> AiCodexAppServerVersionObservation {
+        AiCodexAppServerVersionObservation::missing()
+    }
+
     /// Whether the actual launched process preserves the SDK's protected source guards
     /// through every queue and awaits both input and responder delivery authorization
     /// immediately before transport. Legacy dynamic-tool launch support proves neither.
@@ -2076,6 +2135,15 @@ pub trait AiCodexAppServerRunProcessFactory: Send + Sync {
     }
 
     /// Launches and initializes the exact reviewed registration.
+    ///
+    /// Initialization must not create or resume threads, start model turns, spend
+    /// model budget, or forward business content. The pool owns those operations
+    /// after admission; maintenance launches receive only strict cleanup operations.
+    ///
+    /// Return fresh version attestation rather than enforcing the supported-version
+    /// declaration here: the pool distinguishes model admission from maintenance
+    /// deletion. All existing image integrity and sandbox requirements still apply.
+    /// Keep a tree-kill guard during initialization so cancellation also cleans up.
     ///
     /// The factory must directly execute the verified image without a shell,
     /// clear inherited environment and credentials, apply the fixed external
@@ -2290,6 +2358,25 @@ impl Drop for ActiveTurnGuard {
 }
 
 impl AiCodexAppServerRunPool {
+    /// Checks executable compatibility without credentials, business content or a model turn.
+    /// Combine this advisory result with existing service readiness. Every model launch
+    /// rechecks fresh image evidence; maintenance deletion bypasses only version admission.
+    pub async fn check_version_readiness(
+        &self,
+        registration: &AiCodexAppServerRegistration,
+    ) -> AiCodexAppServerVersionReadiness {
+        if registration.supported_versions.is_none() {
+            return AiCodexAppServerVersionReadiness::NotDeclared;
+        }
+        let observation = tokio::time::timeout(
+            self.inner.limits.startup_timeout,
+            self.inner.factory.observe_version(registration),
+        )
+        .await
+        .unwrap_or_else(|_| AiCodexAppServerVersionObservation::probe_failed());
+        registration.version_readiness(&observation)
+    }
+
     /// Creates a bounded exact-run process pool.
     pub fn new(
         factory: Arc<dyn AiCodexAppServerRunProcessFactory>,
@@ -3220,12 +3307,28 @@ impl AiCodexAppServerRunPool {
             .clone()
             .try_acquire_owned()
             .map_err(|_| ProviderError::RateLimited)?;
-        let process = tokio::time::timeout(
+        let launched = tokio::time::timeout(
             self.inner.limits.startup_timeout,
             self.inner.factory.launch(registration.clone()),
         )
-        .await
-        .map_err(|_| ProviderError::Unavailable)??;
+        .await;
+        let process = match launched {
+            Ok(Ok(process)) => process,
+            _ if registration.supported_versions.is_some() => {
+                // Launch is initialization only: no thread/model operation was invoked.
+                return Err(ProviderError::CodexVersionRefused(
+                    AiCodexAppServerVersionReadiness::ProbeFailed,
+                ));
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Err(ProviderError::Unavailable),
+        };
+        let readiness = registration.version_readiness(&process.version_observation);
+        if !readiness.is_ready() {
+            // No thread or model operation has crossed transport. Drop kills the tree,
+            // and the local admission guard releases capacity on this return.
+            return Err(ProviderError::CodexVersionRefused(readiness));
+        }
         let entry = Arc::new(RunEntry {
             registration_identity: registration.identity().to_owned(),
             process: Arc::new(process),
@@ -6997,6 +7100,13 @@ fn registration_identity(registration: &AiCodexAppServerRegistration) -> String 
     if registration.guarded_tool_result_source_delivery {
         hasher.update(b"guarded-tool-result-source-delivery-v1\0");
     }
+    if let Some(versions) = &registration.supported_versions {
+        hasher.update(b"supported-versions-v1\0");
+        for version in versions.versions() {
+            hasher.update((version.len() as u64).to_be_bytes());
+            hasher.update(version.as_bytes());
+        }
+    }
     hex::encode(hasher.finalize())
 }
 
@@ -7040,6 +7150,309 @@ pub(crate) mod tests {
         ProviderEvent,
     };
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn declared_versions_refuse_legacy_launch_before_thread_creation() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let registration =
+            Arc::new((*registration("1.0.0")).clone().with_supported_versions(
+                AiCodexAppServerSupportedVersions::exact(["1.0.0"]).unwrap(),
+            ));
+        assert_eq!(
+            pool.check_version_readiness(&registration).await,
+            AiCodexAppServerVersionReadiness::Missing
+        );
+        assert!(pool.entry(binding(), registration).await.is_err());
+        assert_eq!(counters.created_threads.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.kills.load(Ordering::SeqCst), 1);
+        assert_eq!(pool.inner.admission.available_permits(), 1);
+    }
+
+    struct VersionFactory {
+        counters: Arc<Counters>,
+        startup: AiCodexAppServerVersionObservation,
+        launch: AiCodexAppServerVersionObservation,
+        stall: bool,
+    }
+    #[async_trait]
+    impl AiCodexAppServerRunProcessFactory for VersionFactory {
+        async fn observe_version(
+            &self,
+            _: &AiCodexAppServerRegistration,
+        ) -> AiCodexAppServerVersionObservation {
+            if self.stall {
+                std::future::pending::<()>().await;
+            }
+            self.startup.clone()
+        }
+        async fn launch(
+            &self,
+            registration: Arc<AiCodexAppServerRegistration>,
+        ) -> Result<AiCodexAppServerLaunchedProcess, ProviderError> {
+            Ok(FakeFactory {
+                counters: self.counters.clone(),
+            }
+            .launch(registration)
+            .await?
+            .with_version_observation(self.launch.clone()))
+        }
+    }
+
+    fn version_pool(
+        counters: Arc<Counters>,
+        startup: AiCodexAppServerVersionObservation,
+        launch: AiCodexAppServerVersionObservation,
+        stall: bool,
+    ) -> AiCodexAppServerRunPool {
+        let limits = AiCodexAppServerRunLimits::new(
+            1,
+            2,
+            Duration::from_millis(20),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        AiCodexAppServerRunPool::new(
+            Arc::new(VersionFactory {
+                counters,
+                startup,
+                launch,
+                stall,
+            }),
+            limits,
+        )
+    }
+    fn declared_registration() -> Arc<AiCodexAppServerRegistration> {
+        Arc::new((*registration("1.0.0")).clone().with_supported_versions(
+            AiCodexAppServerSupportedVersions::exact(["1.0.0", "1.0.1"]).unwrap(),
+        ))
+    }
+    fn version_observation(version: &str, digest: char) -> AiCodexAppServerVersionObservation {
+        AiCodexAppServerVersionObservation::from_version_output(
+            format!("codex-cli {version}\n").as_bytes(),
+            true,
+            &digest.to_string().repeat(64),
+        )
+    }
+    #[tokio::test]
+    async fn version_readiness_rechecks_launch_and_preserves_cleanup() {
+        use AiCodexAppServerVersionReadiness as R;
+        let registration = declared_registration();
+        for (observation, expected) in [
+            (version_observation("1.0.0", 'a'), R::Supported),
+            (version_observation("1.0.1", 'a'), R::IdentityMismatch),
+            (version_observation("1.0.0", 'b'), R::IdentityMismatch),
+            (version_observation("1.0.2", 'a'), R::Unsupported),
+            (AiCodexAppServerVersionObservation::missing(), R::Missing),
+            (
+                AiCodexAppServerVersionObservation::probe_failed(),
+                R::ProbeFailed,
+            ),
+            (version_observation("garbage", 'a'), R::Unparseable),
+        ] {
+            let counters = Arc::new(Counters::new());
+            let pool = version_pool(
+                counters.clone(),
+                version_observation("1.0.0", 'a'),
+                observation.clone(),
+                false,
+            );
+            assert_eq!(
+                pool.check_version_readiness(&registration).await,
+                R::Supported
+            );
+            let result = pool.entry(binding(), registration.clone()).await;
+            if expected == R::Supported {
+                assert!(result.is_ok());
+                drop(result);
+                pool.inner.entries.lock().await.clear();
+            } else {
+                let Err(error) = result else {
+                    panic!("launch admitted incompatible image")
+                };
+                assert!(
+                    matches!(codex_dispatch_outcome(Err(error)), AiProviderDispatchOutcome::RejectedBeforeDispatch(ProviderError::CodexVersionRefused(r)) if r == expected)
+                );
+            }
+            assert_eq!(counters.kills.load(Ordering::SeqCst), 1);
+            assert_eq!(counters.created_threads.load(Ordering::SeqCst), 0);
+            assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.inner.admission.available_permits(), 1);
+            // Check startup independently: no process launch or turn is needed.
+            let pool = version_pool(counters.clone(), observation.clone(), observation, false);
+            assert_eq!(pool.check_version_readiness(&registration).await, expected);
+            let launches = counters.launches.load(Ordering::SeqCst);
+            let cursor = crate::AiProviderSessionCursor::new(
+                "codex.app_server.thread.v2",
+                "thread-retained-test",
+            )
+            .unwrap();
+            pool.delete_or_confirm_detached_thread_absent(registration.clone(), &cursor)
+                .await
+                .unwrap();
+            assert_eq!(counters.launches.load(Ordering::SeqCst), launches + 2);
+            assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+            assert_eq!(counters.absence_confirmations.load(Ordering::SeqCst), 1);
+            assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
+            assert_eq!(pool.check_version_readiness(&registration).await, expected);
+            counters.absence_confirmed.store(false, Ordering::SeqCst);
+            assert!(
+                pool.delete_or_confirm_detached_thread_absent(registration.clone(), &cursor)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+    #[tokio::test]
+    async fn unsupported_registered_image_can_still_delete_old_retained_resources() {
+        let counters = Arc::new(Counters::new());
+        let registration =
+            Arc::new((*registration("1.0.0")).clone().with_supported_versions(
+                AiCodexAppServerSupportedVersions::exact(["1.0.1"]).unwrap(),
+            ));
+        let pool = version_pool(
+            counters.clone(),
+            version_observation("1.0.0", 'a'),
+            version_observation("1.0.0", 'a'),
+            false,
+        );
+        assert_eq!(
+            pool.check_version_readiness(&registration).await,
+            AiCodexAppServerVersionReadiness::Unsupported
+        );
+        assert!(matches!(
+            pool.entry(binding(), registration.clone()).await,
+            Err(ProviderError::CodexVersionRefused(
+                AiCodexAppServerVersionReadiness::Unsupported
+            ))
+        ));
+        let cursor = crate::AiProviderSessionCursor::new(
+            "codex.app_server.thread.v2",
+            "thread-retained-test",
+        )
+        .unwrap();
+        pool.delete_or_confirm_detached_thread_absent(registration.clone(), &cursor)
+            .await
+            .unwrap();
+        assert_eq!(counters.deleted_threads.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.absence_confirmations.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.turns.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.created_threads.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            pool.check_version_readiness(&registration).await,
+            AiCodexAppServerVersionReadiness::Unsupported
+        );
+        assert_eq!(pool.inner.admission.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn version_readiness_timeout_and_undeclared_skip() {
+        use AiCodexAppServerVersionReadiness as R;
+        let counters = Arc::new(Counters::new());
+        let pool = version_pool(
+            counters.clone(),
+            AiCodexAppServerVersionObservation::missing(),
+            AiCodexAppServerVersionObservation::missing(),
+            true,
+        );
+        assert_eq!(
+            pool.check_version_readiness(&registration("1.0.0")).await,
+            R::NotDeclared
+        );
+        assert_eq!(
+            pool.check_version_readiness(&declared_registration()).await,
+            R::ProbeFailed
+        );
+        assert_eq!(counters.launches.load(Ordering::SeqCst), 0);
+    }
+    struct UnavailableVersionFactory {
+        stall: bool,
+    }
+    #[async_trait]
+    impl AiCodexAppServerRunProcessFactory for UnavailableVersionFactory {
+        async fn launch(
+            &self,
+            _: Arc<AiCodexAppServerRegistration>,
+        ) -> Result<AiCodexAppServerLaunchedProcess, ProviderError> {
+            if self.stall {
+                std::future::pending::<()>().await;
+            }
+            Err(ProviderError::Unavailable)
+        }
+    }
+    #[tokio::test]
+    async fn declared_version_launch_failure_and_timeout_are_pre_transport() {
+        for stall in [false, true] {
+            let limits = AiCodexAppServerRunLimits::new(
+                1,
+                2,
+                Duration::from_millis(20),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let pool =
+                AiCodexAppServerRunPool::new(Arc::new(UnavailableVersionFactory { stall }), limits);
+            let Err(error) = pool.entry(binding(), declared_registration()).await else {
+                panic!("missing launch admitted")
+            };
+            assert!(matches!(
+                codex_dispatch_outcome(Err(error)),
+                AiProviderDispatchOutcome::RejectedBeforeDispatch(
+                    ProviderError::CodexVersionRefused(
+                        AiCodexAppServerVersionReadiness::ProbeFailed
+                    )
+                )
+            ));
+            assert_eq!(pool.inner.admission.available_permits(), 1);
+            assert!(matches!(
+                pool.entry(binding(), registration("1.0.0")).await,
+                Err(ProviderError::Unavailable)
+            ));
+        }
+    }
+
+    #[test]
+    fn supported_versions_are_identity_bound_and_order_independent() {
+        let original = registration("1.0.0");
+        let a = (*original).clone().with_supported_versions(
+            AiCodexAppServerSupportedVersions::exact(["1.0.0", "1.0.1"]).unwrap(),
+        );
+        let b = (*original).clone().with_supported_versions(
+            AiCodexAppServerSupportedVersions::exact(["1.0.1", "1.0.0"]).unwrap(),
+        );
+        assert_eq!(a.identity(), b.identity());
+        assert_ne!(a.identity(), original.identity());
+        let base = dynamic_registration("1.0.0");
+        let binding = capability_session_binding(&base, ModelReasoningEffort::Unspecified);
+        let admitted = (*base)
+            .clone()
+            .with_capability_session_binding(binding.clone())
+            .unwrap();
+        let declared = admitted
+            .with_supported_versions(AiCodexAppServerSupportedVersions::exact(["1.0.0"]).unwrap());
+        assert!(!declared.admits_provider_session_fingerprint(binding.fingerprint()));
+        assert!(declared.with_capability_session_binding(binding).is_err());
+    }
+
+    #[test]
+    fn supported_version_does_not_relax_protocol_validation() {
+        let registration = declared_registration();
+        assert!(
+            registration
+                .version_readiness(&version_observation("1.0.0", 'a'))
+                .is_ready()
+        );
+        let mut actor = initialized_protocol_actor();
+        assert!(
+            actor
+                .accept(br#"{"method":"unknown/future/frame","params":{}}"#)
+                .is_err()
+        );
+    }
 
     #[test]
     fn dispatch_classifier_proves_only_typed_pre_turn_rejections() {

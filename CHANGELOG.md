@@ -24,6 +24,7 @@ AI **0.123.0**, ORM runtime/macros **0.94.0**, tool profiles **0.21.1**, operati
 - **Breaking (ORM/macros 0.94.0):** `GraphQLRelations` without `#[graphql(complex)]` on an entity with relation fields reports one error naming the fix, instead of three conflicting-implementation errors. A `GraphQLSchemaEntity` with relation fields now needs `schema_only = true`. An entity with `node_id`, a managed `RecordVersion` and a generated collection relation has one documented, tested declaration.
 - **Docs and tests (ORM/macros 0.94.0):** `tests/link_relation_patterns.rs` compiles and runs link-table patterns: string-kind `source_condition` relations, `#[relation(..., multiple, filter)]` with `inList`, and a nested create over `Database::transaction`. The filter example in the docs used `in`; the member is `inList`.
 - **Added (ORM/macros 0.94.0, catalog 0.7.1, tool profiles 0.21.1, AI 0.123.0):** opt-in `receiver-admission` admits one exact registered named query against a token's signed purpose claim, before scopes or request context are available. A token carrying that claim cannot skip admission through the ORM's identity paths. Private-remote hashes keep their encoding, and credentials without the claim are unchanged.
+AI 0.123.0 adds opt-in authoritative Codex exact-version readiness and fresh launch admission, preserving strict cleanup during refusal. Related to #333. No data migration or persistent schema change.
 
 AI **0.122.0**, ORM runtime/macros **0.93.0**, tool profiles **0.21.0**.
 
