@@ -10,7 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.123.0` uses shared canonical bindings for private remote execution, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no data migration is needed.
+
 Version `0.122.0` adopts tool profiles `0.21.0`, preserves proven pre-transport failure classification and exposes closed retry refusal reasons. No data migration is needed.
+Version `0.123.0` adds opt-in authoritative Codex executable version readiness and launch admission. No data migration is needed.
 Version `0.122.0` also adds regression coverage for catalogue changes in retained sessions.
 No runtime or schema change; see [MIGRATION.md](MIGRATION.md#ai-01210-to-01220-catalogue-change-regression-coverage).
 
@@ -685,3 +688,29 @@ For concurrent chats with immutable provider/model/effort choices, use the
 Registered tools can declare protected retained image references with current
 source authorization and atomic image budgets. See the [tool-result media
 contract](docs/tool-result-media.md) for host resolver and provider integration.
+
+## Codex executable version admission (AI 0.123.0)
+
+Opt in to exact release matching; no declaration preserves existing behavior.
+No data migration is needed; `AI_SCHEMA_MODULE_VERSION` is unchanged because
+this is an in-memory policy.
+
+```rust,ignore
+let registration = registration.with_supported_versions(
+    AiCodexAppServerSupportedVersions::exact(["0.165.0", "0.166.0"])?
+);
+let status = pool.check_version_readiness(&registration).await;
+if !status.is_ready() {
+    // Feed status.reason_code() into existing service readiness; admit no model work.
+}
+```
+
+On a Codex self-update, review the new release and update both the allow-list and
+the registration's executable SHA-256/version. Missing, malformed, failed, unsupported
+or identity-mismatched observations fail closed when declared. Custom factories must
+implement `observe_version` and attach fresh `AiCodexAppServerVersionObservation`
+through `AiCodexAppServerLaunchedProcess::with_version_observation` on every launch;
+the additive defaults report missing. Readiness never uses credentials or model budget.
+Launch refusal is proven pre-transport; strict deletion and fresh absence confirmation
+remain available without turn authority. See the [provider contract](docs/provider-sessions-and-hosted-activity.md#codex-executable-version-admission-ai-01230) for image-binding,
+isolation, bounds, failure codes and migration details.

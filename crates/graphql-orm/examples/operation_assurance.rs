@@ -20,6 +20,7 @@ struct AssuranceExampleRecord {
 #[cfg(feature = "sqlite")]
 schema_roots! {
     backend: "sqlite",
+    schema_policy: "managed",
     entities: [AssuranceExampleRecord],
 }
 

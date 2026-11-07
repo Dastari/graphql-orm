@@ -6,10 +6,11 @@
 //! distinguish generated mutations from mutations actually merged into the
 //! public root.
 //!
-//! This module is discovery and drift-detection metadata only. It does not
-//! authorize resolver execution, classify result data, bind a GraphQL document
-//! projection, or replace normal resolver, row-policy, field-policy, or RLS
-//! checks.
+//! Generated catalogs provide discovery and drift-detection metadata. They do
+//! not authorize execution, classify results, or replace resolver, row-policy,
+//! field-policy or RLS checks. Opt-in [`ReceiverPurposeV1`] helpers separately
+//! bind exact documents and JSON for delegated issuance and receiver admission;
+//! those bindings do not authorize execution.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1601,3 +1602,6 @@ mod tests {
         assert_eq!(hidden.router_protocol_operations().unwrap().len(), 1);
     }
 }
+
+mod receiver;
+pub use receiver::*;

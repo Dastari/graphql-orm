@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.93.0"
+version = "0.94.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.122.0"
+version = "0.123.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.93.0"
+version = "0.94.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

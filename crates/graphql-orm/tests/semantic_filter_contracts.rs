@@ -1,3 +1,10 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
+
 //! Focused real-producer parity for the six field-case qualification lanes.
 #![cfg(feature = "sqlite")]
 use graphql_orm::async_graphql::{InputObject, Object, Schema};

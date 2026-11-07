@@ -73,6 +73,7 @@ mod sqlite_fixture {
 
     schema_roots! {
         backend: "sqlite",
+        schema_policy: "managed",
         query_custom_ops: [],
         entities: [LegacyLabourEntry, SingleKeyRecord],
     }
@@ -141,7 +142,7 @@ mod sqlite_fixture {
     #[tokio::test]
     async fn composite_lookup_sdl_uses_one_argument_per_key() {
         let pool = setup_pool().await;
-        let schema = schema_builder(graphql_orm::db::Database::new(pool)).finish();
+        let schema = schema_builder(graphql_orm::db::Database::<SqliteBackend>::new(pool)).finish();
         let sdl = schema.sdl();
 
         let without_descriptions = sdl
@@ -272,6 +273,7 @@ mod mssql_fixture {
 
     schema_roots! {
         backend: "mssql",
+        schema_policy: "external_read_only",
         query_custom_ops: [],
         entities: [LegacyLabourEntry],
     }

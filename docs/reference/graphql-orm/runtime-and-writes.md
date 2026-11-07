@@ -3,7 +3,7 @@ title: "Runtime, Writes, And Policies"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -125,6 +125,52 @@ Top-level upsert helpers choose `TransactionMode::StateMachine` because an absen
 row to lock. The transaction-bound `MutationContext::upsert` rejects `TransactionMode::Default`;
 callers composing an upsert with other work must choose `StateMachine` explicitly. Update and delete
 helpers lock an existing authoritative preimage and keep their normal source signatures.
+
+### Creating a parent with child rows
+
+No generated mutation creates a parent together with typed child rows
+([#353](https://github.com/Dastari/graphql-orm/issues/353) asks for one). Write a custom root
+field that opens `Database::transaction` and inserts every row with `tx.insert`. Entity write
+access, row and field policies, hooks and input transforms apply to each row, and an error from
+any insert rolls the whole call back: no row is kept and no `Changed` event is released.
+
+```rust,ignore
+#[Object]
+impl NestedCreate {
+    async fn create_owner_with_links(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        label: String,
+        links: Vec<NestedLinkInput>,
+    ) -> async_graphql::Result<ProbeOwner> {
+        let db = ctx.data::<Database>()?;
+        let owner_key = id.clone();
+        db.transaction(TransactionMode::Default, move |tx| {
+            Box::pin(async move {
+                let owner = tx.insert::<ProbeOwner>(CreateProbeOwnerInput { id, label }).await?;
+                for link in links {
+                    tx.insert::<ProbeLink>(CreateProbeLinkInput {
+                        id: link.id,
+                        owner_id: owner_key.clone(),
+                        target_kind: link.target_kind,
+                        target_id: link.target_id,
+                    })
+                    .await?;
+                }
+                Ok(owner)
+            })
+        })
+        .await
+        .map_err(|error| async_graphql::Error::new(format!("{error}")))
+    }
+}
+// schema_roots! { ..., generated_mutations: "none", extra_mutation_types: [NestedCreate], ... }
+```
+
+The host authorizes the caller in a custom root field, as for any hand-written resolver. The
+compiled, executed version, including the rollback of a refused second row, is
+`a_nested_create_is_one_transaction` in `tests/link_relation_patterns.rs`.
 
 ## Field Controls
 

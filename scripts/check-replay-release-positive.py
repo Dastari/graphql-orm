@@ -55,6 +55,20 @@ def check_orm_split(old, new):
     # The SQLite migration API fixture command is byte-identical to the one the
     # default suite's migration_api_compatibility_fixture runner executes.
     expected[expected.index("for backend in sqlite postgres mssql; do")] = "for backend in postgres mssql; do"
+    # Runtime search coverage was added after the qualified snapshot.
+    expected = [line.replace("--test runtime_relations -- --test-threads=1",
+                             "--test runtime_relations --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1")
+                .replace("--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1",
+                         "--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1")
+                for line in expected]
+    # Backend target coverage is deliberately stronger than the qualified job.
+    old_check = "cargo check -p graphql-orm --no-default-features --features postgres --locked"
+    expected[expected.index(old_check):expected.index(old_check) + 1] = [
+        "for backend in postgres mssql sqlite,mssql; do",
+        'cargo check -p graphql-orm --locked --no-default-features --features "$backend" --all-targets',
+        'cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings',
+        "done",
+    ]
     require(sorted(split) == sorted(expected), "ORM lane commands changed by the split")
     for line in [line for name in ORM_JOBS for line in new[name].splitlines()
                  if FIXTURE_MANIFEST in line and line.strip().startswith("cargo ")]:
@@ -76,6 +90,27 @@ def main():
     # into parallel jobs that together run the same commands.
     for name in [*(job for job in EXCLUDED_JOBS if job not in ORM_JOBS), "release"]:
         body = new[name].replace("    if: inputs.validation_profile == 'full'\n", "", 1)
+        if name == "orm-security-sqlite":
+            current = """      - name: Require exact receiver-purpose admission
+        run: bash scripts/run-security-test-targets.sh sqlite,receiver-admission receiver_admission
+"""
+            require(current in body, "receiver admission security gate is required")
+            body = body.replace(current, "", 1)
+        if name == "sqlserver-security":
+            previous = """      - name: Verify TLS, writes, and retained query notifications on owned servers
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications -- --ignored --test-threads=1
+"""
+            current = """      - name: Execute the complete owned MSSQL lane
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: scripts/run-owned-database-lanes.sh mssql
+      - name: Verify TLS and retained query notifications on owned servers
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_notifications -- --ignored --test-threads=1
+"""
+            require(current in body, "complete owned MSSQL execution is required")
+            body = body.replace(current, previous, 1)
         require(without_timeout(body).rstrip() == without_timeout(old[name]).rstrip(),
                 f"full profile changed: {name}")
     check_orm_split(old, new)
@@ -128,7 +163,7 @@ def main():
             and contracts == sorted(contracts, key=lambda row: row["name"]), "contract order changed")
     replay = [row for row in contracts if row["name"].startswith("graphql-orm-owned-planning-replay-")]
     require(len(replay) == 3, "both explicit recipes and format must remain recorded")
-    print("Positive release conformance: 15 original full jobs preserved and the ORM job split with identical commands; 4 explicit scoped jobs; deterministic manifest and three replay contract rows.")
+    print("Positive release conformance: 15 full jobs preserved with explicit backend coverage additions and the ORM job split; 4 explicit scoped jobs; deterministic manifest and three replay contract rows.")
 
 
 if __name__ == "__main__":

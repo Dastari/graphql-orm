@@ -397,7 +397,7 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
                 .as_ref()
                 .and_then(|source| source.downcast_ref::<sqlx::Error>())
                 .map(OrmPublicError::from_sqlx)
-                .unwrap_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError)),
+                .unwrap_or_else(|| OrmPublicError::internal(error.message.clone())),
         );
     }
     let mut public = OrmPublicError::new(
@@ -408,6 +408,16 @@ pub fn sqlx_error_from_graphql(error: async_graphql::Error) -> sqlx::Error {
     public.message = error.message.clone();
     public.application_extensions = Some(Box::new(error.extensions));
     sqlx_error_from_public(public)
+}
+
+/// Apply the bulk callback refusal classifier at a GraphQL callback boundary.
+///
+/// Source-bearing failures without a string `code` extension receive a safe ORM
+/// category. Authored refusals retain their message and all extensions. Internal
+/// diagnostics use the same opt-in server reporting path as repository failures.
+#[doc(hidden)]
+pub fn graphql_error_from_callback(error: impl Into<async_graphql::Error>) -> async_graphql::Error {
+    graphql_error_from_sqlx(sqlx_error_from_graphql(error.into()))
 }
 
 /// Map a repository/SQL error into a GraphQL error with safe public fields.
@@ -471,6 +481,40 @@ mod tests {
             .extend_with(|_, ext| ext.set("code", "CUSTOM_REFUSAL"));
         let coded = graphql_error_from_sqlx(sqlx_error_from_graphql(coded));
         assert_eq!(coded.message, "explicit refusal");
+    }
+
+    #[test]
+    fn callback_sources_mean_the_graphql_field_even_for_leaf_errors() {
+        // A leaf error has no nested std::error::Error source; From still stores it.
+        let leaf = std::io::Error::other("private leaf diagnostic");
+        assert!(std::error::Error::source(&leaf).is_none());
+        let converted = async_graphql::Error::from(leaf);
+        assert!(converted.source.is_some());
+        let public = OrmPublicError::from(sqlx_error_from_graphql(converted));
+        assert_eq!(public.code, OrmErrorCode::InternalError);
+        assert_eq!(public.internal.as_deref(), Some("private leaf diagnostic"));
+
+        struct HostRefusal;
+        impl From<HostRefusal> for async_graphql::Error {
+            fn from(_: HostRefusal) -> Self {
+                Self::new("host refusal").extend_with(|_, ext| ext.set("detail", "preserved"))
+            }
+        }
+        let converted: async_graphql::Result<()> = (|| {
+            Err(HostRefusal)?;
+            Ok(())
+        })();
+        let converted = converted.unwrap_err();
+        assert!(converted.source.is_none());
+        let extensions = converted.extensions.clone();
+        let public = graphql_error_from_callback(converted);
+        assert_eq!(public.message, "host refusal");
+        assert_eq!(public.extensions, extensions);
+
+        let sqlx = sqlx_error_from_graphql(async_graphql::Error::from(sqlx::Error::PoolClosed));
+        let public = OrmPublicError::from(sqlx);
+        assert_eq!(public.code, OrmErrorCode::ServiceUnavailable);
+        assert!(public.internal.is_some());
     }
 
     #[test]

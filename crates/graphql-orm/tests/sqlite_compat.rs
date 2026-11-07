@@ -1,8 +1,18 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
 #![cfg(feature = "sqlite")]
 
 use async_graphql::{Schema, SimpleObject};
 use graphql_orm::prelude::*;
 use sqlx::Row;
+
+/// The query counter is process-global, so every test that issues counted queries
+/// holds this for its whole body.
+static QUERY_COUNT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(
     GraphQLEntity,
@@ -143,6 +153,7 @@ async fn setup_pool() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn std::error::Error>>
 {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
     sqlx::query("PRAGMA foreign_keys = ON")
         .execute(&pool)
@@ -289,6 +300,7 @@ async fn current_macros_work_against_graphql_orm_runtime() -> Result<(), Box<dyn
 #[tokio::test]
 async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
     let pool = setup_pool().await?;
     let database = graphql_orm::db::Database::builder(pool)
         .max_page_limit(Some(2))
@@ -392,6 +404,7 @@ async fn page_limit_cap_applies_to_top_level_and_nested_relation_lists()
 
 #[tokio::test]
 async fn nested_relations_batch_with_and_without_args() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = QUERY_COUNT_LOCK.lock().await;
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
     sqlx::query("PRAGMA foreign_keys = ON")
         .execute(&pool)

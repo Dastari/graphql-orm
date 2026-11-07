@@ -721,3 +721,60 @@ A future visual browser is a separate capability broker, not hosted search and
 not an app-server method. Its observation-first, one-shot, host-isolated design
 is recorded in [the visual-browser broker plan](visual-browser-broker.md).
 No browser capability is implemented by the contracts in this guide.
+
+## Codex executable version admission (AI 0.123.0)
+
+Opt in with an exact supported release declaration; no declaration preserves existing
+behavior. No data migration is needed. This in-memory policy does not change
+`AI_SCHEMA_MODULE_VERSION`.
+
+```rust,ignore
+let registration = registration.with_supported_versions(
+    AiCodexAppServerSupportedVersions::exact(["0.165.0", "0.166.0"])?
+);
+let status = pool.check_version_readiness(&registration).await;
+if !status.is_ready() {
+    // Include the content-free status.reason_code() in service readiness.
+}
+```
+
+When Codex self-updates, stop admitting model work until the new release is reviewed,
+then update both the exact allow-list and the registration's executable digest/version.
+Do not silently rebind retained sessions. Readiness is advisory compatibility evidence,
+not authorization, protocol negotiation, or schema/restore readiness. It spends no model
+budget and never calls the budgeted dynamic-tool readiness probe.
+
+Custom factories keep compiling: `observe_version` defaults to missing, and the existing
+launched-process constructor supplies no evidence. With a declaration these defaults
+fail closed. Implement `observe_version` and attach fresh
+`AiCodexAppServerVersionObservation::from_version_output` evidence using
+`AiCodexAppServerLaunchedProcess::with_version_observation` on every launch.
+Use only successful bounded UTF-8 `codex-cli major.minor.patch` stdout (128 bytes maximum,
+one optional LF/CRLF), with strict numeric release components bounded to u32, no leading
+zeroes, ranges, wildcards, prereleases or build metadata. Declarations accept 1–64 entries.
+Verify the observed SHA-256 from the actual immutable image; metadata is insufficient.
+Run the fixed absolute executable directly, without a shell, with cleared environment,
+disposable empty HOME/CODEX_HOME and cwd, discarded stderr, bounded output/deadline and
+process-tree cleanup. Preserve the verified image across probing and execution using an
+immutable executable or race-safe image handle; checking a replaceable path is insufficient.
+The pool bounds advisory observation by its startup timeout. Factories own subprocess
+cleanup even if the observation future is cancelled. Each model launch must attest again,
+even after successful startup readiness. Refusal drops/kills the child and releases admission
+before thread creation or any turn. Existing strict protocol validation remains in force.
+
+Codes: `codex_version_not_declared` skips policy; `codex_version_supported` passes;
+`codex_version_unsupported`, `codex_version_missing`, `codex_version_unparseable`,
+`codex_version_probe_failed` and `codex_version_identity_mismatch` refuse. Only supported
+passes a declared policy. Unsupported takes precedence over identity mismatch for an
+out-of-list version. Log codes only, never paths, raw output or user-agent text.
+Failed or timed-out initialization under a declaration reports `codex_version_probe_failed`
+because no successful launch observation exists. Launch refusals are proven pre-transport provider failures, with the existing clean
+reservation-release and retry refusal classification; they are not uncertain model effects.
+Strict detached deletion and fresh absence confirmation remain available during version
+refusal and grant no turn authority. All existing sandbox and integrity checks still apply.
+
+Real credential-free evidence from host binaries 0.165.0 and 0.166.0: `--version` reports
+`codex-cli <release>` with LF. Initialize returns userAgent, codexHome and platform strings,
+without a structured version field. User-agent text is not parsed. The ignored
+`real_binary_version_only` test uses `GRAPHQL_ORM_AI_CODEX_VERSION_BIN`; it creates an
+empty disposable home, clears environment and runs only `--version`.

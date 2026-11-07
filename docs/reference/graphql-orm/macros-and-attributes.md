@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-01
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -218,8 +218,10 @@ pub account: Option<Account>;
 ```
 
 An entity with generated relation fields derives `GraphQLRelations` and `SimpleObject` and declares
-`#[graphql(complex)]`; it can't use the generated object. Each relation target also needs a
-`BatchLoadEntity` implementation
+`#[graphql(complex)]`; it can't use the generated object, because `GraphQLEntity` and the relation
+resolvers would both implement the GraphQL type. `GraphQLRelations` without `#[graphql(complex)]` is
+a compile error that names this declaration. The one exception is an entity with `schema_only = true`,
+which has no generated object. Each relation target also needs a `BatchLoadEntity` implementation
 ([#285](https://github.com/Dastari/graphql-orm/issues/285)). For generated relations the keys come
 from the relation, so `batch_column` and `batch_key_from_row` can name the primary key:
 
@@ -235,6 +237,76 @@ impl BatchLoadEntity for Account {
 `GraphQLRelations` adds generated `NodeId` (when `node_id` is enabled) and
 `RecordVersion` (for an exported managed version) to its complex object.
 They use the same encoding and declared version-field policy as generated objects.
+
+This is the whole supported declaration for an entity with a generated `NodeId`, a managed
+`RecordVersion` and a generated collection relation, with generated queries and subscriptions and
+no generated mutations. Its parent is compiled under the default names and under all three
+Pascal-case features by `crates/graphql-orm/tests/node_id_version_relations.rs`:
+
+```rust,ignore
+use graphql_orm::async_graphql::SimpleObject;
+use graphql_orm::prelude::*;
+
+#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql(rename_fields = "PascalCase")]
+#[graphql_entity(backend = "sqlite", schema_policy = "managed", node_id,
+    table = "probe_children", plural = "ProbeChildren", default_sort = "id ASC", keyset = "id asc")]
+pub struct ProbeChild {
+    #[primary_key]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[filterable(type = "string")]
+    pub parent_id: String,
+    #[graphql_orm(version = "managed", default = "0")]
+    pub row_version: i64,
+}
+
+#[derive(GraphQLEntity, GraphQLOperations, GraphQLRelations, SimpleObject,
+    Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[graphql(complex, rename_fields = "PascalCase")]
+#[graphql_entity(backend = "sqlite", schema_policy = "managed", node_id,
+    table = "probe_parents", plural = "ProbeParents", default_sort = "id ASC", keyset = "id asc")]
+pub struct ProbeParent {
+    pub label: String,
+    #[primary_key]
+    #[filterable(type = "string")]
+    #[sortable]
+    pub id: String,
+    #[graphql_orm(version = "managed", default = "0")]
+    pub row_version: i64,
+    #[graphql(skip)]
+    #[serde(default)]
+    #[relation(target = "ProbeChild", from = "id", to = "parent_id",
+        multiple, emit_fk = false, propagate_change = "none")]
+    pub children: Vec<ProbeChild>,
+}
+
+impl BatchLoadEntity for ProbeChild {
+    fn batch_column() -> &'static str { "id" }
+    fn batch_key_from_row(row: &graphql_orm::DbRow) -> Result<String, graphql_orm::sqlx::Error> {
+        use graphql_orm::sqlx::Row;
+        row.try_get("id")
+    }
+}
+
+schema_roots! {
+    backend: "sqlite",
+    schema_policy: "managed",
+    generated_mutations: "none",
+    entities: [ProbeParent, ProbeChild],
+}
+```
+
+`ProbeParent` exports `NodeId: ID!`, `RecordVersion: Int!`, its persisted scalars including
+`RowVersion`, and `Children(...)`, a connection of `ProbeChild`. The child is a plain generated
+object with the same identity and version. `ProbeParent` is not a relation target here, so it needs
+no `BatchLoadEntity`. A relation field is not a `Changed`
+payload field: `Changed` snapshots serve `NodeId`, `RecordVersion` and persisted scalars, and a
+selection of `Children` is refused before registration.
+A host row policy over a relation target also needs `Database::with_authorized_scan_config`.
+`propagate_change = "up"` on a relation delivers a `PROPAGATED` event to the target's `Changed`
+stream; `"none"` delivers none.
 Both are available in `Changed` snapshots; relations and arbitrary computed fields
 still require a query refresh. Selecting `NodeId` requires every primary-key field
 to remain subscribable and pass its read policy.

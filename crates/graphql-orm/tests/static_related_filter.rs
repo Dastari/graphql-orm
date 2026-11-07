@@ -8,9 +8,11 @@ mod graphql_case;
 use graphql_case::{argument_name as a, field_name as f, resolver_name as r};
 use serde_json::{Value, json};
 #[cfg(feature = "mssql")]
+#[allow(dead_code)]
 #[path = "support/owned_mssql.rs"]
 mod owned_mssql;
 #[cfg(feature = "postgres")]
+#[allow(dead_code)]
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 #[cfg(feature = "sqlite")]

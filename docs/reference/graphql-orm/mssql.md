@@ -597,3 +597,7 @@ exact image digest, proves insert wakeup,
 re-registration after reconnect, invalid-query delivery, and expiry, then verifies
 container cleanup. The listener test principal is explicitly denied table writes
 and table creation. SQL Server requires sufficient available memory to start.
+
+Paginated batched relation reads preserve SQL expression projections, including
+the exact decimal cast used for `mssql_money`, when joining ranked keys back to
+full rows. SQL Server execution is covered by the owned `mssql_integration` test.

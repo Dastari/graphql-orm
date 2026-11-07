@@ -4031,6 +4031,14 @@ fn classify_background_retrieval_error(
                 "provider_response_credential_unavailable",
             ))
         }
+        #[cfg(feature = "provider-codex-app-server")]
+        ProviderError::CodexVersionRefused(_) => {
+            AiOpenAiBackgroundRetrievalAttempt::RecoveryRequired(background_retrieval_failure(
+                claim,
+                BackgroundRetrievalFailureDisposition::RecoveryRequired,
+                "provider_response_retrieval_rejected",
+            ))
+        }
         ProviderError::InvalidConfiguration(_)
         | ProviderError::InvalidRequest
         | ProviderError::EgressDenied

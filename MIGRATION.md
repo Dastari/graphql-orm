@@ -10,6 +10,86 @@ supersedes: []
 
 # Migration Guide
 
+## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
+
+Upgrade if you run ORM 0.92.0 or 0.93.0 with a paginated relation whose target has a column read through a SQL expression: MSSQL `mssql_money`, confirmed by a native test, or a PostgreSQL spatial column, which takes the same code path but was not run. Those relations return `INTERNAL_ERROR` on those two versions. The failure exposes no data. Detect it by that error on a paginated relation whose target declares `mssql_money` or a spatial field. No data migration is needed, and unpaginated reads were not affected. Test fixtures and CI backend lanes also change, with no consumer effect.
+
+## 0.93.0 to 0.94.0: relations beside a generated object
+
+This is breaking for one shape. No data migration. Entities that already compile need no change, with one exception: a
+`GraphQLSchemaEntity` that also derives `GraphQLRelations` and has relation fields now fails to compile
+with a message naming `schema_only = true`; add `schema_only = true` to its `#[graphql_entity(...)]`.
+An entity that derives `GraphQLEntity` with `GraphQLRelations` and relation fields but no
+`#[graphql(complex)]` never compiled; it now reports one error. Derive `async_graphql::SimpleObject`,
+add `#[graphql(complex)]` and `#[graphql(skip)]` on each relation field, and give each target a
+`BatchLoadEntity` impl; `node_id` and a managed version then work on that entity. See
+[relations and foreign keys](docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
+Detect it with `cargo check`: the error starts "GraphQLRelations needs a complex object".
+## 0.93.0 to 0.94.0: single-row callback error privacy
+
+This security-improving public error contract change is breaking for consumers
+reading driver text from generated single-row create, update, upsert or delete
+errors, including default propagating `notify_with` failures. Generated field-policy and
+entity-policy callback boundaries and generated single-row row-read callbacks
+follow the same rule; clients reading their driver text are also affected. Those callbacks now
+use the bulk refusal classifier: when `async_graphql::Error.source` is `Some`
+and there is no string `extensions.code`, the client receives the safe ORM
+category/message/code. Direct SQLx sources use the same SQLx category mapping as
+bulk; other sources receive `internal error` / `INTERNAL_ERROR`.
+
+Here “source” means the error's own type-erased `source` field is populated,
+not that `std::error::Error::source()` on the wrapped value returns another error.
+The blanket `From<T: Display>` used by `?` populates it even for a leaf error.
+A host's custom `From` returning `Error::new` leaves it empty and remains an
+authored refusal, even without a code. Authored messages, codes and all extensions
+are preserved, including source-bearing errors with an explicit string code.
+
+Audit callback `?` conversions and client assertions that match database text.
+For text intentionally safe for clients, explicitly return `Error::new(message)`
+or set a string `code` extension. Detect the change by testing failing callbacks:
+responses now carry safe ORM codes instead of driver details. Internal diagnostics
+follow the existing bulk server-only reporting path controlled by
+`GRAPHQL_ORM_LOG_INTERNAL_ERRORS`; no new logging destination is added.
+Notifications still run after commit, so a propagated notification error does
+not undo a committed write. No data migration or SDL change is needed.
+## 0.93.0 to 0.94.0: exact receiver-purpose admission (opt in)
+
+No data migration is needed. Existing callers and signed operation formats are unchanged.
+Hosts adopting admission enable ORM `receiver-admission` (which enables `auth-agql`), register exact reviewed named queries,
+issue `graphql_orm_receiver_purpose` with `ReceiverPurposeV1::bind`, and call
+`AgqlReceiverRegistry::admit` on bounded raw HTTP JSON before constructing request context.
+Use the sealed result to obtain scopes or `into_request`. Old tokens without the claim
+are refused on this new path. A token carrying the claim cannot skip admission: the ORM's
+identity paths refuse it or give it no authority, on every route. Credentials without the claim
+are unchanged, and nothing issues that claim unless a host adopts this. Supply authoritative
+parent-session and current scope/tenant policy adapters. See
+[receiver admission reference](docs/reference/receiver-admission.md).
+## Codex executable version admission (AI 0.123.0)
+
+Opt in to exact release matching; no declaration preserves existing behavior.
+No data migration is needed; `AI_SCHEMA_MODULE_VERSION` is unchanged because
+this is an in-memory policy.
+
+```rust,ignore
+let registration = registration.with_supported_versions(
+    AiCodexAppServerSupportedVersions::exact(["0.165.0", "0.166.0"])?
+);
+let status = pool.check_version_readiness(&registration).await;
+if !status.is_ready() {
+    // Feed status.reason_code() into existing service readiness; admit no model work.
+}
+```
+
+On a Codex self-update, review the new release and update both the allow-list and
+the registration's executable SHA-256/version. Missing, malformed, failed, unsupported
+or identity-mismatched observations fail closed when declared. Custom factories must
+implement `observe_version` and attach fresh `AiCodexAppServerVersionObservation`
+through `AiCodexAppServerLaunchedProcess::with_version_observation` on every launch;
+the additive defaults report missing. Readiness never uses credentials or model budget.
+Launch refusal is proven pre-transport; strict deletion and fresh absence confirmation
+remain available without turn authority. See the [provider contract](crates/graphql-orm-ai/docs/provider-sessions-and-hosted-activity.md#codex-executable-version-admission-ai-01230) for image-binding,
+isolation, bounds, failure codes and migration details.
+
 ## 0.92.0 to 0.93.0: after-commit callback documented
 
 No action and no data migration is needed. `MutationContext::defer` keeps its signature and behaviour; it

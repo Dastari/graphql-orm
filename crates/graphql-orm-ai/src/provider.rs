@@ -2209,6 +2209,11 @@ pub enum ProviderError {
     /// A retained thread failed before business input crossed the turn boundary.
     #[error("provider retained turn rejected before dispatch: {0}")]
     RetainedTurnRejected(AiCodexRetainedTurnRejection),
+    /// Fresh executable evidence refused a Codex launch before any thread/model operation.
+    /// Carries only a closed content-free compatibility status.
+    #[cfg(feature = "provider-codex-app-server")]
+    #[error("provider launch refused: {}", .0.reason_code())]
+    CodexVersionRefused(crate::providers::AiCodexAppServerVersionReadiness),
     /// Stream was cancelled.
     #[error("provider stream cancelled")]
     Cancelled,
@@ -2225,6 +2230,8 @@ impl ProviderError {
     /// credentials, cursors, endpoints, or authorization details.
     pub const fn safe_category(&self) -> AiProviderFailureCategory {
         match self {
+            #[cfg(feature = "provider-codex-app-server")]
+            Self::CodexVersionRefused(_) => AiProviderFailureCategory::ProviderRejection,
             Self::InvalidConfiguration(_)
             | Self::InvalidRequest
             | Self::CredentialUnavailable

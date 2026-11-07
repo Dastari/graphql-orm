@@ -1,3 +1,10 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
+
 //! Denial/absence equivalence at generated relationship boundaries.
 use graphql_orm::async_graphql::{Context, SimpleObject};
 use graphql_orm::futures::{StreamExt, future::BoxFuture};

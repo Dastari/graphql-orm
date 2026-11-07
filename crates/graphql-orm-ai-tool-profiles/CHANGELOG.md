@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.21.1
+
+Re-export receiver-purpose bindings and use the shared exact document hash without changing existing signed encodings or profile fingerprints. No data migration is needed. Fixes #352.
+
 ## 0.21.0 (unreleased)
 
 Fixes #327: expose content-free retry refusal reasons while preserving uncertain classification for possible provider effects.

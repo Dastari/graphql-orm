@@ -258,7 +258,10 @@ jobs:
       # migration API fixture, so only PostgreSQL and SQL Server run here.
       - name: Verify ORM PostgreSQL and SQL Server lanes
         run: |
-          cargo check -p graphql-orm --no-default-features --features postgres --locked
+          for backend in postgres mssql sqlite,mssql; do
+            cargo check -p graphql-orm --locked --no-default-features --features "$backend" --all-targets
+            cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features "$backend" --all-targets -- -D warnings
+          done
           cargo test -p graphql-orm --no-default-features --features postgres --test federation_entity_keys_postgres --locked
           cargo test -p graphql-orm --locked --no-default-features --features postgres --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory --test migration_planner --test migration_apply --test legacy_migration_history -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql --test runtime_migrations_unsupported
@@ -296,6 +299,8 @@ jobs:
             current_authority authorization_mode authorized_pagination \
             subscription_release_authorization subscription_provenance_authorization \
             subscription_repository_provenance
+      - name: Require exact receiver-purpose admission
+        run: bash scripts/run-security-test-targets.sh sqlite,receiver-admission receiver_admission
 
   orm-security-portable:
     if: inputs.validation_profile == 'full'
@@ -337,8 +342,14 @@ jobs:
           ref: ${{ inputs.target_ref }}
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Verify TLS, writes, and retained query notifications on owned servers
-        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications -- --ignored --test-threads=1
+      - name: Execute the complete owned MSSQL lane
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: scripts/run-owned-database-lanes.sh mssql
+      - name: Verify TLS and retained query notifications on owned servers
+        env:
+          GRAPHQL_ORM_TEST_MSSQL_PULL: missing
+        run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_notifications -- --ignored --test-threads=1
 
   ai-provider-matrix:
     if: inputs.validation_profile == 'full'

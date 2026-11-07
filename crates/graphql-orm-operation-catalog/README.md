@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
+Version `0.7.1` adds pure receiver-purpose bindings and canonical hash functions with golden vectors. Existing catalogue fingerprints and signed encodings are unchanged; no data migration is needed.
+
 Version 0.7.0 adds `GraphqlEntitySemanticMetadata::record_version`, the field
 carrying the entity's optimistic-concurrency record version and its
 `GraphqlRecordVersionMode` (`managed` or `cas`). It is validated to name a
