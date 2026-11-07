@@ -436,12 +436,7 @@ pub fn admit_subscription_keys<B: OrmBackend>(
     let Some(keys) = keys else {
         return Ok(None);
     };
-    if has_key || keys.len() > db.subscription_key_limit() {
-        return Err(
-            OrmPublicError::new(crate::graphql::errors::OrmErrorCode::InvalidInput)
-                .into_graphql_error(),
-        );
-    }
+    admit_subscription_key_count(has_key, keys.len(), db.subscription_key_limit())?;
     Ok(Some(Arc::new(
         keys.iter()
             .map(|values| crate::graphql::loaders::RelationKey::from_sql_values(values))
@@ -824,7 +819,7 @@ pub const SUBSCRIPTION_CONTINUITY_LOST: &str = "SUBSCRIPTION_CONTINUITY_LOST";
 /// event source closed, for example because the channel was replaced.
 pub const SUBSCRIPTION_SOURCE_CLOSED: &str = "SUBSCRIPTION_SOURCE_CLOSED";
 
-fn subscription_end(code: &'static str, message: &'static str) -> async_graphql::Error {
+pub(crate) fn subscription_end(code: &'static str, message: &'static str) -> async_graphql::Error {
     use async_graphql::ErrorExtensions;
     async_graphql::Error::new(message).extend_with(|_, extensions| extensions.set("code", code))
 }
@@ -865,4 +860,19 @@ where
             )),
         }
     })
+}
+
+/// Shared admission before deduplication or row reads.
+pub(crate) fn admit_subscription_key_count(
+    has_key: bool,
+    count: usize,
+    limit: usize,
+) -> async_graphql::Result<()> {
+    if has_key || count > limit {
+        return Err(
+            OrmPublicError::new(crate::graphql::errors::OrmErrorCode::InvalidInput)
+                .into_graphql_error(),
+        );
+    }
+    Ok(())
 }

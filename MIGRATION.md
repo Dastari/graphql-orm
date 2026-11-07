@@ -10,6 +10,44 @@ supersedes: []
 
 # Migration Guide
 
+## 0.94.1 to 0.95.0: opt-in runtime identity and live contracts
+
+Breaking Rust IR construction: add `node_identity: None` and
+`live_subscriptions: None` to existing `RuntimeCollection` literals. Handle the
+new `InvalidNodeIdentity` and `InvalidLiveSubscriptions` diagnostic variants in
+exhaustive matches. `RuntimeReadPurpose` also gains `NodeLookup`,
+`SubscriptionRegistration` and `SubscriptionDelivery`; authorize these explicitly
+if using exhaustive purpose dispatch. Use `RuntimeReadCheck::operation_purpose`
+for that distinction on relation-filter targets as well. Older serialized schemas omit both declarations and keep
+byte-identical canonical fingerprints, SDL and operation catalogs. No data
+migration is needed for existing consumers that remain opted out.
+
+Opted-in hosts select an existing integer version column, remove it from client
+write inputs, compare it through `expected`, and rebuild the runtime mutation
+environment/request fingerprint. If a column is needed, add/backfill it through
+an ordinary owned migration first. The original `id` is preserved. Live collections use derived `Int`/`UUID`
+scalars in shared mutation/subscription key inputs; stored scalar fields retain
+their existing runtime types. Install a
+trusted committed-event source and current registration/delivery authority; wire
+publication through existing transaction hooks and `MutationContext::defer`.
+Initial visibility requires current registration and delivery eligibility, so
+authorizers must allow repeated delivery-purpose checks without a frame.
+Every removal requires the `deleted_images` opt-in and an authorized captured
+pre-image, including an update that reloads after deletion. Native-RLS profiles
+serve visible current-row updates but do not emit removals.
+Deleted images require independent application policy and an asserted canonical
+storage profile; native-RLS profiles explicitly refuse that opt-in. Custom opaque
+subscription roots cannot yet be mixed with generated live roots; this fails at
+composition, rather than dropping either root's fields. Derived behavior is unchanged.
+
+Regenerate opted-in client schemas/catalogs, handle uppercase continuity errors
+with resubscribe/refetch, and keep database-auth/cursor partitions current.
+The automatic AI query compiler keeps typed lists usable; the polymorphic node
+root is deliberately not provider-exportable. See the canonical
+[runtime subscriptions guide](docs/reference/graphql-orm/runtime-subscriptions.md)
+for declarations, producer ordering, evidence rules and client compatibility.
+AI 0.123.1 updates compatible fixtures only; no persistent AI schema migration.
+
 ## 0.94.0 to 0.94.1: runtime search catalog parity
 
 No data migration or consumer code change is needed. Runtime-schema hosts that

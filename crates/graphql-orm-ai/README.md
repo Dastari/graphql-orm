@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.123.1` adopts ORM 0.95.0 runtime collection declarations in its contract fixtures and verifies NodeId/live catalogs in the AI compiler. No AI runtime or persistent schema change; no data migration.
+
 Version `0.123.0` uses shared canonical bindings for private remote execution, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no data migration is needed.
 
 Version `0.122.0` adopts tool profiles `0.21.0`, preserves proven pre-transport failure classification and exposes closed retry refusal reasons. No data migration is needed.

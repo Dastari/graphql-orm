@@ -16,7 +16,9 @@ for historical context.
 
 ## Unreleased
 
-AI **0.123.0**, ORM runtime/macros **0.94.1**, tool profiles **0.21.1**, operation catalog **0.7.1**.
+- **Breaking (ORM/macros 0.95.0; AI 0.123.1 fixture compatibility):** runtime collections gain optional `node_identity` and `live_subscriptions` declarations. Opted-in objects preserve `id`, expose canonical `NodeId` and managed `RecordVersion`, join local `node(NodeId:)`, and provide bounded keyed Changed streams through a host committed-event source. Registration, reload and final release recheck current host authority; deleted images default-deny and are explicitly unsupported on native-RLS profiles. Queue loss, restart and revision signals use the existing uppercase continuity frames without keys/counts. Existing version columns need no data migration; ordinary migrations apply when a host adds one. Serialized opt-out schemas, their fingerprints and derived APIs are unchanged. Related to #368.
+
+AI **0.123.1**, ORM runtime/macros **0.95.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 
 - **Fixed (ORM/macros 0.94.1):** searchable runtime list operations now describe `search: RuntimeSearchInput` in their semantic catalog, so runtime-schema hosts can compose them for the AI query compiler. Non-searchable lists and relation pages are unchanged. The single-backend runtime GraphQL example is also gated out of mixed SQLite/MSSQL builds with `runtime-graphql`; CI now checks and lints that configuration. Related to #368.
 

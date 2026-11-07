@@ -32,6 +32,8 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind) -> RuntimeField {
 
 fn collection(id: &str, name: &str, plural: &str, fields: Vec<RuntimeField>) -> RuntimeCollection {
     RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         id: cid(id),
         api_type_name: name.into(),
         api_plural_name: plural.into(),

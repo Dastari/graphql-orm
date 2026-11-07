@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.123.0 to 0.123.1: runtime catalog contract fixtures
+
+No data migration, public AI API or persistent AI schema change. This patch gives
+changed contract fixtures a new package identity. The fixtures adopt the two
+optional ORM 0.95.0 runtime collection fields and prove typed query compilation
+with local NodeId/live metadata. Runtime-schema hosts follow the root ORM
+migration guide; `AI_SCHEMA_MODULE_VERSION` is unchanged.
+
 ## 0.122.0 to 0.123.0: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.

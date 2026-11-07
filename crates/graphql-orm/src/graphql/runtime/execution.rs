@@ -40,6 +40,9 @@ pub struct RuntimeReadCheck<'a> {
     pub relation_filters: Vec<(&'a RuntimeRelationHandle, RuntimeRelationQuantifier)>,
     /// Why this layer is read.
     pub purpose: RuntimeReadPurpose,
+    /// Originating read purpose, retained on relation-filter checks. This is `Select`,
+    /// `NodeLookup`, `SubscriptionRegistration` or `SubscriptionDelivery`, never `RelationFilter`.
+    pub operation_purpose: RuntimeReadPurpose,
     /// The full-text search this layer carries, if any. Only root lists of
     /// searchable collections accept `search`; every other layer reports none.
     /// Each searchable field also appears in `filter_operations` as `"search"`.
@@ -76,6 +79,12 @@ impl RuntimeReadSearchCheck {
 pub enum RuntimeReadPurpose {
     /// Records of this layer are selected and returned.
     Select,
+    /// A local `node(NodeId:)` point read.
+    NodeLookup,
+    /// Admission and initial visibility fence for a keyed subscription.
+    SubscriptionRegistration,
+    /// Current disclosure eligibility, including initial visibility and committed-event reloads.
+    SubscriptionDelivery,
     /// The layer is the target of a relation predicate on `relation`. Nothing is
     /// returned; the grant's row predicate restricts which related rows can match,
     /// and an `authorization_denied` error makes every related row non-matching.
@@ -93,6 +102,16 @@ impl RuntimeReadGrant {
 }
 /// Hosts authorize every field, operator, traversal and count in the check.
 pub trait RuntimeReadAuthority: Send + Sync + 'static {
+    /// Independently authorize a captured image for any removal, including an
+    /// update that reloads as absent, and every dependency of
+    /// `required_row`. Missing evidence must deny. Native RLS cannot grant here.
+    fn authorize_deleted_image<'a>(
+        &'a self,
+        _check: super::RuntimeDeletedImageCheck<'a>,
+    ) -> BoxFuture<'a, Result<(), RuntimeGraphqlError>> {
+        Box::pin(async { Err(RuntimeGraphqlError::denied()) })
+    }
+
     /// Independently release a transaction-captured record after confirmed commit.
     /// Missing policy-required values must deny; this callback cannot roll back work.
     fn authorize_mutation_result<'a>(
@@ -455,7 +474,46 @@ impl<B: RuntimeReadBackend> Guard<B> {
         let selected = planner.selections(&operation.node.selection_set.node, root_type, 0)?;
         let mut plans = Vec::new();
         let mut output_shapes = BTreeMap::new();
+        let mut nodes = Vec::new();
+        let mut values = BTreeMap::new();
         for field in selected {
+            if field.name.node == "node"
+                && self.modules.iter().any(|m| {
+                    m.schema
+                        .schema()
+                        .collections
+                        .iter()
+                        .any(|c| c.node_identity.is_some())
+                })
+            {
+                let key = field.response_key().node.to_string();
+                match super::live::prepare_node(
+                    &self.modules,
+                    &field,
+                    &document,
+                    &variables,
+                    limits,
+                )? {
+                    Some((plan, identity, typename)) => {
+                        planner.cost = planner.cost.checked_add(plan.cost)?;
+                        let shape = OutputShape::compile(
+                            &mut planner,
+                            &ctx.schema_env.registry,
+                            &field.selection_set.node,
+                            &typename,
+                            0,
+                        )?;
+                        output_shapes.insert(key, shape);
+                        nodes.push((plan, identity, typename));
+                    }
+                    None => {
+                        output_shapes.insert(key.clone(), OutputShape { fields: Vec::new() });
+                        values.insert(key, Value::Null);
+                    }
+                }
+                continue;
+            }
+
             for module in &self.modules {
                 if let Some(c) = module
                     .schema
@@ -476,12 +534,20 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 }
             }
         }
-        if plans.is_empty() {
-            return Ok(Results(BTreeMap::new(), BTreeMap::new()));
+        planner.cost.admit(limits)?;
+        if plans.is_empty() && nodes.is_empty() {
+            let mut bytes = 0;
+            for (key, value) in &values {
+                output_shapes[key].measure(value, &mut bytes, limits.max_response_bytes)?;
+            }
+            return Ok(Results(values, BTreeMap::new()));
         }
         let request = request.ok_or_else(|| RuntimeGraphqlError::new("authorization_missing"))?;
         // Complete all layers' grants and cursor framing checks before any ORM I/O.
         for plan in &mut plans {
+            authorize(plan, request, self.protection.as_ref(), limits).await?;
+        }
+        for (plan, _, _) in &mut nodes {
             authorize(plan, request, self.protection.as_ref(), limits).await?;
         }
         let mut executor = Executor {
@@ -530,7 +596,22 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 .map_err(query_error)?;
             prepared.push(read);
         }
-        let mut values = BTreeMap::new();
+        for (plan, key, typename) in nodes {
+            let mut value = point(
+                &self.database,
+                request,
+                &plan,
+                &key,
+                self.protection.as_ref(),
+                limits,
+            )
+            .await?
+            .unwrap_or(Value::Null);
+            if let Value::Object(values) = &mut value {
+                values.insert(Name::new(":node-type"), Value::String(typename));
+            }
+            values.insert(plan.response_key, value);
+        }
         for (plan, read) in plans.into_iter().zip(prepared) {
             let value = executor.root(&plan, read).await?;
             values.insert(plan.response_key, value);
@@ -565,7 +646,8 @@ pub(super) fn authorize<'a, B: RuntimeReadBackend>(
                 return Err(RuntimeGraphqlError::new("invalid_cursor"));
             }
         }
-        if plan.module.options.cursor_profile == RuntimeCursorProfile::AuthenticatedEncryption
+        if !plan.point_read
+            && plan.module.options.cursor_profile == RuntimeCursorProfile::AuthenticatedEncryption
             && request
                 .scope
                 .as_ref()
@@ -603,7 +685,8 @@ pub(super) fn authorize<'a, B: RuntimeReadBackend>(
                     .iter()
                     .map(|(relation, quantifier)| (relation, *quantifier))
                     .collect(),
-                purpose: RuntimeReadPurpose::Select,
+                purpose: plan.purpose,
+                operation_purpose: plan.purpose,
                 search: plan.search.as_ref().map(RuntimeReadSearchCheck::of),
             })
             .await?;
@@ -644,6 +727,7 @@ pub(super) fn authorize<'a, B: RuntimeReadBackend>(
             .validate_graphql_backend(B::DIALECT)
             .map_err(query_error)?;
         for child in &mut plan.children {
+            child.purpose = plan.purpose;
             authorize(child, request, protection, limits).await?;
         }
         Ok(())
@@ -685,6 +769,7 @@ async fn relation_grants<B: RuntimeReadBackend>(
                     .map(|(relation, quantifier)| (relation, *quantifier))
                     .collect(),
                 purpose: RuntimeReadPurpose::RelationFilter(site.quantifier),
+                operation_purpose: plan.purpose,
                 search: None,
             })
             .await;
@@ -759,7 +844,9 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
         plan: &Plan,
         parent: Option<&RuntimeParentAnchor>,
     ) -> Result<Option<RuntimeCursorContext>, RuntimeGraphqlError> {
-        if plan.module.options.cursor_profile == RuntimeCursorProfile::Unprotected {
+        if plan.point_read
+            || plan.module.options.cursor_profile == RuntimeCursorProfile::Unprotected
+        {
             return Ok(None);
         }
         let protection = self
@@ -971,6 +1058,15 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                     .api_name;
                 values.insert(Name::new(name), value);
             }
+            super::live::insert_identity_fields(
+                &plan.module,
+                metadata,
+                &plan.collection,
+                record,
+                plan.node_id,
+                plan.record_version,
+                &mut values,
+            )?;
             nodes.push(Value::Object(values));
         }
         Ok(nodes)
@@ -1045,6 +1141,17 @@ impl<B: RuntimeReadBackend> Executor<'_, B> {
                 &super::schema::relation_output_key(&child.field_name, &child.response_key),
                 values,
             )?;
+        }
+        if plan.point_read {
+            return Ok(object([(
+                "edges",
+                Value::List(
+                    nodes
+                        .into_iter()
+                        .map(|node| object([("node", node)]))
+                        .collect(),
+                ),
+            )]));
         }
         let connection = RuntimeConnection {
             edges: connection
@@ -1339,4 +1446,65 @@ mod alias_tests {
         };
         assert!(repeated.measure(&value, &mut 0, bytes).is_err());
     }
+}
+
+/// One authorized complete-key read through the existing anchored executor.
+pub(super) async fn point<B: RuntimeReadBackend>(
+    database: &Database<B>,
+    request: &RuntimeGraphqlRequest<B>,
+    plan: &Plan,
+    key: &RuntimeKey,
+    protection: Option<&Protection>,
+    limits: RuntimeGraphqlLimits,
+) -> Result<Option<Value>, RuntimeGraphqlError> {
+    let mut plan = plan.clone();
+    let identity = plan
+        .module
+        .schema
+        .runtime_identity_predicate(key)
+        .map_err(query_error)?;
+    plan.predicate = Some(match plan.predicate.take() {
+        Some(predicate) => plan
+            .module
+            .schema
+            .runtime_and(&plan.collection, vec![predicate, identity], limits.query)
+            .map_err(query_error)?,
+        None => identity,
+    });
+    let read = plan
+        .module
+        .schema
+        .runtime_read_request_with_relation_keys(
+            &plan.collection,
+            &plan.projection,
+            plan.predicate.clone(),
+            plan.order.clone(),
+            RuntimePageRequest::first(1, None),
+            false,
+            &plan.relations(),
+            limits.query,
+        )
+        .map_err(relation_error)?;
+    let mut executor = Executor {
+        database,
+        request,
+        protection,
+        limits,
+        response_bytes: 0,
+        crypto_calls: 0,
+        projection_calls: 0,
+    };
+    let Value::Object(connection) = executor.root(&plan, read).await? else {
+        return Err(invalid());
+    };
+    let Some(Value::List(edges)) = connection.get("edges") else {
+        return Err(invalid());
+    };
+    Ok(edges.first().and_then(|edge| {
+        if let Value::Object(edge) = edge {
+            edge.get("node").cloned()
+        } else {
+            None
+        }
+    }))
 }

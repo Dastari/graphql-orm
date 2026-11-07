@@ -707,3 +707,12 @@ only `AgqlAdmittedReceiverRequest::into_request`. Supply authoritative parent
 sessions and current scope/tenant policy; this proof does not establish MFA or
 replace row/field authorization. WebSocket is refused. See
 [receiver admission](../../docs/reference/receiver-admission.md).
+
+Runtime-schema hosts on ORM 0.95.0 must initialize `RuntimeCollection` literals
+with `node_identity` and `live_subscriptions` (both `None` preserves old behavior).
+Opted-in identities keep `id` unchanged and add local `node(NodeId:)`, `NodeId`
+and a managed `RecordVersion`. Live delivery requires a host committed-event
+source, fresh registration/delivery/release authorization and explicit deleted-image
+policy. Runtime collections support SQLite/PostgreSQL, not MSSQL. Follow the
+[runtime subscription contract](../../docs/reference/graphql-orm/runtime-subscriptions.md)
+and use the existing `MutationContext::defer` commit boundary for publication.

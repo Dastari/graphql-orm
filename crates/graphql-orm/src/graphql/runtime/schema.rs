@@ -320,6 +320,12 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Vec<Type> {
     for c in &module.schema.schema().collections {
         let name = module.object_name(c);
         let mut object = Object::new(&name).description(c.effective_description());
+        if c.node_identity.is_some() {
+            object = object
+                .implement("Node")
+                .field(output("NodeId", TypeRef::named_nn("ID")))
+                .field(output("RecordVersion", TypeRef::named_nn("Int")));
+        }
         let mut filter = InputObject::new(format!("{name}WhereInput"))
             .description(format!("Filter {name} records"))
             .field(

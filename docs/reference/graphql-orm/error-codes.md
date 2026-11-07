@@ -108,3 +108,20 @@ Err(OrmPublicError::from_sqlx(&sqlx_error).into_graphql_error())
 // or
 Err(graphql_error_from_sqlx(sqlx_error))
 ```
+
+## Runtime identity and live streams
+
+IR declarations use `invalid_node_identity` and `invalid_live_subscriptions`.
+Runtime composition refuses missing sources with `subscription_source_missing`,
+unsupported deleted-image/storage profiles with `unsupported_deleted_image_profile`,
+and opaque host/generated subscription root mixing with
+`unsupported_subscription_composition`. Key admission uses
+`subscription_key_limit_exceeded`; unkeyed/null key lists are invalid input.
+Ordinary read/field refusals remain lowercase and never release a partial event.
+
+Runtime live streams deliberately share the generated exceptions:
+`SUBSCRIPTION_CONTINUITY_LOST` and `SUBSCRIPTION_SOURCE_CLOSED` stay uppercase.
+Each is a `next` frame carrying `errors[].extensions.code`, followed by `complete`,
+with no sequence, identifier or dropped count. The host can explicitly signal
+missed batches, restart, restore or schema revisions. See the
+[runtime subscriptions guide](runtime-subscriptions.md#continuity-and-generated-clients).

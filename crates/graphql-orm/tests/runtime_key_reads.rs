@@ -26,6 +26,8 @@ fn definition(composite: bool) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             classification: None,
             description: None,
             id: cid(),
