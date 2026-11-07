@@ -51,6 +51,18 @@ follow the existing bulk server-only reporting path controlled by
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS`; no new logging destination is added.
 Notifications still run after commit, so a propagated notification error does
 not undo a committed write. No data migration or SDL change is needed.
+## Exact receiver-purpose admission (opt in)
+
+No data migration is needed. Existing callers and signed operation formats are unchanged.
+Hosts adopting admission enable ORM `receiver-admission` (which enables `auth-agql`), register exact reviewed named queries,
+issue `graphql_orm_receiver_purpose` with `ReceiverPurposeV1::bind`, and call
+`AgqlReceiverRegistry::admit` on bounded raw HTTP JSON before constructing request context.
+Use the sealed result to obtain scopes or `into_request`. Old tokens without the claim
+are refused on this new path. A token carrying the claim cannot skip admission: the ORM's
+identity paths refuse it or give it no authority, on every route. Credentials without the claim
+are unchanged, and nothing issues that claim unless a host adopts this. Supply authoritative
+parent-session and current scope/tenant policy adapters. See
+[receiver admission reference](docs/reference/receiver-admission.md).
 
 ## 0.92.0 to 0.93.0: after-commit callback documented
 

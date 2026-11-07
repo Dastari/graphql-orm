@@ -17,6 +17,7 @@ compile error naming the fix; no data migration.
 Version 0.94.0 masks source-bearing callback failures without a string `code` in generated
 single-row mutations, matching bulk. Authored refusals retain their message and extensions.
 See the root migration guide; no data migration is needed.
+Version `0.93.1` adds shared exact receiver-purpose bindings and opt-in HTTP admission. Existing signed formats and generated SDL/catalogues are unchanged. No data migration is needed.
 
 Version 0.93.0 documents `MutationContext::defer` as the after-commit callback and pins it with tests;
 there is no API or behaviour change.
@@ -345,6 +346,7 @@ repository reference, or build matching local rustdoc with
 | `mssql` | Tiberius SQL Server reads and deliberate external-schema DML | compatibility constructors remain physically read-only; no managed migrations, backup/restore, search maintenance, or runtime-schema row decoding |
 | `change-journal` | change-journal API surface | does not itself configure a journal |
 | `auth-agql` | one-way `agql-auth` bridge | does not install authentication or grant scopes |
+| `receiver-admission` | exact delegated HTTP query admission; enables `auth-agql` | requires registered contracts and authoritative host adapters; [reference](../../docs/reference/receiver-admission.md) |
 | `router-protocol` | project-neutral generated operation export | does not run a router |
 
 The naming features `resolver-case-*`, `argument-case-*`, and `field-case-*`

@@ -29,3 +29,9 @@ pub use profiles::*;
 pub use query_plans::*;
 pub use tool_media::*;
 pub use tools::*;
+
+/// Shared exact receiver bindings for delegated issuance and admission.
+pub use graphql_orm_operation_catalog::{
+    RECEIVER_PURPOSE_CLAIM, ReceiverPurposeMetadata, ReceiverPurposeV1, canonical_json_hash,
+    exact_document_hash,
+};

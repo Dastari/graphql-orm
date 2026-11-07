@@ -299,6 +299,8 @@ jobs:
             current_authority authorization_mode authorized_pagination \
             subscription_release_authorization subscription_provenance_authorization \
             subscription_repository_provenance
+      - name: Require exact receiver-purpose admission
+        run: bash scripts/run-security-test-targets.sh sqlite,receiver-admission receiver_admission
 
   orm-security-portable:
     if: inputs.validation_profile == 'full'

@@ -9,7 +9,6 @@ pub(crate) use native_preflight::{
     NativePreflightRefusal, NativeToolClassification, native_preflight_failure_code,
 };
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use agql_auth::{Clock, PrincipalReferenceKind, ResolvedPrincipal};
@@ -4447,26 +4446,7 @@ pub(crate) fn provider_call_key(lease: &AiRunLease, provider_call_id: &str) -> S
 }
 
 pub(crate) fn canonical_json_hash(value: &serde_json::Value) -> Result<String, AiError> {
-    let canonical = canonical_json(value);
-    let encoded = serde_json::to_vec(&canonical)
-        .map_err(|_| AiError::InvalidInput("tool arguments are not canonical JSON".to_owned()))?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(values) => {
-            let sorted = values
-                .iter()
-                .map(|(key, value)| (key.clone(), canonical_json(value)))
-                .collect::<BTreeMap<_, _>>();
-            serde_json::Value::Object(sorted.into_iter().collect())
-        }
-        value => value.clone(),
-    }
+    Ok(graphql_orm_ai_tool_profiles::canonical_json_hash(value))
 }
 
 fn valid_audit_reference(value: &str) -> bool {

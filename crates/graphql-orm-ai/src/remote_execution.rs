@@ -1,6 +1,5 @@
 //! Short-lived delegated authority for private remote GraphQL execution.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1054,25 +1053,7 @@ fn request_matches_operation(request: &ToolGraphqlRequest, kind: AiToolOperation
 }
 
 fn canonical_json_hash(value: &serde_json::Value) -> Result<String, ToolExecutionError> {
-    let encoded = serde_json::to_vec(&canonical_json(value))
-        .map_err(|_| ToolExecutionError::Authorization)?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
-fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(values) => {
-            let sorted = values
-                .iter()
-                .map(|(key, value)| (key.clone(), canonical_json(value)))
-                .collect::<BTreeMap<_, _>>();
-            serde_json::Value::Object(sorted.into_iter().collect())
-        }
-        value => value.clone(),
-    }
+    Ok(graphql_orm_ai_tool_profiles::canonical_json_hash(value))
 }
 
 fn stable_text_hash(value: &str) -> String {

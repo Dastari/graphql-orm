@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## Exact receiver-purpose admission (opt in)
+
+No data migration is needed. Existing callers and signed operation formats are unchanged.
+Hosts adopting admission enable ORM `receiver-admission` (which enables `auth-agql`), register exact reviewed named queries,
+issue `graphql_orm_receiver_purpose` with `ReceiverPurposeV1::bind`, and call
+`AgqlReceiverRegistry::admit` on bounded raw HTTP JSON before constructing request context.
+Use the sealed result to obtain scopes or `into_request`. Old tokens without the claim
+are refused on this new path. Supply authoritative parent-session and current scope/tenant
+policy adapters. See [receiver admission reference](../../docs/reference/receiver-admission.md).
+
 ## 0.121.0 to 0.122.0: retry refusal reasons
 
 Retry refusals retain `AI_CONFLICT` and add `extensions.retryRefusal` (`not_failed`, `uncertain`, `already_answered`, `already_disposed`). Rust callers may match `AiError::RetryRefused(AiRetryRefusalReason)`. No data migration is needed; AI schema module remains `0.76.0`.

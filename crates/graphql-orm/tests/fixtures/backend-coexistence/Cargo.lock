@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.122.0"
+version = "0.122.1"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -1345,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",

@@ -3,7 +3,7 @@ title: "GraphQL feature selection"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-10-28
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -72,3 +72,10 @@ The first fails because `GraphiQLSource` is gated off; the second because an
 edge. Hosts opting into `email-validator` separately must review its MPL-2.0
 dependencies. Feature graph and compile evidence is bounded to the selected
 locked lanes, not a broad compatibility claim for arbitrary host graphs.
+
+## Exact delegated receiver admission
+
+`receiver-admission` is an explicit ORM opt-in that enables `auth-agql` plus the
+AST-value and constant-time comparison dependencies used by admission. Existing
+`auth-agql` and default consumers retain their dependency selections and behavior.
+See [receiver admission](receiver-admission.md) for contracts and host duties.

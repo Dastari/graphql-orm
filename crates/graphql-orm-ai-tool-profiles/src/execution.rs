@@ -480,9 +480,7 @@ impl GraphqlOperationContract {
 /// Returns the canonical SHA-256 binding for a server-authored GraphQL document.
 #[doc(hidden)]
 pub fn stable_graphql_document_hash(document: &str) -> String {
-    use sha2::{Digest, Sha256};
-
-    hex::encode(Sha256::digest(document.as_bytes()))
+    graphql_orm_operation_catalog::exact_document_hash(document)
 }
 
 fn valid_sha256_fingerprint(value: &str) -> bool {

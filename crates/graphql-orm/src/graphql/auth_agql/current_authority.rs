@@ -12,7 +12,7 @@ use agql_auth::{
 use async_graphql::{Context, Data, ErrorExtensions, Guard, Request};
 use futures::future::BoxFuture;
 
-use super::auth_bundle_from_principal;
+use super::{auth_bundle_from_principal, is_purpose_bound, project_bundle};
 use crate::db::Database;
 use crate::graphql::auth::AuthSubject;
 use crate::graphql::errors::{OrmErrorCode, OrmPublicError};
@@ -32,6 +32,9 @@ pub struct AgqlAcceptedRequest {
     principal: AuthPrincipal,
     subject: AuthSubject,
     db_context: DbAuthContext,
+    /// Set only by receiver admission. A purpose-bound principal without it is
+    /// refused at every point that installs or reads request identity.
+    receiver_admitted: bool,
 }
 
 impl fmt::Debug for AgqlAcceptedRequest {
@@ -47,13 +50,35 @@ impl fmt::Debug for AgqlAcceptedRequest {
 impl AgqlAcceptedRequest {
     /// Projects an already authenticated principal without altering its grants.
     /// Tenant overrides must not be copied from client arguments into this value.
+    ///
+    /// A principal carrying signed receiver-purpose metadata has no authority on
+    /// this path: its projections are empty, and [`Self::inject`],
+    /// [`Self::insert_into_data`] and [`Self::from_context`] refuse it. Use
+    /// receiver admission for those credentials.
     pub fn new(principal: AuthPrincipal) -> Self {
         let (subject, db_context) = auth_bundle_from_principal(&principal);
         Self {
             principal,
             subject,
             db_context,
+            receiver_admitted: false,
         }
+    }
+
+    /// Builds the identity of a request that has passed receiver admission.
+    #[cfg(feature = "receiver-admission")]
+    pub(super) fn from_receiver_admission(principal: AuthPrincipal) -> Self {
+        let (subject, db_context) = project_bundle(&principal);
+        Self {
+            principal,
+            subject,
+            db_context,
+            receiver_admitted: true,
+        }
+    }
+
+    fn refused_purpose_bound(&self) -> bool {
+        is_purpose_bound(&self.principal) && !self.receiver_admitted
     }
 
     /// Returns the complete accepted principal, including its token bindings.
@@ -79,6 +104,9 @@ impl AgqlAcceptedRequest {
     /// Installs coherent copies in request or connection-init data.
     /// Long-lived connections still require a fresh check for every sensitive event.
     pub fn insert_into_data(self, data: &mut Data) -> async_graphql::Result<()> {
+        if self.refused_purpose_bound() {
+            return Err(forbidden());
+        }
         let conflict = data_value::<Self>(data).is_some_and(|value| value != &self)
             || data_value::<AuthPrincipal>(data).is_some_and(|value| value != &self.principal)
             || data_value::<AuthSubject>(data).is_some_and(|value| value != &self.subject)
@@ -121,6 +149,9 @@ impl AgqlAcceptedRequest {
             .flatten()
             .find_map(|data| data_value::<Self>(data))
             .ok_or_else(|| OrmPublicError::unauthenticated().into_graphql_error())?;
+        if accepted.refused_purpose_bound() {
+            return Err(forbidden());
+        }
         if ctx.data_opt::<AuthPrincipal>() != Some(&accepted.principal)
             || ctx.data_opt::<AuthSubject>() != Some(&accepted.subject)
             || ctx.data_opt::<DbAuthContext>() != Some(&accepted.db_context)
@@ -317,7 +348,9 @@ impl AgqlCurrentAuthorityEnforcement {
             .map(|((accepted, current), resolved)| accepted.min(current).min(resolved))
             .ok_or_else(|| AuthError::AccessTokenExpired.extend())?;
         self.check_deadline(deadline)?;
-        let (subject, db_context) = auth_bundle_from_principal(&current);
+        // `accepted` has passed `from_context`, so a purpose-bound principal here
+        // has been admitted and compares by its real projection.
+        let (subject, db_context) = project_bundle(&current);
         if current != accepted.principal
             || subject != accepted.subject
             || db_context != accepted.db_context

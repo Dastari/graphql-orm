@@ -3114,6 +3114,7 @@ version = "0.93.1"
 dependencies = [
  "agql-auth",
  "async-graphql",
+ "async-graphql-value",
  "async-trait",
  "axum",
  "base64",
@@ -3128,12 +3129,14 @@ dependencies = [
  "graphql-orm-macros",
  "graphql-orm-operation-catalog",
  "graphql-orm-router-protocol",
+ "jsonwebtoken 10.4.0",
  "quick-xml 0.41.0",
  "rust_decimal",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "tiberius",
  "time",
  "tokio",
@@ -3146,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai"
-version = "0.122.0"
+version = "0.122.1"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -3183,7 +3186,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-ai-tool-profiles"
-version = "0.21.0"
+version = "0.21.1"
 dependencies = [
  "async-graphql",
  "async-graphql-parser",
@@ -3230,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-operation-catalog"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "graphql-orm-router-protocol",
  "serde",

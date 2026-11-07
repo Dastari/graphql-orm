@@ -698,3 +698,12 @@ Single-row mutations and propagating `notify_with` mask callback errors whose
 `async_graphql::Error.source` is populated and whose extensions lack a string
 `code`, matching bulk. Use `Error::new` or a string `code` for authored client text.
 Custom `From` conversions leaving `source` empty retain all refusal extensions.
+## Exact delegated receiver requests
+
+For private direct delegated HTTP queries, enable `receiver-admission`, register reviewed
+`AgqlReceiverContract` values in an immutable `AgqlReceiverRegistry`, and admit the
+bounded raw body before obtaining scopes or creating request context. Dispatch
+only `AgqlAdmittedReceiverRequest::into_request`. Supply authoritative parent
+sessions and current scope/tenant policy; this proof does not establish MFA or
+replace row/field authorization. WebSocket is refused. See
+[receiver admission](../../docs/reference/receiver-admission.md).

@@ -18,6 +18,7 @@ Generated code for every other entity is unchanged.
 Version 0.94.0 masks source-bearing callback failures without a string `code` in generated
 single-row mutations, matching bulk. Authored refusals retain their message and extensions.
 See the root migration guide; no data migration is needed.
+Version `0.93.1` keeps runtime/macros aligned for opt-in receiver admission. Generated code is unchanged; no data migration is needed.
 
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 
