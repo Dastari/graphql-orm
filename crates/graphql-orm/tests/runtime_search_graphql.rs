@@ -614,6 +614,21 @@ async fn searchable_module_semantic_catalog_matches_sdl() {
         .find(|operation| operation.field_name == "records")
         .unwrap();
     assert_eq!(listed.arguments, list.arguments);
+    use graphql_orm_ai_tool_profiles::{
+        AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits, GraphqlExecutionTargetId,
+    };
+    let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+        "runtime-search",
+        GraphqlExecutionTargetId::parse("runtime-schema-host").unwrap(),
+        &api.sdl(),
+        &catalog,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .expect("searchable composition must compile in the AI catalog");
+    capabilities.capabilities().find(|capability| capability.field_name() == "records").unwrap().compile_compact(serde_json::json!({
+        "arguments":{"search":{(member("query")):"bridge",(member("mode")):"PLAIN"}},
+        "selections":["id","title"],"maximumItems":1,"relationshipArguments":{},"relationshipMaximumItems":{}
+    })).expect("AI compiler accepts the searchable runtime input types");
 }
 
 #[test]
