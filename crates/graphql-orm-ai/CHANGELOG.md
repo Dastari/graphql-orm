@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.123.1
+
+- **Tests (AI 0.123.1):** isolate media fixtures sharing the bounded decoder pool so CPU contention does not turn unrelated tests into overload tests (#367). Production busy-pool refusal, authorization, budgets and effect replay rules are unchanged. No data migration is needed.
+
 ## Unreleased - 0.123.0
 
 Use shared catalogue canonical JSON hashes for remote authority, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no schema module bump or data migration is needed. Fixes #352.

@@ -58,6 +58,13 @@ scripts/check-ai-provider-tls.sh all
 Do not run Cargo `--all-features`: the persistence backends are intentionally
 mutually exclusive. Provider feature matrices must select exactly one backend.
 
+## Media decoder test isolation
+
+Tests using `AiResolvedToolImage::decode_bounded` share the test-only
+`DECODE_TEST_LOCK` for their fixture lifetime. The production pool has two
+workers and refuses saturation immediately; unrelated fixtures must not compete
+for those slots. The deterministic busy-pool test separately preserves that refusal.
+
 ## Database tests
 
 Default tests use in-memory SQLite. PostgreSQL and MSSQL integration tests are

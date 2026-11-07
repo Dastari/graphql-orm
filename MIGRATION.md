@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.123.0 to 0.123.1: media fixture isolation
+
+No consumer action or data migration is needed. Only tests change: media fixtures
+share a guard around the process-wide bounded decoder pool. Real turns still
+refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
+provider failure; no authorization, budget, lease or effect-replay rule changes.
+
 ## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
 
 Upgrade if you run ORM 0.92.0 or 0.93.0 with a paginated relation whose target has a column read through a SQL expression: MSSQL `mssql_money`, confirmed by a native test, or a PostgreSQL spatial column, which takes the same code path but was not run. Those relations return `INTERNAL_ERROR` on those two versions. The failure exposes no data. Detect it by that error on a paginated relation whose target declares `mssql_money` or a spatial field. No data migration is needed, and unpaginated reads were not affected. Test fixtures and CI backend lanes also change, with no consumer effect.

@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## AI 0.123.0 to 0.123.1: media fixture isolation
+
+No consumer action or data migration is needed. Only tests change: media fixtures
+share a guard around the process-wide bounded decoder pool. Real turns still
+refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
+provider failure; no authorization, budget, lease or effect-replay rule changes.
+
 ## 0.122.0 to 0.123.0: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.
