@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## Exact receiver-purpose admission (opt in)
+## 0.21.0 to 0.21.1: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.
 Hosts adopting admission enable ORM `receiver-admission` (which enables `auth-agql`), register exact reviewed named queries,

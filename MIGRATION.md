@@ -10,12 +10,13 @@ supersedes: []
 
 # Migration Guide
 
-## 0.93.0 to 0.93.1: native relation projections and backend coverage
+## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
 
-No consumer action or data migration is needed. Test fixtures and CI backend lanes change; paginated batched relation reads now preserve SQL expression projections, fixing SQL Server MONEY reads that returned INTERNAL_ERROR. Generated behaviour is unchanged. No new public APIs.
-## 0.93.0 to 0.93.1: relations beside a generated object
+Upgrade if you run ORM 0.92.0 or 0.93.0 with a paginated relation whose target has a column read through a SQL expression: MSSQL `mssql_money`, confirmed by a native test, or a PostgreSQL spatial column, which takes the same code path but was not run. Those relations return `INTERNAL_ERROR` on those two versions. The failure exposes no data. Detect it by that error on a paginated relation whose target declares `mssql_money` or a spatial field. No data migration is needed, and unpaginated reads were not affected. Test fixtures and CI backend lanes also change, with no consumer effect.
 
-No data migration. Entities that already compile need no change, with one exception: a
+## 0.93.0 to 0.94.0: relations beside a generated object
+
+This is breaking for one shape. No data migration. Entities that already compile need no change, with one exception: a
 `GraphQLSchemaEntity` that also derives `GraphQLRelations` and has relation fields now fails to compile
 with a message naming `schema_only = true`; add `schema_only = true` to its `#[graphql_entity(...)]`.
 An entity that derives `GraphQLEntity` with `GraphQLRelations` and relation fields but no
@@ -51,7 +52,7 @@ follow the existing bulk server-only reporting path controlled by
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS`; no new logging destination is added.
 Notifications still run after commit, so a propagated notification error does
 not undo a committed write. No data migration or SDL change is needed.
-## Exact receiver-purpose admission (opt in)
+## 0.93.0 to 0.94.0: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.
 Hosts adopting admission enable ORM `receiver-admission` (which enables `auth-agql`), register exact reviewed named queries,

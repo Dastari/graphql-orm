@@ -10,15 +10,15 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.93.1 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.
-Version 0.93.1 makes `GraphQLRelations` without `#[graphql(complex)]` on an entity that derives `GraphQLEntity`
+Version 0.94.0 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.
+Version 0.94.0 makes `GraphQLRelations` without `#[graphql(complex)]` on an entity that derives `GraphQLEntity`
 report one compile error that names the fix, instead of three conflicting-implementation errors. An entity with
 `schema_only = true` is exempt; a `GraphQLSchemaEntity` with relation fields now needs `schema_only = true`.
 Generated code for every other entity is unchanged.
 Version 0.94.0 masks source-bearing callback failures without a string `code` in generated
 single-row mutations, matching bulk. Authored refusals retain their message and extensions.
 See the root migration guide; no data migration is needed.
-Version `0.93.1` keeps runtime/macros aligned for opt-in receiver admission. Generated code is unchanged; no data migration is needed.
+Version `0.94.0` keeps runtime/macros aligned for opt-in receiver admission. Generated code is unchanged; no data migration is needed.
 
 Version 0.93.0 is the companion of graphql-orm 0.93.0; macro generation is unchanged.
 

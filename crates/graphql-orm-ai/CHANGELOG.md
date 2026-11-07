@@ -10,7 +10,7 @@ supersedes: []
 
 # Changelog
 
-## Unreleased - 0.122.1
+## Unreleased - 0.123.0
 
 Use shared catalogue canonical JSON hashes for remote authority, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no schema module bump or data migration is needed. Fixes #352.
 

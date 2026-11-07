@@ -90,6 +90,12 @@ def main():
     # into parallel jobs that together run the same commands.
     for name in [*(job for job in EXCLUDED_JOBS if job not in ORM_JOBS), "release"]:
         body = new[name].replace("    if: inputs.validation_profile == 'full'\n", "", 1)
+        if name == "orm-security-sqlite":
+            current = """      - name: Require exact receiver-purpose admission
+        run: bash scripts/run-security-test-targets.sh sqlite,receiver-admission receiver_admission
+"""
+            require(current in body, "receiver admission security gate is required")
+            body = body.replace(current, "", 1)
         if name == "sqlserver-security":
             previous = """      - name: Verify TLS, writes, and retained query notifications on owned servers
         run: cargo test -p graphql-orm --locked --no-default-features --features mssql --test mssql_tls --test mssql_writes --test mssql_notifications -- --ignored --test-threads=1
