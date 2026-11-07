@@ -7,7 +7,7 @@ use federation_sdl::ParsedFederationSchema;
 use graphql_orm::async_graphql::{EmptyMutation, EmptySubscription, SDLExportOptions, Schema};
 use graphql_orm::prelude::*;
 
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[graphql_entity(
     backend = "mssql",
     table = "dbo.FederationLegacyDevices",
@@ -27,6 +27,7 @@ struct LegacyDevice {
 
 schema_roots! {
     backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [LegacyDevice],
 }

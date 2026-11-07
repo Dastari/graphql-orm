@@ -50,6 +50,7 @@ mod single_key {
 
     schema_roots! {
         backend: "sqlite",
+        schema_policy: "managed",
         query_custom_ops: [],
         entities: [Zone],
     }
@@ -58,7 +59,7 @@ mod single_key {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("SQLite test pool");
-        schema_builder(graphql_orm::db::Database::new(pool))
+        schema_builder(graphql_orm::db::Database::<SqliteBackend>::new(pool))
             .finish()
             .sdl_with_options(SDLExportOptions::new().federation())
     }
@@ -97,6 +98,7 @@ mod composite_key {
 
     schema_roots! {
         backend: "sqlite",
+        schema_policy: "managed",
         query_custom_ops: [],
         entities: [AssetPlacement],
     }
@@ -105,7 +107,7 @@ mod composite_key {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("SQLite test pool");
-        schema_builder(graphql_orm::db::Database::new(pool))
+        schema_builder(graphql_orm::db::Database::<SqliteBackend>::new(pool))
             .finish()
             .sdl_with_options(SDLExportOptions::new().federation())
     }
@@ -145,6 +147,7 @@ mod multiple_keys {
 
     schema_roots! {
         backend: "sqlite",
+        schema_policy: "managed",
         query_custom_ops: [],
         entities: [Asset],
     }
@@ -153,7 +156,7 @@ mod multiple_keys {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("SQLite test pool");
-        schema_builder(graphql_orm::db::Database::new(pool))
+        schema_builder(graphql_orm::db::Database::<SqliteBackend>::new(pool))
             .finish()
             .sdl_with_options(SDLExportOptions::new().federation())
     }
@@ -193,6 +196,7 @@ mod unique_index_key {
 
     schema_roots! {
         backend: "sqlite",
+        schema_policy: "managed",
         query_custom_ops: [],
         entities: [Tenancy],
     }
@@ -201,7 +205,7 @@ mod unique_index_key {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
             .expect("SQLite test pool");
-        schema_builder(graphql_orm::db::Database::new(pool))
+        schema_builder(graphql_orm::db::Database::<SqliteBackend>::new(pool))
             .finish()
             .sdl_with_options(SDLExportOptions::new().federation())
     }
@@ -278,7 +282,7 @@ async fn a_resolvable_key_adds_the_entity_fields_to_introspection() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("SQLite test pool");
-    let sdl = single_key::schema_builder(graphql_orm::db::Database::new(pool))
+    let sdl = single_key::schema_builder(graphql_orm::db::Database::<SqliteBackend>::new(pool))
         .finish()
         .sdl();
     assert!(

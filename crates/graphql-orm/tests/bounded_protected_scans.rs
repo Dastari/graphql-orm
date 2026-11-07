@@ -1,3 +1,9 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
 #![cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 use graphql_orm::async_graphql::Request;
 use graphql_orm::prelude::*;

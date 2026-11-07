@@ -10,6 +10,10 @@ supersedes: []
 
 # Migration Guide
 
+## 0.93.0 to 0.93.1: native relation projections and backend coverage
+
+No consumer action or data migration is needed. Test fixtures and CI backend lanes change; paginated batched relation reads now preserve SQL expression projections, fixing SQL Server MONEY reads that returned INTERNAL_ERROR. Generated behaviour is unchanged. No new public APIs.
+
 ## 0.92.0 to 0.93.0: after-commit callback documented
 
 No action and no data migration is needed. `MutationContext::defer` keeps its signature and behaviour; it

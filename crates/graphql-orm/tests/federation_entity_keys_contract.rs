@@ -42,6 +42,7 @@ macro_rules! contract_entity {
 
             schema_roots! {
                 backend: "sqlite",
+                schema_policy: "managed",
                 query_custom_ops: [],
                 entities: [$entity],
             }

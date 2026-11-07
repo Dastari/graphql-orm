@@ -1,3 +1,10 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
+
 //! `mutation_shapes` narrows generated mutations per category: the GraphQL
 //! root, the operation and semantic catalogues and the orphaned input and
 //! result types follow, while repository writes, relations and `Changed`

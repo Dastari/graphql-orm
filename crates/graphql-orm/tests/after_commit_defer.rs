@@ -1,3 +1,10 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
+
 //! `MutationContext::defer` is the after-commit callback API. These tests pin each of its guarantees on
 //! every write path: it runs once and only after a successful commit, never after a rollback, a failure
 //! is reported without changing the committed result, and its order relative to `Changed` events and

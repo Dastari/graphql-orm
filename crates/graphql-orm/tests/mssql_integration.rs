@@ -10,8 +10,9 @@ use graphql_orm::rust_decimal::Decimal;
 use graphql_orm::tokio_util::compat::TokioAsyncWriteCompatExt;
 use tokio::net::TcpStream;
 
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
 #[graphql_entity(
+    backend = "mssql",
     table = "dbo.GraphqlOrmMssqlCustomers",
     plural = "MssqlCustomers",
     default_sort = "[CustomerName] ASC"
@@ -37,19 +38,29 @@ pub struct MssqlCustomer {
     pub credit_limit: Decimal,
 }
 
-impl graphql_orm::graphql::loaders::BatchLoadEntity for MssqlCustomer {
+impl graphql_orm::graphql::loaders::BatchLoadEntity<MssqlBackend> for MssqlCustomer {
     fn batch_column() -> &'static str {
         "[CustomerId]"
     }
 
-    fn batch_key_from_row(row: &graphql_orm::DbRow) -> Result<String, sqlx::Error> {
+    fn batch_key_from_row(row: &graphql_orm::db::mssql::MssqlRow) -> Result<String, sqlx::Error> {
         row.try_get::<i64, _>("CustomerId")
             .map(|value| value.to_string())
     }
 }
 
-#[derive(GraphQLEntity, GraphQLRelations, GraphQLOperations, SimpleObject, Clone, Debug)]
+#[derive(
+    GraphQLEntity,
+    GraphQLRelations,
+    GraphQLOperations,
+    SimpleObject,
+    serde::Serialize,
+    serde::Deserialize,
+    Clone,
+    Debug,
+)]
 #[graphql_entity(
+    backend = "mssql",
     table = "dbo.GraphqlOrmMssqlJobs",
     plural = "MssqlJobs",
     default_sort = "[JobId] ASC"
@@ -99,6 +110,8 @@ pub struct MssqlJob {
 }
 
 schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [MssqlCustomer, MssqlJob],
 }
@@ -163,7 +176,7 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
     setup_database(&connection_string).await?;
 
     let pool = graphql_orm::db::mssql::MssqlPool::connect_ado(&connection_string).await?;
-    let database = graphql_orm::db::Database::new(pool);
+    let database = graphql_orm::db::Database::<MssqlBackend>::new(pool);
     // Execute the paginated batched relation SQL on a schema-qualified table,
     // including its narrow-key window and join back to the full entity.
     {
@@ -192,7 +205,7 @@ async fn mssql_generated_queries_read_existing_tables() -> Result<(), Box<dyn st
                 auth_context: None,
             }
         });
-        let loader = RelationLoader::<MssqlCustomer>::new(database.clone());
+        let loader = RelationLoader::<MssqlCustomer, MssqlBackend>::new(database.clone());
         let results = loader.load(&keys).await?;
         for (key, id) in keys.iter().zip([10, 20]) {
             let page = &results[key];

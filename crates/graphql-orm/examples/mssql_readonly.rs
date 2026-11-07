@@ -2,8 +2,13 @@
 use graphql_orm::prelude::*;
 
 #[cfg(feature = "mssql")]
-#[derive(GraphQLEntity, GraphQLOperations, Clone, Debug)]
-#[graphql_entity(table = "dbo.Jobs", plural = "Jobs", default_sort = "[JobId] ASC")]
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[graphql_entity(
+    backend = "mssql",
+    table = "dbo.Jobs",
+    plural = "Jobs",
+    default_sort = "[JobId] ASC"
+)]
 pub struct LegacyJob {
     #[primary_key]
     #[graphql_orm(db_column = "JobId", write = false)]
@@ -28,13 +33,15 @@ pub struct LegacyJob {
 
 #[cfg(feature = "mssql")]
 schema_roots! {
+    backend: "mssql",
+    schema_policy: "external_read_only",
     query_custom_ops: [],
     entities: [LegacyJob],
 }
 
 #[cfg(feature = "mssql")]
-pub fn build_schema(pool: graphql_orm::DbPool) -> AppSchema {
-    let database = graphql_orm::db::Database::new(pool);
+pub fn build_schema(pool: graphql_orm::db::mssql::MssqlPool) -> AppSchema {
+    let database = graphql_orm::db::Database::<MssqlBackend>::new(pool);
     schema_builder(database)
         .data("mssql-readonly-example".to_string())
         .finish()

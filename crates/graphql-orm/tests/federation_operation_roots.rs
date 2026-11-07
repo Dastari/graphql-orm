@@ -1,3 +1,9 @@
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(not(any(
+    all(feature = "sqlite", feature = "postgres"),
+    all(feature = "sqlite", feature = "mssql"),
+    all(feature = "postgres", feature = "mssql"),
+)))]
 #![cfg(feature = "sqlite")]
 
 #[path = "support/federation_sdl.rs"]

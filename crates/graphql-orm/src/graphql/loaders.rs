@@ -702,17 +702,10 @@ fn render_relation_page(
         .map(|index| format!("__gom_relation_page.{}", relation_key_alias(index)))
         .collect::<Vec<_>>()
         .join(", ");
-    let entity_columns = query
-        .columns
-        .iter()
-        .map(|column| {
-            format!(
-                "__gom_relation_entity.{}",
-                dialect.render_identifier_path(column)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    // Entity projections are SQL expressions, including backend casts with
+    // output aliases (for example SQL Server MONEY). The narrow page exposes
+    // only reserved key/rank aliases, so original entity columns are unambiguous.
+    let entity_columns = query.columns.join(", ");
     row_sql = format!(
         "SELECT * FROM (SELECT {entity_columns}, {key_aliases}, __gom_relation_page.__gom_relation_row_number FROM ({row_sql}) __gom_relation_page INNER JOIN {} __gom_relation_entity ON {join}) __gom_relation_rows",
         dialect.render_identifier_path(query.table),
@@ -1474,9 +1467,15 @@ mod relation_page_tests {
             dialect,
             SelectQuery {
                 table: "items",
-                columns: ["tenant", "id", "owner", "rank", "payload"]
-                    .map(str::to_owned)
-                    .to_vec(),
+                columns: [
+                    "tenant",
+                    "id",
+                    "owner",
+                    "rank",
+                    "CAST(payload AS VARCHAR(100)) AS payload",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
                 filter: Some(relation_key_filter(
                     &["tenant", "owner"],
                     &[
@@ -1527,6 +1526,13 @@ mod relation_page_tests {
             assert!(!rendered.sql.contains("COUNT(*) OVER"), "{}", rendered.sql);
             // Full entities appear only in the join, outside the ranked subquery.
             assert!(!window.contains("payload"), "{}", rendered.sql);
+            assert!(
+                rendered.sql.contains(
+                    "SELECT tenant, id, owner, rank, CAST(payload AS VARCHAR(100)) AS payload,"
+                ),
+                "{}",
+                rendered.sql
+            );
             assert!(rendered.sql.contains("__gom_relation_pk_0"));
             assert!(rendered.sql.contains("__gom_relation_pk_1"));
             assert!(rendered.sql.contains(
