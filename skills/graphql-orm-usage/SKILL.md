@@ -383,6 +383,8 @@ a to-many relation, with a `Vec<T>` field. The relation field isn't a column.
 - An entity with relation fields needs `GraphQLRelations`, `SimpleObject` and `#[graphql(complex)]`,
   and every target needs a `BatchLoadEntity` impl
   ([#285](https://github.com/Dastari/graphql-orm/issues/285)). The worked example shows both.
+  `GraphQLRelations` without `#[graphql(complex)]` is one compile error that names this
+  declaration. `node_id` and a managed version are fine on the same entity.
 - Add `filter` to an unconditional public `multiple` relation to expose a typed list of target
   Where alternatives on the source Where input: `#[relation(target = "OrderLine", from = "id", to = "order_id", multiple, filter)]`.
   Alternatives use authorized EXISTS before paging and counts; an empty list matches nothing.

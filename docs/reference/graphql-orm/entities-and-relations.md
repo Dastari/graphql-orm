@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -255,6 +255,15 @@ pub struct Post {
 }
 ```
 
+`GraphQLRelations` needs `SimpleObject` and `#[graphql(complex)]` whenever the entity
+derives `GraphQLEntity`, which generates the GraphQL object itself. Omitting `complex` is a
+compile error that names the declaration, not conflicting `OutputType` implementations. `node_id`
+and a managed version work on such an entity: the relation derive adds `NodeId` and
+`RecordVersion` to the complex object. The complete declaration, with a `multiple` relation,
+`node_id`, a managed version and `schema_roots!`, is in
+[macros and attributes](macros-and-attributes.md#relations-and-foreign-keys) and is compiled by
+`tests/node_id_version_relations.rs`.
+
 If the entity also defines handwritten `ComplexObject` fields, add
 `#[graphql_orm(compose_complex_object)]` to the entity and replace the
 handwritten impl's `#[ComplexObject]` attribute with
@@ -450,6 +459,39 @@ a target condition names a physical target column, like `to`.
 Conditional relationships must use `emit_fk = false`. They describe a logical
 join whose validity depends on a discriminator and therefore cannot represent
 an unconditional database foreign key.
+
+### One link table with typed optional targets
+
+A link entity that stores `target_kind` and `target_id` can expose one typed optional
+relation per kind. Each relation selects its kind with a string `source_condition`:
+
+```rust
+#[graphql(skip)]
+#[relation(
+    target = "Person",
+    from = "target_id",
+    to = "id",
+    source_condition(field = "target_kind", equals = "person"),
+    emit_fk = false
+)]
+pub target_person: Option<Person>,
+#[graphql(skip)]
+#[relation(
+    target = "Device",
+    from = "target_id",
+    to = "id",
+    source_condition(field = "target_kind", equals = "device"),
+    emit_fk = false
+)]
+pub target_device: Option<Device>,
+```
+
+`TargetPerson` resolves only on rows whose kind is `person`, even when a device has the same key.
+A target hidden by its own row policy or absent from its table resolves to `null`, like any
+generated to-one relation, and each relation is one batched read per page. A host row policy on a
+relation target also requires `Database::with_authorized_scan_config`. The declaration and these
+results are compiled and run by `tests/link_relation_patterns.rs`; `tests/conditional_relations.rs`
+adds the integer, boolean and floating discriminators.
 
 ## Nested Relation Batching
 
@@ -722,8 +764,12 @@ real multi-parent target dispatches. MSSQL coverage is compilation only.
 
 Use `#[relation(target = "Link", from = "id", to = "parent_id", multiple, filter)]`
 to expose the relation name in the source's generated `WhereInput`. For example,
-`where: {links: [{targetId: {in: ["x", "y"]}}]}` matches parents with any authorized
-matching link. An empty list matches no parents. Each alternative is a typed target
+`where: {links: [{targetId: {inList: ["x", "y"]}}]}` matches parents with any authorized
+matching link. The member is the relation field's GraphQL name, so a relation called `linked_to`
+is `LinkedTo` under `field-case-pascal` or `rename_fields = "PascalCase"`. The filter members of
+one alternative apply to one link row: `{TargetKind: {eq: "person"}, TargetId: {inList: ["a"]}}`
+matches a parent with a person link `a`, not a parent with a person link and a device `a`.
+Omitting the member applies no filter. An empty list matches no parents. Each alternative is a typed target
 Where input; `and`, `or`, `not`, complete composite relation keys, and nested opted-in
 collections compose normally. Values are SQL binds, never interpolated SQL.
 

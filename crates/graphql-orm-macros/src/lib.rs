@@ -497,7 +497,12 @@ pub fn derive_graphql_schema_entity(input: TokenStream) -> TokenStream {
 ///
 /// Supports single-column and composite relation keys. For `async-graphql`
 /// object fields, pair relation fields with `#[graphql(skip)]` and
-/// `#[graphql(complex)]` on the entity type.
+/// `#[graphql(complex)]` on the entity type, and derive `SimpleObject` beside
+/// `GraphQLEntity`. The derive then also adds `NodeId` and `RecordVersion` to the
+/// complex object when the entity declares them. `GraphQLRelations` without
+/// `#[graphql(complex)]` is a compile error that names this declaration, because
+/// `GraphQLEntity` already generates the object; an entity with
+/// `schema_only = true` has no generated object and is exempt.
 pub fn derive_graphql_relations(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     if entity::has_repository_entity_attribute(&input.attrs) {
