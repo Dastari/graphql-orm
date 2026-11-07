@@ -10,6 +10,16 @@ supersedes: []
 
 # Migration Guide
 
+## 0.94.0 to 0.94.1: runtime search catalog parity
+
+No data migration or consumer code change is needed. Runtime-schema hosts that
+compose searchable collections with `finish_with_semantic_catalog` can now do
+so without an SDL/catalog argument mismatch. Regenerate saved semantic catalogs
+and operations for those compositions; detect the correction by checking that
+the searchable list descriptor contains `search: RuntimeSearchInput`.
+Non-searchable collections and relation-page arguments are unchanged. Existing
+query authorization, search bounds and backend support remain unchanged.
+
 ## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
 
 Upgrade if you run ORM 0.92.0 or 0.93.0 with a paginated relation whose target has a column read through a SQL expression: MSSQL `mssql_money`, confirmed by a native test, or a PostgreSQL spatial column, which takes the same code path but was not run. Those relations return `INTERNAL_ERROR` on those two versions. The failure exposes no data. Detect it by that error on a paginated relation whose target declares `mssql_money` or a spatial field. No data migration is needed, and unpaginated reads were not affected. Test fixtures and CI backend lanes also change, with no consumer effect.

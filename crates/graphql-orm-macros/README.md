@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.94.1 aligns searchable runtime list arguments in the semantic catalog with SDL. No data migration is needed.
+
 Version 0.94.0 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.
 Version 0.94.0 makes `GraphQLRelations` without `#[graphql(complex)]` on an entity that derives `GraphQLEntity`
 report one compile error that names the fix, instead of three conflicting-implementation errors. An entity with

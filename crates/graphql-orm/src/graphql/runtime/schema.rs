@@ -44,7 +44,7 @@ pub(super) fn output(name: &str, ty: TypeRef) -> Field {
     })
 }
 pub(super) fn page_args(field: Field, object: &str) -> Field {
-    super::semantic::page_arguments(object)
+    super::semantic::relation_page_arguments(object)
         .into_iter()
         .fold(field, |field, (name, ty)| {
             field.argument(
@@ -115,39 +115,33 @@ pub(super) fn search_helpers() -> Vec<Type> {
 }
 
 pub(super) fn root_field(name: &str, object: &str, search: bool) -> Field {
-    let field = root_list_field(name, object);
-    if search {
-        field.argument(
-            InputValue::new("search", TypeRef::named("RuntimeSearchInput")).description(
-                "Restrict to records matching this full-text search; ordered by relevance unless orderBy is given",
-            ),
-        )
-    } else {
-        field
-    }
-}
-
-fn root_list_field(name: &str, object: &str) -> Field {
-    page_args(
-        Field::new(
-            name,
-            TypeRef::named_nn(format!("{object}Connection")),
-            |ctx| {
-                FieldFuture::new(async move {
-                    let results = ctx.data::<super::execution::Results>()?;
-                    let selection = ctx.field();
-                    let key = selection.alias().unwrap_or(selection.name());
-                    let value = results
-                        .0
-                        .get(key)
-                        .ok_or_else(|| async_graphql::Error::new("authorization_missing"))?;
-                    Ok(Some(field_value(value.clone())))
-                })
-            },
-        )
-        .description(super::semantic::list_description(object)),
-        object,
+    let field = Field::new(
+        name,
+        TypeRef::named_nn(format!("{object}Connection")),
+        |ctx| {
+            FieldFuture::new(async move {
+                let results = ctx.data::<super::execution::Results>()?;
+                let selection = ctx.field();
+                let key = selection.alias().unwrap_or(selection.name());
+                let value = results
+                    .0
+                    .get(key)
+                    .ok_or_else(|| async_graphql::Error::new("authorization_missing"))?;
+                Ok(Some(field_value(value.clone())))
+            })
+        },
     )
+    .description(super::semantic::list_description(object));
+    super::semantic::page_arguments(object, search)
+        .into_iter()
+        .fold(field, |field, (name, ty)| {
+            let description = if name == "search" {
+                super::semantic::SEARCH_DESCRIPTION.to_owned()
+            } else {
+                super::semantic::argument_description(name)
+            };
+            field.argument(InputValue::new(name, type_ref(&ty)).description(description))
+        })
 }
 pub(super) fn helpers(limits: RuntimeScalarLimits) -> Vec<Type> {
     use RuntimeValueKind::*;
