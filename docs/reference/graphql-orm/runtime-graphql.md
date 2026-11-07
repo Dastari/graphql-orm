@@ -203,7 +203,7 @@ description, so SDL and introspection are complete. Collection, field and relati
 the IR's [effective description](runtime-schema-ir.md#descriptions-classification-and-export)
 (declared, else the humanized name); filter, order and mutation input members repeat their
 field's text. Roots use the static derive wording (`Page through Invoice records`,
-`Create one Invoice records`) and arguments the static rule (`orderBy` → `Order by`). Host
+`Create one Invoice record`) and arguments the static rule (`orderBy` → `Order by`). Host
 root objects (`Query`, `Mutation`) are host-named and undescribed.
 
 ```rust,ignore

@@ -2074,14 +2074,14 @@ fn generate_graphql_operations_unfiltered(
     let filter_arg_description = semantic_argument_description(&filter_arg_name);
     let list_operation_description = format!("List {struct_name_str} records");
     let aggregate_operation_description = format!("Aggregate {struct_name_str} records");
-    let single_operation_description = format!("Read one {struct_name_str} records");
+    let single_operation_description = format!("Read one {struct_name_str} record");
     let search_operation_description = format!("Search {struct_name_str} records");
     let keyset_operation_description = format!("Page through {struct_name_str} records");
-    let create_operation_description = format!("Create one {struct_name_str} records");
-    let upsert_operation_description = format!("Create or update one {struct_name_str} records");
-    let update_operation_description = format!("Update one {struct_name_str} records");
+    let create_operation_description = format!("Create one {struct_name_str} record");
+    let upsert_operation_description = format!("Create or update one {struct_name_str} record");
+    let update_operation_description = format!("Update one {struct_name_str} record");
     let update_many_operation_description = format!("Update matching {struct_name_str} records");
-    let delete_operation_description = format!("Delete one {struct_name_str} records");
+    let delete_operation_description = format!("Delete one {struct_name_str} record");
     let delete_many_operation_description = format!("Delete matching {struct_name_str} records");
     let subscription_operation_description =
         format!("Observe changes to {struct_name_str} records");

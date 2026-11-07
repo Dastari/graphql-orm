@@ -1562,7 +1562,7 @@ where {
         {
             super::backup::record_change_journal_event(self, event)
                 .await
-                .map_err(|error| async_graphql::Error::new(error.to_string()))?;
+                .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
         }
 
         Ok(())
@@ -2839,7 +2839,7 @@ impl OrmResultError for sqlx::Error {
 
 impl OrmResultError for async_graphql::Error {
     fn from_sqlx_error(error: sqlx::Error) -> Self {
-        async_graphql::Error::new(error.to_string())
+        crate::graphql::errors::graphql_error_from_sqlx(error)
     }
 }
 

@@ -114,7 +114,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated inputs; `graphql(skip)` also supports relation implementation fields |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
-| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `SimpleObject` entity the field stays in the object unless it also has `#[graphql(skip)]` or the entity uses `graphql_policy_object` ([#292](https://github.com/Dastari/graphql-orm/issues/292)) |
+| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails |
 | `#[graphql_orm(sensitive)]` | emits `Secret` plus structural `NeverExport`; it does not by itself remove the field from ordinary GraphQL |
 | `#[graphql_orm(classification = "…")]` | overrides the inherited public/internal/confidential/restricted/secret classification |
 | `#[graphql_orm(non_exportable)]` | structurally excludes the field from external-provider result projections while retaining ordinary GraphQL visibility |
@@ -130,6 +130,28 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[date_field]`, `#[boolean_field]`, `#[json_field]`, `#[graphql_orm(json)]` | type metadata; JSON disables filter/order generation |
 | `#[transform(write = "…", read = "…")]` | names generated write/read transforms |
 | `#[backup(include | exclude | redact)]` | per-field backup treatment |
+
+On a `SimpleObject` entity, `private`, `read = false`, and `input_only` must
+also remove the object getter: add `#[graphql(skip)]`, or place
+`#[graphql_orm::graphql_policy_object]` before the derives and use
+`#[graphql(complex)]`. `GraphQLEntity` rejects a missing skip rather than changing
+SDL silently. `graphql_policy_object` installs these skips automatically.
+Generated relation getters also honor `input_only`. `skip = false` does not
+satisfy the object-skip requirement; combined attributes such as
+`#[graphql(visible = false, skip)]` do.
+`read_policy` is conditional authorization, not a static hiding declaration;
+use `graphql_policy_object` to enforce scalar policies with SimpleObject.
+`skip_input`, `write = false`, `filter = false`, `order = false`, and
+`subscribe = false` restrict their named surfaces and do not hide object getters.
+`#[graphql(skip)]` already removes a SimpleObject getter. `sensitive`, `classification`,
+`non_exportable`, and backup redaction govern metadata/export/backup rather than
+static object read visibility.
+
+The skip requirement also applies to `GraphQLEntity` with `schema_only = true`,
+which delegates object ownership. Rustc strips derive lists, so the check uses
+these explicit ownership modes and works independently of derive order or
+imports. The separate metadata-only `GraphQLSchemaEntity` derive retains its
+existing contract.
 
 Validation metadata accepted inside `graphql_orm` is `min`, `max`,
 `min_exclusive`, `max_exclusive` (numeric), `non_negative`, `min_length`,

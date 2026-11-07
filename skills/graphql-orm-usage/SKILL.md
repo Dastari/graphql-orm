@@ -554,7 +554,7 @@ appear in the operation catalogue.
 | Update and delete | `append_only = true` | |
 | All writes | `schema_policy = "external_read_only"` | `Changed` stays in the schema |
 | Who can call an operation | `operation_authorization` | The operation stays in the schema |
-| A field | `#[graphql_orm(private)]`, or `read`, `write`, `filter`, `order` and `subscribe` set to `false` | On a `SimpleObject` entity, also add `#[graphql(skip)]` or `graphql_policy_object`, or the field stays readable ([#292](https://github.com/Dastari/graphql-orm/issues/292)). `sensitive` is a classification and hides nothing |
+| A field | `#[graphql_orm(private)]`, or `read`, `write`, `filter`, `order` and `subscribe` set to `false` | On a `SimpleObject` entity, also add `#[graphql(skip)]` or put `graphql_policy_object` before the derives with `#[graphql(complex)]`, or compilation fails. The same rule applies to `input_only`. `sensitive` is a classification and hides nothing |
 
 There's no per-mutation selector: you can't keep `createOrder` and remove `deleteOrder`
 ([#286](https://github.com/Dastari/graphql-orm/issues/286)). Until then, guard the unwanted category
@@ -666,8 +666,8 @@ Run this against any graphql-orm service. The commands use `rg` from the service
       each for `read_policy`, `write_policy` or `auth`. Confirm that each key has a provider:
       `rg -n '(set|with)_(entity|row|field)_policy' src`.
 - [ ] **Check exposure.** Each `GraphQLEntity` should be meant for the API. Internal records, credentials
-      and worker state belong in `RepositoryEntity`. On `SimpleObject` entities, confirm that `private`
-      and `read = false` fields are also skipped, and that fields with a policy have
+      and worker state belong in `RepositoryEntity`. On `SimpleObject` entities, confirm that `private`,
+      `read = false`, and `input_only` fields are also skipped, and that fields with a policy have
       `graphql_policy_object`: `rg -n 'graphql_policy_object|SimpleObject' src`.
 - [ ] **Check identity.** Find where `AuthSubject` is built, and confirm it comes from a validated
       credential: `rg -n 'AuthSubject' src`.

@@ -448,10 +448,10 @@ mod graphql {
             ]
         );
         let mutations = described(&data["mutation"], "fields");
-        assert!(mutations.contains(&("createInvoice".into(), "Create one Invoice records".into())));
+        assert!(mutations.contains(&("createInvoice".into(), "Create one Invoice record".into())));
         assert!(mutations.contains(&(
             "deleteInvoiceLine".into(),
-            "Delete one InvoiceLine records".into()
+            "Delete one InvoiceLine record".into()
         )));
         let update = data["mutation"]["fields"]
             .as_array()
@@ -558,6 +558,7 @@ mod graphql {
                 StartsWith,
                 EndsWith,
                 IsNull,
+                NotIn,
             ]
         });
         assert!(field("number").sortable && !field("number").groupable);
@@ -610,7 +611,7 @@ mod graphql {
         assert_eq!(list.generated_entity_name.as_deref(), Some("Invoice"));
         assert_eq!(list.arguments[1].description, "Order by");
         let create = operation(GraphqlOperationKind::Mutation, "createInvoice");
-        assert_eq!(create.description, "Create one Invoice records");
+        assert_eq!(create.description, "Create one Invoice record");
         assert_eq!(
             create.ai_mutation_execution,
             Some(AiMutationExecutionPolicy::Prohibited)

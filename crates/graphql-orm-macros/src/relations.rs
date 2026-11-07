@@ -269,7 +269,7 @@ pub(crate) fn generate_graphql_relations(
     for parsed_field in &parsed_fields {
         let field = &parsed_field.field;
         let meta = &parsed_field.meta;
-        if !meta.is_relation || !meta.read {
+        if !meta.is_relation || !meta.read || meta.input_only {
             continue;
         }
 
@@ -1468,4 +1468,33 @@ pub(crate) fn generate_graphql_relations(
 
         #complex_object_impl
     })
+}
+
+#[cfg(test)]
+mod object_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn input_only_relations_do_not_regenerate_skipped_getters() {
+        for backend in crate::backend::enabled_backends() {
+            let backend = backend.name();
+            let input: DeriveInput = syn::parse_str(&format!(
+                r#"
+                #[graphql(complex)]
+                #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                struct Record {{
+                    #[primary_key]
+                    id: String,
+                    #[input_only]
+                    #[graphql(skip)]
+                    #[relation(target = "Target", from = "id", to = "id", emit_fk = false)]
+                    hidden_relation: Option<Target>,
+                }}
+            "#
+            ))
+            .unwrap();
+            let generated = generate_graphql_relations(&input).unwrap().to_string();
+            assert!(!generated.contains("async fn hidden_relation"));
+        }
+    }
 }

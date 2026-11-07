@@ -1,0 +1,6 @@
+error: unreadable SimpleObject field: private, read = false, and input_only require #[graphql(skip)]; add #[graphql(skip)] to this field or place #[graphql_orm::graphql_policy_object] before the derives with #[graphql(complex)]
+  --> tests/ui/simple_object_hidden_schema_only_first.rs:11:5
+   |
+11 | /     #[graphql_orm(private)]
+12 | |     secret: String,
+   | |__________________^

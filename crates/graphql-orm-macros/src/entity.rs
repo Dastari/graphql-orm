@@ -1304,6 +1304,31 @@ fn rls_impl_tokens(
     }
 }
 
+/// Check the effective SimpleObject skip independently of the legacy ORM
+/// input/filter exclusion metadata.
+pub(crate) fn has_graphql_object_skip(field: &Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        attr.path().is_ident("graphql")
+            && attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|options| {
+                    options.iter().any(|option| match option {
+                        syn::Meta::Path(path) => path.is_ident("skip"),
+                        syn::Meta::NameValue(value) if value.path.is_ident("skip") => {
+                            if let syn::Expr::Lit(literal) = &value.value {
+                                matches!(&literal.lit, syn::Lit::Bool(value) if value.value)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    })
+                })
+    })
+}
+
 pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("graphql") {
@@ -3232,6 +3257,22 @@ fn generate_entity_impl(
         })
         .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
+    // Rustc removes derive lists before invoking derives. Valid externally owned
+    // objects opt into complex or schema_only, so check those ownership modes.
+    // Pure GraphQLSchemaEntity metadata does not own a GraphQL read contract.
+    let externally_owned_object = legacy_graphql_complex || entity_meta.schema_only;
+    if !schema_only_override && externally_owned_object {
+        for field in fields {
+            let meta = parse_field_metadata(field)?;
+            if (meta.is_private || !meta.read || meta.input_only) && !has_graphql_object_skip(field)
+            {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "unreadable SimpleObject field: private, read = false, and input_only require #[graphql(skip)]; add #[graphql(skip)] to this field or place #[graphql_orm::graphql_policy_object] before the derives with #[graphql(complex)]",
+                ));
+            }
+        }
+    }
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
     let rls_impl = rls_impl_tokens(
@@ -7681,5 +7722,64 @@ mod generated_identifier_tests {
         let bounded = bounded_generated_identifier(full);
         assert!(bounded.len() <= 63);
         assert!(bounded.is_char_boundary(bounded.len() - 17));
+    }
+}
+
+#[cfg(test)]
+mod object_visibility_tests {
+    use super::*;
+    use syn::parse::Parser;
+
+    #[test]
+    fn only_effective_object_skips_satisfy_visibility() {
+        for (attribute, skipped) in [
+            ("#[graphql(skip)]", true),
+            ("#[graphql(skip = true)]", true),
+            ("#[graphql(skip = false)]", false),
+            ("#[graphql(visible = false, skip)]", true),
+            ("#[graphql(visible = false)]", false),
+        ] {
+            let field: syn::Field = syn::Field::parse_named
+                .parse_str(&format!("{attribute} hidden: String"))
+                .unwrap();
+            assert_eq!(has_graphql_object_skip(&field), skipped);
+        }
+    }
+
+    #[test]
+    fn unreadable_simple_object_fields_require_skips() {
+        for backend in crate::backend::enabled_backends() {
+            let backend = backend.name();
+            for (object_attrs, mode) in [
+                ("#[graphql(complex)]", ""),
+                ("", ", schema_only = true"),
+                ("#[graphql(complex)]", ", schema_only = true"),
+            ] {
+                for attribute in [
+                    "#[graphql_orm(private)]",
+                    "#[graphql_orm(read = false)]",
+                    "#[input_only]",
+                ] {
+                    let input: DeriveInput = syn::parse_str(&format!(
+                    r#"
+                    {object_attrs}
+                    #[graphql_entity(backend = "{backend}", table = "records", plural = "Records" {mode})]
+                    struct Record {{
+                        #[primary_key]
+                        #[filterable(type = "string")]
+                        #[sortable]
+                        id: String,
+                        label: String,
+                        {attribute}
+                        hidden: String,
+                    }}
+                "#
+                ))
+                .unwrap();
+                    let error = generate_entity_impl(&input, false, false).unwrap_err();
+                    assert!(error.to_string().contains("unreadable SimpleObject field"));
+                }
+            }
+        }
     }
 }

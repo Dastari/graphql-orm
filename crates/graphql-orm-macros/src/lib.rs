@@ -366,6 +366,11 @@ pub fn backend_selected_graphql_entity(args: TokenStream, input: TokenStream) ->
 /// This derive emits metadata, filters, order inputs, row decoding, query SQL
 /// helpers, optional write inputs, and backup descriptors depending on field
 /// attributes and backend capabilities.
+///
+/// With `SimpleObject`, fields marked `private`, `read = false`, or `input_only`
+/// require `#[graphql(skip)]`. Alternatively, place
+/// `#[graphql_orm::graphql_policy_object]` before the derives with
+/// `#[graphql(complex)]` to install skips and scalar policy guards.
 pub fn derive_graphql_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     if entity::has_repository_entity_attribute(&input.attrs) {

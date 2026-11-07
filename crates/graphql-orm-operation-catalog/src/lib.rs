@@ -150,7 +150,15 @@ fn default_operation_description(
         GeneratedGraphqlOperationCategory::DeleteMany => "Delete matching",
         GeneratedGraphqlOperationCategory::Subscription => "Observe changes to",
     };
-    format!("{action} {entity_name} records")
+    let noun = match category {
+        GeneratedGraphqlOperationCategory::SingleRead
+        | GeneratedGraphqlOperationCategory::Create
+        | GeneratedGraphqlOperationCategory::Upsert
+        | GeneratedGraphqlOperationCategory::Update
+        | GeneratedGraphqlOperationCategory::Delete => "record",
+        _ => "records",
+    };
+    format!("{action} {entity_name} {noun}")
 }
 
 fn default_argument_description(value: &str) -> String {

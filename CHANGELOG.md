@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.96.0**, operation catalog **0.7.2**.
+
+- **Breaking:** reject `private`, `read = false`, and `input_only` fields on SimpleObject entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.
+- **Security:** internal journal and result SQLx adapters now preserve safe error categories and operator reporting without publishing raw diagnostics. Fixes #354.
+- **Fixed:** generated single-record descriptions use singular wording; SDL and derived fingerprints change. Fixes #289. No data migration is needed.
+
 AI **0.124.0**, ORM runtime/macros **0.95.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 
 - **Breaking (ORM/macros 0.95.0; AI 0.124.0 fixture compatibility):** runtime collections gain optional `node_identity` and `live_subscriptions` declarations. Opted-in objects preserve `id`, expose canonical `NodeId` and managed `RecordVersion`, join local `node(NodeId:)`, and provide bounded keyed `Changed` streams through a host committed-event source. Every event rechecks the current registration and delivery grants together; a revoked grant withholds events quietly, matching derived subscriptions. Deleted images default-deny and are explicitly unsupported on native-RLS profiles; a loaded NULL in a nullable field counts as image evidence, an unloaded field does not. Queue loss, restart and revision signals use the existing uppercase continuity frames without keys or counts, independent of which keys were ever visible. A subscription operation selecting a generated live root must select exactly one root field, or it is refused with `subscription_root_limit_exceeded` before any source is opened. Existing version columns need no data migration; ordinary migrations apply when a host adds one. Serialized opt-out schemas, their fingerprints and derived APIs are unchanged. Rust code building `RuntimeCollection` literals must add the two fields. Fixes #368.

@@ -10,6 +10,40 @@ supersedes: []
 
 # Migration Guide
 
+## 0.95.0 to 0.96.0: unreadable object fields and safe errors
+
+Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`
+fields on `SimpleObject` entities without `#[graphql(skip)]`. This also applies
+to `GraphQLEntity` with `schema_only = true`, which delegates object ownership;
+add explicit skips there as well. The metadata-only `GraphQLSchemaEntity` derive
+is unchanged. The compiler names the affected field. Add `#[graphql(skip)]` to each such field, or place
+`#[graphql_orm::graphql_policy_object]` before the derives (with
+`#[graphql(complex)]`) to install the skips and scalar policy guards. For example:
+
+```rust,ignore
+#[graphql_orm(private)]
+#[graphql(skip)]
+secret: String,
+```
+
+Generated relation getters now also honor `input_only`; remove that attribute
+from a relation intended to remain readable. `graphql_policy_object` also installs
+output skips on private and non-read relation fields; drop client selections of
+those formerly exposed relations. `#[graphql(skip = false)]` does not
+satisfy the skip requirement; replace it with `#[graphql(skip)]` on unreadable
+fields. Existing input/filter exclusions for `skip = false` on ordinary public
+fields are preserved. Combined GraphQL attributes with an effective
+`skip` do.
+
+Operation catalog 0.7.2 aligns its default singular descriptions with the
+macros and runtime SDL.
+
+Internal SQLx adapter errors now use safe messages and error codes rather than
+raw database diagnostics. Generated single-record operation descriptions use
+singular wording. This changes SDL, schema hashes, operation catalogue
+fingerprints and any signed metadata derived from them: regenerate exported
+schemas, catalogues and consumer snapshots. No data migration is needed.
+
 ## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 
 Breaking Rust IR construction: add `node_identity: None` and
