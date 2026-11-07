@@ -464,6 +464,12 @@ pub struct RuntimeIndex {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCollection {
+    /// Opt-in global identity and ORM-managed record version. No physical column is added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_identity: Option<RuntimeNodeIdentity>,
+    /// Opt-in keyed, non-durable observation. Requires `node_identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_subscriptions: Option<RuntimeLiveSubscriptions>,
     pub id: CollectionId,
     /// Public GraphQL object type name.
     pub api_type_name: String,
@@ -507,6 +513,28 @@ pub struct RuntimeCollection {
     /// absent, so schemas without search keep their exact bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search: Option<RuntimeSearch>,
+}
+
+/// Global identity backed by the complete primary key and an existing integer version column.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeNodeIdentity {
+    /// Existing non-null integer column advanced by every runtime write.
+    pub version_field: FieldId,
+}
+/// Bounded live observations; this declaration adds no transport or durable journal.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeLiveSubscriptions {
+    /// Positive maximum entries in the sole live root's `keys` list before
+    /// deduplication (at most 1024), also bounded by the database's limit.
+    /// An operation selecting a generated live root must select exactly one
+    /// root-field occurrence, including aliases, fragments and skipped fields.
+    pub subscription_key_limit: u16,
+    /// Explicit application-authorized removal images, including updates that reload as absent.
+    /// Unsupported with native RLS; without this opt-in no removal is delivered.
+    #[serde(default)]
+    pub deleted_images: bool,
 }
 
 /// Maximum ordered label fields of one runtime collection.
@@ -691,6 +719,10 @@ pub enum RuntimeSchemaDiagnosticCode {
     /// A label field is repeated, too numerous, or not an exportable, non-secret
     /// scalar (JSON and bytes are ineligible).
     InvalidLabelField,
+    /// Invalid global identity, key kind, version field or reserved field name.
+    InvalidNodeIdentity,
+    /// Missing node declaration or invalid keyed observation bound.
+    InvalidLiveSubscriptions,
     /// A many-to-many join table is malformed, collides with another physical
     /// name, or is shared by relations that are not exact inverses.
     InvalidJoinTable,
@@ -744,6 +776,8 @@ impl RuntimeSchemaDiagnosticCode {
             Self::InvalidDescription => "invalid_description",
             Self::InvalidClassification => "invalid_classification",
             Self::InvalidLabelField => "invalid_label_field",
+            Self::InvalidNodeIdentity => "invalid_node_identity",
+            Self::InvalidLiveSubscriptions => "invalid_live_subscriptions",
             Self::InvalidJoinTable => "invalid_join_table",
             Self::InvalidAutoTimestamp => "invalid_auto_timestamp",
             Self::InvalidAutoActor => "invalid_auto_actor",
@@ -1203,6 +1237,57 @@ impl RuntimeSchema {
         for collection in &self.collections {
             let cid = &collection.id;
             let own_fields = &field_kinds[cid];
+            let invalid_node = collection.node_identity.as_ref().is_some_and(|node| {
+                !collection.fields.iter().any(|f| {
+                    f.id == node.version_field
+                        && !f.nullable
+                        && f.value_kind == RuntimeValueKind::Integer
+                        && !f.generated
+                        && f.filterable
+                        && f.format.is_none()
+                        && f.auto_actor.is_none()
+                        && f.auto_timestamp.is_none()
+                        && !collection.primary_key.contains(&f.id)
+                }) || collection
+                    .fields
+                    .iter()
+                    .any(|f| matches!(f.api_name.as_str(), "NodeId" | "RecordVersion"))
+                    || collection
+                        .relations
+                        .iter()
+                        .any(|r| matches!(r.api_name.as_str(), "NodeId" | "RecordVersion"))
+                    || collection.primary_key.iter().any(|id| {
+                        !collection.fields.iter().any(|f| {
+                            &f.id == id
+                                && matches!(
+                                    f.value_kind,
+                                    RuntimeValueKind::String
+                                        | RuntimeValueKind::Boolean
+                                        | RuntimeValueKind::Integer
+                                        | RuntimeValueKind::Uuid
+                                )
+                        })
+                    })
+            });
+            let invalid_live = collection.live_subscriptions.as_ref().is_some_and(|live| {
+                collection.node_identity.is_none()
+                    || live.subscription_key_limit == 0
+                    || live.subscription_key_limit > 1024
+            });
+            for code in [
+                invalid_node.then_some(RuntimeSchemaDiagnosticCode::InvalidNodeIdentity),
+                invalid_live.then_some(RuntimeSchemaDiagnosticCode::InvalidLiveSubscriptions),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                    code,
+                    "invalid runtime node/live declaration".into(),
+                    cid,
+                    None,
+                ));
+            }
 
             for (name, kind_label, reserved) in [
                 (&collection.api_type_name, "api_type_name", true),
@@ -2172,6 +2257,18 @@ impl ValidatedRuntimeSchema {
                 collection.physical_table,
                 collection.append_only
             ));
+            if let Some(node) = &collection.node_identity {
+                out.push_str(&format!(
+                    "|node_version={}",
+                    field_ref(cid, &node.version_field)
+                ));
+            }
+            if let Some(live) = &collection.live_subscriptions {
+                out.push_str(&format!(
+                    "|live_keys={}|deleted_images={}",
+                    live.subscription_key_limit, live.deleted_images
+                ));
+            }
             if collection.retention_purge {
                 out.push_str("|retention_purge=true");
             }
@@ -3085,6 +3182,8 @@ impl RuntimeSchema {
                 .and_then(|definition| static_search(definition, &cid, &mut diagnostics));
 
             collections.push(RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 description: None,
                 classification: None,
                 id: cid,

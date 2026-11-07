@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.95.0 adds opt-in runtime NodeId, managed versions and authorized keyed live subscriptions. Rust runtime collection literals need the two new optional fields; see the root migration guide. Existing serialized schemas and derived APIs are unchanged.
+
 Version 0.94.1 aligns searchable runtime list arguments in the semantic catalog with SDL. No data migration is needed.
 
 Version 0.94.0 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.

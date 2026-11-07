@@ -465,3 +465,11 @@ filter, deterministic order, bounded keyset execution, and optional exact count 
 through the [runtime query boundary](runtime-queries.md). Relation loading, migration planning from
 the IR, transactional outbox integration, writes, and dynamic GraphQL registration remain later
 slices.
+
+## Optional identities and live observation
+
+`RuntimeCollection::node_identity` and `live_subscriptions` default to absent and
+are omitted from serialized legacy schemas. They join both canonical fingerprints
+when present, without adding physical columns. See the canonical
+[runtime subscriptions guide](runtime-subscriptions.md) for validation, version
+column reuse, current authorization, source lifecycle and native-RLS limitations.

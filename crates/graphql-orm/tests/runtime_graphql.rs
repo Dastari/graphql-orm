@@ -143,6 +143,8 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind, nullable: bool) -> Runtim
 }
 fn schema() -> Arc<ValidatedRuntimeSchema> {
     let mut parent = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         description: None,
         classification: None,
         id: cid("parent"),
@@ -168,6 +170,8 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
         search: None,
     };
     let mut child = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         description: None,
         classification: None,
         id: cid("child"),

@@ -51,6 +51,8 @@ fn actor(collection: &str, name: &str, kind: RuntimeValueKind) -> RuntimeField {
 }
 fn collection(id: &str, type_name: &str, fields: Vec<RuntimeField>) -> RuntimeCollection {
     RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         description: None,
         classification: None,
         id: cid(id),

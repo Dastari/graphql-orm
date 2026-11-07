@@ -318,6 +318,24 @@ impl RuntimeGraphqlModule {
                         has_field_policy: true,
                     });
                 }
+                if let Some(node) = &c.node_identity {
+                    fields.push(super::live::dependent_semantic(
+                        "NodeId",
+                        GraphqlSemanticTypeRef::named("ID", GraphqlSemanticTypeKind::Scalar, false),
+                        c,
+                        &c.primary_key,
+                    ));
+                    fields.push(super::live::dependent_semantic(
+                        "RecordVersion",
+                        GraphqlSemanticTypeRef::named(
+                            "Int",
+                            GraphqlSemanticTypeKind::Scalar,
+                            false,
+                        ),
+                        c,
+                        std::slice::from_ref(&node.version_field),
+                    ));
+                }
                 GraphqlEntitySemanticMetadata {
                     entity_name: self.object_name(c),
                     description: c.effective_description(),
@@ -339,15 +357,23 @@ impl RuntimeGraphqlModule {
                             .map(|f| f.api_name.clone())
                             .collect()
                     },
-                    record_version: None,
+                    record_version: c
+                        .node_identity
+                        .as_ref()
+                        .and_then(|node| c.fields.iter().find(|f| f.id == node.version_field))
+                        .map(|f| GraphqlRecordVersionMetadata {
+                            field: f.api_name.clone(),
+                            mode: GraphqlRecordVersionMode::Managed,
+                        }),
                 }
             })
             .collect()
     }
 
-    /// Semantic descriptors of every root this module installs: one keyset list
-    /// query per collection and, when mutations are enabled, each enabled
-    /// mutation. Mutations are [`AiMutationExecutionPolicy::Prohibited`].
+    /// Module-local keyset list and enabled mutation descriptors. Shared local
+    /// Node and keyed live descriptors are added by the composer through
+    /// [`RuntimeGraphqlComposer::finish_with_semantic_catalog`]. Mutations are
+    /// [`AiMutationExecutionPolicy::Prohibited`].
     pub fn semantic_operations(
         &self,
     ) -> Result<Vec<GraphqlSemanticOperationDescriptor>, RuntimeGraphqlError> {
