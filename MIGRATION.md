@@ -10,6 +10,23 @@ supersedes: []
 
 # Migration Guide
 
+## ORM/macros 0.94.0 to 0.94.1: companion lockfile package identities
+
+No code or data migration is needed. Runtime and generated code are unchanged.
+The release tag check includes package-local fixture lockfiles; recording AI
+0.124.0 therefore needs fresh, aligned ORM/macros identities. Related to #278.
+
+## AI 0.123.0 to 0.124.0: optional Codex read-marker tolerance
+
+No data migration is needed. Strict hosts need no change. Process adapters may
+opt in with `AiCodexAppServerProtocolActor::with_ignored_read_state_notifications()`
+and discard `IgnoredNotification` without reporting progress or resetting liveness.
+Only the closed read-marker payload qualifies; unknown methods, requests and item
+kinds remain refused, as do cleanup frames. Detect ignored traffic through
+`ignored_notification_count()` and method-only tracing warnings (32 per actor).
+Version readiness remains authoritative (Related to #333). See the
+[AI migration guide](crates/graphql-orm-ai/MIGRATION.md) for the complete contract.
+
 ## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
 
 Upgrade if you run ORM 0.92.0 or 0.93.0 with a paginated relation whose target has a column read through a SQL expression: MSSQL `mssql_money`, confirmed by a native test, or a PostgreSQL spatial column, which takes the same code path but was not run. Those relations return `INTERNAL_ERROR` on those two versions. The failure exposes no data. Detect it by that error on a paginated relation whose target declares `mssql_money` or a spatial field. No data migration is needed, and unpaginated reads were not affected. Test fixtures and CI backend lanes also change, with no consumer effect.

@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.94.1 allocates fresh package identities for fixture lockfiles recording AI 0.124.0. Runtime and generated code are unchanged; no data migration is needed. Related to #278.
+
 Version 0.94.0 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.
 Version 0.94.0 makes `GraphQLRelations` without `#[graphql(complex)]` on an entity that derives `GraphQLEntity`
 report one compile error that names the fix, instead of three conflicting-implementation errors. An entity with

@@ -16,6 +16,10 @@ for historical context.
 
 ## Unreleased
 
+- **Packaging (ORM/macros 0.94.1):** fresh identities for fixture lockfiles recording AI 0.124.0; runtime and generated code are unchanged. Related to #278. No data migration.
+
+- AI **0.124.0**: optional, typed and bounded Codex read-marker tolerance; default wire bytes and strict admission are unchanged. Unknown effect-capable methods remain refused. See the migration guide for opt-in, method-only tracing and counters, and version readiness (Related to #333). No data migration. Fixes #369.
+
 AI **0.123.0**, ORM runtime/macros **0.94.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 
 - **Breaking (ORM/macros 0.94.0):** generated single-row mutations and default propagating `notify_with` failures now mask callback errors that have a source and no string `code`, matching bulk. Generated entity and field policy callbacks and single-row row-read callbacks follow the same rule. Authored refusals keep their message and extensions. Fixes #328.

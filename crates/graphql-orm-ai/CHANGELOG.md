@@ -10,6 +10,9 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.124.0
+
+- AI **0.124.0**: optional, typed and bounded Codex read-marker tolerance; default wire bytes and strict admission are unchanged. Unknown effect-capable methods remain refused. See the migration guide for opt-in, method-only tracing and counters, and version readiness (Related to #333). No data migration. Fixes #369.
 ## Unreleased - 0.123.0
 
 Use shared catalogue canonical JSON hashes for remote authority, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no schema module bump or data migration is needed. Fixes #352.
