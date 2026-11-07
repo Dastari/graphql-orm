@@ -1,4 +1,5 @@
-#![cfg(feature = "sqlite")]
+// This fixture selects one backend per build; coexistence has dedicated targets.
+#![cfg(all(feature = "sqlite", not(any(feature = "postgres", feature = "mssql"))))]
 //! Patterns over a general link table: typed optional relations selected by a
 //! string kind, an existential filter over the link rows, and a nested create
 //! written as one custom mutation over `Database::transaction`.
