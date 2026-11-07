@@ -713,6 +713,11 @@ with `node_identity` and `live_subscriptions` (both `None` preserves old behavio
 Opted-in identities keep `id` unchanged and add local `node(NodeId:)`, `NodeId`
 and a managed `RecordVersion`. Live delivery requires a host committed-event
 source, fresh registration/delivery/release authorization and explicit deleted-image
-policy. Runtime collections support SQLite/PostgreSQL, not MSSQL. Follow the
+policy. Every reload and release intersects current registration and delivery
+grants. Revocation quietly withholds events and leaves the stream open. An
+operation containing a generated live root must select exactly one root-field
+occurrence; `subscription_key_limit` bounds that root's key-list entries before
+deduplication, also capped by the database limit. Runtime collections support
+SQLite/PostgreSQL, not MSSQL. Follow the
 [runtime subscription contract](../../docs/reference/graphql-orm/runtime-subscriptions.md)
 and use the existing `MutationContext::defer` commit boundary for publication.

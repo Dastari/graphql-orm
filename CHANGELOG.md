@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- **Fixed (ORM/macros 0.95.0):** generated runtime live subscriptions refuse multiple root-field occurrences before any receiver or read, closing the operation-wide key/budget bypass. Every event intersects fresh registration and delivery grants; revocation quietly withholds events, while grant/reload continuity errors no longer depend on remembered key visibility. Loaded nullable NULL fields now qualify as removal-image evidence without admitting unloaded fields. Retained adversarial regressions cover terminal completion, and executing link-only/dependent writes prove version advancement and stale `expected` CAS refusal on SQLite and PostgreSQL. Related to #368.
+
 - **Breaking (ORM/macros 0.95.0; AI 0.123.1 fixture compatibility):** runtime collections gain optional `node_identity` and `live_subscriptions` declarations. Opted-in objects preserve `id`, expose canonical `NodeId` and managed `RecordVersion`, join local `node(NodeId:)`, and provide bounded keyed Changed streams through a host committed-event source. Registration, reload and final release recheck current host authority; deleted images default-deny and are explicitly unsupported on native-RLS profiles. Queue loss, restart and revision signals use the existing uppercase continuity frames without keys/counts. Existing version columns need no data migration; ordinary migrations apply when a host adds one. Serialized opt-out schemas, their fingerprints and derived APIs are unchanged. Related to #368.
 
 AI **0.123.1**, ORM runtime/macros **0.95.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.

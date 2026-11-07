@@ -225,6 +225,7 @@ impl<B: RuntimeReadBackend> ExtensionFactory for GuardFactory<B> {
             limits: self.limits,
             protection: self.protection.clone(),
             parsed: Mutex::new(None),
+            operation_name: Mutex::new(None),
         })
     }
 }
@@ -234,6 +235,7 @@ struct Guard<B: RuntimeReadBackend> {
     limits: RuntimeGraphqlLimits,
     protection: Option<Protection>,
     parsed: Mutex<Option<(ExecutableDocument, Variables)>>,
+    operation_name: Mutex<Option<String>>,
 }
 fn server(e: RuntimeGraphqlError) -> async_graphql::ServerError {
     {
@@ -365,7 +367,10 @@ impl<B: RuntimeReadBackend> Extension for Guard<B> {
             return Err(server(RuntimeGraphqlError::new("cost_exceeded")));
         }
         bounded_variables(&request.variables, limits).map_err(server)?;
-        next.run(ctx, request).await
+        let request = next.run(ctx, request).await?;
+        *self.operation_name.lock().map_err(|_| server(invalid()))? =
+            request.operation_name.clone();
+        Ok(request)
     }
     async fn parse_query(
         &self,
@@ -392,6 +397,26 @@ impl<B: RuntimeReadBackend> Extension for Guard<B> {
         ctx: &ExtensionContext<'_>,
         next: NextValidation<'_>,
     ) -> Result<async_graphql::ValidationResult, Vec<async_graphql::ServerError>> {
+        {
+            let selected = self
+                .operation_name
+                .lock()
+                .map_err(|_| vec![server(invalid())])?;
+            let parsed = self.parsed.lock().map_err(|_| vec![server(invalid())])?;
+            let (document, _) = parsed.as_ref().ok_or_else(|| vec![server(invalid())])?;
+            if let Some((_, operation)) =
+                document
+                    .operations
+                    .iter()
+                    .find(|(name, _)| match selected.as_deref() {
+                        Some(expected) => name.is_some_and(|name| name == expected),
+                        None => document.operations.iter().len() == 1,
+                    })
+            {
+                super::live::admit_operation(document, &operation.node, &self.modules, self.limits)
+                    .map_err(|error| vec![server(error)])?;
+            }
+        }
         next.run(ctx).await.map_err(|_| vec![server(invalid())])
     }
     async fn execute(

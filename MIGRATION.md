@@ -30,8 +30,19 @@ scalars in shared mutation/subscription key inputs; stored scalar fields retain
 their existing runtime types. Install a
 trusted committed-event source and current registration/delivery authority; wire
 publication through existing transaction hooks and `MutationContext::defer`.
-Initial visibility requires current registration and delivery eligibility, so
-authorizers must allow repeated delivery-purpose checks without a frame.
+Every reload and release intersects current registration and delivery eligibility,
+so authorizers must allow repeated checks for both purposes without a frame.
+Each subscription operation containing a generated runtime live root must select
+exactly one root-field occurrence, including aliases, fragments, repeated fields
+and skipped fields. Split multi-root operations into separate subscriptions;
+detect refusal by `subscription_root_limit_exceeded`. The key limit bounds that
+single root's list entries before deduplication. A revoked or field-denied grant
+quietly withholds events and leaves the stream open, matching derived behavior.
+Other grant errors, reload errors and restrictions changing at a prepared
+row/removal's final release terminate uniformly with a continuity error then
+completion, without remembered
+key visibility. Loaded nullable NULLs qualify as captured-image evidence;
+unloaded fields still deny. These corrections need no data migration.
 Every removal requires the `deleted_images` opt-in and an authorized captured
 pre-image, including an update that reloads after deletion. Native-RLS profiles
 serve visible current-row updates but do not emit removals.

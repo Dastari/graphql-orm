@@ -526,7 +526,10 @@ pub struct RuntimeNodeIdentity {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeLiveSubscriptions {
-    /// Positive maximum complete keys per subscription (at most 1024).
+    /// Positive maximum entries in the sole live root's `keys` list before
+    /// deduplication (at most 1024), also bounded by the database's limit.
+    /// An operation selecting a generated live root must select exactly one
+    /// root-field occurrence, including aliases, fragments and skipped fields.
     pub subscription_key_limit: u16,
     /// Explicit application-authorized removal images, including updates that reload as absent.
     /// Unsupported with native RLS; without this opt-in no removal is delivered.

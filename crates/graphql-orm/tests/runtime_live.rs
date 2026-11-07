@@ -94,6 +94,7 @@ fn definition() -> RuntimeSchema {
 struct Source {
     tx: broadcast::Sender<RuntimeLiveEvent>,
     subscribed: Notify,
+    opened: std::sync::atomic::AtomicUsize,
 }
 impl RuntimeLiveSource for Source {
     fn subscribe(
@@ -101,6 +102,7 @@ impl RuntimeLiveSource for Source {
         _: &SchemaFingerprint,
         _: &CollectionId,
     ) -> Result<broadcast::Receiver<RuntimeLiveEvent>, RuntimeGraphqlError> {
+        self.opened.fetch_add(1, Ordering::SeqCst);
         let receiver = self.tx.subscribe();
         self.subscribed.notify_one();
         Ok(receiver)
@@ -109,6 +111,9 @@ impl RuntimeLiveSource for Source {
 #[derive(Default)]
 struct Authority {
     registration_all: AtomicBool,
+    registration_south: AtomicBool,
+    registration_revoked: AtomicBool,
+    unavailable: AtomicBool,
     revoked: AtomicBool,
     revoke_after_grant: AtomicBool,
     move_scope_after_grant: AtomicBool,
@@ -158,7 +163,12 @@ impl RuntimeReadAuthority for Authority {
                 self.entered.notify_one();
                 self.resume.notified().await;
             }
+            if self.unavailable.load(Ordering::SeqCst) {
+                return Err(RuntimeGraphqlError::unavailable());
+            }
             if self.revoked.load(Ordering::SeqCst)
+                || (check.purpose == RuntimeReadPurpose::SubscriptionRegistration
+                    && self.registration_revoked.load(Ordering::SeqCst))
                 || (self.deny_title.load(Ordering::SeqCst)
                     && check.projection.iter().any(|f| f.id() == &fid("title")))
             {
@@ -179,11 +189,16 @@ impl RuntimeReadAuthority for Authority {
                     check.collection,
                     &tenant,
                     RuntimeScalarOperator::Eq,
-                    RuntimeValue::String(if self.use_south.load(Ordering::SeqCst) {
-                        "south".into()
-                    } else {
-                        "north".into()
-                    }),
+                    RuntimeValue::String(
+                        if self.use_south.load(Ordering::SeqCst)
+                            || (check.purpose == RuntimeReadPurpose::SubscriptionRegistration
+                                && self.registration_south.load(Ordering::SeqCst))
+                        {
+                            "south".into()
+                        } else {
+                            "north".into()
+                        },
+                    ),
                     Default::default(),
                 )
                 .unwrap();
@@ -249,7 +264,7 @@ impl Fixture {
         let target = schema
             .physical_schema::<Backend>(Default::default())
             .unwrap();
-        let ownership = ManagedTableSet::new(["runtime_live_records".into()]).unwrap();
+        let ownership = ManagedTableSet::new(schema.owned_table_names()).unwrap();
         let plan = db
             .schema()
             .plan_owned_migration(
@@ -293,6 +308,7 @@ impl Fixture {
         let source = Arc::new(Source {
             tx,
             subscribed: Notify::new(),
+            opened: Default::default(),
         });
         #[cfg(feature = "sqlite")]
         let match_profile = RuntimeMatchProfile::SqliteBinaryCanonical;
@@ -530,26 +546,20 @@ async fn field_denial_and_queued_policy_revocation_stop_delivery() {
     baseline(&f, &mut stream).await;
     f.authority.deny_title.store(true, Ordering::SeqCst);
     f.emit("visible", RuntimeMutationAction::Update, None);
-    assert!(
-        timeout(Duration::from_secs(10), stream.next())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    no_delivery(&mut stream).await;
     f.authority.deny_title.store(false, Ordering::SeqCst);
     let mut stream = f.stream(LIVE).await;
     baseline(&f, &mut stream).await;
     f.authority.pause.store(true, Ordering::SeqCst);
     f.emit("visible", RuntimeMutationAction::Update, None);
     let task = tokio::spawn(async move {
-        let value = stream.next().await;
-        (value, stream)
+        no_delivery(&mut stream).await;
+        stream
     });
     f.authority.entered.notified().await;
     f.authority.revoked.store(true, Ordering::SeqCst);
     f.authority.resume.notify_one();
-    let (value, _) = task.await.unwrap();
-    assert!(value.is_none(), "a queued event crossed revocation");
+    let _stream = task.await.unwrap();
 }
 #[tokio::test]
 async fn reload_reads_current_state_and_visibility_loss_is_removed() {
@@ -1527,12 +1537,7 @@ async fn revocation_and_row_restriction_changes_after_the_first_grant_never_rele
     baseline(&f, &mut stream).await;
     f.authority.revoke_after_grant.store(true, Ordering::SeqCst);
     f.emit("visible", RuntimeMutationAction::Update, None);
-    assert!(
-        timeout(Duration::from_secs(10), stream.next())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    no_delivery(&mut stream).await;
     f.authority.revoked.store(false, Ordering::SeqCst);
     let mut stream = f.stream(LIVE).await;
     baseline(&f, &mut stream).await;
@@ -2004,4 +2009,558 @@ async fn authorized_delete_queued_before_initial_visibility_is_not_lost() {
     assert_eq!(data["recordChanged"]["action"], "DELETED");
     assert_eq!(data["recordChanged"]["id"], "visible");
     assert!(data["recordChanged"]["record"].is_null());
+}
+
+// Retained adversarial regressions adapted from the independent review probes.
+#[tokio::test]
+async fn review_multiple_live_roots_are_refused_before_sources_or_authority() {
+    let f = Fixture::new().await;
+    let mut working = f.stream(LIVE).await;
+    baseline(&f, &mut working).await;
+    let mut queries = vec![
+        r#"subscription {recordChanged(keys:["visible"]){id} recordChanged(keys:["visible"]){id}}"#.to_owned(),
+        r#"subscription {...Roots} fragment Roots on Subscription {a:recordChanged(keys:["visible"]){id} ... on Subscription {b:recordChanged(keys:["missing"]){id}}}"#.to_owned(),
+        r#"subscription {recordChanged(keys:["visible"]){id} b:recordChanged(keys:["hidden"]) @skip(if:true) {id}}"#.to_owned(),
+        r#"subscription {recordChanged(keys:["visible"]){id} __typename}"#.to_owned(),
+    ];
+    for keys in [["visible", "other"], ["hidden", "missing"]] {
+        queries.push(format!(
+            "subscription {{ a: recordChanged(keys:[\"{}\",\"{}\"]) {{id}} b:recordChanged(keys:[\"k3\",\"k4\"]) {{id}} c:recordChanged(keys:[\"k5\",\"k6\"]) {{id}} }}",
+            keys[0], keys[1]
+        ));
+    }
+    for query in queries {
+        let opened = f.source.opened.load(Ordering::SeqCst);
+        f.authority.purposes.lock().unwrap().clear();
+        let mut refused = f.api.execute_stream(f.request(&query)).boxed();
+        let response = timeout(Duration::from_millis(500), refused.next())
+            .await
+            .expect("multi-root operation must refuse immediately")
+            .unwrap();
+        assert_eq!(response.data, graphql_orm::async_graphql::Value::Null);
+        assert_eq!(
+            response.errors[0].extensions.as_ref().unwrap().get("code"),
+            Some(&graphql_orm::async_graphql::Value::String(
+                "subscription_root_limit_exceeded".into()
+            ))
+        );
+        assert!(
+            timeout(Duration::from_secs(2), refused.next())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(f.source.opened.load(Ordering::SeqCst), opened);
+        assert!(f.authority.purposes.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn live_root_admission_counts_only_the_selected_operation() {
+    let f = Fixture::new().await;
+    let mut stream = f.api.execute_stream(f.request(r#"
+        subscription Selected {recordChanged(keys:["visible"]){id record{id title}}}
+        subscription Unused {a:recordChanged(keys:["visible"]){id} b:recordChanged(keys:["hidden"]){id}}
+    "#).operation_name("Selected")).boxed();
+    tokio::select! {
+        response = stream.next() => panic!("registration produced a frame: {response:?}"),
+        () = f.source.subscribed.notified() => {}
+    }
+    baseline(&f, &mut stream).await;
+}
+
+#[tokio::test]
+async fn review_registration_and_delivery_both_restrict_every_event() {
+    let f = Fixture::new().await;
+    let mut working = f.stream(LIVE).await;
+    baseline(&f, &mut working).await;
+    f.authority.registration_south.store(true, Ordering::SeqCst);
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    no_delivery(&mut working).await;
+    for key in ["visible", "missing"] {
+        let mut stream = f
+            .stream(&format!(
+                "subscription {{ recordChanged(keys:[\"{key}\"]) {{ id record {{title}} }} }}"
+            ))
+            .await;
+        f.emit(key, RuntimeMutationAction::Update, None);
+        no_delivery(&mut stream).await;
+    }
+}
+
+#[tokio::test]
+async fn review_revoked_registration_quietly_withholds_delivery() {
+    let f = Fixture::new().await;
+    let mut stream = f.stream(LIVE).await;
+    baseline(&f, &mut stream).await;
+    f.authority
+        .registration_revoked
+        .store(true, Ordering::SeqCst);
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    no_delivery(&mut stream).await;
+    f.authority
+        .registration_revoked
+        .store(false, Ordering::SeqCst);
+    baseline(&f, &mut stream).await;
+    // Revoke registration while delivery alone is still permitted and paused.
+    // The final registration check must withhold this already queued event.
+    f.authority.pause.store(true, Ordering::SeqCst);
+    f.emit("visible", RuntimeMutationAction::Update, None);
+    let task = tokio::spawn(async move {
+        no_delivery(&mut stream).await;
+        stream
+    });
+    f.authority.entered.notified().await;
+    f.authority
+        .registration_revoked
+        .store(true, Ordering::SeqCst);
+    f.authority.resume.notify_one();
+    let mut stream = task.await.unwrap();
+    f.authority
+        .registration_revoked
+        .store(false, Ordering::SeqCst);
+    baseline(&f, &mut stream).await;
+    f.source.tx.send(RuntimeLiveEvent::SourceClosed).unwrap();
+    assert_terminal(&mut stream, "SUBSCRIPTION_SOURCE_CLOSED").await;
+}
+
+async fn assert_terminal(stream: &mut BoxStream<'static, Response>, code: &str) {
+    let response = next(stream).await;
+    assert_eq!(response.data, graphql_orm::async_graphql::Value::Null);
+    assert_eq!(response.errors.len(), 1);
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&graphql_orm::async_graphql::Value::String(code.into()))
+    );
+    assert!(
+        timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .is_none(),
+        "a terminal error must be immediately followed by complete"
+    );
+}
+
+#[tokio::test]
+async fn review_nullable_image_is_present_evidence_for_delete_and_visibility_loss() {
+    for action in [RuntimeMutationAction::Delete, RuntimeMutationAction::Update] {
+        let mut definition = definition();
+        let mut note = field("note", RuntimeValueKind::String);
+        note.nullable = true;
+        definition.collections[0].fields.push(note);
+        let f = Fixture::with_definition(definition).await;
+        let mut stream = f.stream("subscription { recordChanged(keys:[\"visible\"]) {action id record{id title note}} }").await;
+        baseline(&f, &mut stream).await;
+        let loaded = f
+            .image("visible", &["id", "title", "tenant", "rowVersion", "note"])
+            .await;
+        let unloaded = f
+            .image("visible", &["id", "title", "tenant", "rowVersion"])
+            .await;
+        assert_eq!(
+            loaded.state(&f.field("note")).unwrap(),
+            RuntimeFieldState::Null
+        );
+        assert_eq!(
+            unloaded.state(&f.field("note")).unwrap(),
+            RuntimeFieldState::Unloaded
+        );
+        let sql = if action == RuntimeMutationAction::Delete {
+            "DELETE FROM runtime_live_records WHERE id='visible'"
+        } else {
+            "UPDATE runtime_live_records SET tenant='south',rowversion=rowversion+1 WHERE id='visible'"
+        };
+        graphql_orm::sqlx::query(sql)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        f.authority.allow_delete.store(true, Ordering::SeqCst);
+        f.emit("visible", action, Some(unloaded));
+        no_delivery(&mut stream).await;
+        f.emit("visible", action, Some(loaded));
+        let response = next(&mut stream).await;
+        assert!(response.errors.is_empty(), "{response:?}");
+        let value = response.data.into_json().unwrap();
+        assert_eq!(value["recordChanged"]["action"], "DELETED");
+        assert_eq!(value["recordChanged"]["id"], "visible");
+        assert!(value["recordChanged"]["record"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn review_revocation_does_not_reveal_prior_key_visibility() {
+    for key in ["visible", "hidden", "missing"] {
+        let f = Fixture::new().await;
+        let mut working = f.stream(LIVE).await;
+        baseline(&f, &mut working).await;
+        let mut target = f
+            .stream(&format!(
+                "subscription {{recordChanged(keys:[\"{key}\"]){{id record{{title}}}}}} "
+            ))
+            .await;
+        no_delivery(&mut target).await; // finish registration before changing policy
+        if key == "visible" {
+            graphql_orm::sqlx::query(
+                "UPDATE runtime_live_records SET tenant='south' WHERE id='visible'",
+            )
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+            f.emit(key, RuntimeMutationAction::Update, None);
+            no_delivery(&mut target).await;
+        }
+        f.authority.revoked.store(true, Ordering::SeqCst);
+        f.emit(key, RuntimeMutationAction::Update, None);
+        no_delivery(&mut target).await;
+    }
+}
+
+#[tokio::test]
+async fn review_restriction_change_terminal_is_independent_of_prior_visibility() {
+    for key in ["visible", "hidden", "missing"] {
+        let f = Fixture::new().await;
+        let mut working = f.stream(LIVE).await;
+        baseline(&f, &mut working).await;
+        let mut target = f
+            .stream(&format!(
+                "subscription {{recordChanged(keys:[\"{key}\"]){{id record{{title}}}}}} "
+            ))
+            .await;
+        no_delivery(&mut target).await;
+        if key == "hidden" {
+            graphql_orm::sqlx::query(
+                "UPDATE runtime_live_records SET tenant='north' WHERE id='hidden'",
+            )
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        } else if key == "missing" {
+            graphql_orm::sqlx::query("INSERT INTO runtime_live_records(id,title,tenant)VALUES('missing','now present','north')").execute(f.db.pool()).await.unwrap();
+        }
+        f.authority
+            .move_scope_after_grant
+            .store(true, Ordering::SeqCst);
+        f.emit(key, RuntimeMutationAction::Update, None);
+        assert_terminal(&mut target, "SUBSCRIPTION_CONTINUITY_LOST").await;
+    }
+}
+
+#[tokio::test]
+async fn review_reload_error_terminal_is_independent_of_prior_visibility() {
+    for key in ["visible", "hidden", "missing"] {
+        let f = Fixture::new().await;
+        let mut working = f.stream(LIVE).await;
+        baseline(&f, &mut working).await;
+        let mut target = f
+            .stream(&format!(
+                "subscription {{recordChanged(keys:[\"{key}\"]){{id record{{title}}}}}} "
+            ))
+            .await;
+        no_delivery(&mut target).await;
+        graphql_orm::sqlx::query("DROP TABLE runtime_live_records")
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        f.emit(key, RuntimeMutationAction::Update, None);
+        assert_terminal(&mut target, "SUBSCRIPTION_CONTINUITY_LOST").await;
+    }
+}
+
+#[tokio::test]
+async fn authority_error_terminal_is_independent_of_prior_visibility() {
+    for key in ["visible", "hidden", "missing"] {
+        let f = Fixture::new().await;
+        let mut working = f.stream(LIVE).await;
+        baseline(&f, &mut working).await;
+        let mut stream = f
+            .stream(&format!(
+                "subscription {{recordChanged(keys:[\"{key}\"]){{id record{{title}}}}}}"
+            ))
+            .await;
+        no_delivery(&mut stream).await;
+        f.authority.unavailable.store(true, Ordering::SeqCst);
+        f.emit(key, RuntimeMutationAction::Update, None);
+        assert_terminal(&mut stream, "SUBSCRIPTION_CONTINUITY_LOST").await;
+    }
+}
+
+struct VersionWrite(Arc<ValidatedRuntimeSchema>);
+impl RuntimeWriteAuthority<Backend> for VersionWrite {
+    fn authorize_intent<'a>(
+        &'a self,
+        intent: RuntimeWriteIntent<'a>,
+        _: &'a mut MutationContext<'_, Backend>,
+    ) -> BoxFuture<'a, Result<RuntimeWriteGrant, RuntimeMutationError>> {
+        Box::pin(async move {
+            let definition = self
+                .0
+                .schema()
+                .collections
+                .iter()
+                .find(|c| &c.id == intent.collection().id())
+                .unwrap();
+            let fields = definition
+                .fields
+                .iter()
+                .map(|f| self.0.resolve_field(intent.collection(), &f.id).unwrap())
+                .collect::<Vec<_>>();
+            RuntimeWriteGrant::new(
+                self.0
+                    .resolve_projection(intent.collection(), &fields)
+                    .unwrap(),
+                None,
+            )
+        })
+    }
+    fn authorize_preimage<'a>(
+        &'a self,
+        _: RuntimePreimageCheck<'a>,
+        _: &'a mut MutationContext<'_, Backend>,
+    ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn authorize_result<'a>(
+        &'a self,
+        check: RuntimeResultCheck<'a>,
+        _: &'a mut MutationContext<'_, Backend>,
+    ) -> BoxFuture<'a, Result<RuntimeReturnGrant, RuntimeMutationError>> {
+        Box::pin(async move { Ok(RuntimeReturnGrant::new(check.intent.returning().cloned())) })
+    }
+    fn link_target_visibility<'a>(
+        &'a self,
+        _: RuntimeLinkVisibilityCheck<'a>,
+        _: &'a mut MutationContext<'_, Backend>,
+    ) -> BoxFuture<'a, Result<Option<RuntimePredicate>, RuntimeMutationError>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn authorize_links<'a>(
+        &'a self,
+        _: RuntimeLinkCheck<'a>,
+        _: &'a mut MutationContext<'_, Backend>,
+    ) -> BoxFuture<'a, Result<(), RuntimeMutationError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+impl Fixture {
+    async fn version_write(
+        &self,
+        request: RuntimeMutationRequest,
+        expect_conflict: bool,
+    ) -> Result<RuntimeMutationEffect, TransactionError> {
+        let environment = self.environment.clone();
+        let authority = VersionWrite(self.schema.clone());
+        self.db
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    let result = tx.mutate_runtime(&environment, &request, &authority).await;
+                    if expect_conflict {
+                        assert_eq!(
+                            result
+                                .as_ref()
+                                .expect_err("stale expected version must refuse")
+                                .code(),
+                            RuntimeMutationErrorCode::Conflict
+                        );
+                    }
+                    result.map_err(graphql_orm::graphql::errors::OrmPublicError::from)
+                })
+            })
+            .await
+    }
+    async fn assert_version_and_stale_cas(&self, version: i64) {
+        let row = self.image("visible", &["id", "title", "rowVersion"]).await;
+        assert_eq!(
+            row.value(&self.field("rowVersion")).unwrap(),
+            &RuntimeValue::Integer(version)
+        );
+        assert_eq!(
+            row.value(&self.field("title")).unwrap(),
+            &RuntimeValue::String("initial".into())
+        );
+        let expected = self
+            .schema
+            .runtime_compare(
+                &self.collection(),
+                &self.field("rowVersion"),
+                RuntimeScalarOperator::Eq,
+                RuntimeValue::Integer(version - 1),
+                Default::default(),
+            )
+            .unwrap();
+        let request = self
+            .schema
+            .runtime_update_request(
+                self.key("visible"),
+                &[(self.field("title"), RuntimeValue::String("stale".into()))],
+                Some(expected),
+                None,
+                Default::default(),
+            )
+            .unwrap();
+        assert!(self.version_write(request, true).await.is_err());
+        let row = self.image("visible", &["id", "title", "rowVersion"]).await;
+        assert_eq!(
+            row.value(&self.field("rowVersion")).unwrap(),
+            &RuntimeValue::Integer(version)
+        );
+        assert_eq!(
+            row.value(&self.field("title")).unwrap(),
+            &RuntimeValue::String("initial".into())
+        );
+    }
+}
+
+#[tokio::test]
+async fn link_only_writes_advance_record_version_and_refuse_stale_expected_cas() {
+    let mut schema = definition();
+    schema.collections[0].relations.push(RuntimeRelation {
+        id: RelationId::new("links").unwrap(),
+        api_name: "links".into(),
+        target: CollectionId::new("records").unwrap(),
+        key_pairs: vec![],
+        cardinality: RelationCardinality::Many,
+        enforce_foreign_key: false,
+        on_delete: None,
+        description: None,
+        classification: None,
+        export: None,
+        join: Some(RuntimeJoinTable {
+            physical_table: "runtime_live_links".into(),
+            source: vec![RuntimeJoinColumn {
+                field: fid("id"),
+                column: "from_id".into(),
+            }],
+            target: vec![RuntimeJoinColumn {
+                field: fid("id"),
+                column: "to_id".into(),
+            }],
+        }),
+    });
+    let f = Fixture::with_definition(schema).await;
+    let relation = f
+        .schema
+        .resolve_relation(&f.collection(), &RelationId::new("links").unwrap())
+        .unwrap();
+    // Positive write precedes each stale-CAS refusal, including removing all links.
+    for (targets, version, expected_links) in [(vec![f.key("other")], 2, 1), (vec![], 3, 0)] {
+        let request = f
+            .schema
+            .runtime_link_request(
+                &relation,
+                f.key("visible"),
+                RuntimeLinkChange::Replace(targets),
+                None,
+                10,
+                Default::default(),
+            )
+            .unwrap();
+        let effect = f.version_write(request, false).await.unwrap();
+        assert_eq!(
+            effect.staged().value(&f.field("rowVersion")).unwrap(),
+            &RuntimeValue::Integer(version)
+        );
+        f.assert_version_and_stale_cas(version).await;
+        let count: i64 = graphql_orm::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM runtime_live_links WHERE from_id='visible'",
+        )
+        .fetch_one(f.db.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, expected_links);
+    }
+}
+
+#[tokio::test]
+async fn dependent_set_null_advances_record_version_and_refuses_stale_expected_cas() {
+    let mut schema = definition();
+    let mut parent_field = field("parentId", RuntimeValueKind::String);
+    parent_field.nullable = true;
+    schema.collections[0].fields.push(parent_field);
+    schema.collections[0].relations.push(RuntimeRelation {
+        id: RelationId::new("parent").unwrap(),
+        api_name: "parent".into(),
+        target: CollectionId::new("parents").unwrap(),
+        key_pairs: vec![RelationKeyPair {
+            source: fid("parentId"),
+            target: fid("parent.id"),
+        }],
+        cardinality: RelationCardinality::One,
+        enforce_foreign_key: true,
+        on_delete: Some(DeletePolicy::SetNull),
+        join: None,
+        description: None,
+        classification: None,
+        export: None,
+    });
+    let mut parent = schema.collections[0].clone();
+    parent.id = CollectionId::new("parents").unwrap();
+    parent.api_type_name = "Parent".into();
+    parent.api_plural_name = "Parents".into();
+    parent.physical_table = "runtime_live_parents".into();
+    parent.node_identity = None;
+    parent.live_subscriptions = None;
+    parent.relations.clear();
+    let mut id = field("id", RuntimeValueKind::String);
+    id.id = fid("parent.id");
+    parent.fields = vec![id];
+    parent.primary_key = vec![fid("parent.id")];
+    schema.collections.push(parent);
+    let f = Fixture::with_definition(schema).await;
+    let parents = f
+        .schema
+        .resolve_collection(&CollectionId::new("parents").unwrap())
+        .unwrap();
+    let id = f.schema.resolve_field(&parents, &fid("parent.id")).unwrap();
+    for (key, version) in [("parent1", 2), ("parent2", 3)] {
+        #[cfg(feature = "sqlite")]
+        let insert = "INSERT INTO runtime_live_parents (id) VALUES (?1)";
+        #[cfg(feature = "postgres")]
+        let insert = "INSERT INTO runtime_live_parents (id) VALUES ($1)";
+        graphql_orm::sqlx::query(insert)
+            .bind(key)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        #[cfg(feature = "sqlite")]
+        let attach = "UPDATE runtime_live_records SET parentid=?1 WHERE id='visible'";
+        #[cfg(feature = "postgres")]
+        let attach = "UPDATE runtime_live_records SET parentid=$1 WHERE id='visible'";
+        graphql_orm::sqlx::query(attach)
+            .bind(key)
+            .execute(f.db.pool())
+            .await
+            .unwrap();
+        let key = f
+            .schema
+            .runtime_key(&parents, &[(id.clone(), RuntimeValue::String(key.into()))])
+            .unwrap();
+        let request = f
+            .schema
+            .runtime_delete_request(key, None, None, Default::default())
+            .unwrap()
+            .with_dependent_changes(Default::default())
+            .unwrap();
+        let effect = f.version_write(request, false).await.unwrap();
+        assert_eq!(effect.dependents().len(), 1);
+        assert_eq!(
+            effect.dependents()[0]
+                .staged()
+                .value(&f.field("rowVersion"))
+                .unwrap(),
+            &RuntimeValue::Integer(version)
+        );
+        assert_eq!(
+            effect.dependents()[0]
+                .staged()
+                .state(&f.field("parentId"))
+                .unwrap(),
+            RuntimeFieldState::Null
+        );
+        f.assert_version_and_stale_cas(version).await;
+        let row = f.image("visible", &["id", "parentId"]).await;
+        assert_eq!(
+            row.state(&f.field("parentId")).unwrap(),
+            RuntimeFieldState::Null
+        );
+    }
 }

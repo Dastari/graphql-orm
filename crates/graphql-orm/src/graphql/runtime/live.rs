@@ -388,6 +388,111 @@ fn fence(
     Ok(())
 }
 
+// Count root occurrences before async-graphql opens any of its independent streams.
+// Do not merge response names or let directives relax this structural bound: the
+// dynamic subscription executor can open a receiver for each repeated occurrence.
+pub(super) fn admit_operation(
+    document: &async_graphql::parser::types::ExecutableDocument,
+    operation: &async_graphql::parser::types::OperationDefinition,
+    modules: &[RuntimeGraphqlModule],
+    limits: RuntimeGraphqlLimits,
+) -> Result<(), RuntimeGraphqlError> {
+    use async_graphql::parser::types::{OperationType, Selection};
+    if operation.ty != OperationType::Subscription
+        || !modules.iter().any(|module| {
+            module
+                .schema
+                .schema()
+                .collections
+                .iter()
+                .any(|collection| collection.live_subscriptions.is_some())
+        })
+    {
+        return Ok(());
+    }
+    let mut stack = vec![(&operation.selection_set.node, 0usize)];
+    let mut expanded = 0usize;
+    let mut roots = 0usize;
+    let mut live = false;
+    while let Some((selections, depth)) = stack.pop() {
+        if depth > limits.max_depth {
+            return Err(RuntimeGraphqlError::new("cost_exceeded"));
+        }
+        for selection in &selections.items {
+            expanded = expanded.checked_add(1).ok_or_else(invalid)?;
+            if expanded > limits.max_selections {
+                return Err(RuntimeGraphqlError::new("cost_exceeded"));
+            }
+            match &selection.node {
+                Selection::Field(field) => {
+                    roots += 1;
+                    live |= modules.iter().any(|module| {
+                        module.schema.schema().collections.iter().any(|collection| {
+                            collection.live_subscriptions.is_some()
+                                && field.node.name.node == changed_name(module, collection)
+                        })
+                    });
+                }
+                Selection::InlineFragment(fragment) => {
+                    stack.push((&fragment.node.selection_set.node, depth + 1));
+                }
+                Selection::FragmentSpread(spread) => {
+                    let fragment = document
+                        .fragments
+                        .get(&spread.node.fragment_name.node)
+                        .ok_or_else(invalid)?;
+                    stack.push((&fragment.node.selection_set.node, depth + 1));
+                }
+            }
+        }
+    }
+    if live && roots > 1 {
+        return Err(RuntimeGraphqlError::new("subscription_root_limit_exceeded"));
+    }
+    Ok(())
+}
+
+// Authorize fresh plans for BOTH purposes. Intersect every layer, including
+// nested reads and the relation-filter grants already embedded in predicates.
+async fn authorize_live<B: RuntimeReadBackend>(
+    original: &Plan,
+    request: &RuntimeGraphqlRequest<B>,
+    protection: Option<&super::execution::Protection>,
+    limits: RuntimeGraphqlLimits,
+) -> Result<Plan, RuntimeGraphqlError> {
+    let mut registration = original.clone();
+    registration.purpose = RuntimeReadPurpose::SubscriptionRegistration;
+    super::execution::authorize(&mut registration, request, protection, limits).await?;
+    let mut delivery = original.clone();
+    delivery.purpose = RuntimeReadPurpose::SubscriptionDelivery;
+    super::execution::authorize(&mut delivery, request, protection, limits).await?;
+    intersect_grants(&mut delivery, &registration, B::DIALECT, limits)?;
+    Ok(delivery)
+}
+fn intersect_grants(
+    delivery: &mut Plan,
+    registration: &Plan,
+    backend: DatabaseBackend,
+    limits: RuntimeGraphqlLimits,
+) -> Result<(), RuntimeGraphqlError> {
+    if !same_row_grants(delivery, registration, backend)
+        && let Some(predicate) = registration.predicate.clone()
+    {
+        delivery.predicate = Some(match delivery.predicate.take() {
+            Some(other) => delivery
+                .module
+                .schema
+                .runtime_and(&delivery.collection, vec![predicate, other], limits.query)
+                .map_err(super::plan::query_error)?,
+            None => predicate,
+        });
+    }
+    for (child, grant) in delivery.children.iter_mut().zip(&registration.children) {
+        intersect_grants(child, grant, backend, limits)?;
+    }
+    Ok(())
+}
+
 async fn authorize_image(
     source: &Source,
     module: &RuntimeGraphqlModule,
@@ -414,7 +519,11 @@ async fn authorize_image(
         .fields()
         .iter()
         .any(|(f, v)| image.value(f).ok() != Some(v))
-        || plan.fields.iter().any(|f| image.value(f).is_err())
+        || plan.fields.iter().any(|field| match image.state(field) {
+            Ok(RuntimeFieldState::Value(_)) => false,
+            Ok(RuntimeFieldState::Null) => !field.nullable(),
+            _ => true,
+        })
     {
         return false;
     }
@@ -578,45 +687,13 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                 }
                 registration_cost.admit(limits).map_err(safe)?;
                 let original = plan.clone();
-                let registration =
-                    super::execution::authorize(&mut plan, request, protection.as_ref(), limits)
-                        .await;
+                let eligibility =
+                    authorize_live(&original, request, protection.as_ref(), limits).await;
                 fence(&mut receiver, &mut pending, module.schema.fingerprint())
                     .map_err(wire_error)?;
-                registration.map_err(safe)?;
-                // Registration can be broader than delivery. It cannot establish
-                // prior visibility by itself, or a later removal would disclose a
-                // delivery-hidden key. Validate both purposes before any initial read.
-                let mut eligibility = original.clone();
-                eligibility.purpose = RuntimeReadPurpose::SubscriptionDelivery;
-                let admitted = super::execution::authorize(
-                    &mut eligibility,
-                    request,
-                    protection.as_ref(),
-                    limits,
-                )
-                .await;
-                fence(&mut receiver, &mut pending, module.schema.fingerprint())
-                    .map_err(wire_error)?;
-                admitted.map_err(safe)?;
-                if !same_row_grants(&plan, &eligibility, B::DIALECT)
-                    && let Some(registration) = plan.predicate.clone()
-                {
-                    eligibility.predicate = Some(match eligibility.predicate.take() {
-                        Some(delivery) => module
-                            .schema
-                            .runtime_and(
-                                &eligibility.collection,
-                                vec![registration, delivery],
-                                limits.query,
-                            )
-                            .map_err(super::plan::query_error)
-                            .map_err(safe)?,
-                        None => registration,
-                    });
-                }
-                // Initial visibility is private evidence, never a record payload.
-                // Do not run projectors or fetch related records for this probe.
+                let mut eligibility = eligibility.map_err(safe)?;
+                // Keep bounded admission probes without retaining per-key visibility
+                // history. Do not run projectors or fetch related records here.
                 eligibility.children.clear();
                 eligibility.projected.clear();
                 eligibility.node_id = false;
@@ -628,7 +705,6 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     .schema
                     .resolve_projection(&eligibility.collection, &eligibility.fields)
                     .map_err(|_| safe(invalid()))?;
-                let mut visible = BTreeSet::new();
                 for key in &keys {
                     let value = super::execution::point(
                         &database,
@@ -641,9 +717,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                     .await;
                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
                         .map_err(wire_error)?;
-                    if value.map_err(safe)?.is_some() {
-                        visible.insert(key_text(key).map_err(safe)?);
-                    }
+                    value.map_err(safe)?;
                 }
                 let key_set = keys
                     .iter()
@@ -654,7 +728,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                 let key_set = Arc::new(key_set);
                 let original = Arc::new(original);
                 let stream =
-                    futures::stream::unfold(Some((receiver, pending, visible)), move |state| {
+                    futures::stream::unfold(Some((receiver, pending)), move |subscription_state| {
                         let c = c.clone();
                         let key_set = key_set.clone();
                         let original = original.clone();
@@ -665,7 +739,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                         let shape = shape.clone();
                         let protection = protection.clone();
                         async move {
-                            let (mut receiver, mut pending, mut visible) = state?;
+                            let (mut receiver, mut pending) = subscription_state?;
                             loop {
                                 let event = match pending.pop_front() {
                                     Some(event) => event,
@@ -758,32 +832,28 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                 if !key_set.contains(&identity) {
                                     continue;
                                 }
-                                let mut delivery = original.as_ref().clone();
-                                delivery.purpose = RuntimeReadPurpose::SubscriptionDelivery;
-                                let grant = super::execution::authorize(
-                                    &mut delivery,
-                                    request,
-                                    protection.as_ref(),
-                                    limits,
-                                )
-                                .await;
+                                let grant =
+                                    authorize_live(&original, request, protection.as_ref(), limits)
+                                        .await;
                                 if let Err(code) =
                                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
                                 {
                                     return Some((Err(wire_error(code)), None));
                                 }
-                                if let Err(error) = grant {
-                                    if !visible.contains(&identity) {
+                                let delivery = match grant {
+                                    Ok(plan) => plan,
+                                    // Match derived subscriptions: revocation withholds events
+                                    // quietly and does not expose whether this key ever existed.
+                                    Err(error) if error == RuntimeGraphqlError::denied() => {
                                         continue;
                                     }
-                                    if error != RuntimeGraphqlError::denied() {
+                                    Err(_) => {
                                         return Some((
                                             Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
                                             None,
                                         ));
                                     }
-                                    return None;
-                                }
+                                };
                                 let mut image_proved = false;
                                 if action == RuntimeMutationAction::Delete {
                                     image_proved = authorize_image(
@@ -824,9 +894,6 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                 let value = match current {
                                     Ok(value) => value,
                                     Err(_) => {
-                                        if !visible.contains(&identity) && !image_proved {
-                                            continue;
-                                        }
                                         return Some((
                                             Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
                                             None,
@@ -858,36 +925,27 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                         continue;
                                     }
                                 }
-                                let mut release = original.as_ref().clone();
-                                release.purpose = RuntimeReadPurpose::SubscriptionDelivery;
-                                let grant = super::execution::authorize(
-                                    &mut release,
-                                    request,
-                                    protection.as_ref(),
-                                    limits,
-                                )
-                                .await;
+                                let grant =
+                                    authorize_live(&original, request, protection.as_ref(), limits)
+                                        .await;
                                 if let Err(code) =
                                     fence(&mut receiver, &mut pending, module.schema.fingerprint())
                                 {
                                     return Some((Err(wire_error(code)), None));
                                 }
-                                if let Err(error) = grant {
-                                    if !visible.contains(&identity) {
+                                let release = match grant {
+                                    Ok(plan) => plan,
+                                    Err(error) if error == RuntimeGraphqlError::denied() => {
                                         continue;
                                     }
-                                    if error == RuntimeGraphqlError::denied() {
-                                        return None;
+                                    Err(_) => {
+                                        return Some((
+                                            Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
+                                            None,
+                                        ));
                                     }
-                                    return Some((
-                                        Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
-                                        None,
-                                    ));
-                                }
+                                };
                                 if !same_grants(&delivery, &release, B::DIALECT) {
-                                    if !visible.contains(&identity) {
-                                        continue;
-                                    }
                                     return Some((
                                         Err(wire_error(SUBSCRIPTION_CONTINUITY_LOST)),
                                         None,
@@ -968,11 +1026,6 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                 payload.insert(Name::new("sourceEntity"), Value::Null);
                                 payload.insert(Name::new("sourceId"), Value::Null);
                                 payload.insert(Name::new("path"), Value::List(Vec::new()));
-                                if value.is_some() {
-                                    visible.insert(identity);
-                                } else {
-                                    visible.remove(&identity);
-                                }
                                 payload
                                     .insert(Name::new(&entity_field), value.unwrap_or(Value::Null));
                                 let payload = Value::Object(payload);
@@ -987,7 +1040,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
                                 }
                                 return Some((
                                     Ok(super::schema::field_value(payload)),
-                                    Some((receiver, pending, visible)),
+                                    Some((receiver, pending)),
                                 ));
                             }
                         }

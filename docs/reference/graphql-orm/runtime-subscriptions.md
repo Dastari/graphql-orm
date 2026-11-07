@@ -62,9 +62,16 @@ collection.live_subscriptions = Some(RuntimeLiveSubscriptions {
 });
 ```
 
-Live requires node identity. `subscription_key_limit` is 1–1024; the effective
-bound is also limited by `Database::subscription_key_limit`. Bounds apply before
-deduplication. An empty list observes nothing. Supply `keys` on each operation;
+Live requires node identity. `subscription_key_limit` is 1–1024. It bounds the
+number of entries in the single live root's `keys` list before deduplication;
+the effective bound is the smaller of that declaration and
+`Database::subscription_key_limit`. A subscription operation selecting any
+generated runtime live root must contain exactly one root-field occurrence.
+Aliases, repeated response names, named/inline fragments and directive-skipped
+fields cannot multiply receivers or key/read budgets. Multiple root occurrences
+refuse with `subscription_root_limit_exceeded` before opening any source,
+authorizing or reading, independently of key existence. Unused operations are
+not counted. An empty list observes nothing. Supply `keys` on each operation;
 unkeyed observation and `keys: null` are refused. Single-key lists use the derived
 wire scalar (`String`, `Int`, `UUID`, or `Boolean`). Composite lists use
 `<Entity>KeyInput`; their event also exposes the complete `<Entity>Key` and the
@@ -133,20 +140,33 @@ subscription roots are unchanged.
 `RuntimeReadCheck::operation_purpose` retains that origin even on a
 `RelationFilter` target, so indirect filter reads can enforce the same observation
 rules. A list read permission need not grant observation permission.
-Registration validates all requested fields and every key member. Initial visibility also requires a current
-`SubscriptionDelivery` grant and the intersection of both row restrictions; a
-broader registration rule cannot make a delivery-hidden key appear as removed.
-These probes load keys only, without projectors or related records. Delivery
-eligibility checks can repeat without a frame, including during registration.
-Delivery decisions must enforce current observation permission as well as
-row/field reads; registration is not an enduring allow grant.
+Registration validates all requested fields and every key member. Initial
+visibility and every event's reload and final release require BOTH current
+`SubscriptionRegistration` and `SubscriptionDelivery` grants. The engine
+intersects their row restrictions at every selected layer, including each
+purpose's authorized relation-filter predicates; neither purpose can broaden
+the other. A key hidden by either rule is
+silently admitted and produces no per-row frame, just like a missing key.
+Initial probes load keys only, without projectors or related records. Both
+purposes can be checked repeatedly without a frame. Registration is not an
+enduring allow grant: revoking it also withholds the next queued event.
+
 Deliveries start from fresh grants, reload through the existing authorized
-anchored executor, prepare the entire selected payload, and authorize again
-before release. No registration grant or event-time record becomes a delivery
-snapshot. A changed row restriction across the reload loses continuity; field or
-operation denial releases no partial identifier/payload. Authorizers must return
-current decisions, reject stale database-auth/cursor partitions and verify current
-principals rather than retaining an allow decision from registration.
+anchored executor, prepare the entire selected payload, and authorize both
+purposes again before release. No registration grant or event-time record
+becomes a delivery snapshot. For a prepared row or an approved removal, a row
+restriction changing between preparation and its final release loses continuity
+with `SUBSCRIPTION_CONTINUITY_LOST`, followed immediately by `complete`. Empty
+reloads without approved image evidence remain quiet. Other authority errors
+and reload failures use that
+same terminal, irrespective of whether a key was previously visible. Changes
+between events simply apply both fresh restrictions to the next read.
+Field or operation denial, including revocation of either purpose, quietly
+withholds the event and keeps the stream open, matching derived subscriptions;
+there is no key-dependent completion or diagnostic. Reauthorization can permit
+a later event. Authorizers must return current decisions, reject stale
+database-auth/cursor partitions and verify current principals rather than
+retaining an allow decision from registration.
 
 Current rows hidden from this subscription produce no per-row frame. A reload
 that is invisible or missing can be reported as removed (`DELETED`, null entity)
@@ -168,7 +188,10 @@ that the row was not deleted in the meantime. It requires
 `SqliteBinaryCanonical` or `PostgresCUtf8` storage assertion for that backend.
 This assertion concerns real storage/collation, not merely the decoder's type.
 The engine verifies the captured image's key, loaded fields and current row
-predicate through the conservative checked matcher. Unsupported predicates
+predicate through the conservative checked matcher. A loaded SQL NULL in a
+nullable selected field is present evidence; an unloaded field is missing
+evidence and denies. This applies to both deletes and visibility-loss removals.
+Unsupported predicates
 (including relation dependencies) and missing evidence refuse the whole event.
 `RuntimeReadAuthority::authorize_deleted_image` independently proves all current
 application-policy dependencies, including those not expressed in the row
