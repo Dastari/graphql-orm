@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 use std::{fmt, io::Cursor, sync::Arc};
 use uuid::Uuid;
 
+static POOL: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+
 #[cfg(test)]
 mod tests;
 
@@ -70,7 +72,6 @@ impl AiResolvedToolImage {
     ) -> Result<Self, AiError> {
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_millis(limits.maximum_resolution_ms());
-        static POOL: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
         let permit = POOL
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
             .clone()

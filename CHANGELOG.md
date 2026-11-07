@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- **Tests (AI 0.123.1):** isolate media fixtures sharing the bounded decoder pool so CPU contention does not turn unrelated tests into overload tests (#367). Production busy-pool refusal, authorization, budgets and effect replay rules are unchanged. No data migration is needed.
+
 AI **0.123.0**, ORM runtime/macros **0.94.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 
 - **Breaking (ORM/macros 0.94.0):** generated single-row mutations and default propagating `notify_with` failures now mask callback errors that have a source and no string `code`, matching bulk. Generated entity and field policy callbacks and single-row row-read callbacks follow the same rule. Authored refusals keep their message and extensions. Fixes #328.
