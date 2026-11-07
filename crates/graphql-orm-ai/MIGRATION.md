@@ -17,6 +17,12 @@ changed contract fixtures a new package identity. The fixtures adopt the two
 optional ORM 0.95.0 runtime collection fields and prove typed query compilation
 with local NodeId/live metadata. Runtime-schema hosts follow the root ORM
 migration guide; `AI_SCHEMA_MODULE_VERSION` is unchanged.
+## AI 0.123.0 to 0.123.1: media fixture isolation
+
+No consumer action or data migration is needed. Only tests change: media fixtures
+share a guard around the process-wide bounded decoder pool. Real turns still
+refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
+provider failure; no authorization, budget, lease or effect-replay rule changes.
 
 ## 0.122.0 to 0.123.0: exact receiver-purpose admission (opt in)
 

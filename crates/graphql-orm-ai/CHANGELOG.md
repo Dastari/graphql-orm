@@ -13,6 +13,7 @@ supersedes: []
 ## Unreleased - 0.123.1
 
 - **0.123.1:** adopt ORM 0.95.0 runtime collection declarations in fixtures and verify node/live catalogs in the AI compiler. No AI runtime or persistent schema change.
+- **Tests (AI 0.123.1):** isolate media fixtures sharing the bounded decoder pool so CPU contention does not turn unrelated tests into overload tests (#367). Production busy-pool refusal, authorization, budgets and effect replay rules are unchanged. No data migration is needed.
 
 ## Unreleased - 0.123.0
 

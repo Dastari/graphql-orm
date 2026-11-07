@@ -68,6 +68,12 @@ and operations for those compositions; detect the correction by checking that
 the searchable list descriptor contains `search: RuntimeSearchInput`.
 Non-searchable collections and relation-page arguments are unchanged. Existing
 query authorization, search bounds and backend support remain unchanged.
+## AI 0.123.0 to 0.123.1: media fixture isolation
+
+No consumer action or data migration is needed. Only tests change: media fixtures
+share a guard around the process-wide bounded decoder pool. Real turns still
+refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
+provider failure; no authorization, budget, lease or effect-replay rule changes.
 
 ## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
 

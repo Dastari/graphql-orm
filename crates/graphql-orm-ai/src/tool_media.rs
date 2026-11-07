@@ -45,3 +45,8 @@ pub trait AiToolResultMediaResolver: Send + Sync {
         reference: &AiToolImageReference,
     ) -> Result<AiResolvedToolImage, AiError>;
 }
+
+// Tests using the process-wide decoder pool must own this for their full lifetime,
+// including cancelled decode work which can outlive its awaiting future.
+#[cfg(test)]
+pub(crate) static DECODE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
