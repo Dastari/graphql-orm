@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.94.1 to 0.95.0: opt-in runtime identity and live contracts
+## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 
 Breaking Rust IR construction: add `node_identity: None` and
 `live_subscriptions: None` to existing `RuntimeCollection` literals. Handle the
@@ -57,9 +57,9 @@ The automatic AI query compiler keeps typed lists usable; the polymorphic node
 root is deliberately not provider-exportable. See the canonical
 [runtime subscriptions guide](docs/reference/graphql-orm/runtime-subscriptions.md)
 for declarations, producer ordering, evidence rules and client compatibility.
-AI 0.123.1 updates compatible fixtures only; no persistent AI schema migration.
+AI 0.124.0 updates compatible fixtures only; no persistent AI schema migration.
 
-## 0.94.0 to 0.94.1: runtime search catalog parity
+## 0.94.0 to 0.95.0: runtime search catalog parity
 
 No data migration or consumer code change is needed. Runtime-schema hosts that
 compose searchable collections with `finish_with_semantic_catalog` can now do
@@ -68,17 +68,13 @@ and operations for those compositions; detect the correction by checking that
 the searchable list descriptor contains `search: RuntimeSearchInput`.
 Non-searchable collections and relation-page arguments are unchanged. Existing
 query authorization, search bounds and backend support remain unchanged.
-## AI 0.123.0 to 0.123.1: media fixture isolation
+
+## AI 0.123.0 to 0.124.0: media fixture isolation
 
 No consumer action or data migration is needed. Only tests change: media fixtures
 share a guard around the process-wide bounded decoder pool. Real turns still
 refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
 provider failure; no authorization, budget, lease or effect-replay rule changes.
-## ORM/macros 0.94.0 to 0.94.1: companion lockfile package identities
-
-No code or data migration is needed. Runtime and generated code are unchanged.
-The release tag check includes package-local fixture lockfiles; recording AI
-0.124.0 therefore needs fresh, aligned ORM/macros identities. Related to #278.
 
 ## AI 0.123.0 to 0.124.0: optional Codex read-marker tolerance
 
@@ -106,6 +102,7 @@ add `#[graphql(complex)]` and `#[graphql(skip)]` on each relation field, and giv
 `BatchLoadEntity` impl; `node_id` and a managed version then work on that entity. See
 [relations and foreign keys](docs/reference/graphql-orm/macros-and-attributes.md#relations-and-foreign-keys).
 Detect it with `cargo check`: the error starts "GraphQLRelations needs a complex object".
+
 ## 0.93.0 to 0.94.0: single-row callback error privacy
 
 This security-improving public error contract change is breaking for consumers
@@ -133,6 +130,7 @@ follow the existing bulk server-only reporting path controlled by
 `GRAPHQL_ORM_LOG_INTERNAL_ERRORS`; no new logging destination is added.
 Notifications still run after commit, so a propagated notification error does
 not undo a committed write. No data migration or SDL change is needed.
+
 ## 0.93.0 to 0.94.0: exact receiver-purpose admission (opt in)
 
 No data migration is needed. Existing callers and signed operation formats are unchanged.
@@ -145,6 +143,7 @@ identity paths refuse it or give it no authority, on every route. Credentials wi
 are unchanged, and nothing issues that claim unless a host adopts this. Supply authoritative
 parent-session and current scope/tenant policy adapters. See
 [receiver admission reference](docs/reference/receiver-admission.md).
+
 ## Codex executable version admission (AI 0.123.0)
 
 Opt in to exact release matching; no declaration preserves existing behavior.
@@ -178,6 +177,7 @@ gains rustdoc and tests. Applications that spawn a delayed task from a hook to w
 to `hook_ctx.defer`, which runs after the commit and never after a rollback, and should keep the durable
 job row in the transaction because the callback is lost by a crash after commit. See
 [After-commit work](docs/reference/graphql-orm/runtime-and-writes.md#after-commit-work).
+
 ## 0.92.0 to 0.93.0: transforms once per input row
 
 This is a breaking behavior change: ORM/macros move together to 0.93.0.
@@ -195,6 +195,7 @@ report `Repository`; `InternalMutationHook` is reserved for writes executing
 inside mutation hooks. Do not use origin to compensate for duplicate calls.
 External side effects are not transactional; defer them until after commit.
 Fixes #284.
+
 ## 0.92.0 to 0.93.0: generated mutation shape selection
 
 Nothing changes unless you add `mutation_shapes`. An application that refuses unwanted generated mutations at run time can now remove them from the schema instead:
@@ -218,6 +219,7 @@ No data migration is needed; AI schema module remains `0.76.0`.
 Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
 require committed evidence that no turn in the whole run may have dispatched.
 A clean last turn cannot authorize replay of an earlier possible effect.
+
 ## AI 0.121.0 to 0.122.0: catalogue-change regression coverage
 
 No consumer action or data migration is needed. This patch adds regression tests
@@ -239,6 +241,7 @@ still require current intermediate rows and relation authorization, within the
 existing 16-hop/256-target bounds. Missing or deleted parents emit nothing.
 Direct deleted-preimage authorization is unchanged; no key-only direct-delete
 opt-in is added.
+
 ## 0.92.0 to 0.93.0: generated compile cost
 
 No consumer action or data migration is needed. ORM/macros share internal SQL and semantic metadata builders; filter SQL, bind order, NULL handling, SDL and public contracts are unchanged.
@@ -290,6 +293,7 @@ to generated paths that previously dropped inputs: optional create/upsert fields
 and supplied update fields of either nullability. Required create/upsert fields
 still fail on denial. Policy errors and missing-provider errors still propagate;
 repository field authorization remains strict. Omitted update fields remain untouched.
+
 ## 0.91.1 to 0.92.0: type-aware implicit timestamps
 
 String (including optional String) fields named `created_at` or `updated_at` with
@@ -357,6 +361,7 @@ further discrepancies. Keyset paging uses this same stored ordering and key tie
 breakers. Normalize values before relying on chronological pages; discard old
 cursors after normalization and restart paging. No migration is needed for integer
 columns or applications intentionally retaining existing text representations.
+
 ## AI 0.120.2 to 0.121.0: finite provider session cleanup
 
 Handle `AiProviderSessionState::CleanupExhausted` in exhaustive matches and apply
@@ -364,6 +369,7 @@ AI schema module `0.76.0` before restarting all workers. No row data migration i
 Custom Codex process adapters must implement bounded absence confirmation.
 Cleanup retries grow and stop, retaining the protected cursor for investigation;
 see the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01202-to-01210-finite-provider-session-cleanup).
+
 ## 0.91.1 to 0.92.0: relation denial contract
 
 No data migration is needed. Find queries selecting generated to-one relations
@@ -391,6 +397,7 @@ version fields remain supported. Consumers can remove an equivalent handwritten
 `RecordVersion` resolver; its declared version column still controls read policy
 and subscription availability. Inspect the entity SDL for `NodeId`,
 `RecordVersion` and `@key(fields: "NodeId")` to detect the generated contract.
+
 ## 0.91.1 to 0.92.0: keyset cursors bind entity and filter
 
 Restart in-flight keyset pagination after upgrading: a generated keyset cursor, scan continuation or protected runtime GraphQL cursor issued by 0.91.1 or earlier may be refused once with `CURSOR_INVALID` (`invalid_cursor` at runtime). Configured-order cursors now name their entity; scan and `MutationContext` keyset reads bind the caller's filter as filtered `recordsKeyset` already does; protected runtime cursors authenticate the caller's `where` digest. Nothing else changes for correct clients, and none of it affects stored data, so no data migration is needed. A client that reused one cursor with a different filter or on another entity now receives `CURSOR_INVALID` instead of a page; detect it by that error code. Value drift while paging is unchanged and is documented in the [pagination guide](docs/reference/graphql-orm/pagination-migration.md#value-drift-is-inherent-to-keyset-paging). `RepositoryEntity` and handwritten filters, and unprotected runtime cursors, remain unbound to the filter.
@@ -405,12 +412,15 @@ first and use supported key-based mutations when needed. No data migration is ne
 No data migration is needed. Opt in with `#[relation(..., multiple, filter)]` on an unconditional public collection relation. Its generated Where field accepts a list of target Where alternatives, including nested opted-in collections. Every traversed entity must provide `Complete` SQL read visibility or `Unrestricted`; callback-only/prefilter policies are rejected. Relation field policies and spatial combinations are unsupported and fail closed. Existing declarations require no changes.
 
 Filtered keyset cursors now bind the caller-visible typed filter input. Clients must restart filtered keyset pagination after upgrading (old cursors return `cursor_invalid`), when changing filters. Unfiltered cursors retain their identity. Private SQL visibility parameters are excluded from cursor fingerprints; ordinary per-request authorization still applies. Generated GraphQL list, keyset/scan and aggregate roots prepare relation filters under request authority; unprepared filters in context-free repository helpers are rejected. The preparation budget is eight levels and 128 filter nodes, with at most 512 binds per related predicate.
+
 ## 0.91.1 to 0.92.0: private and negated read predicates
 
 No data migration is needed. Existing policies and working keyset roots are unchanged. Policies may opt into `ReadPredicate::column::<Backend, Entity>("column", ReadPredicateOp::Gt, SqlValue::Int(bound))` for private persisted columns and `.not()?` for SQL negation. UNKNOWN remains UNKNOWN and does not authorize a row. Policies that always return `Prefilter` or `CallbackOnly` should omit `keyset` from `query_shapes` and use bounded `scan` instead; detect these by `AUTHORIZATION_MISCONFIGURED` on every keyset request.
+
 ## 0.91.1 to 0.92.0: aggregate counts from two subgraphs, test only
 
 No action is required, and no data migration. This item adds a test and changes no runtime behaviour. A consumer who set `aggregate = false` on an entity only to avoid the aggregate result-type collision between two subgraphs can restore `aggregate = true`: the shared result objects have been `@shareable` since 0.82.0. A generated aggregate still needs a row policy whose `read_visibility` is `Complete` or `Unrestricted`; with a callback-only policy it is refused, which is intended.
+
 ## 0.91.1 to 0.92.0: selected connection queries
 
 No consumer action or data migration is needed. Upgrade ORM and macros together. Static top-level and relation offset connections omit SQL for unselected components; selected values and authorization are unchanged. Detect the change by observing one statement for count-only or row-only pages. Existing direct connection fetch methods still return complete connections. The additive `ConnectionSelection` and `fetch_connection_selected_with_auth` support callers that intentionally accept placeholders for unselected fields.
@@ -418,6 +428,7 @@ No consumer action or data migration is needed. Upgrade ORM and macros together.
 ## 0.91.1 to 0.92.0: narrow relation pagination windows
 
 No consumer action or data migration is needed. SQL-pushed static paginated relations on SQLite, PostgreSQL and MSSQL fetch full entities only for the requested page. GraphQL schemas, rows, totals, ordering and read policies are unchanged. Hosts can identify the optimization by the primary-key join outside the relation window in emitted SQL. Count-only GraphQL selections still load the requested page; selection-aware loading is a separate change.
+
 ## 0.91.1 to 0.92.0: dedicated schema export builds
 
 No data migration is needed. Normal builds require no changes. Export tools may

@@ -10,23 +10,22 @@ supersedes: []
 
 # Migration Guide
 
-## 0.123.0 to 0.123.1: runtime catalog contract fixtures
+## 0.123.0 to 0.124.0: runtime catalog contract fixtures
 
 No data migration, public AI API or persistent AI schema change. This patch gives
 changed contract fixtures a new package identity. The fixtures adopt the two
 optional ORM 0.95.0 runtime collection fields and prove typed query compilation
 with local NodeId/live metadata. Runtime-schema hosts follow the root ORM
 migration guide; `AI_SCHEMA_MODULE_VERSION` is unchanged.
-## AI 0.123.0 to 0.123.1: media fixture isolation
+
+## AI 0.123.0 to 0.124.0: media fixture isolation
 
 No consumer action or data migration is needed. Only tests change: media fixtures
 share a guard around the process-wide bounded decoder pool. Real turns still
 refuse a busy pool with `ToolExecutionFailed`, which can surface as a safe
 provider failure; no authorization, budget, lease or effect-replay rule changes.
-## AI 0.123.0 to 0.124.0: optional Codex read-marker tolerance
 
-This release also adopts ORM/macros 0.94.1 package identities for companion
-fixture lockfiles. Their runtime and generated code are unchanged. Related to #278.
+## AI 0.123.0 to 0.124.0: optional Codex read-marker tolerance
 
 AI 0.124.0 adds an actor-policy opt-in for ignored read-marker notifications (issue #369).
 `AiCodexAppServerProtocolActor::with_ignored_read_state_notifications()` admits only
@@ -59,6 +58,7 @@ issue `graphql_orm_receiver_purpose` with `ReceiverPurposeV1::bind`, and call
 Use the sealed result to obtain scopes or `into_request`. Old tokens without the claim
 are refused on this new path. Supply authoritative parent-session and current scope/tenant
 policy adapters. See [receiver admission reference](../../docs/reference/receiver-admission.md).
+
 ## 0.122.0 to 0.123.0: Codex executable version admission
 
 Opt in to exact release matching; no declaration preserves existing behavior.
@@ -104,6 +104,7 @@ At the same proven-unstarted boundary, `BudgetDenied` uses the existing
 Retries of `provider_pre_transport_failed` and `provider_budget_denied` now also
 require committed evidence that no turn in the whole run may have dispatched.
 A clean last turn cannot authorize replay of an earlier possible effect.
+
 ## AI 0.121.0 to 0.122.0: catalogue-change regression coverage
 
 No consumer action or data migration is needed. This patch adds regression tests
