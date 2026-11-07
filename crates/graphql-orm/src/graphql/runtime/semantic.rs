@@ -163,13 +163,17 @@ fn filter_operators(kind: RuntimeValueKind) -> Vec<GraphqlSemanticFilterOperator
 fn argument(name: &str, ty: &str) -> GraphqlSemanticArgumentDescriptor {
     GraphqlSemanticArgumentDescriptor {
         graphql_name: name.to_owned(),
-        description: argument_description(name),
+        description: if name == "search" {
+            SEARCH_DESCRIPTION.to_owned()
+        } else {
+            argument_description(name)
+        },
         type_ref: parse_graphql_type(ty).expect("generated runtime argument types parse"),
     }
 }
 
 /// Root list arguments, in SDL order.
-pub(super) fn page_arguments(object: &str) -> [(&'static str, String); 6] {
+pub(super) fn relation_page_arguments(object: &str) -> [(&'static str, String); 6] {
     [
         ("where", format!("{object}WhereInput")),
         ("orderBy", format!("[{object}OrderInput!]")),
@@ -178,6 +182,17 @@ pub(super) fn page_arguments(object: &str) -> [(&'static str, String); 6] {
         ("last", "Int".to_owned()),
         ("before", "String".to_owned()),
     ]
+}
+
+pub(super) const SEARCH_DESCRIPTION: &str = "Restrict to records matching this full-text search; ordered by relevance unless orderBy is given";
+
+/// Root list arguments, including full-text search only when the SDL declares it.
+pub(super) fn page_arguments(object: &str, search: bool) -> Vec<(&'static str, String)> {
+    let mut arguments = relation_page_arguments(object).to_vec();
+    if search {
+        arguments.push(("search", "RuntimeSearchInput".to_owned()));
+    }
+    arguments
 }
 
 /// Description of a link mutation root.
@@ -347,7 +362,7 @@ impl RuntimeGraphqlModule {
                     &object,
                     self.root_name(c),
                     list_description(&object),
-                    page_arguments(&object)
+                    page_arguments(&object, c.search.is_some())
                         .iter()
                         .map(|(name, ty)| argument(name, ty))
                         .collect(),
