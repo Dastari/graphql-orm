@@ -1,6 +1,6 @@
 {
   "formatVersion": 1,
-  "cargoLockSha256": "d38b2e15754ea9bedcc11a6e30088306e4a79fde5c5e9e4767a95081d9a6a24a",
+  "cargoLockSha256": "bdcd46b78db7c6d15c74ecc6df39a04b3178b1cc69d106910d4f3b69a94e7902",
   "componentsSha256": "1fae2623489d2e13927c415b05c0e8065c6b8b8e6545d8a7a702204b8e8460ce",
   "target": "x86_64-unknown-linux-gnu",
   "features": [

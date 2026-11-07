@@ -79,6 +79,8 @@ fn tokenized(remove_diacritics: bool, min_token_len: Option<u8>) -> RuntimeSchem
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             id: CollectionId::new("records").unwrap(),
             api_type_name: "Record".into(),
             api_plural_name: "Records".into(),
@@ -309,6 +311,7 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
     assert!(api.execute(run(&web)).await.errors.is_empty());
     authority.deny_web.store(true, Ordering::SeqCst);
     let withheld = api.execute(run(&web)).await;
+    assert_eq!(withheld.data, graphql_orm::async_graphql::Value::Null);
     assert_eq!(
         withheld.errors[0]
             .extensions
@@ -370,6 +373,7 @@ async fn graphql_search_ranks_scores_waits_for_readiness_and_hides_rows() {
     // with the ordinary denial, before any read.
     authority.deny_body_search.store(true, Ordering::SeqCst);
     let denied = api.execute(run(searched)).await;
+    assert_eq!(denied.data, graphql_orm::async_graphql::Value::Null);
     let code = denied.errors[0]
         .extensions
         .as_ref()
@@ -564,4 +568,87 @@ async fn changing_document_tokenization_rebuilds_the_index() {
     }
     #[cfg(feature = "postgres")]
     drop(owned);
+}
+
+#[tokio::test]
+async fn searchable_module_semantic_catalog_matches_sdl() {
+    let schema = Arc::new(definition().validate().unwrap());
+    let module = RuntimeGraphqlModule::compile(
+        schema.clone(),
+        RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected),
+    )
+    .unwrap();
+    let operations = module.semantic_operations().unwrap();
+    let list = operations
+        .iter()
+        .find(|operation| operation.field_name == "records")
+        .unwrap();
+    let search = list
+        .arguments
+        .iter()
+        .find(|argument| argument.graphql_name == "search")
+        .expect("searchable list must describe its search argument");
+    assert_eq!(
+        search.type_ref,
+        parse_graphql_type("RuntimeSearchInput").unwrap()
+    );
+    #[cfg(feature = "postgres")]
+    let owned = owned_postgres::OwnedPostgres::start("runtime-search-catalog").unwrap();
+    #[cfg(feature = "postgres")]
+    let database = Database::<Backend>::connect_postgres(&owned.url)
+        .await
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    let database = Database::<Backend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    let (api, catalog) = RuntimeGraphqlComposer::new(database, "Query", Default::default())
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish_with_semantic_catalog()
+        .unwrap();
+    assert!(api.sdl().contains("search: RuntimeSearchInput"));
+    catalog.validate().unwrap();
+    let listed = catalog
+        .operations
+        .iter()
+        .find(|operation| operation.field_name == "records")
+        .unwrap();
+    assert_eq!(listed.arguments, list.arguments);
+    use graphql_orm_ai_tool_profiles::{
+        AiGraphqlQueryCapabilityCatalog, AiGraphqlQueryCapabilityLimits, GraphqlExecutionTargetId,
+    };
+    let capabilities = AiGraphqlQueryCapabilityCatalog::compile(
+        "runtime-search",
+        GraphqlExecutionTargetId::parse("runtime-schema-host").unwrap(),
+        &api.sdl(),
+        &catalog,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .expect("searchable composition must compile in the AI catalog");
+    capabilities.capabilities().find(|capability| capability.field_name() == "records").unwrap().compile_compact(serde_json::json!({
+        "arguments":{"search":{(member("query")):"bridge",(member("mode")):"PLAIN"}},
+        "selections":["id","title"],"maximumItems":1,"relationshipArguments":{},"relationshipMaximumItems":{}
+    })).expect("AI compiler accepts the searchable runtime input types");
+}
+
+#[test]
+fn non_searchable_module_keeps_original_list_arguments() {
+    let mut schema = definition();
+    schema.collections[0].search = None;
+    let module = RuntimeGraphqlModule::compile(
+        Arc::new(schema.validate().unwrap()),
+        RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected),
+    )
+    .unwrap();
+    let operations = module.semantic_operations().unwrap();
+    assert_eq!(
+        operations[0]
+            .arguments
+            .iter()
+            .map(|argument| argument.graphql_name.as_str())
+            .collect::<Vec<_>>(),
+        ["where", "orderBy", "first", "after", "last", "before"]
+    );
 }

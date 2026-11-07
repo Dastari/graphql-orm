@@ -51,6 +51,8 @@ fn schema(search: Option<RuntimeSearch>) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             id: CollectionId::new("records").unwrap(),
             api_type_name: "Record".into(),
             api_plural_name: "Records".into(),

@@ -10,6 +10,65 @@ supersedes: []
 
 # Migration Guide
 
+## 0.94.1 to 0.95.0: opt-in runtime identity and live contracts
+
+Breaking Rust IR construction: add `node_identity: None` and
+`live_subscriptions: None` to existing `RuntimeCollection` literals. Handle the
+new `InvalidNodeIdentity` and `InvalidLiveSubscriptions` diagnostic variants in
+exhaustive matches. `RuntimeReadPurpose` also gains `NodeLookup`,
+`SubscriptionRegistration` and `SubscriptionDelivery`; authorize these explicitly
+if using exhaustive purpose dispatch. Use `RuntimeReadCheck::operation_purpose`
+for that distinction on relation-filter targets as well. Older serialized schemas omit both declarations and keep
+byte-identical canonical fingerprints, SDL and operation catalogs. No data
+migration is needed for existing consumers that remain opted out.
+
+Opted-in hosts select an existing integer version column, remove it from client
+write inputs, compare it through `expected`, and rebuild the runtime mutation
+environment/request fingerprint. If a column is needed, add/backfill it through
+an ordinary owned migration first. The original `id` is preserved. Live collections use derived `Int`/`UUID`
+scalars in shared mutation/subscription key inputs; stored scalar fields retain
+their existing runtime types. Install a
+trusted committed-event source and current registration/delivery authority; wire
+publication through existing transaction hooks and `MutationContext::defer`.
+Every reload and release intersects current registration and delivery eligibility,
+so authorizers must allow repeated checks for both purposes without a frame.
+Each subscription operation containing a generated runtime live root must select
+exactly one root-field occurrence, including aliases, fragments, repeated fields
+and skipped fields. Split multi-root operations into separate subscriptions;
+detect refusal by `subscription_root_limit_exceeded`. The key limit bounds that
+single root's list entries before deduplication. A revoked or field-denied grant
+quietly withholds events and leaves the stream open, matching derived behavior.
+Other grant errors, reload errors and restrictions changing at a prepared
+row/removal's final release terminate uniformly with a continuity error then
+completion, without remembered
+key visibility. Loaded nullable NULLs qualify as captured-image evidence;
+unloaded fields still deny. These corrections need no data migration.
+Every removal requires the `deleted_images` opt-in and an authorized captured
+pre-image, including an update that reloads after deletion. Native-RLS profiles
+serve visible current-row updates but do not emit removals.
+Deleted images require independent application policy and an asserted canonical
+storage profile; native-RLS profiles explicitly refuse that opt-in. Custom opaque
+subscription roots cannot yet be mixed with generated live roots; this fails at
+composition, rather than dropping either root's fields. Derived behavior is unchanged.
+
+Regenerate opted-in client schemas/catalogs, handle uppercase continuity errors
+with resubscribe/refetch, and keep database-auth/cursor partitions current.
+The automatic AI query compiler keeps typed lists usable; the polymorphic node
+root is deliberately not provider-exportable. See the canonical
+[runtime subscriptions guide](docs/reference/graphql-orm/runtime-subscriptions.md)
+for declarations, producer ordering, evidence rules and client compatibility.
+AI 0.123.1 updates compatible fixtures only; no persistent AI schema migration.
+
+## 0.94.0 to 0.94.1: runtime search catalog parity
+
+No data migration or consumer code change is needed. Runtime-schema hosts that
+compose searchable collections with `finish_with_semantic_catalog` can now do
+so without an SDL/catalog argument mismatch. Regenerate saved semantic catalogs
+and operations for those compositions; detect the correction by checking that
+the searchable list descriptor contains `search: RuntimeSearchInput`.
+Non-searchable collections and relation-page arguments are unchanged. Existing
+query authorization, search bounds and backend support remain unchanged.
+
 ## 0.93.0 to 0.94.0: paginated relations over SQL expression columns
 
 Upgrade if you run ORM 0.92.0 or 0.93.0 with a paginated relation whose target has a column read through a SQL expression: MSSQL `mssql_money`, confirmed by a native test, or a PostgreSQL spatial column, which takes the same code path but was not run. Those relations return `INTERNAL_ERROR` on those two versions. The failure exposes no data. Detect it by that error on a paginated relation whose target declares `mssql_money` or a spatial field. No data migration is needed, and unpaginated reads were not affected. Test fixtures and CI backend lanes also change, with no consumer effect.

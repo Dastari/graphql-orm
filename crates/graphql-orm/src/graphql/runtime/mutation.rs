@@ -78,16 +78,27 @@ fn create_inputs<'a>(
     module: &'a RuntimeGraphqlModule,
     c: &'a RuntimeCollection,
 ) -> impl Iterator<Item = &'a RuntimeField> + 'a {
-    c.fields.iter().filter(|f| is_input(module, f))
+    c.fields.iter().filter(|f| {
+        is_input(module, f)
+            && !c
+                .node_identity
+                .as_ref()
+                .is_some_and(|node| node.version_field == f.id)
+    })
 }
 /// Fields of `Update<Object>Input`: non-key inputs.
 fn update_inputs<'a>(
     module: &'a RuntimeGraphqlModule,
     c: &'a RuntimeCollection,
 ) -> impl Iterator<Item = &'a RuntimeField> + 'a {
-    c.fields
-        .iter()
-        .filter(|f| is_input(module, f) && !c.primary_key.contains(&f.id))
+    c.fields.iter().filter(|f| {
+        is_input(module, f)
+            && !c.primary_key.contains(&f.id)
+            && !c
+                .node_identity
+                .as_ref()
+                .is_some_and(|node| node.version_field == f.id)
+    })
 }
 /// Whether `create<Object>` takes an `input`: some field is client-writable (or an
 /// actor stamp with `actor_inputs`).
@@ -240,7 +251,11 @@ pub(super) fn types(module: &RuntimeGraphqlModule) -> Result<Vec<Type>, RuntimeG
                 input = input.field(
                     InputValue::new(
                         &f.api_name,
-                        TypeRef::named_nn(super::scalar::name(f.value_kind)),
+                        TypeRef::named_nn(if c.live_subscriptions.is_some() {
+                            super::live::key_scalar(f.value_kind)
+                        } else {
+                            super::scalar::name(f.value_kind)
+                        }),
                     )
                     .description(f.effective_description()),
                 );
@@ -403,6 +418,8 @@ use super::plan::{Planner, invalid};
 use async_graphql::{Value, parser::types::SelectionSet};
 #[derive(Clone)]
 pub(super) struct Prepared {
+    node_id: bool,
+    record_version: bool,
     module: RuntimeGraphqlModule,
     collection: RuntimeCollectionHandle,
     request: RuntimeMutationRequest,
@@ -563,6 +580,8 @@ fn input_fields(
                 .map_err(record_error)?;
             let value = if value == &Value::Null {
                 RuntimeValue::Null
+            } else if c.live_subscriptions.is_some() && c.primary_key.contains(&field.id) {
+                super::live::decode_key_value(field.value_kind, value, limits.scalars)?
             } else {
                 super::scalar::decode(field.value_kind, value, limits.scalars)?
             };
@@ -610,6 +629,8 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         .map_err(record_error)?;
                     let mut fields = vec![];
                     let mut selected_fields = vec![];
+                    let mut node_id = false;
+                    let mut record_version = false;
                     let mut children = vec![];
                     let mut projected = vec![];
                     for payload in planner.selections(
@@ -628,6 +649,32 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                         {
                             if selected.name.node == "__typename" {
                                 continue;
+                            }
+                            if let Some(identity) = &c.node_identity {
+                                let ids = if selected.name.node == "NodeId" {
+                                    node_id = true;
+                                    c.primary_key.clone()
+                                } else if selected.name.node == "RecordVersion" {
+                                    record_version = true;
+                                    vec![identity.version_field.clone()]
+                                } else {
+                                    Vec::new()
+                                };
+                                if !ids.is_empty() {
+                                    for id in ids {
+                                        let handle = module
+                                            .schema
+                                            .resolve_field(&collection, &id)
+                                            .map_err(record_error)?;
+                                        if !fields.contains(&handle) {
+                                            fields.push(handle.clone());
+                                        }
+                                        if !selected_fields.contains(&handle) {
+                                            selected_fields.push(handle);
+                                        }
+                                    }
+                                    continue;
+                                }
                             }
                             // Relations are read after commit through the same nested
                             // layer authorization, batching and bounds as queries: a
@@ -756,6 +803,7 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                                     .collect(),
                                 relation_filters: Vec::new(),
                                 purpose: RuntimeReadPurpose::Select,
+                                operation_purpose: RuntimeReadPurpose::Select,
                                 search: None,
                             })
                             .await?
@@ -934,6 +982,8 @@ pub(super) async fn prepare<B: RuntimeReadBackend>(
                     prepared.insert(
                         field.response_key().node.to_string(),
                         Prepared {
+                            node_id,
+                            record_version,
                             module: module.clone(),
                             collection,
                             request,
@@ -1189,6 +1239,16 @@ async fn execute_once<B: RuntimeMutationBackend>(
             .api_name;
         values.insert(async_graphql::Name::new(name), value);
     }
+    super::live::insert_identity_fields(
+        &prepared.module,
+        metadata,
+        &prepared.collection,
+        record,
+        prepared.node_id,
+        prepared.record_version,
+        &mut values,
+    )
+    .map_err(|_| committed_error("mutation_payload_failed"))?;
     // Host objects resolve only after commit and the independent release check.
     for projected in &prepared.projected {
         let stored = match record

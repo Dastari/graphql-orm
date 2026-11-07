@@ -78,6 +78,8 @@ fn collection(
     relations: Vec<RuntimeRelation>,
 ) -> RuntimeCollection {
     RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         description: None,
         classification: None,
         id: CollectionId::new(id).unwrap(),

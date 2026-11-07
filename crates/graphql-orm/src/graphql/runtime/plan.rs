@@ -18,6 +18,11 @@ fn record_error(e: RuntimeRecordError) -> RuntimeGraphqlError {
 
 #[derive(Clone)]
 pub(super) struct Plan {
+    pub point_read: bool,
+    pub cost: RuntimeGraphqlCost,
+    pub purpose: RuntimeReadPurpose,
+    pub node_id: bool,
+    pub record_version: bool,
     pub module: RuntimeGraphqlModule,
     pub collection: RuntimeCollectionHandle,
     pub response_key: String,
@@ -133,17 +138,17 @@ impl Planner<'_> {
                         .fragments
                         .get(&f.node.fragment_name.node)
                         .ok_or_else(invalid)?;
-                    if fragment.node.type_condition.node.on.node.as_str() != ty {
+                    if fragment.node.type_condition.node.on.node.as_str() != ty
+                        && fragment.node.type_condition.node.on.node.as_str() != "Node"
+                    {
                         continue;
                     }
                     self.selections(&fragment.node.selection_set.node, ty, depth + 1)?
                 }
                 Selection::InlineFragment(f) => {
-                    if f.node
-                        .type_condition
-                        .as_ref()
-                        .is_some_and(|t| t.node.on.node.as_str() != ty)
-                    {
+                    if f.node.type_condition.as_ref().is_some_and(|t| {
+                        t.node.on.node.as_str() != ty && t.node.on.node.as_str() != "Node"
+                    }) {
                         continue;
                     }
                     self.selections(&f.node.selection_set.node, ty, depth + 1)?
@@ -172,6 +177,27 @@ impl Planner<'_> {
         relation: Option<RuntimeRelationHandle>,
         parents: usize,
         depth: usize,
+    ) -> Result<Plan, RuntimeGraphqlError> {
+        self.collection_internal(module, c, field, relation, parents, depth, false)
+    }
+    pub(super) fn point_collection(
+        &mut self,
+        module: &RuntimeGraphqlModule,
+        c: &RuntimeCollection,
+        field: &Field,
+    ) -> Result<Plan, RuntimeGraphqlError> {
+        self.collection_internal(module, c, field, None, 1, 0, true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn collection_internal(
+        &mut self,
+        module: &RuntimeGraphqlModule,
+        c: &RuntimeCollection,
+        field: &Field,
+        relation: Option<RuntimeRelationHandle>,
+        parents: usize,
+        depth: usize,
+        point_read: bool,
     ) -> Result<Plan, RuntimeGraphqlError> {
         if depth > self.limits.max_depth {
             return Err(RuntimeGraphqlError::new("cost_exceeded"));
@@ -393,7 +419,8 @@ impl Planner<'_> {
                 }
             }
         }
-        let protected = !to_one
+        let protected = !point_read
+            && !to_one
             && module.options.cursor_profile == RuntimeCursorProfile::AuthenticatedEncryption;
         let size = usize::try_from(size).map_err(|_| invalid())?;
         let cost = if relation.is_some() {
@@ -411,11 +438,36 @@ impl Planner<'_> {
             return Err(RuntimeGraphqlError::new("cost_exceeded"));
         }
         let mut fields = Vec::new();
+        let mut node_id = false;
+        let mut record_version = false;
         let mut children = Vec::new();
         let mut projected_fields = Vec::new();
         for selected in self.selections(&node_set, &object, depth + 1)? {
             if selected.name.node == "__typename" {
                 continue;
+            }
+            if let Some(identity) = &c.node_identity {
+                let ids = if selected.name.node == "NodeId" {
+                    node_id = true;
+                    c.primary_key.clone()
+                } else if selected.name.node == "RecordVersion" {
+                    record_version = true;
+                    vec![identity.version_field.clone()]
+                } else {
+                    Vec::new()
+                };
+                if !ids.is_empty() {
+                    for id in ids {
+                        let field = module
+                            .schema
+                            .resolve_field(&collection, &id)
+                            .map_err(record_error)?;
+                        if !fields.contains(&field) {
+                            fields.push(field);
+                        }
+                    }
+                    continue;
+                }
             }
             if let Some(f) = c
                 .fields
@@ -498,6 +550,11 @@ impl Planner<'_> {
             .resolve_projection(&collection, &projected)
             .map_err(record_error)?;
         Ok(Plan {
+            point_read,
+            cost: self.cost,
+            purpose: RuntimeReadPurpose::Select,
+            node_id,
+            record_version,
             module: module.clone(),
             collection,
             response_key: field.response_key().node.to_string(),
@@ -1143,6 +1200,8 @@ mod checked_compatibility_tests {
         RuntimeSchema {
             format_version: 1,
             collections: vec![RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 id: CollectionId::new("items").unwrap(),
                 api_type_name: "Item".into(),
                 api_plural_name: "Items".into(),

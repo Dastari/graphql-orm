@@ -44,6 +44,8 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind) -> RuntimeField {
 }
 fn collection(id: &str, name: &str, plural: &str) -> RuntimeCollection {
     RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         description: None,
         classification: None,
         id: cid(id),

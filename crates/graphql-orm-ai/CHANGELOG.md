@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.123.1
+
+- **0.123.1:** adopt ORM 0.95.0 runtime collection declarations in fixtures and verify node/live catalogs in the AI compiler. No AI runtime or persistent schema change.
+
 ## Unreleased - 0.123.0
 
 Use shared catalogue canonical JSON hashes for remote authority, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no schema module bump or data migration is needed. Fixes #352.

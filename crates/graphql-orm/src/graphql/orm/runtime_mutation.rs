@@ -207,6 +207,10 @@ pub use links::{
     RuntimeLinkChange, RuntimeLinkCheck, RuntimeLinkEffect, RuntimeLinkVisibilityCheck,
 };
 impl RuntimeKey {
+    /// Validated schema identity of this complete key; contains no key values.
+    pub fn schema_fingerprint(&self) -> SchemaFingerprint {
+        self.schema.fingerprint()
+    }
     pub(super) fn schema(&self) -> &ValidatedRuntimeSchema {
         &self.schema
     }
@@ -708,6 +712,12 @@ impl ValidatedRuntimeSchema {
                 .ok_or_else(|| err(RuntimeMutationErrorCode::InvalidInput))?;
             // Actor stamps are decided once the write grant is known
             // (`RuntimeWriteGrant::with_actor_assignment`), before any SQL write.
+            if c.node_identity
+                .as_ref()
+                .is_some_and(|node| node.version_field == definition.id)
+            {
+                return Err(err(RuntimeMutationErrorCode::FieldDenied));
+            }
             if (!definition.is_client_writable() && definition.auto_actor.is_none())
                 || (action != RuntimeMutationAction::Create && c.primary_key.contains(field.id()))
             {
@@ -1076,6 +1086,13 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         {
             fields.push(request.schema.resolve_field(&request.collection, &f.id)?);
         }
+        if let Some(node) = &c.node_identity {
+            fields.push(
+                request
+                    .schema
+                    .resolve_field(&request.collection, &node.version_field)?,
+            );
+        }
         fields.extend(request.fields.iter().map(|(f, _)| f.clone()));
         if let Some(expected) = &request.expected {
             fields.extend(expected.referenced_fields().into_iter().cloned());
@@ -1159,7 +1176,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         use RuntimeMutationErrorCode as E;
         if request.links.is_some() {
             return self
-                .execute_runtime_link_write(request, authority, prepared.preimage)
+                .execute_runtime_link_write(request, authority, prepared)
                 .await;
         }
         let PreparedRuntimeWrite {
@@ -1181,6 +1198,14 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         let sql = match request.action {
             RuntimeMutationAction::Create => {
                 let mut entries = request.fields.clone();
+                if let Some(node) = &c.node_identity {
+                    entries.push((
+                        request
+                            .schema
+                            .resolve_field(&request.collection, &node.version_field)?,
+                        RuntimeValue::Integer(1),
+                    ));
+                }
                 for field in c.fields.iter().filter(|f| f.generated) {
                     entries.push((
                         request
@@ -1247,10 +1272,33 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                                 )
                             }),
                     )
+                    .chain(c.node_identity.iter().map(|node| {
+                        let field = c
+                            .fields
+                            .iter()
+                            .find(|f| f.id == node.version_field)
+                            .expect("validated version");
+                        let column = B::DIALECT.quote_identifier(&field.physical_column);
+                        format!("{column} = {column} + 1")
+                    }))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let key = request.key.as_ref().ok_or_else(|| err(E::InvalidInput))?;
                 let mut condition = key_sql(B::DIALECT, &key.fields, &mut values);
+                if request.action == RuntimeMutationAction::Update
+                    && let Some(node) = &c.node_identity
+                {
+                    let field = c
+                        .fields
+                        .iter()
+                        .find(|f| f.id == node.version_field)
+                        .expect("version");
+                    condition = format!(
+                        "({condition}) AND {} < {}",
+                        B::DIALECT.quote_identifier(&field.physical_column),
+                        i64::MAX
+                    );
+                }
                 for p in [grant.predicate.as_ref(), request.expected.as_ref()]
                     .into_iter()
                     .flatten()
@@ -1291,7 +1339,7 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
             self.maintain_runtime_search_document(c, search, request.action, &key)
                 .await?;
         }
-        let result = if request.action == RuntimeMutationAction::Delete {
+        let mut result = if request.action == RuntimeMutationAction::Delete {
             preimage.as_ref().ok_or_else(|| err(E::NotFound))?.clone()
         } else {
             self.runtime_select(request, &projection, &key, grant.predicate.as_ref(), false)
@@ -1320,9 +1368,30 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
                 .prepare_runtime_write(environment, &link_request, authority)
                 .await?;
             let effect = self
-                .execute_runtime_link_write(&link_request, authority, prepared.preimage)
+                .execute_runtime_link_write(&link_request, authority, prepared)
                 .await?;
             links.extend(effect.links);
+        }
+        if c.node_identity.is_some() && !request.attached.is_empty() {
+            result = self
+                .runtime_select(request, &projection, &key, grant.predicate.as_ref(), false)
+                .await?
+                .ok_or_else(|| err(E::Denied))?;
+            if authority
+                .authorize_result(
+                    RuntimeResultCheck {
+                        intent,
+                        preimage: preimage.as_ref(),
+                        record: &result,
+                    },
+                    self,
+                )
+                .await?
+                .projection
+                != request.returning
+            {
+                return Err(err(E::FieldDenied));
+            }
         }
         let record = request
             .returning
@@ -1395,17 +1464,70 @@ impl<B: RuntimeMutationBackend> MutationContext<'_, B> {
         .map_err(database_error::<B>)
     }
 
-    /// Apply a prepared link mutation and authorize its unchanged source row as the result.
+    /// Apply a prepared link mutation and authorize its source row and managed version as the result.
     async fn execute_runtime_link_write(
         &mut self,
         request: &RuntimeMutationRequest,
         authority: &dyn RuntimeWriteAuthority<B>,
-        preimage: Option<RuntimeRecord>,
+        prepared: PreparedRuntimeWrite,
     ) -> Result<RuntimeMutationEffect, RuntimeMutationError> {
         use RuntimeMutationErrorCode as E;
+        let PreparedRuntimeWrite {
+            grant, preimage, ..
+        } = prepared;
         let intent = RuntimeWriteIntent { request };
         let link_effect = self.apply_runtime_links(request, authority).await?;
-        let result = preimage.clone().ok_or_else(|| err(E::NotFound))?;
+        let mut result = preimage.clone().ok_or_else(|| err(E::NotFound))?;
+        let c = collection(&request.schema, &request.collection)?;
+        if let Some(node) = &c.node_identity {
+            let field = request
+                .schema
+                .resolve_field(&request.collection, &node.version_field)?;
+            let mut values = Vec::new();
+            let key = request.key.as_ref().ok_or_else(|| err(E::InvalidInput))?;
+            let mut condition = key_sql(B::DIALECT, &key.fields, &mut values);
+            if let Some(predicate) = &grant.predicate {
+                condition = format!(
+                    "({condition}) AND ({})",
+                    predicate.render(B::DIALECT, &mut values)
+                );
+            }
+            if values.len() > request.limits.query.max_bind_parameters {
+                return Err(err(E::LimitExceeded));
+            }
+            let column = B::DIALECT.quote_identifier(field.physical_column());
+            let sql = format!(
+                "UPDATE {} SET {column} = {column} + 1 WHERE ({condition}) AND {column} < {} RETURNING {column}",
+                B::DIALECT.quote_identifier(&c.physical_table),
+                i64::MAX
+            );
+            if self
+                .fetch_rows(&sql, &values)
+                .await
+                .map_err(database_error::<B>)?
+                .len()
+                != 1
+            {
+                return Err(err(E::Conflict));
+            }
+            let projection = request.schema.resolve_projection(
+                &request.collection,
+                &result
+                    .loaded_fields()
+                    .map(|id| request.schema.resolve_field(&request.collection, id))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )?;
+            result = self
+                .runtime_select(
+                    request,
+                    &projection,
+                    &key.fields,
+                    grant.predicate.as_ref(),
+                    false,
+                )
+                .await?
+                .ok_or_else(|| err(E::NotFound))?;
+        }
         let return_grant = authority
             .authorize_result(
                 RuntimeResultCheck {

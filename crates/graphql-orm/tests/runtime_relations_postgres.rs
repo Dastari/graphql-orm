@@ -49,6 +49,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
         format_version: 1,
         collections: vec![
             RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 classification: None,
                 description: None,
                 id: cid("pg_customers"),
@@ -95,6 +97,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 search: None,
             },
             RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 classification: None,
                 description: None,
                 id: cid("pg_contacts"),
@@ -137,6 +141,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
                 search: None,
             },
             RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 description: None,
                 classification: None,
                 id: cid("pg_notes"),

@@ -85,6 +85,8 @@ fn definition(formats: bool) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             description: None,
             classification: None,
             id: CollectionId::new("profiles").unwrap(),

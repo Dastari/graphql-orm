@@ -240,6 +240,8 @@ async fn all_runtime_value_kinds_match_actual_runtime_sdl() {
         .collect::<Vec<_>>();
     let primary_key = vec![fields[0].id.clone()];
     let collection = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         id: CollectionId::new("filter_values").unwrap(),
         api_type_name: "FilterValues".into(),
         api_plural_name: "filterValues".into(),

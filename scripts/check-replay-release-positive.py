@@ -60,6 +60,7 @@ def check_orm_split(old, new):
                              "--test runtime_relations --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1")
                 .replace("--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations -- --test-threads=1",
                          "--features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1")
+                .replace("--test runtime_search_graphql", "--test runtime_live --test runtime_search_graphql")
                 for line in expected]
     # Backend target coverage is deliberately stronger than the qualified job.
     old_check = "cargo check -p graphql-orm --no-default-features --features postgres --locked"

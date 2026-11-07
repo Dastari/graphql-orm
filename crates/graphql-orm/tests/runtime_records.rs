@@ -67,6 +67,8 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
         format_version: 1,
         collections: vec![
             RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 classification: None,
                 description: None,
                 id: collection_id("customers"),
@@ -120,6 +122,8 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
                 search: None,
             },
             RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 description: None,
                 classification: None,
                 id: collection_id("accounts"),

@@ -31,6 +31,8 @@ fn field(id: &str, name: &str, kind: RuntimeValueKind) -> RuntimeField {
 
 fn collection(id: &str, name: &str, fields: Vec<RuntimeField>) -> RuntimeCollection {
     RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         id: CollectionId::new(id).unwrap(),
         api_type_name: name.into(),
         api_plural_name: format!("{name}s"),
@@ -256,4 +258,68 @@ async fn runtime_collections_reach_the_capability_index() {
         .find(|entity| entity.entity_name == "Invoice")
         .unwrap();
     assert_eq!(entity.description, "Customer invoice");
+}
+
+#[tokio::test]
+async fn runtime_node_and_live_catalog_keeps_typed_lists_usable_by_ai() {
+    struct Source(tokio::sync::broadcast::Sender<RuntimeLiveEvent>);
+    impl RuntimeLiveSource for Source {
+        fn subscribe(
+            &self,
+            _: &SchemaFingerprint,
+            _: &CollectionId,
+        ) -> Result<tokio::sync::broadcast::Receiver<RuntimeLiveEvent>, RuntimeGraphqlError>
+        {
+            Ok(self.0.subscribe())
+        }
+    }
+    let mut definition = schema().schema().clone();
+    definition.collections[0].fields.push(field(
+        "invoices.version",
+        "rowVersion",
+        RuntimeValueKind::Integer,
+    ));
+    definition.collections[0].node_identity = Some(RuntimeNodeIdentity {
+        version_field: FieldId::new("invoices.version").unwrap(),
+    });
+    definition.collections[0].live_subscriptions = Some(RuntimeLiveSubscriptions {
+        subscription_key_limit: 8,
+        deleted_images: false,
+    });
+    let (sender, _) = tokio::sync::broadcast::channel(8);
+    let module = RuntimeGraphqlModule::compile(
+        Arc::new(definition.validate().unwrap()),
+        RuntimeGraphqlOptions::default()
+            .with_cursor_profile(RuntimeCursorProfile::Unprotected)
+            .with_live_source(Arc::new(Source(sender)), RuntimeLiveProfile::NativeRls),
+    )
+    .unwrap();
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    let (api, catalog) = RuntimeGraphqlComposer::new(database, "Query", Default::default())
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish_with_semantic_catalog()
+        .unwrap();
+    let queries = AiGraphqlQueryCapabilityCatalog::compile(
+        "runtime-live",
+        GraphqlExecutionTargetId::parse("runtime-application").unwrap(),
+        &api.sdl(),
+        &catalog,
+        AiGraphqlQueryCapabilityLimits::default(),
+    )
+    .unwrap();
+    let capability = queries
+        .capabilities()
+        .find(|capability| capability.field_name() == "invoices")
+        .unwrap();
+    capability.compile_compact(serde_json::json!({"arguments":{}, "selections":["id","NodeId","RecordVersion"], "maximumItems":1, "relationshipArguments":{}, "relationshipMaximumItems":{}})).unwrap();
+    assert!(
+        !queries
+            .capabilities()
+            .any(|capability| capability.field_name() == "node"),
+        "polymorphic node is intentionally not a provider-exportable query"
+    );
 }

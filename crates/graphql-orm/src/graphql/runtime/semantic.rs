@@ -163,13 +163,17 @@ fn filter_operators(kind: RuntimeValueKind) -> Vec<GraphqlSemanticFilterOperator
 fn argument(name: &str, ty: &str) -> GraphqlSemanticArgumentDescriptor {
     GraphqlSemanticArgumentDescriptor {
         graphql_name: name.to_owned(),
-        description: argument_description(name),
+        description: if name == "search" {
+            SEARCH_DESCRIPTION.to_owned()
+        } else {
+            argument_description(name)
+        },
         type_ref: parse_graphql_type(ty).expect("generated runtime argument types parse"),
     }
 }
 
 /// Root list arguments, in SDL order.
-pub(super) fn page_arguments(object: &str) -> [(&'static str, String); 6] {
+pub(super) fn relation_page_arguments(object: &str) -> [(&'static str, String); 6] {
     [
         ("where", format!("{object}WhereInput")),
         ("orderBy", format!("[{object}OrderInput!]")),
@@ -178,6 +182,17 @@ pub(super) fn page_arguments(object: &str) -> [(&'static str, String); 6] {
         ("last", "Int".to_owned()),
         ("before", "String".to_owned()),
     ]
+}
+
+pub(super) const SEARCH_DESCRIPTION: &str = "Restrict to records matching this full-text search; ordered by relevance unless orderBy is given";
+
+/// Root list arguments, including full-text search only when the SDL declares it.
+pub(super) fn page_arguments(object: &str, search: bool) -> Vec<(&'static str, String)> {
+    let mut arguments = relation_page_arguments(object).to_vec();
+    if search {
+        arguments.push(("search", "RuntimeSearchInput".to_owned()));
+    }
+    arguments
 }
 
 /// Description of a link mutation root.
@@ -303,6 +318,24 @@ impl RuntimeGraphqlModule {
                         has_field_policy: true,
                     });
                 }
+                if let Some(node) = &c.node_identity {
+                    fields.push(super::live::dependent_semantic(
+                        "NodeId",
+                        GraphqlSemanticTypeRef::named("ID", GraphqlSemanticTypeKind::Scalar, false),
+                        c,
+                        &c.primary_key,
+                    ));
+                    fields.push(super::live::dependent_semantic(
+                        "RecordVersion",
+                        GraphqlSemanticTypeRef::named(
+                            "Int",
+                            GraphqlSemanticTypeKind::Scalar,
+                            false,
+                        ),
+                        c,
+                        std::slice::from_ref(&node.version_field),
+                    ));
+                }
                 GraphqlEntitySemanticMetadata {
                     entity_name: self.object_name(c),
                     description: c.effective_description(),
@@ -324,15 +357,23 @@ impl RuntimeGraphqlModule {
                             .map(|f| f.api_name.clone())
                             .collect()
                     },
-                    record_version: None,
+                    record_version: c
+                        .node_identity
+                        .as_ref()
+                        .and_then(|node| c.fields.iter().find(|f| f.id == node.version_field))
+                        .map(|f| GraphqlRecordVersionMetadata {
+                            field: f.api_name.clone(),
+                            mode: GraphqlRecordVersionMode::Managed,
+                        }),
                 }
             })
             .collect()
     }
 
-    /// Semantic descriptors of every root this module installs: one keyset list
-    /// query per collection and, when mutations are enabled, each enabled
-    /// mutation. Mutations are [`AiMutationExecutionPolicy::Prohibited`].
+    /// Module-local keyset list and enabled mutation descriptors. Shared local
+    /// Node and keyed live descriptors are added by the composer through
+    /// [`RuntimeGraphqlComposer::finish_with_semantic_catalog`]. Mutations are
+    /// [`AiMutationExecutionPolicy::Prohibited`].
     pub fn semantic_operations(
         &self,
     ) -> Result<Vec<GraphqlSemanticOperationDescriptor>, RuntimeGraphqlError> {
@@ -347,7 +388,7 @@ impl RuntimeGraphqlModule {
                     &object,
                     self.root_name(c),
                     list_description(&object),
-                    page_arguments(&object)
+                    page_arguments(&object, c.search.is_some())
                         .iter()
                         .map(|(name, ty)| argument(name, ty))
                         .collect(),

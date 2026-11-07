@@ -39,6 +39,8 @@ fn schema(labels: &[&str]) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             id: CollectionId::new("books").unwrap(),
             api_type_name: "Book".into(),
             api_plural_name: "Books".into(),

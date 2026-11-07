@@ -57,6 +57,8 @@ fn stamp(collection: &str, name: &str, auto: RuntimeAutoTimestamp) -> RuntimeFie
 }
 fn collection(id: &str, type_name: &str, fields: Vec<RuntimeField>) -> RuntimeCollection {
     RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         description: None,
         classification: None,
         id: cid(id),
