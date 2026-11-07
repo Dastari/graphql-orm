@@ -857,15 +857,512 @@ async fn exact_signed_delegation_is_admitted_before_context_and_unrelated_read_i
             .is_err()
     );
     assert_eq!(counters.values(), [0, 0, 0]);
-    // Opt-out compatibility/reproducer: the generic identity bridge still does
-    // not enforce operation purpose. Read B is real and performs a SQLite read.
-    let legacy = AgqlAcceptedRequest::new(accepted)
-        .inject(async_graphql::Request::new(READ_B))
+    // The generic identity path cannot be used to skip admission: this token
+    // would otherwise run Read B, which is real and performs a SQLite read.
+    assert!(
+        AgqlAcceptedRequest::new(accepted)
+            .inject(async_graphql::Request::new(READ_B))
+            .is_err()
+    );
+    assert_eq!(counters.values(), [0, 0, 0]);
+}
+
+/// A purpose-bound token at one receiver, with its parent and authentication.
+struct Issued {
+    principal: AuthPrincipal,
+    parent: AuthUser,
+    expires_at: OffsetDateTime,
+    body: Vec<u8>,
+    registry: AgqlReceiverRegistry,
+}
+
+fn parent_user() -> AuthUser {
+    AuthUser {
+        user_id: "owner".into(),
+        session_id: Uuid::new_v4(),
+        roles: vec!["Reader".into()],
+        scopes: vec!["item.read".into()],
+        session: SessionContext::default(),
+        token_claims: AccessTokenMetadata {
+            tenant_id: Some("tenant-a".into()),
+            organization_id: Some("organization-a".into()),
+            session_family_id: Some(Uuid::new_v4().to_string()),
+            grant_kind: Some(AccessTokenGrantKind::UserSession),
+            ..Default::default()
+        },
+    }
+}
+
+fn boundary_metadata() -> ReceiverPurposeMetadata {
+    ReceiverPurposeMetadata {
+        receiver: "receiver-a".into(),
+        target: "target-a".into(),
+        schema: "schema-a".into(),
+        capability: "capability-a".into(),
+        projection: "projection-a".into(),
+        disclosure: "disclosure-a".into(),
+        resource_type: "operation".into(),
+        resource_id: "read-a".into(),
+    }
+}
+
+async fn issue(
+    name: &str,
+    document: &str,
+    root: &str,
+    variables: serde_json::Value,
+    arguments: serde_json::Value,
+) -> Issued {
+    let now = OffsetDateTime::now_utc();
+    let parent = parent_user();
+    let principal = AuthPrincipal::User(parent.clone());
+    let resolved = ResolvedPrincipal::new(principal.reference(), principal, now).unwrap();
+    let active = Arc::new(ActiveSession {
+        user: parent.clone(),
+        verified_at: now,
+    });
+    let auth = AuthService::new(
+        AuthConfig::new("test-only-secret-that-is-at-least-thirty-two-bytes"),
+        Arc::new(NoUsers),
+        Arc::new(NoRefreshTokens::default()),
+    )
+    .unwrap()
+    .with_active_user_session_resolver(active);
+    let metadata = boundary_metadata();
+    let purpose = ReceiverPurposeV1::bind(metadata.clone(), name, document, &variables, &arguments);
+    let binding = SessionBoundDelegationBinding::new(
+        ActorIdentity {
+            sub: "issuer".into(),
+            amr: vec!["service".into()],
+        },
+        "operation",
+        "read-a",
+        "correlation-a",
+        ExactOperationBinding::new(name, exact_document_hash(document)),
+    );
+    let request = auth
+        .prepare_session_bound_access_token_only(
+            &resolved,
+            vec!["Reader".into()],
+            vec!["item.read".into()],
+            binding,
+        )
+        .await
+        .unwrap()
+        .with_claim(
+            RECEIVER_PURPOSE_CLAIM,
+            serde_json::to_value(purpose).unwrap(),
+        );
+    let grant = auth
+        .issue_session_bound_access_token_only(request)
+        .await
         .unwrap();
-    counters.dispatch.fetch_add(1, Ordering::SeqCst);
-    let response = schema.execute(legacy).await;
+    let user = auth.authenticate_access_token(&grant.access_token).unwrap();
+    let expires_at = user.token_claims.expires_at.unwrap();
+    Issued {
+        principal: AuthPrincipal::User(user),
+        parent,
+        expires_at,
+        body: serde_json::to_vec(
+            &serde_json::json!({"query":document,"operationName":name,"variables":variables}),
+        )
+        .unwrap(),
+        registry: AgqlReceiverRegistry::new(
+            vec![AgqlReceiverContract::new(name, document, root, metadata).unwrap()],
+            4096,
+        )
+        .unwrap(),
+    }
+}
+
+async fn issue_read_a() -> Issued {
+    let variables = serde_json::json!({"id":"one","tenant":"tenant-a"});
+    issue("ReadA", DOCUMENT, "item", variables.clone(), variables).await
+}
+
+/// A parent read fresh at the clock's current time, whose only deadline is
+/// `absolute`, so a refusal can't come from a stale snapshot.
+struct FreshParent<'a> {
+    user: AuthUser,
+    clock: &'a TestClock,
+    absolute: OffsetDateTime,
+}
+#[async_trait]
+impl VerifiedActiveUserSessionResolver for FreshParent<'_> {
+    async fn resolve_active_user_session(
+        &self,
+        reference: &PrincipalReference,
+    ) -> AuthResult<VerifiedActiveUserSession> {
+        VerifiedActiveUserSession::from_authoritative_record(
+            reference.clone(),
+            self.user.clone(),
+            "session-version-1",
+            self.absolute,
+            None,
+            agql_auth::Clock::now(self.clock),
+        )
+    }
+}
+
+#[tokio::test]
+async fn own_expiry_refuses_at_the_deadline_with_a_live_parent() {
+    let issued = issue_read_a().await;
+    let deadline = issued.expires_at;
+    let clock = TestClock(std::sync::Mutex::new(deadline - Duration::seconds(1)));
+    let parent = FreshParent {
+        user: issued.parent.clone(),
+        clock: &clock,
+        absolute: deadline + Duration::hours(1),
+    };
+    let admit = || {
+        issued.registry.admit(
+            &issued.body,
+            AgqlReceiverTransport::Http,
+            issued.principal.clone(),
+            &parent,
+            &Policy,
+            &clock,
+        )
+    };
+    // Control: one second earlier this exact token is admitted.
+    assert!(admit().await.is_ok());
+    *clock.0.lock().unwrap() = deadline;
+    assert!(admit().await.is_err(), "refused exactly at expiry");
+    *clock.0.lock().unwrap() = deadline + Duration::seconds(1);
+    assert!(admit().await.is_err(), "refused after expiry");
+}
+
+#[tokio::test]
+async fn own_expiry_during_the_policy_await_refuses_with_a_live_parent() {
+    let issued = issue_read_a().await;
+    let deadline = issued.expires_at;
+    let clock = TestClock(std::sync::Mutex::new(deadline - Duration::seconds(2)));
+    let parent = FreshParent {
+        user: issued.parent.clone(),
+        clock: &clock,
+        absolute: deadline + Duration::hours(1),
+    };
+    let run = |to: OffsetDateTime| {
+        let policy = AdvancePolicy(&clock, to);
+        let body = issued.body.clone();
+        let principal = issued.principal.clone();
+        let registry = &issued.registry;
+        let parent = &parent;
+        let clock = &clock;
+        async move {
+            registry
+                .admit(
+                    &body,
+                    AgqlReceiverTransport::Http,
+                    principal,
+                    parent,
+                    &policy,
+                    clock,
+                )
+                .await
+                .is_ok()
+        }
+    };
+    assert!(run(deadline - Duration::seconds(1)).await, "control");
+    *clock.0.lock().unwrap() = deadline - Duration::seconds(2);
+    assert!(!run(deadline).await, "expired during the policy await");
+}
+
+/// A parent snapshot verified at a fixed time, so `from_authoritative_record`
+/// accepts it and only admission's own deadline comparison can refuse it.
+struct SnapshotParent {
+    user: AuthUser,
+    verified_at: OffsetDateTime,
+    absolute: OffsetDateTime,
+}
+#[async_trait]
+impl VerifiedActiveUserSessionResolver for SnapshotParent {
+    async fn resolve_active_user_session(
+        &self,
+        reference: &PrincipalReference,
+    ) -> AuthResult<VerifiedActiveUserSession> {
+        VerifiedActiveUserSession::from_authoritative_record(
+            reference.clone(),
+            self.user.clone(),
+            "session-version-1",
+            self.absolute,
+            None,
+            self.verified_at,
+        )
+    }
+}
+
+#[tokio::test]
+async fn parent_absolute_expiry_during_the_policy_await_refuses() {
+    let issued = issue_read_a().await;
+    let start = issued.expires_at - Duration::seconds(30);
+    let deadline = start + Duration::seconds(2);
+    let clock = TestClock(std::sync::Mutex::new(start));
+    let parent = SnapshotParent {
+        user: issued.parent.clone(),
+        verified_at: start,
+        absolute: deadline,
+    };
+    let run = |to: OffsetDateTime| {
+        let policy = AdvancePolicy(&clock, to);
+        let body = issued.body.clone();
+        let principal = issued.principal.clone();
+        let registry = &issued.registry;
+        let parent = &parent;
+        let clock = &clock;
+        async move {
+            registry
+                .admit(
+                    &body,
+                    AgqlReceiverTransport::Http,
+                    principal,
+                    parent,
+                    &policy,
+                    clock,
+                )
+                .await
+                .is_ok()
+        }
+    };
+    assert!(run(deadline - Duration::seconds(1)).await, "control");
+    *clock.0.lock().unwrap() = start;
+    assert!(!run(deadline).await, "parent ended during the policy await");
+}
+
+struct IdentityQuery {
+    reached: Arc<AtomicUsize>,
+}
+#[async_graphql::Object]
+impl IdentityQuery {
+    async fn scope_count(&self, ctx: &async_graphql::Context<'_>) -> async_graphql::Result<i32> {
+        self.reached.fetch_add(1, Ordering::SeqCst);
+        let accepted = AgqlAcceptedRequest::from_context(ctx)?;
+        Ok(accepted.subject().scopes.len() as i32)
+    }
+}
+
+#[tokio::test]
+async fn purpose_bound_tokens_cannot_skip_admission_through_identity_paths() {
+    use graphql_orm::graphql::auth_agql::{
+        auth_bundle_from_principal, auth_subject_from_principal, db_auth_context_from_principal,
+    };
+    let issued = issue(
+        "ReadScopes",
+        "query ReadScopes { scopeCount }",
+        "scopeCount",
+        serde_json::json!({}),
+        serde_json::json!({}),
+    )
+    .await;
+    let reached = Arc::new(AtomicUsize::new(0));
+    let schema = async_graphql::Schema::build(
+        IdentityQuery {
+            reached: reached.clone(),
+        },
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .finish();
+    let document = "query ReadScopes { scopeCount }";
+
+    // Every generic installation path refuses, or projects no authority.
+    let unadmitted = AgqlAcceptedRequest::new(issued.principal.clone());
+    assert!(unadmitted.subject().scopes.is_empty());
+    assert!(unadmitted.subject().roles.is_empty());
+    assert!(unadmitted.subject().user_id.is_none());
+    assert!(unadmitted.subject().tenant_id.is_none());
+    assert!(
+        unadmitted
+            .clone()
+            .inject(async_graphql::Request::new(document))
+            .is_err()
+    );
+    let mut data = async_graphql::Data::default();
+    assert!(unadmitted.clone().insert_into_data(&mut data).is_err());
+    for subject in [
+        auth_subject_from_principal(&issued.principal),
+        auth_bundle_from_principal(&issued.principal).0,
+    ] {
+        assert!(subject.scopes.is_empty() && subject.roles.is_empty());
+        assert!(subject.user_id.is_none() && subject.tenant_id.is_none());
+    }
+    let db = db_auth_context_from_principal(&issued.principal);
+    assert_ne!(db.user_id.as_deref(), Some("owner"));
+    assert!(db.tenant_id.is_none());
+
+    // Placing the value directly in request data is refused at the boundary.
+    let direct = schema
+        .execute(async_graphql::Request::new(document).data(unadmitted))
+        .await;
+    assert_eq!(direct.errors.len(), 1, "{direct:?}");
+    assert_eq!(reached.load(Ordering::SeqCst), 1, "resolver guard refused");
+
+    // Control: the same token through admission keeps its unchanged scopes.
+    let clock = TestClock(std::sync::Mutex::new(OffsetDateTime::now_utc()));
+    let admitted = issued
+        .registry
+        .admit(
+            &issued.body,
+            AgqlReceiverTransport::Http,
+            issued.principal.clone(),
+            &FreshParent {
+                user: issued.parent.clone(),
+                clock: &clock,
+                absolute: issued.expires_at + Duration::hours(1),
+            },
+            &Policy,
+            &clock,
+        )
+        .await
+        .unwrap();
+    assert_eq!(admitted.scopes(), ["item.read"]);
+    let response = schema.execute(admitted.into_request().unwrap()).await;
     assert!(response.errors.is_empty(), "{:?}", response.errors);
-    assert_eq!(counters.values(), [1, 1, 1]);
+    assert_eq!(
+        response.data.into_json().unwrap(),
+        serde_json::json!({"scopeCount": 1})
+    );
+
+    // Control: a principal without the claim is unchanged on the generic path.
+    let plain = AgqlAcceptedRequest::new(AuthPrincipal::User(issued.parent.clone()));
+    assert_eq!(plain.subject().scopes, ["item.read"]);
+    let response = schema
+        .execute(plain.inject(async_graphql::Request::new(document)).unwrap())
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+}
+
+struct CoercionQuery;
+#[async_graphql::Object]
+impl CoercionQuery {
+    #[allow(clippy::too_many_arguments)]
+    async fn probe(
+        &self,
+        id: async_graphql::ID,
+        count: i32,
+        ratio: f64,
+        flag: bool,
+        text: String,
+        ids: Vec<async_graphql::ID>,
+    ) -> String {
+        format!("{id:?} {count} {ratio} {flag} {text} {ids:?}")
+    }
+}
+
+const COERCION: &str = "query Probe($id: ID!, $count: Int!, $ratio: Float!, $flag: Boolean!, $text: String!, $ids: [ID!]!){ probe(id: $id, count: $count, ratio: $ratio, flag: $flag, text: $text, ids: $ids) }";
+
+/// Derived arguments must agree with what the executor really accepts: every
+/// value admission accepts executes, and every value it refuses for its type
+/// is one the executor also refuses.
+#[tokio::test]
+async fn coercion_agrees_with_the_real_executor() {
+    let schema = async_graphql::Schema::build(
+        CoercionQuery,
+        async_graphql::EmptyMutation,
+        async_graphql::EmptySubscription,
+    )
+    .finish();
+    let base = serde_json::json!({
+        "id": "one", "count": 1, "ratio": 1.5, "flag": true, "text": "t", "ids": ["a"],
+    });
+    let with = |key: &str, value: serde_json::Value| {
+        let mut variables = base.clone();
+        variables[key] = value;
+        variables
+    };
+    let derived = |variables: &serde_json::Value, key: &str, value: serde_json::Value| {
+        let mut arguments = variables.clone();
+        arguments[key] = value;
+        arguments
+    };
+    let accepted = [
+        with("id", serde_json::json!(i64::MAX)),
+        with("id", serde_json::json!(i64::MIN)),
+        with("count", serde_json::json!(i32::MAX)),
+        with("count", serde_json::json!(i32::MIN)),
+        with("ratio", serde_json::json!(2)),
+        with("ids", serde_json::json!("single")),
+        with("ids", serde_json::json!([])),
+    ];
+    for variables in accepted {
+        let mut arguments = variables.clone();
+        if let Some(id) = variables["id"].as_i64() {
+            arguments = derived(&arguments, "id", serde_json::json!(id.to_string()));
+        }
+        if let Some(ratio) = variables["ratio"].as_i64() {
+            arguments = derived(&arguments, "ratio", serde_json::json!(ratio as f64));
+        }
+        if let Some(single) = variables["ids"].as_str() {
+            arguments = derived(&arguments, "ids", serde_json::json!([single]));
+        }
+        let issued = issue("Probe", COERCION, "probe", variables.clone(), arguments).await;
+        let clock = TestClock(std::sync::Mutex::new(OffsetDateTime::now_utc()));
+        let admitted = issued
+            .registry
+            .admit(
+                &issued.body,
+                AgqlReceiverTransport::Http,
+                issued.principal.clone(),
+                &FreshParent {
+                    user: issued.parent.clone(),
+                    clock: &clock,
+                    absolute: issued.expires_at + Duration::hours(1),
+                },
+                &Policy,
+                &clock,
+            )
+            .await
+            .unwrap_or_else(|_| panic!("admission refused {variables}"));
+        let response = schema.execute(admitted.into_request().unwrap()).await;
+        assert!(
+            response.errors.is_empty(),
+            "{variables}: {:?}",
+            response.errors
+        );
+    }
+    let refused = [
+        with("id", serde_json::json!(u64::MAX)),
+        with("id", serde_json::json!(9_223_372_036_854_775_808_u64)),
+        with("id", serde_json::json!(1.5)),
+        with("count", serde_json::json!(i64::from(i32::MAX) + 1)),
+        with("count", serde_json::json!(1.0)),
+        with("flag", serde_json::json!("true")),
+        with("text", serde_json::json!(1)),
+    ];
+    for variables in refused {
+        let issued = issue(
+            "Probe",
+            COERCION,
+            "probe",
+            variables.clone(),
+            variables.clone(),
+        )
+        .await;
+        let clock = TestClock(std::sync::Mutex::new(OffsetDateTime::now_utc()));
+        let result = issued
+            .registry
+            .admit(
+                &issued.body,
+                AgqlReceiverTransport::Http,
+                issued.principal.clone(),
+                &FreshParent {
+                    user: issued.parent.clone(),
+                    clock: &clock,
+                    absolute: issued.expires_at + Duration::hours(1),
+                },
+                &Policy,
+                &clock,
+            )
+            .await;
+        assert!(result.is_err(), "admission accepted {variables}");
+        let executed = schema
+            .execute(
+                async_graphql::Request::new(COERCION)
+                    .variables(async_graphql::Variables::from_json(variables.clone())),
+            )
+            .await;
+        assert!(!executed.errors.is_empty(), "executor accepted {variables}");
+    }
 }
 
 #[derive(Default)]

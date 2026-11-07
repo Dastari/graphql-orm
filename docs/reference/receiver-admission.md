@@ -53,8 +53,15 @@ issue explicit narrowed roles/scopes for version 1.
 
 The host must authenticate the credential before admission, bound streaming reads
 before buffering, keep identity out of shared schema data, and dispatch only the
-sealed result. Existing generic identity projection APIs remain available for
-other routes; hosts must route delegated receiver traffic through admission.
+sealed result. A credential carrying the purpose claim cannot skip admission through
+the ORM's identity paths: `AgqlAcceptedRequest::inject`, `insert_into_data` and
+`from_context` refuse it unless it came from `AgqlAdmittedReceiverRequest`, on every
+route and build, with or without the `receiver-admission` feature. The infallible
+projections (`AgqlAcceptedRequest::new`, `auth_subject_from_principal`,
+`auth_bundle_from_principal`, `db_auth_context_from_principal`) give it a subject with
+no user, tenant, roles or scopes. Credentials without the claim are unchanged. This
+protects ORM identity paths only: a host that reads `AuthUser` scopes itself, or
+authenticates in a separate router, must not act on them before admission.
 Admission is a point-in-time proof, not an atomic revocation fence. Continue to
 apply business, row, field, sender-proof and current-authority checks as required.
 Do not infer assurance from parent liveness or from this proof.

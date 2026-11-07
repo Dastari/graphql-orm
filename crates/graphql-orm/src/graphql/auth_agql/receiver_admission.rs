@@ -234,9 +234,8 @@ fn coerce(value: &Value, ty: &Type) -> Result<Value> {
             let value = match name.as_str() {
                 "String" if value.is_string() => value.clone(),
                 "ID" if value.is_string() => value.clone(),
-                "ID" if value.as_i64().is_some() || value.as_u64().is_some() => {
-                    Value::String(value.to_string())
-                }
+                // Matches the executor's ID scalar: strings and i64 numbers only.
+                "ID" if value.as_i64().is_some() => Value::String(value.to_string()),
                 "Boolean" if value.is_boolean() => value.clone(),
                 "Int" if value.as_i64().is_some_and(|n| i32::try_from(n).is_ok()) => value.clone(),
                 "Float" if value.is_number() => {
@@ -429,7 +428,7 @@ impl AgqlReceiverRegistry {
                 && latest.idle_expires_at().is_none_or(|e| e > clock.now()),
         )?;
         Ok(AgqlAdmittedReceiverRequest {
-            accepted: AgqlAcceptedRequest::new(principal),
+            accepted: AgqlAcceptedRequest::from_receiver_admission(principal),
             document: document.into(),
             name: name.into(),
             variables,

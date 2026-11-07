@@ -107,7 +107,31 @@ fn assurance_from_user(user: &agql_auth::AuthUser) -> Option<AuthAssurance> {
 /// - session id / token id / jti → string references only (never raw secrets)
 /// - tenant / organization from access-token metadata when present
 /// - actor identity from token claims when present
+///
+/// A principal carrying signed receiver-purpose metadata is usable only through
+/// receiver admission, so this projection gives it a subject with no identity
+/// and no authority. It cannot match an owner, tenant, role or scope.
 pub fn auth_subject_from_principal(principal: &AuthPrincipal) -> AuthSubject {
+    if is_purpose_bound(principal) {
+        return AuthSubject::builder(UNADMITTED_SUBJECT).build();
+    }
+    project_subject(principal)
+}
+
+/// Subject id for a purpose-bound principal that has not passed admission. The
+/// leading NUL keeps it from matching any stored owner or subject value.
+const UNADMITTED_SUBJECT: &str = "\u{0}unadmitted-receiver-purpose";
+
+/// Whether this principal may be used only through receiver admission.
+fn is_purpose_bound(principal: &AuthPrincipal) -> bool {
+    matches!(principal, AuthPrincipal::User(user)
+        if user
+            .token_claims
+            .additional
+            .contains_key(graphql_orm_operation_catalog::RECEIVER_PURPOSE_CLAIM))
+}
+
+fn project_subject(principal: &AuthPrincipal) -> AuthSubject {
     match principal {
         AuthPrincipal::User(user) => {
             let assurance = assurance_from_user(user);
@@ -165,16 +189,7 @@ pub fn auth_subject_from_principal(principal: &AuthPrincipal) -> AuthSubject {
 /// Convert an `agql-auth` principal into a [`DbAuthContext`] for RLS and
 /// structural authorization.
 pub fn db_auth_context_from_principal(principal: &AuthPrincipal) -> DbAuthContext {
-    let mut context = DbAuthContext::from_subject(&auth_subject_from_principal(principal));
-    if let AuthPrincipal::User(user) = principal {
-        context.policy_version = user
-            .token_claims
-            .additional
-            .get("policy_version")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-    }
-    context
+    auth_bundle_from_principal(principal).1
 }
 
 /// Convert an `AuthPrincipal` and optional tenant override into a database auth
@@ -193,8 +208,20 @@ pub fn db_auth_context_from_principal_with_tenant(
 /// Convert an `AuthPrincipal` into safe GraphQL and database auth values.
 /// This does not retain full bindings or revalidate authority. Sensitive request
 /// integrations should use [`AgqlAcceptedRequest`] with current-authority enforcement.
+///
+/// A purpose-bound principal projects to no authority, as in
+/// [`auth_subject_from_principal`]; it is usable only through receiver admission.
 pub fn auth_bundle_from_principal(principal: &AuthPrincipal) -> (AuthSubject, DbAuthContext) {
-    let subject = auth_subject_from_principal(principal);
+    if is_purpose_bound(principal) {
+        let subject = auth_subject_from_principal(principal);
+        let db = DbAuthContext::from_subject(&subject);
+        return (subject, db);
+    }
+    project_bundle(principal)
+}
+
+fn project_bundle(principal: &AuthPrincipal) -> (AuthSubject, DbAuthContext) {
+    let subject = project_subject(principal);
     let mut db = DbAuthContext::from_subject(&subject);
     if let AuthPrincipal::User(user) = principal {
         db.policy_version = user
