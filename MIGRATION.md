@@ -10,6 +10,18 @@ supersedes: []
 
 # Migration Guide
 
+## 0.95.0 to 0.95.1: in-memory SQLite lifetime
+
+No data migration or caller changes are needed. ORM-owned in-memory SQLite pools
+now disable idle/lifetime retirement, keep at least one pooled connection and
+retain an unleased shared-cache keeper for the pool lifetime. Replaced connections
+see the same schema and rows. Memory URLs use shared cache internally; `cache=private` URLs and anonymous
+memory URLs receive a unique name, retaining isolation between pools. Explicit pool sizes remain
+supported. Raw pools passed to `Database::new` retain caller-owned lifetime rules.
+A pool still fails normally when closed; memory databases are not durable across
+process exit. Router 0.8.2 adds optional owned-listener startup (`run_with_listener` and Unix
+`--listen-stdin`) for race-free executable tests; default startup is unchanged.
+
 ## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 
 Breaking Rust IR construction: add `node_identity: None` and

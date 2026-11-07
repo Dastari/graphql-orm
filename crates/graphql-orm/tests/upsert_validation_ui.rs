@@ -1,6 +1,9 @@
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn invalid_upsert_configurations_are_rejected() {
-    let t = trybuild::TestCases::new();
+    let t = ui::test_cases();
     t.compile_fail("tests/ui/upsert_non_unique_target.rs");
     t.pass("tests/ui/upsert_hidden_graphql_target.rs");
 }

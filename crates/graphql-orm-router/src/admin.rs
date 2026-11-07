@@ -295,15 +295,17 @@ pub(crate) fn build_admin_server(
     .shutdown_timeout(hive_router::ntex::time::Seconds(shutdown_timeout));
     #[cfg(target_family = "unix")]
     let server = server.disable_signals();
-    server
-        .bind(listener)
-        .map(|server| server.run())
-        .map_err(|_| {
-            RouterError::new(
-                RouterErrorKind::Server,
-                format!("failed to bind administrative listener {listener}"),
-            )
-        })
+    #[cfg(test)]
+    let bound = crate::federation::wire_tests::bind_test_listener(listener, "admin")
+        .and_then(|listener| server.listen(listener));
+    #[cfg(not(test))]
+    let bound = server.bind(listener);
+    bound.map(|server| server.run()).map_err(|_| {
+        RouterError::new(
+            RouterErrorKind::Server,
+            format!("failed to bind administrative listener {listener}"),
+        )
+    })
 }
 
 async fn status_handler(

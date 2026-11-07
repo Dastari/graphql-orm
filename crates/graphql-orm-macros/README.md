@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.95.1 stays aligned with the ORM memory-pool fix; generated code is unchanged. No data migration is needed.
+
 Version 0.95.0 adds opt-in runtime NodeId, managed versions and authorized keyed live subscriptions. Rust runtime collection literals need the two new optional fields; see the root migration guide. Existing serialized schemas and derived APIs are unchanged.
 
 Version 0.95.0 also aligns searchable runtime list arguments in the semantic catalog with SDL.

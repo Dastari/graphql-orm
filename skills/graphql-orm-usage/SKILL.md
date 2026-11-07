@@ -224,6 +224,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+ORM-owned in-memory SQLite helpers retain a separate shared-cache keeper connection,
+disable idle/lifetime retirement and keep at least one pooled connection. Replacement
+connections retain schema and rows. Memory URLs use shared cache internally; explicit `cache=private` URLs get a
+unique name to preserve isolation between pools. Caller-built raw pools retain
+caller-owned lifetime rules.
+
+
 ## Lifecycle hooks
 
 A generated write runs in this order. Entity and row policy checks come first, and the

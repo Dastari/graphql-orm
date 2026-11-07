@@ -16,6 +16,11 @@ for historical context.
 
 ## Unreleased
 
+- **Fixed (ORM/macros 0.95.1):** in-memory SQLite helpers disable pooled connection retirement and retain a shared-cache keeper so replacement connections see the same schema and rows. No data migration is needed. Fixes #376.
+- **Tests (router 0.8.2):** wire children bind port zero and report their owned public/admin addresses, eliminating released-port races. The executable smoke test transfers an already-bound socket through the additive `run_with_listener` hook and Unix `--listen-stdin` option; default startup is unchanged. Fixes #366.
+- **Tests (ORM/macros 0.95.1):** OS-backed coordination prevents concurrent trybuild projects from truncating a live generated lockfile; timeout sanitization setup uses normal deadlines and blocked acquisitions use virtual time. Fixes #380. Fixes #381.
+
+
 AI **0.124.0**, ORM runtime/macros **0.95.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 
 - **Breaking (ORM/macros 0.95.0; AI 0.124.0 fixture compatibility):** runtime collections gain optional `node_identity` and `live_subscriptions` declarations. Opted-in objects preserve `id`, expose canonical `NodeId` and managed `RecordVersion`, join local `node(NodeId:)`, and provide bounded keyed `Changed` streams through a host committed-event source. Every event rechecks the current registration and delivery grants together; a revoked grant withholds events quietly, matching derived subscriptions. Deleted images default-deny and are explicitly unsupported on native-RLS profiles; a loaded NULL in a nullable field counts as image evidence, an unloaded field does not. Queue loss, restart and revision signals use the existing uppercase continuity frames without keys or counts, independent of which keys were ever visible. A subscription operation selecting a generated live root must select exactly one root field, or it is refused with `subscription_root_limit_exceeded` before any source is opened. Existing version columns need no data migration; ordinary migrations apply when a host adds one. Serialized opt-out schemas, their fingerprints and derived APIs are unchanged. Rust code building `RuntimeCollection` literals must add the two fields. Fixes #368.

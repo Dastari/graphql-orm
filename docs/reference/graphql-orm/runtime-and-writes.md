@@ -28,6 +28,19 @@ Postgres uses `Database::<PostgresBackend>::connect_postgres(database_url)`. MSS
 schema policy. Deliberate SQL Server DML uses
 `Database::<MssqlBackend>::connect_ado_external_writable(connection_string)`.
 
+For in-memory SQLite URLs (`sqlite::memory:`, `sqlite://:memory:` and
+`mode=memory`), ORM-owned helpers default to one pooled connection, disable idle
+and maximum-lifetime retirement, and set at least one minimum connection. An
+additional unleased keeper connection holds the shared-cache memory database for
+the pool lifetime. If cancellation, a failed release ping or explicit connection
+closure replaces a pooled connection, its replacement sees the existing schema
+and rows. Explicit pool sizes use the same database. Memory URLs use shared cache internally.
+Explicit `cache=private` URLs and anonymous memory URLs get unique database names,
+preserving isolation between independent pools. This
+costs one additional SQLite connection per memory pool. Closing the pool still
+refuses acquisitions normally, and process exit loses memory data. These guarantees
+do not apply to caller-built raw pools.
+
 Use `Database::new(pool)` for compatibility or `Database::builder(pool)` when the application
 intentionally owns raw driver-specific pool setup.
 

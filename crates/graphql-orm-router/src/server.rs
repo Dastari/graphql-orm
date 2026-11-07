@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     future::Future,
+    net::TcpListener,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -60,6 +61,46 @@ static PLUGIN_RUNTIMES: OnceLock<Mutex<BTreeMap<u64, PluginRuntime>>> = OnceLock
 /// Embedders that already manage an asynchronous runtime can instead await
 /// [`RouterConfig::prepare`] and [`PreparedRouter::run`] directly.
 pub fn run(config: RouterConfig) -> Result<(), RouterError> {
+    run_on_owned_runtime(config, None)
+}
+
+/// Runs a router using an already-bound public TCP listener.
+///
+/// The listener's actual address replaces the configured public address before
+/// preparation, including subscription endpoint validation. Ownership transfers
+/// to the server without releasing or rebinding the port. The listener is made
+/// nonblocking; preparation failure drops it. Administrative listeners still use
+/// the configured address. This function owns the Ntex runtime like [`run`].
+///
+/// ```no_run
+/// let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+/// let config = graphql_orm_router::RouterConfig::new(listener.local_addr()?);
+/// graphql_orm_router::run_with_listener(config, listener)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub fn run_with_listener(
+    mut config: RouterConfig,
+    listener: TcpListener,
+) -> Result<(), RouterError> {
+    config.listener = listener.local_addr().map_err(|error| {
+        RouterError::new(
+            RouterErrorKind::Server,
+            format!("failed to read public listener address: {error}"),
+        )
+    })?;
+    listener.set_nonblocking(true).map_err(|error| {
+        RouterError::new(
+            RouterErrorKind::Server,
+            format!("failed to configure public listener: {error}"),
+        )
+    })?;
+    run_on_owned_runtime(config, Some(listener))
+}
+
+fn run_on_owned_runtime(
+    config: RouterConfig,
+    listener: Option<TcpListener>,
+) -> Result<(), RouterError> {
     #[cfg(target_family = "unix")]
     let process_signals = ProcessSignals::install()?;
 
@@ -79,7 +120,11 @@ pub fn run(config: RouterConfig) -> Result<(), RouterError> {
                 let _ = hive_router::ntex::rt::signals::signal().await;
             };
 
-            config.prepare().await?.run_until_shutdown(shutdown).await
+            config
+                .prepare()
+                .await?
+                .run_until_shutdown_on_listener(shutdown, listener)
+                .await
         });
 
     #[cfg(target_family = "unix")]
@@ -272,6 +317,17 @@ impl PreparedRouter {
     where
         F: Future<Output = ()>,
     {
+        self.run_until_shutdown_on_listener(shutdown, None).await
+    }
+
+    async fn run_until_shutdown_on_listener<F>(
+        self,
+        shutdown: F,
+        owned_listener: Option<TcpListener>,
+    ) -> Result<(), RouterError>
+    where
+        F: Future<Output = ()>,
+    {
         hive_router::init_rustls_crypto_provider();
         let runtime_id = NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed);
         let internal_subscription = if self.config.subscriptions.is_some() {
@@ -410,7 +466,17 @@ impl PreparedRouter {
             .shutdown_timeout(graceful_shutdown_timeout);
         #[cfg(target_family = "unix")]
         let server = server.disable_signals();
-        let server = server.bind(listener).map_err(|error| {
+        let bound = if let Some(owned) = owned_listener {
+            server.listen(owned)
+        } else {
+            #[cfg(test)]
+            let bound = crate::federation::wire_tests::bind_test_listener(listener, "public")
+                .and_then(|listener| server.listen(listener));
+            #[cfg(not(test))]
+            let bound = server.bind(listener);
+            bound
+        };
+        let server = bound.map_err(|error| {
             RouterError::new(
                 RouterErrorKind::Server,
                 format!("failed to bind public listener {listener}: {error}"),
