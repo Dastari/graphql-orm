@@ -111,6 +111,7 @@ fn actual_decode_and_narrow_policy_limits_are_required() {
 }
 #[tokio::test]
 async fn bounded_decode_preserves_exact_immutable_payload() {
+    let _guard = crate::tool_media::DECODE_TEST_LOCK.lock().await;
     let bytes = png();
     let reference = image_reference(&bytes);
     let decoded = AiResolvedToolImage::decode_bounded(
@@ -155,4 +156,23 @@ fn two_genuine_pngs_must_fit_the_complete_result_pixel_budget() {
         AiToolResultMediaLimits::new(2, 8192, 10, 12, 1000, 5000).unwrap(),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn bounded_decode_refuses_a_busy_pool_without_waiting() {
+    let _guard = crate::tool_media::DECODE_TEST_LOCK.lock().await;
+    let pool = POOL.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)));
+    let permits = pool.clone().acquire_many_owned(2).await.unwrap();
+    let bytes = png();
+    let reference = image_reference(&bytes);
+    assert!(matches!(
+        futures::FutureExt::now_or_never(AiResolvedToolImage::decode_bounded(
+            reference.clone(),
+            resource(&reference),
+            bytes,
+            AiToolResultMediaLimits::new(1, 4096, 10, 100, 1000, 5000).unwrap(),
+        )),
+        Some(Err(AiError::ToolExecutionFailed))
+    ));
+    drop(permits);
 }

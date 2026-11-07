@@ -70,6 +70,7 @@ guidance for the core ORM package.
 - [Backup runtime boundary](backup-runtime.md)
 
 - [Runtime GraphQL reads and checked composition](runtime-graphql.md)
+- [Runtime identities and authorized live subscriptions](runtime-subscriptions.md)
 - [Full-text search on runtime collections](runtime-search.md)
 
 - [Dedicated schema export builds](schema-export.md)

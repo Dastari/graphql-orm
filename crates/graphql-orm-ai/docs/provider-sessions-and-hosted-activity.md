@@ -778,3 +778,48 @@ Real credential-free evidence from host binaries 0.165.0 and 0.166.0: `--version
 without a structured version field. User-agent text is not parsed. The ignored
 `real_binary_version_only` test uses `GRAPHQL_ORM_AI_CODEX_VERSION_BIN`; it creates an
 empty disposable home, clears environment and runs only `--version`.
+
+## Optional read-marker notification policy
+
+AI 0.124.0 adds an actor-policy opt-in for ignored read-marker notifications (issue #369).
+`AiCodexAppServerProtocolActor::with_ignored_read_state_notifications()` admits only
+`thread/readState/changed` with the reviewed, closed read-marker payload for the
+current fully bound thread. This is a narrow compatibility exception, not tolerance
+for arbitrary future methods. Unknown requests, item kinds, methods (including new
+`item/*` and `turn/*`), moderation metadata, extra payload fields and malformed or
+oversized frames remain refused. Deletion and absence scans remain strict.
+
+Default admission and both initialize frames are unchanged. Process adapters may
+opt in when constructing their turn actor and must discard
+`AiCodexAppServerInbound::IgnoredNotification` without emitting events, resetting
+peer-liveness timers, or changing deadlines, budgets, approval, retries or effect
+replay. The actor exposes `ignored_notification_count()` and emits a tracing warning
+with only the fixed method name, never params. Ignored frames also have an 8 KiB ceiling (including whitespace). At most 32 frames are ignored per
+actor lifetime; the next rejects, so a flood cannot run indefinitely. Recreate the
+actor through its normal lifecycle rather than resetting the counter.
+
+This does not replace executable version readiness (Related to #333): undeclared
+versions remain not ready and launch admission still applies. Hosts should keep
+reviewed version declarations. No data migration is needed; persistent schema and
+`AI_SCHEMA_MODULE_VERSION` are unchanged.
+
+Evidence: schemas generated from the real 0.165.0 and 0.166.0 standalone binaries
+both contain 85 identical notification method names. Both describe `ThreadReadState`
+as a durable-thread first-unread position plus an opaque revision. Its closed
+projection contains only references and a `threadStart` or `turn` marker; it cannot
+satisfy any tool, usage or completion requirement. By contrast,
+`TurnModerationMetadataNotification.metadata` is unconstrained JSON and is excluded.
+PR #305 observed both methods in live traffic despite opt-out. The generated
+interactive client discards all unknown notifications; that rule is too broad for
+this actor's usage and effect accounting.
+
+Threat review: putting tool arguments, usage, outcomes or approval fields into the
+read-marker object rejects on unknown fields; new marker kinds reject. Duplicate
+keys reject because the original bytes are also decoded into closed types.
+The empty `threadStart` shape rejects extra fields. Relabeling
+an effect as a valid marker cannot advance lifecycle or satisfy outstanding calls,
+usage or completion. A peer that lies by withholding all authoritative effect
+traffic cannot be made honest by notification validation; this opt-in grants it no
+new completion or replay proof. A flood exhausts the fixed lifetime allowance.
+Cleanup actors never use the exception. Adapters must treat the content-free
+ignored result as no progress and retain their absolute deadlines.

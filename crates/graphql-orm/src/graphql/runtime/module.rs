@@ -15,6 +15,7 @@ impl<B: OrmBackend + RuntimeRowDecoder> RuntimeReadBackend for B {}
 #[non_exhaustive]
 pub struct RuntimeGraphqlOptions {
     pub type_prefix: String,
+    pub(super) live_source: Option<super::live::Source>,
     pub root_names: BTreeMap<CollectionId, String>,
     pub cursor_profile: RuntimeCursorProfile,
     pub(super) mutations: Option<RuntimeGraphqlMutationOptions>,
@@ -243,6 +244,17 @@ impl RuntimeGraphqlCost {
             relation_groups: usize::from(parents != 0),
             projection_calls: 0,
         })
+    }
+    pub(super) fn admit(self, limits: RuntimeGraphqlLimits) -> Result<(), RuntimeGraphqlError> {
+        if self.statements > limits.max_statements
+            || self.materialized_nodes > limits.max_materialized_nodes
+            || self.crypto_calls > limits.max_crypto_calls
+            || self.relation_groups > limits.relation.max_compatible_groups
+            || self.projection_calls > limits.projection.max_calls
+        {
+            return Err(RuntimeGraphqlError::new("cost_exceeded"));
+        }
+        Ok(())
     }
     /// Add independent roots/layers without wrapping admission counters.
     pub fn checked_add(self, other: Self) -> Result<Self, RuntimeGraphqlError> {
@@ -646,6 +658,9 @@ pub struct RuntimeGraphqlComposer<B: RuntimeReadBackend> {
     query: Object,
     query_name: String,
     subscription_name: Option<String>,
+    subscription: Option<Subscription>,
+    pending_live: Vec<(RuntimeGraphqlModule, RuntimeCollection)>,
+    live_roots: BTreeSet<String>,
     actions: Vec<Box<dyn FnOnce(SchemaBuilder) -> SchemaBuilder + Send>>,
     pub(super) names: BTreeSet<String>,
     roots: BTreeSet<String>,
@@ -684,6 +699,9 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             query: Object::new(&query_name),
             query_name,
             subscription_name: None,
+            subscription: None,
+            pending_live: Vec::new(),
+            live_roots: BTreeSet::new(),
             actions: Vec::new(),
             names,
             roots: BTreeSet::new(),
@@ -816,6 +834,118 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
                 c.search.is_some(),
             ));
         }
+        if module
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .any(|c| c.node_identity.is_some())
+            && !self.modules.iter().any(|m| {
+                m.schema
+                    .schema()
+                    .collections
+                    .iter()
+                    .any(|c| c.node_identity.is_some())
+            })
+        {
+            self = self.register(
+                Interface::new("Node")
+                    .field(InterfaceField::new("NodeId", TypeRef::named_nn("ID")))
+                    .into(),
+            )?;
+            self.semantic.operations.push(super::live::node_semantic()?);
+        }
+        let live_collections = module
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .filter(|c| c.live_subscriptions.is_some())
+            .collect::<Vec<_>>();
+        if !live_collections.is_empty() {
+            if self.subscription_name.is_some()
+                && !self.modules.iter().any(|m| {
+                    m.schema
+                        .schema()
+                        .collections
+                        .iter()
+                        .any(|c| c.live_subscriptions.is_some())
+                })
+            {
+                return Err(
+                    RuntimeGraphqlError::new("unsupported_subscription_composition").into(),
+                );
+            }
+
+            let source = module
+                .options
+                .live_source
+                .as_ref()
+                .ok_or_else(|| RuntimeGraphqlError::new("subscription_source_missing"))?;
+            if let super::RuntimeLiveProfile::ApplicationPolicy { match_profile } = source.1 {
+                if !matches!(
+                    (B::DIALECT, match_profile),
+                    (
+                        DatabaseBackend::Sqlite,
+                        RuntimeMatchProfile::SqliteBinaryCanonical
+                    ) | (
+                        DatabaseBackend::Postgres,
+                        RuntimeMatchProfile::PostgresCUtf8
+                    )
+                ) {
+                    return Err(
+                        RuntimeGraphqlError::new("unsupported_deleted_image_profile").into(),
+                    );
+                }
+            }
+            if source.1 == super::RuntimeLiveProfile::NativeRls
+                && live_collections.iter().any(|c| {
+                    c.live_subscriptions
+                        .as_ref()
+                        .is_some_and(|l| l.deleted_images)
+                })
+            {
+                return Err(RuntimeGraphqlError::new("unsupported_deleted_image_profile").into());
+            }
+            if !self.modules.iter().any(|m| {
+                m.schema
+                    .schema()
+                    .collections
+                    .iter()
+                    .any(|c| c.live_subscriptions.is_some())
+            }) {
+                for ty in super::live::helpers() {
+                    self = self.register(ty)?;
+                }
+            }
+            if self.subscription_name.is_none() {
+                self.subscription_name = Some("Subscription".into());
+                self.semantic.subscription_described = true;
+            }
+            let subscription = self.subscription.take().unwrap_or_else(|| {
+                Subscription::new(
+                    self.subscription_name
+                        .as_deref()
+                        .expect("subscription name"),
+                )
+            });
+            for c in live_collections {
+                for ty in super::live::types(&module, c) {
+                    self = self.register(ty)?;
+                }
+                if !self
+                    .live_roots
+                    .insert(super::live::changed_name(&module, c))
+                {
+                    return Err(RuntimeGraphqlError::new("name_collision").into());
+                }
+                self.pending_live.push((module.clone(), c.clone()));
+                let (entity, operation) = super::live::event_semantics(&module, c)?;
+                self.semantic.entities.extend(entity);
+                self.semantic.operations.push(operation);
+            }
+            self.subscription = Some(subscription);
+        }
         self.semantic.entities.extend(module.semantic_entities());
         self.semantic
             .operations
@@ -928,6 +1058,33 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
     }
 
     pub fn finish(mut self) -> Result<Schema, RuntimeGraphqlError> {
+        if self.modules.iter().any(|m| {
+            m.schema
+                .schema()
+                .collections
+                .iter()
+                .any(|c| c.node_identity.is_some())
+        }) {
+            if !self.roots.insert("node".into()) {
+                return Err(RuntimeGraphqlError::new("name_collision"));
+            }
+            self.query = self.query.field(super::live::node_field());
+        }
+        if let Some(mut subscription) = self.subscription.take() {
+            // Bind final composer limits and cursor protection, independent of
+            // whether the host configured those before or after installing a module.
+            for (module, collection) in std::mem::take(&mut self.pending_live) {
+                subscription = subscription.field(super::live::subscription_field(
+                    self.database.clone(),
+                    module,
+                    collection,
+                    self.limits,
+                    self.protection.clone(),
+                ));
+            }
+            self = self.register(subscription.into())?;
+        }
+
         if let Some(root) = self.mutation.take() {
             self.actions
                 .push(Box::new(move |builder| builder.register(root)));

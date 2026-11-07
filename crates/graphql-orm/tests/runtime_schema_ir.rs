@@ -257,6 +257,8 @@ fn order(field: &str, direction: RuntimeOrderDirection) -> RuntimeOrderTerm {
 
 fn fixture_runtime_schema() -> RuntimeSchema {
     let customers = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         classification: None,
         description: None,
         id: cid("col_customer"),
@@ -380,6 +382,8 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     let contact_details = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         classification: None,
         description: None,
         id: cid("col_contact_detail"),
@@ -438,6 +442,8 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     let customer_notes = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         classification: None,
         description: None,
         id: cid("col_customer_note"),
@@ -492,6 +498,8 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     let note_attachments = RuntimeCollection {
+        node_identity: None,
+        live_subscriptions: None,
         classification: None,
         description: None,
         id: cid("col_note_attachment"),
@@ -649,6 +657,8 @@ fn owned_schema_survives_source_value_drop_and_serde_round_trip() {
         let source_table = String::from("things");
         let mut schema = RuntimeSchema::default();
         schema.collections.push(RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             description: None,
             classification: None,
             id: CollectionId::new(source_table.clone()).expect("id"),

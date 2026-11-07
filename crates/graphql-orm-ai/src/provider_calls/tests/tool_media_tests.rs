@@ -15,6 +15,7 @@ struct Capture {
 }
 #[derive(Default)]
 struct Custody {
+    _decode_guard: Option<tokio::sync::MutexGuard<'static, ()>>,
     captures: Mutex<BTreeMap<Uuid, Capture>>,
     effects: AtomicUsize,
     created_threads: AtomicUsize,
@@ -525,8 +526,12 @@ async fn media_fixture_resolution(
     supervised: bool,
     resolution_ms: u64,
 ) -> (Fixture, Arc<Custody>, Arc<OrmAiApplicationToolCallService>) {
+    let decode_guard = crate::tool_media::DECODE_TEST_LOCK.lock().await;
     let mut fixture = fixture(Vec::new()).await;
-    let custody = Arc::new(Custody::default());
+    let custody = Arc::new(Custody {
+        _decode_guard: Some(decode_guard),
+        ..Default::default()
+    });
     custody.allowed.store(true, Ordering::SeqCst);
     custody.ordinary_allowed.store(true, Ordering::SeqCst);
     custody

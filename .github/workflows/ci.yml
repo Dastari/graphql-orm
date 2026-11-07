@@ -151,9 +151,11 @@ jobs:
         env:
           CARGO_BUILD_JOBS: "2"
         run: |
-          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1
-          cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_queries --test runtime_relations --test runtime_live --test runtime_search_graphql --test runtime_search_writes -- --test-threads=1
+          cargo test -p graphql-orm --locked --no-default-features --features postgres,runtime-graphql --lib --test runtime_graphql --test runtime_mutations --test runtime_live --test runtime_search_graphql --test runtime_search_writes --test runtime_search_ir -- --test-threads=1
           cargo test -p graphql-orm --locked --no-default-features --features mssql,runtime-graphql --test runtime_graphql_unsupported
+          cargo check -p graphql-orm --locked --no-default-features --features sqlite,mssql,runtime-graphql --all-targets
+          cargo clippy -p graphql-orm -p graphql-orm-macros --locked --no-default-features --features sqlite,mssql,runtime-graphql --all-targets -- -D warnings
 
   # Fixture workspaces build into the shared target/fixtures directory used by
   # the fixture runner tests, never into the source tree.

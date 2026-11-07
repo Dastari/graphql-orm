@@ -73,6 +73,8 @@ fn definition(extra: bool, amount_scale: u8) -> RuntimeSchema {
     RuntimeSchema {
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             id: CollectionId::new(TABLE).unwrap(),
             api_type_name: "Ledger".into(),
             api_plural_name: "Ledgers".into(),

@@ -2422,6 +2422,8 @@ mod tests {
         RuntimeSchema {
             format_version: 1,
             collections: vec![RuntimeCollection {
+                node_identity: None,
+                live_subscriptions: None,
                 description: None,
                 classification: None,
                 id: collection_id("items"),
@@ -2810,5 +2812,46 @@ mod tests {
         let empty_or = schema.runtime_or(&collection, vec![], limits).unwrap();
         assert!(matches!(empty_and.expr, PredicateExpr::Constant(true)));
         assert!(matches!(empty_or.expr, PredicateExpr::Constant(false)));
+    }
+}
+
+#[cfg(feature = "runtime-graphql")]
+impl ValidatedRuntimeSchema {
+    // Identity is not public Filter permission. Only a checked complete RuntimeKey
+    // may enter this private path, after the runtime host's read authorization.
+    pub(crate) fn runtime_identity_predicate(
+        &self,
+        key: &super::RuntimeKey,
+    ) -> Result<RuntimePredicate, RuntimeQueryError> {
+        if self.fingerprint() != key.schema().fingerprint() || key.validate().is_err() {
+            return Err(RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidHandle));
+        }
+        let current = self
+            .resolve_collection(key.collection().id())
+            .map_err(|_| RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidHandle))?;
+        if &current != key.collection()
+            || key.fields().iter().any(|(field, _)| {
+                self.resolve_field(&current, field.id()).as_ref().ok() != Some(field)
+            })
+        {
+            return Err(RuntimeQueryError::new(RuntimeQueryErrorCode::InvalidHandle));
+        }
+        Ok(RuntimePredicate {
+            schema: self.fingerprint(),
+            collection: key.collection().id().clone(),
+            expr: PredicateExpr::And(
+                key.fields()
+                    .iter()
+                    .map(|(field, value)| PredicateExpr::Compare {
+                        field: field.clone(),
+                        op: RuntimeScalarOperator::Eq,
+                        value: value.clone(),
+                    })
+                    .collect(),
+            ),
+            nodes: key.fields().len() + 1,
+            depth: 2,
+            binds: key.fields().len(),
+        })
     }
 }

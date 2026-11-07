@@ -1802,7 +1802,9 @@ pub trait AiCodexAppServerRunProcess: Send + Sync {
     /// The implementation must enforce the supplied output-token ceiling or
     /// reject the request before starting it. It must normalize only visible
     /// assistant text and authoritative usage/completion events, and abort the
-    /// process on every forbidden or unknown protocol event.
+    /// process on every forbidden or unknown protocol event, except an explicitly
+    /// opted-in `IgnoredNotification` from the reviewed actor policy. That result
+    /// must emit no event and cannot reset liveness or extend a deadline.
     ///
     /// # Errors
     ///
@@ -3602,6 +3604,10 @@ pub enum AiCodexAppServerInbound {
     /// One bounded state-index page was validated and discarded; the actor is
     /// ready to encode the next page or archived partition request.
     ThreadAbsenceScanContinue,
+    /// One reviewed read-marker notification was discarded. Adapters must
+    /// produce no event or peer-liveness progress, and retain absolute deadlines.
+    /// This is never usage, completion, approval, or evidence of no effect.
+    IgnoredNotification,
     /// The exact protected cursor was observed in the provider state index.
     ///
     /// No provider thread metadata crosses the actor boundary.
@@ -3719,6 +3725,9 @@ impl std::fmt::Debug for AiCodexAppServerInbound {
                 .field("method", method)
                 .field("result", &"<provider-content>")
                 .finish(),
+            Self::IgnoredNotification => {
+                formatter.write_str("AiCodexAppServerInbound::IgnoredNotification")
+            }
             Self::ThreadAbsenceScanContinue => {
                 formatter.write_str("AiCodexAppServerInbound::ThreadAbsenceScanContinue")
             }
@@ -3828,7 +3837,8 @@ enum ThreadLifecycleOperation {
 /// that timestamp optional for `warning`, and a present timestamp remains
 /// strictly validated. Initialization
 /// negotiates one fixed opt-out profile for unused thread, MCP, and account
-/// notifications; those methods remain rejected if the server emits them.
+/// notifications; those methods remain rejected if the server emits them,
+/// except the explicitly opted-in closed read-marker projection.
 /// Deletion uses only its exact correlated response. An ambiguous deletion
 /// failure may be followed in a separate fresh actor by the exact bounded,
 /// content-discarding active-and-archived state-index absence scan. A
@@ -3839,7 +3849,8 @@ enum ThreadLifecycleOperation {
 /// reasoning summaries remain explicitly disabled. Typed `sleep` display items
 /// retain exact turn/item lifecycle bounds without granting execution authority
 /// or extending the provider turn deadline. All other server-initiated
-/// requests and non-allowlisted notifications fail closed.
+/// requests and non-allowlisted notifications fail closed, except the optional
+/// closed read-marker projection in [`Self::with_ignored_read_state_notifications`].
 #[derive(Debug)]
 pub struct AiCodexAppServerProtocolActor {
     next_id: u64,
@@ -3877,6 +3888,8 @@ pub struct AiCodexAppServerProtocolActor {
     runtime_warning_count: usize,
     runtime_warning_bytes: usize,
     maximum_frame_bytes: usize,
+    ignore_read_state_notifications: bool,
+    ignored_notification_count: u8,
 }
 
 impl AiCodexAppServerProtocolActor {
@@ -3929,14 +3942,38 @@ impl AiCodexAppServerProtocolActor {
             runtime_warning_count: 0,
             runtime_warning_bytes: 0,
             maximum_frame_bytes,
+            ignore_read_state_notifications: false,
+            ignored_notification_count: 0,
         })
+    }
+
+    /// Opts this actor into discarding only the reviewed closed
+    /// `thread/readState/changed` payload on its fully bound current thread.
+    ///
+    /// Unknown methods, fields and marker kinds still fail closed. Cleanup and
+    /// absence scans stay strict. The ignored projection has an additional 8 KiB
+    /// ceiling, including whitespace. Initialization bytes are unchanged. At most
+    /// 32 notifications may be ignored over the actor's lifetime; the next
+    /// rejects. Adapters must discard `IgnoredNotification` without reporting
+    /// progress or changing liveness, deadlines, budgets or replay decisions.
+    #[must_use]
+    pub fn with_ignored_read_state_notifications(mut self) -> Self {
+        self.ignore_read_state_notifications = true;
+        self
+    }
+
+    /// Number of reviewed notifications discarded over this actor's lifetime
+    /// (bounded by 32). Rejections are not counted. No peer content is retained.
+    #[must_use]
+    pub fn ignored_notification_count(&self) -> u8 {
+        self.ignored_notification_count
     }
 
     /// Encodes the one allowed stable protocol-initialization request.
     ///
     /// The actor always suppresses the exact thread-status, thread-settings,
     /// MCP-startup, and account-rate-limit notifications that this closed
-    /// adapter neither consumes nor admits. The host cannot alter that profile
+    /// adapter does not consume. The host cannot alter that profile
     /// or suppress authoritative thread, turn, item, usage, dynamic-tool, or
     /// completion traffic.
     ///
@@ -4728,7 +4765,8 @@ impl AiCodexAppServerProtocolActor {
     ///
     /// Every server-initiated request, uncorrelated response, provider error,
     /// forbidden item kind, non-empty reasoning content, and unknown
-    /// notification is rejected.
+    /// notification is rejected, except the explicitly opted-in closed read-marker
+    /// projection (see [`Self::with_ignored_read_state_notifications`]).
     ///
     /// # Errors
     ///
@@ -4855,6 +4893,10 @@ impl AiCodexAppServerProtocolActor {
         let notification: CodexAppServerNotificationEnvelope =
             serde_json::from_slice(frame).map_err(|_| ProviderError::Rejected)?;
         notification.validate()?;
+        if self.ignore_read_state_notifications && notification.method == "thread/readState/changed"
+        {
+            return self.ignore_read_state_notification(frame);
+        }
         if notification.method == REMOTE_CONTROL_STATUS_CHANGED {
             return self.accept_disabled_remote_control_status(notification);
         }
@@ -4966,6 +5008,50 @@ impl AiCodexAppServerProtocolActor {
             return Err(ProviderError::Rejected);
         }
         Ok(())
+    }
+
+    fn ignore_read_state_notification(
+        &mut self,
+        frame: &[u8],
+    ) -> Result<AiCodexAppServerInbound, ProviderError> {
+        // Exact literal matching bounds and sanitizes the only logged method:
+        // peer-provided names and params never reach tracing or stored state.
+        if frame.len() > 8 * 1024
+            || !self.initialization_complete
+            || self.thread_lifecycle_phase != ThreadLifecyclePhase::Complete
+            || self.deleting_thread_id.is_some()
+            || self.thread_absence_scan.is_some()
+            || self.pending.values().any(|method| {
+                matches!(
+                    method,
+                    ClientMethod::TurnInterrupt
+                        | ClientMethod::ThreadDelete
+                        | ClientMethod::ThreadList
+                )
+            })
+            || self.ignored_notification_count >= 32
+        {
+            return Err(ProviderError::Rejected);
+        }
+        // Decode the original bytes into a closed typed envelope too: going
+        // through Value alone would erase duplicate keys inside params.
+        let envelope: ReadStateChangedEnvelope =
+            serde_json::from_slice(frame).map_err(|_| ProviderError::Rejected)?;
+        let params = envelope.params;
+        if !valid_reference(&params.thread_id)
+            || self.active_thread_id.as_deref() != Some(params.thread_id.as_str())
+            || !valid_reference(&params.read_state.revision)
+            || matches!(&params.read_state.first_unread,
+                Some(UnreadPosition::Turn { turn_id }) if !valid_reference(turn_id))
+        {
+            return Err(ProviderError::Rejected);
+        }
+        self.ignored_notification_count += 1;
+        tracing::warn!(
+            method = "thread/readState/changed",
+            "ignored Codex notification"
+        );
+        Ok(AiCodexAppServerInbound::IgnoredNotification)
     }
 
     fn accept_dynamic_tool_lifecycle(
@@ -5903,6 +5989,42 @@ impl CodexAppServerNotificationEnvelope {
         }
         Ok(())
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadStateChangedEnvelope {
+    #[serde(rename = "method")]
+    _method: String,
+    params: ReadStateChangedParams,
+    #[serde(default, rename = "emittedAtMs")]
+    _emitted_at_ms: OptionalNotificationTimestamp,
+}
+
+// Closed projection of the identical 0.165.0/0.166.0 read-marker schemas.
+// References are display metadata, never lifecycle or execution evidence.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReadStateChangedParams {
+    thread_id: String,
+    read_state: ReadState,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReadState {
+    revision: String,
+    first_unread: Option<UnreadPosition>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "camelCase")]
+enum UnreadPosition {
+    ThreadStart {},
+    Turn {
+        #[serde(rename = "turnId")]
+        turn_id: String,
+    },
 }
 
 #[derive(Default)]
@@ -10765,6 +10887,290 @@ pub(crate) mod tests {
                 },
             }),
         )
+    }
+
+    #[test]
+    fn ignored_read_state_positive_baseline() {
+        let frame = lifecycle_notification(
+            "thread/readState/changed",
+            json!({
+                "threadId": "thread-1", "readState": {"revision": "r1", "firstUnread": null}
+            }),
+        );
+        let mut strict = active_protocol_actor();
+        assert!(strict.accept(&frame).is_err());
+        let mut tolerant = active_protocol_actor().with_ignored_read_state_notifications();
+        assert!(tolerant.accept(&frame).is_ok());
+        tolerant
+            .accept(&token_usage_notification("thread-1", "turn-1"))
+            .unwrap();
+        tolerant
+            .accept(&turn_completed_notification("thread-1", "turn-1"))
+            .unwrap();
+    }
+
+    fn read_marker(params: Value) -> Vec<u8> {
+        lifecycle_notification("thread/readState/changed", params)
+    }
+
+    fn valid_read_marker() -> Value {
+        json!({"threadId":"thread-1", "readState":{"revision":"r1", "firstUnread":null}})
+    }
+
+    #[test]
+    fn ignored_read_state_preserves_all_protocol_state_and_between_turns() {
+        let mut actor = active_protocol_actor().with_ignored_read_state_notifications();
+        for position in [
+            Value::Null,
+            json!({"type":"threadStart"}),
+            json!({"type":"turn","turnId":"previous-turn"}),
+        ] {
+            let before = format!("{actor:?}");
+            let mut params = valid_read_marker();
+            params["readState"]["firstUnread"] = position;
+            assert_eq!(
+                actor.accept(&read_marker(params)).unwrap(),
+                AiCodexAppServerInbound::IgnoredNotification
+            );
+            let mut expected = before;
+            let count = actor.ignored_notification_count();
+            expected = expected.replace(
+                &format!("ignored_notification_count: {}", count - 1),
+                &format!("ignored_notification_count: {count}"),
+            );
+            assert_eq!(format!("{actor:?}"), expected);
+        }
+        actor
+            .accept(&token_usage_notification("thread-1", "turn-1"))
+            .unwrap();
+        actor
+            .accept(&turn_completed_notification("thread-1", "turn-1"))
+            .unwrap();
+        assert!(actor.active_turn_id.is_none());
+        assert_eq!(
+            actor.accept(&read_marker(valid_read_marker())).unwrap(),
+            AiCodexAppServerInbound::IgnoredNotification
+        );
+        assert!(actor.active_turn_id.is_none());
+    }
+
+    #[test]
+    fn ignored_read_state_flood_is_lifetime_bounded() {
+        let mut actor = active_protocol_actor().with_ignored_read_state_notifications();
+        let frame = read_marker(valid_read_marker());
+        for _ in 0..32 {
+            assert_eq!(
+                actor.accept(&frame).unwrap(),
+                AiCodexAppServerInbound::IgnoredNotification
+            );
+        }
+        for _ in 0..1000 {
+            assert!(actor.accept(&frame).is_err());
+        }
+        assert_eq!(actor.ignored_notification_count(), 32);
+        actor
+            .accept(&token_usage_notification("thread-1", "turn-1"))
+            .unwrap();
+        actor
+            .accept(&turn_completed_notification("thread-1", "turn-1"))
+            .unwrap();
+        assert!(actor.accept(&frame).is_err());
+    }
+
+    #[test]
+    fn ignored_read_state_refuses_unproven_payloads_and_methods() {
+        let mut actor = active_protocol_actor().with_ignored_read_state_notifications();
+        for params in [
+            json!({}),
+            json!({"threadId":"other", "readState":{"revision":"r1"}}),
+            json!({"threadId":"thread-1", "readState":{"revision":""}}),
+            json!({"threadId":"thread-1", "readState":{"revision":1}}),
+            json!({"threadId":"thread-1", "readState":{"revision":"r1","effectExecuted":true}}),
+            json!({"threadId":"thread-1", "readState":{"revision":"r1","firstUnread":{"type":"toolCall"}}}),
+            json!({"threadId":"thread-1", "readState":{"revision":"r1","firstUnread":{"type":"turn","turnId":"x","usage":1}}}),
+            json!({"threadId":"thread-1", "readState":{"revision":"r1"},"approval":true}),
+            json!({"threadId":"thread-1", "readState":{"revision":"r1"},"tokenUsage":{}}),
+            json!({"threadId":"thread-1", "readState":{"revision":"r1"},"turn":{"status":"completed"}}),
+        ] {
+            assert!(actor.accept(&read_marker(params)).is_err());
+        }
+        for method in [
+            "item/futureTool",
+            "turn/futureOutcome",
+            "thread/tokenUsage/future",
+            "approval/future",
+            "account/rateLimits/updated",
+            "turn/moderationMetadata",
+            "thread/readState/future",
+            "thread/readState/changed\nforged",
+            &"x".repeat(10000),
+        ] {
+            assert!(
+                actor
+                    .accept(&lifecycle_notification(method, valid_read_marker()))
+                    .is_err()
+            );
+        }
+        for frame in [
+            json!({"id":99,"method":"thread/readState/changed","params":valid_read_marker()}),
+            json!({"method":"thread/readState/changed","params":valid_read_marker(),"extra":true}),
+            json!({"method":"thread/readState/changed","params":null}),
+        ] {
+            assert!(actor.accept(&serde_json::to_vec(&frame).unwrap()).is_err());
+        }
+        assert!(actor.accept(b"{").is_err());
+        for frame in [
+            br#"{"method":"thread/readState/changed","params":{"threadId":"thread-1","readState":{"revision":"r1","firstUnread":{"type":"threadStart","effectExecuted":true}}}}"#.as_slice(),
+            br#"{"method":"thread/readState/changed","params":{"threadId":"other","threadId":"thread-1","readState":{"revision":"r1"}}}"#.as_slice(),
+            br#"{"method":"thread/readState/changed","params":{"threadId":"thread-1","readState":{"revision":"r1","revision":"r2"}}}"#.as_slice(),
+            br#"{"method":"thread/readState/changed","emittedAtMs":0,"params":{"threadId":"thread-1","readState":{"revision":"r1"}}}"#.as_slice(),
+        ] { assert!(actor.accept(frame).is_err()); }
+        let unknown_item = lifecycle_notification(
+            "item/started",
+            json!({"threadId":"thread-1","turnId":"turn-1","item":{"id":"unknown-item","type":"futureTool"}}),
+        );
+        assert!(actor.accept(&unknown_item).is_err());
+        let frame = read_marker(valid_read_marker());
+        let mut padded = vec![b' '; 8 * 1024];
+        padded.extend_from_slice(&frame);
+        assert!(actor.accept(&padded).is_err());
+        actor.maximum_frame_bytes = frame.len() - 1;
+        assert!(actor.accept(&frame).is_err());
+        assert_eq!(actor.ignored_notification_count(), 0);
+    }
+
+    #[test]
+    fn ignored_read_state_cannot_replace_outstanding_effect_or_outcome() {
+        let mut actor = active_protocol_actor().with_ignored_read_state_notifications();
+        actor
+            .started_dynamic_calls
+            .insert("call-1".into(), "tool-1".into());
+        actor.accept(&read_marker(valid_read_marker())).unwrap();
+        assert_eq!(actor.started_dynamic_calls.len(), 1);
+        assert!(
+            actor
+                .accept(&turn_completed_notification("thread-1", "turn-1"))
+                .is_err()
+        );
+        assert!(matches!(
+            codex_dispatch_outcome(Err(ProviderError::Rejected)),
+            AiProviderDispatchOutcome::FailedAfterPossibleDispatch(_)
+        ));
+    }
+
+    #[test]
+    fn ignored_read_state_cleanup_initialization_and_absence_stay_strict() {
+        for mut actor in [
+            AiCodexAppServerProtocolActor::new(65536).unwrap(),
+            initialized_protocol_actor(),
+            deleting_protocol_actor(),
+        ] {
+            actor = actor.with_ignored_read_state_notifications();
+            assert!(actor.accept(&read_marker(valid_read_marker())).is_err());
+            assert_eq!(actor.ignored_notification_count(), 0);
+        }
+        let mut actor = active_protocol_actor().with_ignored_read_state_notifications();
+        // Even a bound actor cannot ignore during an absence scan.
+        actor.thread_absence_scan = Some(ThreadAbsenceScanState {
+            target_fingerprint: "target".into(),
+            archived: false,
+            next_cursor: None,
+            seen_cursor_fingerprints: BTreeSet::new(),
+            pages: 0,
+            records: 0,
+            awaiting_response: true,
+        });
+        assert!(actor.accept(&read_marker(valid_read_marker())).is_err());
+    }
+
+    #[test]
+    fn ignored_read_state_initialize_bytes_are_identical() {
+        // Independent pre-policy byte fixtures, including trailing newlines.
+        // Dependency feature unification may enable serde_json/preserve_order;
+        // both map orderings existed before this policy. Do not derive these
+        // fixtures from the production opt-out list or encoder.
+        let insertion_baseline = concat!(
+            r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"client","title":"Client","version":"1.0.0"},"capabilities":{"optOutNotificationMethods":["#,
+            r#""thread/status/changed","thread/readState/changed","thread/settings/updated","thread/goal/cleared","mcpServer/startupStatus/updated","account/rateLimits/updated","account/updated","turn/moderationMetadata"]}}}"#,
+            "\n",
+        );
+        let sorted_baseline = concat!(
+            r#"{"id":1,"method":"initialize","params":{"capabilities":{"optOutNotificationMethods":["#,
+            r#""thread/status/changed","thread/readState/changed","thread/settings/updated","thread/goal/cleared","mcpServer/startupStatus/updated","account/rateLimits/updated","account/updated","turn/moderationMetadata"]},"#,
+            r#""clientInfo":{"name":"client","title":"Client","version":"1.0.0"}}}"#,
+            "\n",
+        );
+        let map_order_probe = json!({"z": 0, "a": 0});
+        let insertion_order = map_order_probe.as_object().unwrap().keys().next().unwrap() == "z";
+        for dynamic in [false, true] {
+            let mut strict = AiCodexAppServerProtocolActor::new(65536).unwrap();
+            let mut opted = AiCodexAppServerProtocolActor::new(65536)
+                .unwrap()
+                .with_ignored_read_state_notifications();
+            let a = if dynamic {
+                strict.initialize_with_dynamic_tools("client", "Client", "1.0.0")
+            } else {
+                strict.initialize("client", "Client", "1.0.0")
+            }
+            .unwrap();
+            let b = if dynamic {
+                opted.initialize_with_dynamic_tools("client", "Client", "1.0.0")
+            } else {
+                opted.initialize("client", "Client", "1.0.0")
+            }
+            .unwrap();
+            let expected = match (insertion_order, dynamic) {
+                (true, false) => insertion_baseline.to_owned(),
+                (false, false) => sorted_baseline.to_owned(),
+                (true, true) => {
+                    insertion_baseline.replacen("]}}}", r#"],"experimentalApi":true}}}"#, 1)
+                }
+                (false, true) => sorted_baseline.replacen(
+                    r#""capabilities":{"#,
+                    r#""capabilities":{"experimentalApi":true,"#,
+                    1,
+                ),
+            };
+            assert_eq!(a, expected.as_bytes());
+            assert_eq!(a, b);
+        }
+    }
+    #[tokio::test]
+    async fn ignored_read_state_cannot_extend_deadline_or_report_clean_completion() {
+        let counters = Arc::new(Counters::new());
+        let pool = pool(counters.clone(), 1, 2);
+        let binding = binding();
+        let entry = pool.entry(binding, registration("1.0.0")).await.unwrap();
+        entry.turn_active.store(true, Ordering::Release);
+        let mut actor = active_protocol_actor().with_ignored_read_state_notifications();
+        let source: ProviderEventStream = Box::pin(async_stream::try_stream! {
+            for _ in 0..32 {
+                let inbound = actor.accept(&read_marker(valid_read_marker()))?;
+                assert_eq!(inbound, AiCodexAppServerInbound::IgnoredNotification);
+                tokio::task::yield_now().await;
+            }
+            std::future::pending::<()>().await;
+            yield ProviderEvent::ResponseCompleted { response_id: None };
+        });
+        let mut guarded = pool
+            .guard_turn_stream(
+                binding,
+                entry,
+                tokio::time::Instant::now() + Duration::from_millis(20),
+                source,
+            )
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(1), guarded.next())
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            Some(Err(ProviderError::Classified(
+                AiProviderFailureCategory::Timeout
+            )))
+        ));
+        assert!(pool.inner.entries.lock().await.is_empty());
+        assert_eq!(counters.shutdowns.load(Ordering::SeqCst), 1);
     }
 
     fn active_protocol_actor() -> AiCodexAppServerProtocolActor {
@@ -17242,8 +17648,8 @@ pub(crate) mod tests {
     /// GRAPHQL_ORM_AI_CODEX_LIVE_BIN=/absolute/path/to/codex
     /// GRAPHQL_ORM_AI_CODEX_LIVE_HOME=/absolute/path/to/disposable/home
     /// GRAPHQL_ORM_AI_CODEX_LIVE_MODEL=<model>          # required
-    /// GRAPHQL_ORM_AI_CODEX_LIVE_SCENARIO=reasoning     # or dynamic, web_search, sleep
-    /// GRAPHQL_ORM_AI_CODEX_LIVE_FRAME_LOG=/absolute/path/frames.jsonl  # optional
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_SCENARIO=reasoning     # or read_state, dynamic, web_search, sleep
+    /// GRAPHQL_ORM_AI_CODEX_LIVE_FRAME_LOG=/absolute/path/frames.jsonl  # optional, disabled for read_state
     /// ```
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires an installed Codex CLI and a disposable configured home"]
@@ -17259,8 +17665,13 @@ pub(crate) mod tests {
             .expect("set GRAPHQL_ORM_AI_CODEX_LIVE_MODEL to a model the account can use");
         let scenario = std::env::var("GRAPHQL_ORM_AI_CODEX_LIVE_SCENARIO")
             .unwrap_or_else(|_| "reasoning".to_owned());
-        let mut frame_log = std::env::var_os("GRAPHQL_ORM_AI_CODEX_LIVE_FRAME_LOG")
-            .map(|path| std::fs::File::create(path).expect("frame log should be creatable"));
+        // Ignored payloads must never reach raw diagnostic recordings either.
+        let mut frame_log = if scenario == "read_state" {
+            None
+        } else {
+            std::env::var_os("GRAPHQL_ORM_AI_CODEX_LIVE_FRAME_LOG")
+                .map(|path| std::fs::File::create(path).expect("frame log should be creatable"))
+        };
 
         let mut request = dynamic_model_request();
         request.model = model;
@@ -17274,7 +17685,7 @@ pub(crate) mod tests {
         )
         .expect("direct-tool live profile should validate");
         let (profile, prompt) = match scenario.as_str() {
-            "reasoning" => {
+            "reasoning" | "read_state" => {
                 request.tools = Vec::new();
                 (
                     AiCodexAppServerLaunchProfile::strict_text_only_v1(),
@@ -17318,15 +17729,28 @@ pub(crate) mod tests {
             LiveCodexProcess::launch_with_profile(&executable, configured_home.clone(), profile);
         let mut actor =
             AiCodexAppServerProtocolActor::new(MAXIMUM_FRAME_BYTES).expect("actor should validate");
-        process.send(
-            &actor
-                .initialize_with_dynamic_tools(
-                    "graphql_orm_ai_live_test",
-                    "GraphQL ORM AI live test",
-                    "1.0.0",
-                )
-                .expect("initialize should encode"),
-        );
+        if scenario == "read_state" {
+            actor = actor.with_ignored_read_state_notifications();
+        }
+        let mut initialize = actor
+            .initialize_with_dynamic_tools(
+                "graphql_orm_ai_live_test",
+                "GraphQL ORM AI live test",
+                "1.0.0",
+            )
+            .expect("initialize should encode");
+        if scenario == "read_state" {
+            // Test-only probe: production negotiation continues to suppress this
+            // method. Exercise a real peer emitting the reviewed payload.
+            let mut value: Value = serde_json::from_slice(&initialize).unwrap();
+            value["params"]["capabilities"]["optOutNotificationMethods"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|method| method != "thread/readState/changed");
+            initialize = serde_json::to_vec(&value).unwrap();
+            initialize.push(b'\n');
+        }
+        process.send(&initialize);
         loop {
             let frame = process.receive();
             record_live_frame(&mut frame_log, &frame);
@@ -17467,10 +17891,26 @@ pub(crate) mod tests {
                 _ => {}
             }
         }
+        if scenario == "read_state" {
+            // Some peers publish the marker immediately after turn/completed.
+            for _ in 0..32 {
+                if actor.ignored_notification_count() > 0 {
+                    break;
+                }
+                let frame = process.receive();
+                actor
+                    .accept(&frame)
+                    .expect("post-turn frames must remain admitted");
+            }
+            assert!(
+                actor.ignored_notification_count() > 0,
+                "peer emitted no read marker"
+            );
+        }
         assert_eq!(turn_status.as_deref(), Some("completed"));
         assert!(agent_message_completions > 0, "no agent message completed");
         match scenario.as_str() {
-            "reasoning" => assert!(
+            "reasoning" | "read_state" => assert!(
                 reasoning_completions > 0,
                 "prompt emitted no reasoning, so this run proves nothing"
             ),

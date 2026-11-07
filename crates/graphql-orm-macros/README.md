@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.95.0 adds opt-in runtime NodeId, managed versions and authorized keyed live subscriptions. Rust runtime collection literals need the two new optional fields; see the root migration guide. Existing serialized schemas and derived APIs are unchanged.
+
+Version 0.95.0 also aligns searchable runtime list arguments in the semantic catalog with SDL.
+
 Version 0.94.0 repairs backend test gating and native MSSQL CI coverage, and fixes paginated relation reads of SQL expression projections. No data migration is needed.
 Version 0.94.0 makes `GraphQLRelations` without `#[graphql(complex)]` on an entity that derives `GraphQLEntity`
 report one compile error that names the fix, instead of three conflicting-implementation errors. An entity with

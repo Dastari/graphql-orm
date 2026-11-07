@@ -42,6 +42,8 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     RuntimeSchema {
         format_version: 1,
         collections: vec![RuntimeCollection {
+            node_identity: None,
+            live_subscriptions: None,
             description: None,
             classification: None,
             id: cid("customers"),

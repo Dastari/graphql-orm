@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.124.0` adopts ORM 0.95.0 runtime collection declarations in its contract fixtures and verifies NodeId/live catalogs in the AI compiler. No AI runtime or persistent schema change; no data migration.
+Version `0.124.0` also isolates media test fixtures sharing the decoder pool. Runtime behavior and schema are unchanged; no consumer action or data migration is needed.
+Version `0.124.0` adds optional Codex read-marker tolerance and adopts ORM/macros 0.95.0. No data migration.
+
 Version `0.123.0` uses shared canonical bindings for private remote execution, tool arguments and checkpoints. Signed formats and persistent state are unchanged; no data migration is needed.
 
 Version `0.122.0` adopts tool profiles `0.21.0`, preserves proven pre-transport failure classification and exposes closed retry refusal reasons. No data migration is needed.
@@ -714,3 +718,22 @@ the additive defaults report missing. Readiness never uses credentials or model 
 Launch refusal is proven pre-transport; strict deletion and fresh absence confirmation
 remain available without turn authority. See the [provider contract](docs/provider-sessions-and-hosted-activity.md#codex-executable-version-admission-ai-01230) for image-binding,
 isolation, bounds, failure codes and migration details.
+
+## Optional Codex read-marker tolerance
+
+AI 0.124.0 preserves strict admission by default. Host process adapters may opt in:
+
+```rust,ignore
+let mut actor = AiCodexAppServerProtocolActor::new(maximum_frame_bytes)?
+    .with_ignored_read_state_notifications();
+// Discard IgnoredNotification without reporting progress or resetting liveness.
+let ignored = actor.ignored_notification_count();
+```
+
+Only the closed `thread/readState/changed` read-marker shape qualifies. Unknown
+methods, requests, item kinds, moderation metadata and malformed frames still
+reject; cleanup stays strict. The lifetime cap is 32 ignored frames, with
+method-only tracing warnings and a bounded counter. Initialization bytes,
+budgets, effect replay and version readiness (Related to #333) are unchanged.
+No data migration. See the [migration guide](MIGRATION.md) and
+[protocol contract and threat review](docs/provider-sessions-and-hosted-activity.md#optional-read-marker-notification-policy).

@@ -937,3 +937,32 @@ fn eval(e: &PredicateExpr, r: &RuntimeRecord) -> Result<Option<bool>, RuntimeFil
         }
     })
 }
+
+#[cfg(feature = "runtime-graphql")]
+impl RuntimePredicate {
+    pub(crate) fn matches_captured_image(
+        &self,
+        record: &RuntimeRecord,
+        profile: RuntimeMatchProfile,
+    ) -> Result<bool, RuntimeFilterError> {
+        let intent = Intent::Sequence(
+            self.referenced_fields()
+                .iter()
+                .map(|field| {
+                    Intent::Field(
+                        (*field).clone(),
+                        RuntimeFilterOperator::Scalar(RuntimeScalarOperator::Eq),
+                        false,
+                    )
+                })
+                .collect(),
+        );
+        let checked = CheckedRuntimeFilter {
+            root: RuntimeFilterNode {
+                predicate: self.clone(),
+                intent,
+            },
+        };
+        checked.prepare_match(profile)?.matches(record)
+    }
+}
