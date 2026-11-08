@@ -439,8 +439,9 @@ compilation; unknown physical dependents, cycles and denied dependent/set-null w
 whole delete. Opted-in entities omit bulk GraphQL delete and its catalog entry so it cannot
 bypass these checks; remove explicit `delete_many` shape/policy declarations. Repository deletes
 retain physical behavior. Opt every deleting ancestor in too: an opted-out parent
-still physically changes opted-in children without hooks/events. Declared to-one cascade/set-null
-relations now require the parent's opt-in at compile time, including across crates. Database-only
+still physically changes opted-in children without hooks/events. Declared cascade/set-null
+relations require the parent's opt-in at compile time for non-`multiple` relations (even with
+`emit_fk = false`) and `multiple` relations with `emit_fk = true`, including across crates. Database-only
 FKs and other write aliases cannot all be detected by registry construction; audit those paths. Refusal versus success reveals whether the root
 has unwritable dependents, while hiding their identities/counts. Dependent assurance uses
 its own mutation coordinate; root admission/errors retain the direct-write contract.
@@ -450,6 +451,17 @@ extension/domain and blank-padded character keys refuse. Existing `notify_with` 
 authorized transactional cleanup in `Before`; `After` is too late for a restrict backstop. No data
 migration is needed. See the canonical [relations reference](../../docs/reference/graphql-orm/entities-and-relations.md#orm-driven-dependent-deletes)
 for native-RLS, schema and locking limits.
+
+Before each write, PostgreSQL repeats only relation-kind, inheritance/partition
+and rewrite-rule checks. Trigger, physical-FK, hidden-FK and comparison-semantics
+checks run only at planning; SQLite has no per-write catalogue revalidation.
+Pre-delete referencer checks use the original FK plan. Mutation hooks are trusted
+host code: DDL that creates triggers (including SQLite TEMP triggers), adds FKs
+or creates cascading tables during a dependent delete is unsupported and is not
+detected: no full catalogue recheck runs after hooks. It can bypass the
+authorized dependent plan. A PostgreSQL hook-installed rule is caught by the narrower rule guard;
+this does not support hook DDL in general. Keep DDL outside these hooks; related
+follow-up: [#391](https://github.com/Dastari/graphql-orm/issues/391).
 
 ## Subscriptions and propagation
 

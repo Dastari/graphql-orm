@@ -26,8 +26,10 @@ PostgreSQL single-column primary-key references; composite keys and MSSQL opt-in
 are rejected. Unknown physical dependents and cycles refuse the entire delete.
 
 **Declare and opt in every deleting ancestor.** An opted-in entity's declared
-to-one `cascade` or `set_null` relation now requires its parent to implement
-`StaticDeleteEntity` for the same backend. The derive emits a compile-time
+`cascade` or `set_null` relation requires its parent to implement
+`StaticDeleteEntity` for the same backend when it is non-`multiple`, or when it is
+`multiple` with `emit_fk = true`. Non-`multiple` relations also require this when
+`emit_fk = false`. The derive emits a compile-time
 obligation, including when the parent is imported from another crate. Mark that
 parent with `#[graphql_entity(dependent_deletes)]` and generate its writable
 operations too; do not remove the check to retain a physical cascade.
@@ -60,12 +62,23 @@ an explicit reviewed migration, or keep that graph opted out; the ORM never
 rewrites it automatically. These checks protect both discovery and the final
 referencer recheck.
 
-PostgreSQL registered relations must be ordinary standalone heap tables. The
-same catalogue guard runs at planning and before every write and refuses
-inheritance parents/children, partitioned tables/partitions, non-`_RETURN` rewrite
-rules, views and foreign tables. SQLite has no inheritance, declarative
-partitioning, rewrite RULE or foreign-table equivalent; registered SQLite views
-also refuse table validation.
+PostgreSQL registered relations must be ordinary standalone heap tables. Before
+each write, only the relation-kind, inheritance/partition and rewrite-rule guard
+from planning is repeated: it refuses inheritance parents/children,
+partitioned tables/partitions, non-`_RETURN` rewrite rules, views and foreign
+tables. Trigger validation, physical-FK validation and hidden-FK detection run
+only during planning. SQLite performs no per-write catalogue revalidation; it
+has no PostgreSQL inheritance, partitioning, rewrite RULE or foreign-table
+equivalent, and registered SQLite views refuse planning.
+
+**Mutation hooks must not run DDL during a dependent delete.** Hooks are trusted
+host code. Creating triggers (including SQLite TEMP triggers), adding foreign
+keys or creating cascading tables inside a hook is unsupported and is not
+detected: no full catalogue recheck runs after hooks. Such changes can introduce physical writes
+outside the authorized plan. The narrower PostgreSQL guard catches a newly
+installed rewrite rule, but this is not general hook-DDL protection. Keep DDL
+outside dependent-delete hooks; broader revalidation is tracked in
+[#391](https://github.com/Dastari/graphql-orm/issues/391).
 
 The root's Before hook runs before dependent authorization, so a refused cascade
 may already have caused side effects outside the database, as with a direct
