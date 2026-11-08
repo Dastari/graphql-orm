@@ -461,16 +461,16 @@ authorized transactional cleanup in `Before`; `After` is too late for a restrict
 migration is needed. See the canonical [relations reference](../../docs/reference/graphql-orm/entities-and-relations.md#orm-driven-dependent-deletes)
 for native-RLS, schema and locking limits.
 
-Before each write, PostgreSQL repeats only relation-kind, inheritance/partition
-and rewrite-rule checks. Trigger, physical-FK, hidden-FK and comparison-semantics
-checks run only at planning; SQLite has no per-write catalogue revalidation.
-Pre-delete referencer checks use the original FK plan. Mutation hooks are trusted
-host code: DDL that creates triggers (including SQLite TEMP triggers), adds FKs
-or creates cascading tables during a dependent delete is unsupported and is not
-detected: no full catalogue recheck runs after hooks. It can bypass the
-authorized dependent plan. A PostgreSQL hook-installed rule is caught by the narrower rule guard;
-this does not support hook DDL in general. Keep DDL outside these hooks; related
-follow-up: [#391](https://github.com/Dastari/graphql-orm/issues/391).
+After preparation hooks, before every prepared write and before commit, the
+pinned SQLite/PostgreSQL transaction repeats full planning catalogue validation
+and compares the physical schema snapshot to the original plan.
+Invalidating DDL (including persistent/TEMP triggers, new FKs or cascading tables)
+refuses with sanitized errors and atomic rollback of rows, DDL and queued events.
+After-hook changes between writes and after the final write are covered. Existing
+schema/write fences, direct authority, limits and after-commit callbacks remain.
+Keep DDL outside these hooks: unrelated modeled schema changes also conservatively
+refuse; this is not a general hook-DDL migration API. See the canonical reference
+for the snapshot scope and validation contract.
 
 ## Subscriptions and propagation
 

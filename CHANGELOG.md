@@ -16,6 +16,10 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.99.0**.
+
+- **Security:** bounded static dependent deletes repeat full physical catalogue validation after hooks before every prepared write and before commit, comparing the physical schema snapshot to the verified plan. Trigger, FK, cascading-table and other invalidating catalogue changes refuse with sanitized errors and atomic rollback, including changes between writes. Authorization, bounds and after-commit events remain intact. Fixes #391.
+
 ORM runtime/macros **0.98.0**, operation catalog **0.7.2**.
 
 - **Breaking:** reject `private`, `read = false`, and `input_only` fields on `GraphQLEntity` + `SimpleObject` entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.

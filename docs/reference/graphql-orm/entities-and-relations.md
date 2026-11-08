@@ -937,10 +937,8 @@ deterministic collation on both columns when collatable. Nondeterministic ICU
 collations refuse. Extension/domain key types (including citext) and blank-padded
 character keys also refuse: equality against a bound value can differ from the
 FK's equality even when both columns have identical declared types.
-Planning verifies these comparison semantics under the schema/write fences for
-both discovery and the final pre-delete referencer lookup, assuming hooks keep
-the physical catalogue unchanged; it does not repeat these catalogue checks
-after hooks. No schema is rewritten automatically.
+Planning and every full catalogue revalidation verify these comparison semantics
+under the schema/write fences. No schema is rewritten automatically.
 
 **Inside dependent checks, `ctx.field()` still describes the initiating root,
 not the dependent operation.** Library auth,
@@ -963,27 +961,34 @@ referencers covered by the original FK plan are checked before each delete.
 PostgreSQL's native
 FK/unique/exclusion constraint triggers remain supported.
 
-PostgreSQL only supports ordinary standalone heap tables for this option. Before
-each write, `validate_delete_relations` repeats only the relation-kind,
-inheritance/partition and rewrite-rule checks against `pg_class`, `pg_inherits`
-and `pg_rewrite`. Any registered inheritance parent/child, partitioned
-table/partition, non-`_RETURN` rewrite rule, view or foreign table refuses. This
-narrow guard also catches a rule installed by an earlier mutation hook. Trigger
-validation, `validate_postgres` physical-FK validation, hidden-FK detection and
-comparison-semantics checks run only during planning. SQLite performs no
-per-write catalogue revalidation; it has no PostgreSQL inheritance, declarative
-partitioning, rewrite RULE or foreign-table equivalent, and registered views
-refuse ordinary-table validation at planning.
+PostgreSQL only supports ordinary standalone heap tables: inheritance,
+partitions, rewrite rules, views and foreign tables refuse. Before every prepared
+write (delete or set-null), after all preparation hooks, and again before commit,
+the same pinned transaction reruns **all** planning catalogue checks. This includes
+triggers, physical FK validity, hidden incoming FKs, RLS visibility, search-path/
+temporary shadowing, relation kinds and FK comparison semantics. Existing
+PostgreSQL relation locks and SQLite `BEGIN IMMEDIATE` remain held.
 
-**Mutation hooks that run DDL during a dependent delete are unsupported.** Hooks
-are trusted host code. Creating triggers (including SQLite TEMP triggers),
-adding foreign keys or creating cascading tables after planning is unsupported
-and is not detected: no full catalogue recheck runs after hooks. Such changes can
-introduce physical writes outside the authorized plan, bypassing dependent
-checks, hooks, events and limits. The narrow
-PostgreSQL relation/rule guard does not provide general hook-DDL protection.
-Keep DDL outside these hooks. Full catalogue revalidation after hooks is tracked
-in [#391](https://github.com/Dastari/graphql-orm/issues/391).
+The comparison contract is conservative: retain the planning-time
+`OwnedSchemaModel` and require structural equality (`PartialEq`) with a freshly
+introspected model. No lossy hash is used. This includes all introspected tables
+(including internal tables), columns, keys, indexes, checks, FK constraint names,
+ordered column pairs and delete policies, search metadata and extensions.
+It excludes rows, catalogue OIDs and unmodeled DDL such as function bodies.
+Introspection order is retained; even a harmless change in that order can refuse.
+Validation is mandatory in addition to snapshot equality: triggers, hidden
+FKs, inheritance/rules, shadowing and comparison semantics are not all represented
+by that model. Even an unrelated modeled schema change conservatively refuses;
+no changed graph is replanned or authorized implicitly. Row-referencer checks
+continue using the verified original FK plan before every delete.
+
+**Keep DDL outside dependent-delete hooks.** Hook DDL is not a supported migration
+mechanism. Invalidating changes now return only `Dependent delete refused` and
+roll back the transaction, including rows, transactional DDL and queued events.
+Revalidation before each write catches After-hook changes between writes; the
+final check also catches the last write's After hook. Native PostgreSQL
+FK/unique/exclusion constraint triggers remain supported. Row/depth limits,
+direct dependent authorization and after-commit events are unchanged.
 
 The root's Before hook runs before dependents are authorized, so a refused
 cascade may already have produced external hook side effects, as with a direct

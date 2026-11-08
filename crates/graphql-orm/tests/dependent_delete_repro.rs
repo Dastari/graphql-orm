@@ -147,6 +147,17 @@ impl MutationHook for Hook {
             {
                 revoke.0.store(true, std::sync::atomic::Ordering::SeqCst);
             }
+            if let Some(ddl) = ctx.and_then(|ctx| ctx.data_opt::<HookDdl>())
+                && event.entity_name == ddl.entity
+                && event.phase == ddl.phase
+            {
+                for sql in &ddl.statements {
+                    hook_ctx
+                        .execute(sql, &[])
+                        .await
+                        .map_err(graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                }
+            }
             self.0
                 .lock()
                 .unwrap()
@@ -1702,5 +1713,188 @@ mod database_only_parent {
                 .all(|(entity, _)| *entity == "DbOnlyParent")
         );
         assert!(events.try_recv().is_err());
+    }
+}
+
+// Exercise both preparation hooks and After hooks between writes, including
+// the final root write. No physical fallback may escape the verified bounds.
+struct HookDdl {
+    entity: &'static str,
+    phase: MutationPhase,
+    statements: Vec<&'static str>,
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn hook_ddl_revalidates_catalogue_and_rolls_back_rows_and_events() {
+    #[cfg(feature = "sqlite")]
+    let cases = vec![
+        vec![
+            "CREATE TRIGGER hook_cleanup BEFORE DELETE ON delete_parents BEGIN DELETE FROM hook_victims; END",
+        ],
+        vec![
+            "CREATE TEMP TRIGGER hook_cleanup BEFORE DELETE ON main.delete_parents BEGIN DELETE FROM hook_victims; END",
+        ],
+        vec![
+            "CREATE TABLE hook_new(id TEXT PRIMARY KEY,parent_id TEXT REFERENCES delete_parents(id) ON DELETE CASCADE)",
+            "INSERT INTO hook_new VALUES('hidden','parent')",
+        ],
+    ];
+    #[cfg(feature = "postgres")]
+    let cases = vec![
+        vec![
+            "CREATE FUNCTION hook_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM hook_victims; RETURN OLD; END $$",
+            "CREATE TRIGGER hook_cleanup BEFORE DELETE ON delete_parents FOR EACH ROW EXECUTE FUNCTION hook_cleanup()",
+        ],
+        vec![
+            "ALTER TABLE hook_victims ADD FOREIGN KEY(parent_id) REFERENCES delete_parents(id) ON DELETE CASCADE",
+        ],
+        vec![
+            "CREATE TABLE hook_new(id TEXT PRIMARY KEY,parent_id TEXT REFERENCES delete_parents(id) ON DELETE CASCADE)",
+            "INSERT INTO hook_new VALUES('hidden','parent')",
+        ],
+    ];
+    // This benign column addition passes capability/FK validation: only
+    // comparison with the verified snapshot can detect it.
+    let mut cases = cases;
+    cases.push(vec!["ALTER TABLE hook_victims ADD COLUMN extra TEXT"]);
+    #[cfg(feature = "postgres")]
+    cases.extend([
+        vec!["CREATE TABLE hook_inherited () INHERITS (delete_parents)"],
+        vec!["CREATE RULE hook_cleanup AS ON DELETE TO delete_parents DO ALSO DELETE FROM hook_victims WHERE parent_id=OLD.id"],
+    ]);
+    cases.push(vec![
+        "CREATE TEMP TABLE delete_parents(id TEXT PRIMARY KEY,name TEXT NOT NULL)",
+    ]);
+    for statements in cases {
+        for (entity, phase) in [
+            ("DeleteParent", MutationPhase::Before),
+            ("DeleteChild", MutationPhase::Before),
+            ("DeleteNull", MutationPhase::After),
+            ("DeleteLeaf", MutationPhase::After),
+            ("DeleteParent", MutationPhase::After),
+        ] {
+            // The final parent After hook cannot add a populated FK to a
+            // deleted parent. Use an empty source in that case instead.
+            let pool = fixture("dependent-hook-ddl").await;
+            sqlx::query("CREATE TABLE hook_victims(id TEXT PRIMARY KEY,parent_id TEXT)")
+                .execute(&pool)
+                .await
+                .unwrap();
+            if entity != "DeleteParent" || phase != MutationPhase::After {
+                sqlx::query("INSERT INTO hook_victims VALUES('victim','parent')")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            let statements = statements
+                .iter()
+                .copied()
+                .filter(|sql| {
+                    !(entity == "DeleteParent"
+                        && phase == MutationPhase::After
+                        && sql.starts_with("INSERT INTO hook_new"))
+                })
+                .collect();
+            let hook = Hook::default();
+            let mut db = Database::with_mutation_hook(pool.clone(), hook.clone());
+            db.set_field_policy(Policy {
+                deny_entity: false,
+                deny_field: false,
+            });
+            let mut parents = db
+                .ensure_event_sender::<DeleteParentChangedEvent>()
+                .subscribe();
+            let mut children = db
+                .ensure_event_sender::<DeleteChildChangedEvent>()
+                .subscribe();
+            let mut leaves = db
+                .ensure_event_sender::<DeleteLeafChangedEvent>()
+                .subscribe();
+            let mut nulls = db
+                .ensure_event_sender::<DeleteNullChangedEvent>()
+                .subscribe();
+            let notifications = NotificationLog::default();
+            let registry = StaticDependentDeletes::<DefaultBackend>::new(
+                RuntimeDependentLimits::new(3, 2).unwrap(),
+            )
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+            let response = schema_builder(db)
+                .data(AuthSubject::new("test-principal"))
+                .data(registry)
+                .data(notifications.clone())
+                .finish()
+                .execute(
+                    async_graphql::Request::new(
+                        "mutation { deleteDeleteParent(id: \"parent\") { success } }",
+                    )
+                    .data(HookDdl {
+                        entity,
+                        phase: phase.clone(),
+                        statements,
+                    }),
+                )
+                .await;
+            assert_eq!(response.errors.len(), 1, "{entity} {phase:?}: {response:?}");
+            assert_eq!(
+                response.errors[0].message, "Dependent delete refused",
+                "{entity} {phase:?}"
+            );
+            assert!(
+                hook.0.lock().unwrap().contains(&(entity, phase.clone())),
+                "DDL hook did not run: {entity} {phase:?}"
+            );
+            assert_intact(&pool).await;
+            assert!(parents.try_recv().is_err());
+            assert!(children.try_recv().is_err());
+            assert!(leaves.try_recv().is_err());
+            assert!(nulls.try_recv().is_err());
+            assert!(notifications.0.lock().unwrap().is_empty());
+            let victims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hook_victims")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(
+                victims,
+                i64::from(entity != "DeleteParent" || phase != MutationPhase::After)
+            );
+            // A second operation on the same SQLite connection also proves
+            // temporary trigger DDL rolled back; all normal writes still work.
+            let registry = StaticDependentDeletes::<DefaultBackend>::new(
+                RuntimeDependentLimits::new(3, 2).unwrap(),
+            )
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+            let mut retry_db = Database::new(pool.clone());
+            retry_db.set_field_policy(Policy {
+                deny_entity: false,
+                deny_field: false,
+            });
+            let response = schema_builder(retry_db)
+                .data(AuthSubject::new("test-principal"))
+                .data(registry)
+                .finish()
+                .execute("mutation { deleteDeleteParent(id: \"parent\") { success } }")
+                .await;
+            assert!(
+                response.errors.is_empty(),
+                "catalogue DDL survived rollback: {response:?}"
+            );
+        }
     }
 }

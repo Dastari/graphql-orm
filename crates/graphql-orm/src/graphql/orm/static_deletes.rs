@@ -18,14 +18,18 @@ fn refusal() -> Error {
 #[doc(hidden)]
 pub trait StaticDeleteBackend: TransactionBackend {
     /// Refuse physical relation behavior that can bypass the planned writes.
-    /// PostgreSQL repeats this check before every write; SQLite has no
-    /// inheritance, partitions, rewrite rules or foreign-table equivalent.
+    /// This is also included in full catalogue revalidation before every write.
+    /// SQLite has no inheritance, partitions, rules or foreign-table equivalent.
     fn validate_delete_relations<'a>(
         _tx: &'a mut Self::Transaction<'_>,
         _ownership: &'a ManagedTableSet,
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    /// Read and fully validate the catalogue on the pinned transaction.
+    /// Repeat even checks not represented in the returned model on every call.
+    /// The caller requires structural equality with the planning snapshot;
+    /// no rows are rediscovered and no changed dependency graph is accepted.
     fn dependencies<'a>(
         tx: &'a mut Self::Transaction<'_>,
         ownership: &'a ManagedTableSet,
@@ -218,8 +222,8 @@ impl StaticDeleteBackend for PostgresBackend {
             }
             // The planner and final no-referencer check use the child
             // column's equality semantics; FK enforcement uses the parent's.
-            // Prove them identical before either lookup. Relation locks keep
-            // these catalogue facts fixed through the final DELETE. Extension/
+            // Prove them identical before either lookup. Relation locks fence
+            // concurrent DDL; hook changes are revalidated before writes. Extension/
             // domain equality and blank-padded char vs bound text are unmodeled.
             let incompatible: bool = sqlx::query_scalar(
                 "SELECT EXISTS(
@@ -662,11 +666,13 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
             ));
         }
         prepared.push((Some(0), root_write));
+        // Compare the physical schema snapshot, not row data or
+        // catalogue OIDs. Full backend validation is mandatory on every read:
+        // the schema model alone cannot describe triggers, hidden FKs, RLS,
+        // shadowing, inheritance/rules or FK comparison semantics.
         let mut notifications = Vec::new();
         for (deletion, write) in prepared {
-            B::validate_delete_relations(&mut tx.tx, &ownership)
-                .await
-                .map_err(|_| refusal())?;
+            revalidate::<B>(&mut tx, &ownership, &physical).await?;
             // Hooks may create or re-link rows after discovery. Refuse instead
             // of letting the physical FK action perform an unplanned write.
             if let Some(i) = deletion {
@@ -713,9 +719,28 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                 notifications.push(notification);
             }
         }
+        // The last write's After hook has no following write to guard it.
+        revalidate::<B>(&mut tx, &ownership, &physical).await?;
         tx.commit_and_emit()
             .await
             .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
         Ok((None, notifications))
     }
+}
+
+// Keep the original plan: never rediscover rows or accept a changed dependency
+// graph after grants and bounds have been verified. Existing transaction fences
+// remain held while both full validation and snapshot comparison run.
+async fn revalidate<B: StaticDeleteBackend>(
+    tx: &mut MutationContext<'_, B>,
+    ownership: &ManagedTableSet,
+    verified: &OwnedSchemaModel,
+) -> Result<()> {
+    let current = B::dependencies(&mut tx.tx, ownership)
+        .await
+        .map_err(|_| refusal())?;
+    if &current != verified {
+        return Err(refusal());
+    }
+    Ok(())
 }
