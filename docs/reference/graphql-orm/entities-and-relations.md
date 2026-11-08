@@ -530,7 +530,10 @@ loaded and resolves to `None` or an empty connection. SQL `NULL = NULL` matching
 ## Physical Foreign Keys
 
 Relation metadata and physical foreign-key emission are separate. By default, relations emit
-migration metadata for physical foreign keys where migrations are supported. Disable physical FK
+migration metadata for physical foreign keys where migrations are supported. Physical cascade and
+set-null actions bypass dependent hooks, Changed subscribers, search maintenance, managed versions
+and propagation. Use [ORM-driven dependent deletes](#orm-driven-dependent-deletes) when those effects
+are needed on a supported generated GraphQL delete. Disable physical FK
 emission for external schemas:
 
 ```rust
@@ -799,3 +802,57 @@ Related-row filters are read-only. Bulk updates and deletes (including bounded r
 and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
 or `not` with `invalid_input` before writing. Select authorized rows through a read
 first and use supported key-based mutations when needed. No data migration is needed.
+
+## ORM-driven dependent deletes
+
+A declared `on_delete = "cascade"` or `"set_null"` normally executes inside the
+database: dependent mutation hooks, Changed subscribers, search maintenance,
+managed versions and change propagation do not run. Prefer a declared delete
+policy with the following opt-in when those effects matter.
+
+Declare `#[graphql_entity(dependent_deletes, ...)]` on each participating entity
+and supply schema/request data:
+
+```rust,ignore
+let dependents = StaticDependentDeletes::<SqliteBackend>::new(
+    RuntimeDependentLimits::new(256, 8)?,
+).register::<Parent>()?.register::<Child>()?;
+let schema = schema_builder(database).data(dependents).finish();
+```
+
+The registry is mandatory for opted-in single-row GraphQL deletes. Bulk GraphQL
+delete is omitted from those entities and their operation catalog so it cannot
+bypass dependent authorization or limits. Explicit `delete_many` shape/policy
+declarations must be removed before opting in. Repository deletes retain their
+existing physical-FK behavior as a separate trusted Rust surface. Every dependent runs its direct generated GraphQL write
+checks (scopes, assurance, entity/row/field policies), input hooks and mutation
+hooks on the same transaction. Any denial refuses the entire delete with a
+sanitized error. Limits count dependent rows, excluding the requested parent,
+and relation hops. Planning locks precede all writes; cycles and unknown external
+dependents refuse. Set-nulls run first and deletes run leaf-first; Changed events
+are emitted only after commit. Physical FK actions remain as a backstop.
+
+This release supports SQLite/PostgreSQL, single-column primary keys and FKs
+referencing those primary keys. Composite-key and MSSQL opt-ins fail compilation. Both direct `delete` and
+`update` mutation shapes must be enabled; read-only and append-only entities
+cannot opt in.
+Non-primary-key references refuse at planning. Existing `notify_with` callbacks run after commit with their GraphQL context. PostgreSQL row security is set
+locally to fail rather than silently hide dependent rows; roles affected by RLS
+therefore refuse, and no bypass authority is granted. No DDL/data migration is
+needed and opt-out SQL is unchanged.
+
+PostgreSQL fences the registered tables with `SHARE ROW EXCLUSIVE` locks before
+catalog discovery and transaction-local auth settings, preventing concurrent FK
+DDL from introducing unplanned physical actions. This follows [PostgreSQL’s lock-before-query guidance](https://www.postgresql.org/docs/17/sql-lock.html).
+Register only the participating graph to limit contention. SQLite uses its immediate write transaction. Registry
+tables must exist in the introspected schema with portable managed identifiers;
+temporary-table shadowing and PostgreSQL search-path fallbacks refuse. Authority
+is checked again immediately before SQL after earlier hooks, without repeating
+input transforms or mutation hooks.
+
+Unmodeled database triggers on registered tables refuse planning, including
+SQLite temporary triggers. A trigger can insert a new referencer inside a delete
+statement, leaving a physical cascade to change a row the ORM never authorized
+or counted. Use explicitly authorized ORM mutation hooks for such behavior;
+unplanned referencers are checked before each delete. PostgreSQL's native
+FK/unique/exclusion constraint triggers remain supported.

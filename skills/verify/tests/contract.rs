@@ -1560,3 +1560,36 @@ fn callback_error_privacy_preserves_authored_refusals() {
         assert_eq!(actual.extensions, expected_extensions);
     }
 }
+
+mod dependent_delete_contract {
+    use graphql_orm::prelude::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "dependent_contract",
+        plural = "DependentContracts",
+        default_sort = "label ASC"
+    )]
+    struct DependentContract {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        label: String,
+        #[graphql_orm(write = false)]
+        audit: Option<String>,
+        #[graphql_orm(version = "managed", default = "0")]
+        version: i64,
+    }
+    #[test]
+    fn registry_requires_explicit_limits_and_unique_entity_tables() {
+        let limits = RuntimeDependentLimits::new(256, 8).unwrap();
+        let registry = StaticDependentDeletes::<SqliteBackend>::new(limits)
+            .register::<DependentContract>()
+            .unwrap();
+        assert!(registry.register::<DependentContract>().is_err());
+        assert!(RuntimeDependentLimits::new(RUNTIME_DEPENDENT_MAX_ROWS + 1, 8).is_err());
+    }
+}

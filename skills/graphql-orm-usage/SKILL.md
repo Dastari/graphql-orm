@@ -321,6 +321,7 @@ Behaviour to design around:
 | Repository helper: `insert`, `insert_many`, `update_by_id`, `update_where`, `delete_by_id`, `delete_where`, `delete_all`, `replace_all`, `upsert`, `compare_and_swap` | Yes, per row | `None` | Yes |
 | `Database::transaction` methods | Yes | `None` | Yes, after commit |
 | A write made through `hook_ctx` | Yes, so guard against recursion | `None` | Yes, after commit |
+| Opted-in GraphQL dependent deletes/set-nulls | Yes, per row | `Some` | Yes, after commit |
 | Database `on_delete` action | **No** | | **No** |
 | Raw SQL, or any write outside the ORM | **No** | | **No** |
 
@@ -399,7 +400,7 @@ a to-many relation, with a `Vec<T>` field. The relation field isn't a column.
 
 ### Delete policies
 
-`on_delete` is a **physical foreign-key action**. The database changes the dependent rows, so the
+By default, `on_delete` is a **physical foreign-key action**. The database changes the dependent rows, so the
 ORM never sees them: no dependent hooks, no dependent `Changed` events, no version bump and no search
 update ([#283](https://github.com/Dastari/graphql-orm/issues/283)).
 
@@ -408,11 +409,28 @@ update ([#283](https://github.com/Dastari/graphql-orm/issues/283)).
 | None (`restrict`) | The database refuses to delete a parent with children | Children must be handled deliberately |
 | `on_delete = "cascade"` | Dependents vanish silently | Children have no hooks, no external state and no live viewers |
 | `on_delete = "set_null"` | The foreign key is cleared silently; needs an `Option` field | As above |
-| Delete in a `Before` hook | Each child runs its hooks and queues its events | Children have side effects or live viewers |
+| Declared policy + `dependent_deletes` and bounded registry | Each dependent runs its GraphQL write checks/hooks and queues Changed after commit | Supported single-row GraphQL deletes with hooks or live viewers |
+| Explicitly authorized cleanup in a `Before` hook | Each ORM write runs its hooks and queues events | Application-specific cleanup outside the supported option |
 
-Prefer a declared policy over manual cleanup when nothing needs to observe the children. Use a hook
-when something does. With `restrict`, clean up in `Before`, because the parent's delete would fail
-first if you waited for `After`.
+Prefer a declared policy when nothing needs to observe the children. When hooks, subscribers,
+search, managed versions or propagation matter, opt each participating entity into
+`#[graphql_entity(dependent_deletes)]` and attach schema/request data:
+
+```rust,ignore
+let dependents = StaticDependentDeletes::<SqliteBackend>::new(
+    RuntimeDependentLimits::new(256, 8)?,
+).register::<Parent>()?.register::<Child>()?;
+let schema = schema_builder(database).data(dependents).finish();
+```
+
+SQLite/PostgreSQL single-column primary-key references only. Composite-key and MSSQL opt-ins fail
+compilation; unknown physical dependents, cycles and denied dependent/set-null writes refuse the
+whole delete. Opted-in entities omit bulk GraphQL delete and its catalog entry so it cannot
+bypass these checks; remove explicit `delete_many` shape/policy declarations. Repository deletes
+retain physical behavior. Existing `notify_with` callbacks run after commit with their GraphQL context. For other paths, retain `restrict` and use explicitly
+authorized transactional cleanup in `Before`; `After` is too late for a restrict backstop. No data
+migration is needed. See the canonical [relations reference](../../docs/reference/graphql-orm/entities-and-relations.md#orm-driven-dependent-deletes)
+for native-RLS, schema and locking limits.
 
 ## Subscriptions and propagation
 
@@ -659,7 +677,8 @@ Run this against any graphql-orm service. The commands use `rg` from the service
       with `rg -n '#\[relation' src`.
 - [ ] **Check manual cleanup.** Compare `rg -n 'delete_where|delete_by_id' src` in hooks with the
       `on_delete` declarations. Use a declared policy where nothing observes the children, and check
-      that every `cascade` has no hooks or live viewers beneath it.
+      that each `cascade` with dependent hooks or live viewers uses the bounded GraphQL option above
+      or explicitly authorized cleanup for other paths.
 - [ ] **Look for parent views that need `propagate_change`.** For each screen that shows child state,
       check the relation: `rg -n 'propagate_change' src`.
 - [ ] **Confirm every entity has an explicit decision.** `rg -n -A10 'graphql_entity\(' src` and check

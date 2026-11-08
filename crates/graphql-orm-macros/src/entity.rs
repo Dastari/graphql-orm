@@ -26,6 +26,7 @@ pub(crate) struct EntityMetadata {
     pub(crate) retention_policy: Option<String>,
     pub(crate) repository_mutations: bool,
     pub(crate) aggregate: bool,
+    pub(crate) dependent_deletes: bool,
     /// Explicit AI execution policy by generated mutation category.
     pub(crate) ai_mutations: std::collections::BTreeMap<String, String>,
     pub(crate) keyset: Option<String>,
@@ -215,6 +216,8 @@ pub(crate) fn parse_entity_metadata(attrs: &[syn::Attribute]) -> syn::Result<Ent
                     let value = meta.value()?;
                     let lit: syn::LitBool = value.parse()?;
                     metadata.append_only = lit.value;
+                } else if meta.path.is_ident("dependent_deletes") {
+                    metadata.dependent_deletes = true;
                 } else if meta.path.is_ident("retention_purge") {
                     let value = meta.value()?;
                     let lit: syn::LitStr = value.parse()?;
@@ -3099,6 +3102,42 @@ fn generate_entity_impl(
             ));
         }
     };
+
+    if entity_meta.dependent_deletes {
+        if backend == BackendKind::Mssql {
+            return Err(syn::Error::new_spanned(
+                input,
+                "dependent_deletes supports SQLite and PostgreSQL only; MSSQL is unsupported",
+            ));
+        }
+        let key_count = fields
+            .iter()
+            .filter(|f| parse_field_metadata(f).is_ok_and(|m| m.is_primary_key))
+            .count();
+        if key_count != 1 {
+            return Err(syn::Error::new_spanned(
+                input,
+                "dependent_deletes requires a single-column primary key; composite keys are unsupported",
+            ));
+        }
+        for field in fields {
+            let meta = parse_field_metadata(field)?;
+            if meta
+                .relation_from_fields
+                .as_ref()
+                .is_some_and(|f| f.len() > 1)
+                || meta
+                    .relation_to_fields
+                    .as_ref()
+                    .is_some_and(|f| f.len() > 1)
+            {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "dependent_deletes does not support composite-key relations",
+                ));
+            }
+        }
+    }
 
     // Generated updates target the physical updated_at column, including aliases.
     let text_updated_at = fields.iter().find_map(|field| {

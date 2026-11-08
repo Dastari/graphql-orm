@@ -2,13 +2,13 @@
 set -euo pipefail
 
 if [[ $# -gt 1 ]]; then
-  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|all]" >&2
+  echo "usage: scripts/run-owned-database-lanes.sh [sqlite|postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|all]" >&2
   exit 2
 fi
 
 lane=${1:-all}
 case "${lane}" in
-  sqlite|postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|all) ;;
+  sqlite|postgres|postgres-legacy|mssql|runtime-live|runtime-search-catalog|ai-postgres|field-write-denial|bulk-refusals|notify-bulk|denied-relations|static-related-filter|read-predicate|defer-after-commit|delete-propagation|dependent-deletes|all) ;;
   *)
     echo "owned-database-lanes: unsupported lane: ${lane}" >&2
     exit 2
@@ -25,7 +25,15 @@ done
 repository_root=$(git rev-parse --show-toplevel)
 cd "${repository_root}"
 
+run_dependent_deletes() {
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro -- --ignored --test-threads=1
+  cargo check -p graphql-orm --locked --no-default-features --features mssql --all-targets
+  cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
+}
+
 run_sqlite() {
+  cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro --test dependent_delete_ui
   cargo test -p graphql-orm --locked --no-default-features --features sqlite,runtime-graphql \
     --lib --test runtime_graphql --test runtime_strings --test runtime_queries --test runtime_relations \
     --test runtime_mutations --test runtime_migrations --test runtime_schema_ir --test runtime_migration_memory \
@@ -69,6 +77,8 @@ run_postgres() {
 }
 
 run_postgres_legacy() {
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro -- --ignored --test-threads=1
+
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter \
     --test app_repository_helpers \
@@ -116,6 +126,7 @@ run_postgres_legacy() {
 }
 
 run_mssql() {
+  cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
   cargo test -p graphql-orm --no-default-features --features mssql \
     --test mssql_writes --test mssql_integration --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test field_write_denial --test implicit_timestamp_defaults --test read_predicate --locked -- --ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
@@ -155,6 +166,7 @@ run_read_predicate() {
 }
 
 case "${lane}" in
+  dependent-deletes) run_dependent_deletes ;;
   notify-bulk)
     for backend in sqlite postgres mssql; do
       cargo test -p graphql-orm --locked --no-default-features --features "${backend}" --test notify_bulk -- --include-ignored --test-threads=1

@@ -1278,6 +1278,7 @@ pub(crate) fn generate_graphql_operations(
     input: &DeriveInput,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let output = generate_graphql_operations_unfiltered(input)?;
+    let output = super::dependent_deletes::generate(input, output)?;
     let metadata = parse_entity_metadata(&input.attrs)?;
     if metadata.query_shapes.is_none() && metadata.mutation_shapes.is_none() {
         return Ok(output);
@@ -3754,7 +3755,16 @@ fn generate_graphql_operations_unfiltered(
     generated_category_required("update", generates_standard_write_surface)?;
     generated_category_required("update_many", generates_standard_write_surface)?;
     generated_category_required("delete", generates_standard_write_surface)?;
-    generated_category_required("delete_many", generates_standard_write_surface)?;
+    generated_category_required(
+        "delete_many",
+        generates_standard_write_surface && !entity_meta.dependent_deletes,
+    )?;
+    if entity_meta.dependent_deletes && entity_meta.ai_mutations.contains_key("delete_many") {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "dependent_deletes disables delete_many; remove its AI mutation policy",
+        ));
+    }
     if let Some(shapes) = &entity_meta.mutation_shapes {
         for shape in shapes {
             let available = match shape.as_str() {
@@ -7372,7 +7382,7 @@ fn generate_graphql_operations_unfiltered(
                 && [#(#disabled_query_fields),*].contains(&operation.field_name())));
         }
     };
-    let disabled_mutation_fields = entity_meta
+    let mut disabled_mutation_fields = entity_meta
         .mutation_shapes
         .as_ref()
         .map(|selected| {
@@ -7390,6 +7400,9 @@ fn generate_graphql_operations_unfiltered(
             .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if entity_meta.dependent_deletes {
+        disabled_mutation_fields.push(delete_many_mutation_name.as_str());
+    }
     let mutation_shape_metadata_filter = if disabled_mutation_fields.is_empty() {
         quote! {}
     } else {

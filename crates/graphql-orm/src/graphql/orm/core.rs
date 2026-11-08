@@ -880,7 +880,7 @@ where
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mssql"))]
 pub struct MutationContext<'tx, B: WriteBackend = DefaultWriteBackend> {
     db: &'tx crate::db::Database<B>,
-    tx: B::Transaction<'tx>,
+    pub(crate) tx: B::Transaction<'tx>,
     mode: TransactionMode,
     pub(crate) runtime_state: std::sync::Arc<super::runtime_transaction::RuntimeTransactionState>,
     deferred_events: Vec<Box<dyn DeferredEventEmitter<B>>>,

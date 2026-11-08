@@ -10,6 +10,25 @@ supersedes: []
 
 # Migration Guide
 
+## ORM/macros 0.96.0: optional dependent deletes
+
+No data migration is needed. Existing opt-out SQL and foreign-key DDL are
+unchanged. To run dependent hooks and Changed subscriptions, declare
+`dependent_deletes` on each participating GraphQL entity and attach a
+`StaticDependentDeletes::<Backend>::new(RuntimeDependentLimits::new(rows, depth)?)`
+registry registering each entity with `.register::<Entity>()?` to schema data.
+Opted-in root deletes require the registry. Their bulk GraphQL delete and catalog
+entry are omitted to prevent an authorization/limit bypass; remove explicit
+`delete_many` shape, operation-authorization and AI-policy declarations, and call
+the bounded single-row deletes. Repository delete helpers retain physical behavior. This release supports SQLite and
+PostgreSQL single-column primary-key references; composite keys and MSSQL opt-ins
+are rejected. Unknown physical dependents and cycles refuse the entire delete.
+Existing `notify_with` callbacks run after the graph commits with the original
+GraphQL context. Native RLS that can hide dependents refuses rather than cascading
+unseen rows. All dependent field-policy denials refuse the delete. Unmodeled database triggers
+on registered tables refuse planning; retain those schemas opted out or move the
+behavior to explicitly authorized ORM mutation hooks before opting in.
+
 ## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 
 Breaking Rust IR construction: add `node_identity: None` and
