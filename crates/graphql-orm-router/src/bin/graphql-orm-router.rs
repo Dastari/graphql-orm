@@ -18,10 +18,11 @@ fn run() -> Result<(), String> {
     let arguments = parse_arguments()?;
     if arguments.help {
         println!(
-            "Usage: graphql-orm-router --config <router.json> [--check]\n\
+            "Usage: graphql-orm-router --config <router.json> [--check | --listen-stdin]\n\
              \n\
              GRAPHQL_ORM_ROUTER_CONFIG may supply the path. Listener overrides use\n\
-             GRAPHQL_ORM_ROUTER_LISTENER and GRAPHQL_ORM_ROUTER_ADMIN_LISTENER."
+             GRAPHQL_ORM_ROUTER_LISTENER and GRAPHQL_ORM_ROUTER_ADMIN_LISTENER.\n\
+             On Unix, --listen-stdin accepts a bound TCP listener on stdin."
         );
         return Ok(());
     }
@@ -33,6 +34,9 @@ fn run() -> Result<(), String> {
         .and_then(RouterFileConfig::into_router_config)
         .map_err(|error| error.to_string())?;
 
+    if arguments.check && arguments.listen_stdin {
+        return Err("--check cannot be combined with --listen-stdin".to_owned());
+    }
     if arguments.check {
         hive_router::ntex::rt::System::build()
             .name("graphql-orm-router-check")
@@ -46,6 +50,22 @@ fn run() -> Result<(), String> {
                 );
                 Ok(())
             })
+    } else if arguments.listen_stdin {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+            let descriptor = std::io::stdin()
+                .as_fd()
+                .try_clone_to_owned()
+                .map_err(|error| format!("failed to duplicate listener from stdin: {error}"))?;
+            let listener = std::net::TcpListener::from(descriptor);
+            graphql_orm_router::run_with_listener(config, listener)
+                .map_err(|error| error.to_string())
+        }
+        #[cfg(not(unix))]
+        {
+            Err("--listen-stdin is supported only on Unix".to_owned())
+        }
     } else {
         graphql_orm_router::run(config).map_err(|error| error.to_string())
     }
@@ -55,6 +75,7 @@ fn run() -> Result<(), String> {
 struct Arguments {
     config: Option<PathBuf>,
     check: bool,
+    listen_stdin: bool,
     help: bool,
 }
 
@@ -75,6 +96,7 @@ fn parse_arguments() -> Result<Arguments, String> {
                 );
             }
             Some("--check") => result.check = true,
+            Some("--listen-stdin") => result.listen_stdin = true,
             Some("--help" | "-h") => result.help = true,
             _ => return Err("unknown or non-UTF-8 command-line argument".to_owned()),
         }

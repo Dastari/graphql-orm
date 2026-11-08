@@ -11,7 +11,7 @@
 
 use std::{
     env, fs,
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -62,8 +62,6 @@ const PRODUCTS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_SDL_EN
 const REVIEWS_SDL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_SDL_ENDPOINT";
 const PRODUCTS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PRODUCTS_PROTOCOL_ENDPOINT";
 const REVIEWS_PROTOCOL_ENDPOINT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_REVIEWS_PROTOCOL_ENDPOINT";
-const ROUTER_PORT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_PORT";
-const ADMIN_PORT_ENV: &str = "GRAPHQL_ORM_ROUTER_WIRE_ADMIN_PORT";
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 const PRODUCTS_V1: &str = r#"
@@ -94,7 +92,7 @@ const CONFLICTING_REVIEWS: &str = r#"
     type Product @key(fields: "id") { id: Int! }
 "#;
 
-/// The selected test child runs the actual Hive HTTP entrypoint. It is a
+/// The selected test child runs the configured Hive HTTP app. It is a
 /// no-op in the ordinary test process so the parent test can select this one
 /// with `current_exe` without recursively starting a router.
 #[test]
@@ -108,14 +106,8 @@ fn router_child_entrypoint() {
         .build(ntex::rt::DefaultRuntime)
         .block_on(async move {
             if mode == "admin" {
-                let port = env::var(ROUTER_PORT_ENV)
-                    .expect("admin test router port")
-                    .parse()
-                    .expect("numeric router port");
-                let admin_port = env::var(ADMIN_PORT_ENV)
-                    .expect("admin test listener port")
-                    .parse()
-                    .expect("numeric admin port");
+                let public_address = child_listener_address();
+                let admin_address = child_listener_address();
                 let products_endpoint = env::var(PRODUCTS_ENDPOINT_ENV).unwrap();
                 let products_sdl = env::var(PRODUCTS_SDL_ENDPOINT_ENV).unwrap();
                 let products_protocol = env::var(PRODUCTS_PROTOCOL_ENDPOINT_ENV).unwrap();
@@ -143,7 +135,7 @@ fn router_child_entrypoint() {
                     endpoint_origin(&reviews_sdl),
                 )
                 .with_schema_header("authorization", "Bearer schema-secret");
-                let config = RouterConfig::new(SocketAddr::from(([127, 0, 0, 1], port)))
+                let config = RouterConfig::new(public_address)
                     .with_graphql_path("/api/graphql")
                     .with_authentication_provider(Arc::new(TestAuthenticationProvider))
                     .with_scope_matcher(Arc::new(TestHierarchicalScopeMatcher))
@@ -162,7 +154,7 @@ fn router_child_entrypoint() {
                             .with_schema_header("authorization", "Bearer schema-secret"),
                     )
                     .with_admin(
-                        AdminConfig::new(SocketAddr::from(([127, 0, 0, 1], admin_port)), network)
+                        AdminConfig::new(admin_address, network)
                             .trust_subgraph(trusted)
                             .with_max_request_body_bytes(256),
                     );
@@ -205,10 +197,7 @@ fn router_child_entrypoint() {
                     mode.to_str(),
                     Some("polling" | "auth-subscriptions-polling")
                 );
-                let port = env::var(ROUTER_PORT_ENV)
-                    .expect("static router port")
-                    .parse()
-                    .expect("numeric static router port");
+                let public_address = child_listener_address();
                 let products = StaticSubgraph::new(
                     "products",
                     env::var(PRODUCTS_ENDPOINT_ENV).expect("products endpoint"),
@@ -221,7 +210,7 @@ fn router_child_entrypoint() {
                     env::var(REVIEWS_SDL_ENDPOINT_ENV).expect("reviews SDL endpoint"),
                 )
                 .with_schema_header("authorization", "Bearer schema-secret");
-                let config = RouterConfig::new(SocketAddr::from(([127, 0, 0, 1], port)))
+                let config = RouterConfig::new(public_address)
                     .with_graphql_path("/api/graphql")
                     .forward_header("x-approved")
                     .with_subgraph(if authenticated {
@@ -292,10 +281,80 @@ fn router_child_entrypoint() {
                 return;
             }
             hive_router::init_rustls_crypto_provider();
-            hive_router::router_entrypoint(PluginRegistry::new().register::<WireProofPlugin>())
-                .await
-                .expect("test router should run until its parent terminates it");
+            run_wire_app().await;
         });
+}
+
+static CHILD_LISTENERS: Mutex<Vec<TcpListener>> = Mutex::new(Vec::new());
+
+fn child_listener_address() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("owned child listener");
+    let address = listener.local_addr().unwrap();
+    CHILD_LISTENERS.lock().unwrap().push(listener);
+    address
+}
+
+// Authentication subscriptions need the actual public address during prepare.
+// Keep the child-bound socket alive, then move it into the server without rebinding.
+pub(crate) fn bind_test_listener(address: SocketAddr, kind: &str) -> io::Result<TcpListener> {
+    let reserved = {
+        let mut listeners = CHILD_LISTENERS.lock().unwrap();
+        listeners
+            .iter()
+            .position(|listener| listener.local_addr().ok() == Some(address))
+            .map(|index| listeners.swap_remove(index))
+    };
+    let listener = match reserved {
+        Some(listener) => listener,
+        None => TcpListener::bind(address)?,
+    };
+    listener.set_nonblocking(true)?;
+    if env::var_os(CHILD_ENV).is_some() {
+        println!("WIRE_BOUND {kind} {}", listener.local_addr()?);
+    }
+    Ok(listener)
+}
+
+async fn run_wire_app() {
+    use hive_router::{background_tasks, config::load_config, ntex::web};
+    let config = load_config(env::var("ROUTER_CONFIG_FILE_PATH").ok())
+        .unwrap()
+        .into_static();
+    let telemetry = hive_router::telemetry::Telemetry::init_global(config).unwrap();
+    let mut tasks = background_tasks::BackgroundTasksManager::new();
+    let (state, schema) = hive_router::configure_app_from_config(
+        config,
+        telemetry.context.clone(),
+        &mut tasks,
+        PluginRegistry::new().register::<WireProofPlugin>(),
+    )
+    .await
+    .unwrap();
+    let paths = hive_router::RouterPaths::new(
+        config.graphql_path().to_owned(),
+        config.websocket_path().map(str::to_owned),
+        None,
+    );
+    let listener = bind_test_listener("127.0.0.1:0".parse().unwrap(), "public").unwrap();
+    web::HttpServer::new(async move || {
+        web::App::new()
+            .middleware(hive_router::plugins::plugins_service::PluginService::new(
+                paths.clone(),
+                None,
+            ))
+            .middleware(hive_router::pipeline::request_identifiers::RequestIdentifiersService)
+            .state(schema.clone())
+            .state(state.clone())
+            .state(state.telemetry_context.clone())
+            .state(schema.callback_subscriptions.clone())
+            .configure(|routes| hive_router::configure_ntex_app(routes, &paths, None))
+    })
+    .workers(1)
+    .listen(listener)
+    .unwrap()
+    .run()
+    .await
+    .unwrap();
 }
 
 #[derive(Debug)]
@@ -489,12 +548,36 @@ impl RouterPlugin for WireProofPlugin {
 }
 
 #[test]
-fn hive_http_entrypoint_preserves_federation_and_replacement_invariants() {
+fn static_children_bind_their_own_ports_even_when_the_old_choice_is_occupied() {
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
-    let router_port = reserve_port();
-    let temp = TemporaryConfig::new(router_port);
-    let mut router = TestRouter::spawn(router_port, &temp, products.endpoint(), reviews.endpoint());
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let mut first = TestRouter::spawn_static(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+    );
+    let mut second = TestRouter::spawn_static(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+    );
+    first.wait_until_ready();
+    second.wait_until_ready();
+    assert_ne!(first.address, second.address);
+    assert_ne!(first.address, occupied.local_addr().unwrap());
+}
+
+#[test]
+fn hive_http_app_preserves_federation_and_replacement_invariants() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let temp = TemporaryConfig::new();
+    let mut router = TestRouter::spawn(&temp, products.endpoint(), reviews.endpoint());
     router.wait_until_ready();
 
     let cross_subgraph = router.graphql(
@@ -580,9 +663,7 @@ fn public_static_router_serves_only_after_complete_preparation() {
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
     let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
     let reviews_sdl = LoopbackSdl::start(REVIEWS);
-    let router_port = reserve_port();
     let mut router = TestRouter::spawn_static(
-        router_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -642,10 +723,8 @@ fn prepared_router_gracefully_drains_and_releases_its_listener() {
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
     let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
     let reviews_sdl = LoopbackSdl::start(REVIEWS);
-    let router_port = reserve_port();
     let mut router = TestRouter::spawn_static_mode(
         "graceful",
-        router_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -674,9 +753,7 @@ fn public_polling_router_atomically_reloads_and_preserves_executable_lkg() {
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
     let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
     let reviews_sdl = LoopbackSdl::start(REVIEWS);
-    let router_port = reserve_port();
     let mut router = TestRouter::spawn_polling(
-        router_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -757,11 +834,7 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let public_port = reserve_port();
-    let admin_port = reserve_port();
     let (mut router, admin_address) = TestRouter::spawn_admin(
-        public_port,
-        admin_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -1093,11 +1166,7 @@ fn authenticated_admin_registration_binds_identity_destinations_and_restart_stat
 
     router.stop();
 
-    let restarted_public_port = reserve_port();
-    let restarted_admin_port = reserve_port();
     let (mut restarted, restarted_admin) = TestRouter::spawn_admin(
-        restarted_public_port,
-        restarted_admin_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -1199,9 +1268,7 @@ fn authenticated_static_router_denies_before_downstream_and_expands_templates() 
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let router_port = reserve_port();
     let mut router = TestRouter::spawn_authenticated(
-        router_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -1360,7 +1427,6 @@ fn authenticated_websocket_uses_provider_clock_and_rejects_clock_failure() {
     ] {
         let mut router = TestRouter::spawn_authenticated_mode(
             mode,
-            reserve_port(),
             products.endpoint(),
             reviews.endpoint(),
             products_sdl.endpoint(),
@@ -1459,9 +1525,7 @@ fn authenticated_public_websocket_enforces_lifecycle_and_routes_upstream_websock
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let router_port = reserve_port();
     let mut router = TestRouter::spawn_authenticated_subscriptions(
-        router_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -1673,7 +1737,6 @@ fn assert_quiet_subscription_cancellation(close_socket: bool, keep_sibling: bool
         Vec::new(),
     ));
     let mut router = TestRouter::spawn_authenticated_subscriptions(
-        reserve_port(),
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -1760,9 +1823,7 @@ fn authenticated_polling_reloads_graph_and_policy_as_one_subscription_snapshot()
         reviews_sdl.endpoint(),
         Vec::new(),
     ));
-    let router_port = reserve_port();
     let mut router = TestRouter::spawn_authenticated_subscriptions_polling(
-        router_port,
         products.endpoint(),
         reviews.endpoint(),
         products_sdl.endpoint(),
@@ -2021,9 +2082,8 @@ fn authenticated_preparation_rejects_stale_policy_metadata_without_binding() {
 fn hive_websocket_subscription_retires_and_reconnects_on_graph_replacement() {
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
-    let router_port = reserve_port();
-    let temp = TemporaryConfig::new(router_port);
-    let mut router = TestRouter::spawn(router_port, &temp, products.endpoint(), reviews.endpoint());
+    let temp = TemporaryConfig::new();
+    let mut router = TestRouter::spawn(&temp, products.endpoint(), reviews.endpoint());
     router.wait_until_ready();
 
     let mut first_connection = TestWebSocket::connect(router.address);
@@ -2391,8 +2451,40 @@ struct TestRouter {
 }
 
 impl TestRouter {
+    fn from_child(mut child: Child, has_admin: bool) -> (Self, Option<SocketAddr>) {
+        let stdout = child.stdout.take().expect("piped child stdout");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Some(bound) = line.strip_prefix("WIRE_BOUND ") {
+                    let _ = sender.send(bound.to_owned());
+                }
+            }
+        });
+        let mut router = Self {
+            address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            child: Arc::new(Mutex::new(Some(child))),
+        };
+        let mut admin = None;
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        for _ in 0..if has_admin { 2 } else { 1 } {
+            let bound = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("child must report its owned listener");
+            let (kind, address) = bound.split_once(' ').expect("listener report");
+            let address = address.parse().expect("bound socket address");
+            match kind {
+                "public" => router.address = address,
+                "admin" => admin = Some(address),
+                _ => panic!("unexpected listener kind"),
+            }
+        }
+        assert_ne!(router.address.port(), 0);
+        (router, admin)
+    }
+
     fn spawn(
-        port: u16,
         config: &TemporaryConfig,
         products_endpoint: String,
         reviews_endpoint: String,
@@ -2407,18 +2499,14 @@ impl TestRouter {
             .env(REVIEWS_ENDPOINT_ENV, reviews_endpoint)
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("router child should start");
-        Self {
-            address: SocketAddr::from(([127, 0, 0, 1], port)),
-            child: Arc::new(Mutex::new(Some(child))),
-        }
+        Self::from_child(child, false).0
     }
 
     fn spawn_static(
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2426,7 +2514,6 @@ impl TestRouter {
     ) -> Self {
         Self::spawn_static_mode(
             "static",
-            port,
             products_endpoint,
             reviews_endpoint,
             products_sdl_endpoint,
@@ -2435,7 +2522,6 @@ impl TestRouter {
     }
 
     fn spawn_polling(
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2443,7 +2529,6 @@ impl TestRouter {
     ) -> Self {
         Self::spawn_static_mode(
             "polling",
-            port,
             products_endpoint,
             reviews_endpoint,
             products_sdl_endpoint,
@@ -2453,7 +2538,6 @@ impl TestRouter {
 
     fn spawn_static_mode(
         mode: &str,
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2464,25 +2548,20 @@ impl TestRouter {
             .arg("federation::wire_tests::router_child_entrypoint")
             .arg("--nocapture")
             .env(CHILD_ENV, mode)
-            .env(ROUTER_PORT_ENV, port.to_string())
             .env(PRODUCTS_ENDPOINT_ENV, products_endpoint)
             .env(REVIEWS_ENDPOINT_ENV, reviews_endpoint)
             .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl_endpoint)
             .env(REVIEWS_SDL_ENDPOINT_ENV, reviews_sdl_endpoint)
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("static router child should start");
-        Self {
-            address: SocketAddr::from(([127, 0, 0, 1], port)),
-            child: Arc::new(Mutex::new(Some(child))),
-        }
+        Self::from_child(child, false).0
     }
 
     fn spawn_authenticated(
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2492,7 +2571,6 @@ impl TestRouter {
     ) -> Self {
         Self::spawn_authenticated_mode(
             "auth",
-            port,
             products_endpoint,
             reviews_endpoint,
             products_sdl_endpoint,
@@ -2503,7 +2581,6 @@ impl TestRouter {
     }
 
     fn spawn_authenticated_subscriptions(
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2513,7 +2590,6 @@ impl TestRouter {
     ) -> Self {
         Self::spawn_authenticated_mode(
             "auth-subscriptions",
-            port,
             products_endpoint,
             reviews_endpoint,
             products_sdl_endpoint,
@@ -2524,7 +2600,6 @@ impl TestRouter {
     }
 
     fn spawn_authenticated_subscriptions_polling(
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2534,7 +2609,6 @@ impl TestRouter {
     ) -> Self {
         Self::spawn_authenticated_mode(
             "auth-subscriptions-polling",
-            port,
             products_endpoint,
             reviews_endpoint,
             products_sdl_endpoint,
@@ -2546,8 +2620,6 @@ impl TestRouter {
 
     #[allow(clippy::too_many_arguments)]
     fn spawn_admin(
-        port: u16,
-        admin_port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2560,8 +2632,6 @@ impl TestRouter {
             .arg("federation::wire_tests::router_child_entrypoint")
             .arg("--nocapture")
             .env(CHILD_ENV, "admin")
-            .env(ROUTER_PORT_ENV, port.to_string())
-            .env(ADMIN_PORT_ENV, admin_port.to_string())
             .env(PRODUCTS_ENDPOINT_ENV, products_endpoint)
             .env(REVIEWS_ENDPOINT_ENV, reviews_endpoint)
             .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl_endpoint)
@@ -2570,23 +2640,17 @@ impl TestRouter {
             .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol_endpoint)
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("administrative router child should start");
-        (
-            Self {
-                address: SocketAddr::from(([127, 0, 0, 1], port)),
-                child: Arc::new(Mutex::new(Some(child))),
-            },
-            SocketAddr::from(([127, 0, 0, 1], admin_port)),
-        )
+        let (router, admin) = Self::from_child(child, true);
+        (router, admin.expect("bound admin address"))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn spawn_authenticated_mode(
         mode: &str,
-        port: u16,
         products_endpoint: String,
         reviews_endpoint: String,
         products_sdl_endpoint: String,
@@ -2599,7 +2663,6 @@ impl TestRouter {
             .arg("federation::wire_tests::router_child_entrypoint")
             .arg("--nocapture")
             .env(CHILD_ENV, mode)
-            .env(ROUTER_PORT_ENV, port.to_string())
             .env(PRODUCTS_ENDPOINT_ENV, products_endpoint)
             .env(REVIEWS_ENDPOINT_ENV, reviews_endpoint)
             .env(PRODUCTS_SDL_ENDPOINT_ENV, products_sdl_endpoint)
@@ -2608,14 +2671,11 @@ impl TestRouter {
             .env(REVIEWS_PROTOCOL_ENDPOINT_ENV, reviews_protocol_endpoint)
             .env("RUST_TEST_THREADS", "1")
             .env("RUST_LOG", "error")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("authenticated router child should start");
-        Self {
-            address: SocketAddr::from(([127, 0, 0, 1], port)),
-            child: Arc::new(Mutex::new(Some(child))),
-        }
+        Self::from_child(child, false).0
     }
 
     fn wait_until_ready(&mut self) {
@@ -2713,7 +2773,7 @@ struct TemporaryConfig {
 }
 
 impl TemporaryConfig {
-    fn new(port: u16) -> Self {
+    fn new() -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time after epoch")
@@ -2726,9 +2786,7 @@ impl TemporaryConfig {
         let config = directory.join("router.yaml");
         fs::write(
             &config,
-            format!(
-                "supergraph:\n  source: plugin\nhttp:\n  host: 127.0.0.1\n  port: {port}\n  workers: 1\nsubscriptions:\n  enabled: true\nwebsocket:\n  enabled: true\n  path: /ws\nplugins:\n  graphql-orm-router-wire-proof: {{}}\n"
-            ),
+            "supergraph:\n  source: plugin\nhttp:\n  host: 127.0.0.1\n  port: 0\n  workers: 1\nsubscriptions:\n  enabled: true\nwebsocket:\n  enabled: true\n  path: /ws\nplugins:\n  graphql-orm-router-wire-proof: {}\n",
         )
         .expect("temporary router config should be written");
         Self { directory, config }
@@ -3837,14 +3895,6 @@ fn write_http_response(mut stream: TcpStream, status: u16, body: &[u8]) -> io::R
         body.len()
     )?;
     stream.write_all(body)
-}
-
-fn reserve_port() -> u16 {
-    TcpListener::bind(("127.0.0.1", 0))
-        .expect("router loopback port reservation")
-        .local_addr()
-        .expect("router loopback address")
-        .port()
 }
 
 fn endpoint_origin(endpoint: &str) -> String {

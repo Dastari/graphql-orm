@@ -1,8 +1,11 @@
 #![cfg(feature = "sqlite")]
 
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn invalid_operation_authorization_declarations_are_rejected() {
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     cases.pass("tests/ui/operation_authorization_templates_without_router_protocol.rs");
     cases.compile_fail("tests/ui/operation_authorization_duplicate_category.rs");
     cases.compile_fail("tests/ui/operation_authorization_duplicate_declaration.rs");

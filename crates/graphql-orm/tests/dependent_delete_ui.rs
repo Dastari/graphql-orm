@@ -1,10 +1,13 @@
+#[path = "support/ui.rs"]
+mod ui;
+
 static BUILDS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn unsupported_dependent_delete_shapes_are_rejected() {
     let _build = BUILDS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let t = trybuild::TestCases::new();
+    let t = ui::test_cases();
     #[cfg(not(feature = "mssql"))]
     {
         t.compile_fail("tests/ui/dependent_delete_composite.rs");
