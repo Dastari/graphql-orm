@@ -183,7 +183,8 @@ case "${lane}" in
     ;;
   changed-subscriptions)
     for backend in sqlite postgres mssql; do
-      cargo test -p graphql-orm --locked --no-default-features --features "${backend}"         --test keyed_changed_subscriptions -- --include-ignored --test-threads=1
+      cargo test -p graphql-orm --locked --no-default-features --features "${backend}" \
+        --test keyed_changed_subscriptions -- --include-ignored --test-threads=1
     done
     ;;
   runtime-live)

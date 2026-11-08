@@ -5664,6 +5664,9 @@ fn generate_graphql_operations_unfiltered(
                                 // Lost continuity or a closed event source: one error, then the stream ends.
                                 Err(error) => return Some(Err(error)),
                             };
+                            // Host policies may buffer private diagnostics before denying an event.
+                            // Cover every filter and release-proof drop, not only payload preparation.
+                            let errors_before = ctx.query_env.errors.lock().unwrap().len();
                             let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
@@ -5721,6 +5724,9 @@ fn generate_graphql_operations_unfiltered(
                                     Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                                 }
                             }.await;
+                            if delivered.is_none() {
+                                ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+                            }
                             delivered.map(Ok)
                         }
                     });
@@ -7529,6 +7535,9 @@ fn generate_graphql_operations_unfiltered(
                                 // Lost continuity or a closed event source: one error, then the stream ends.
                                 Err(error) => return Some(Err(error)),
                             };
+                            // Host policies may buffer private diagnostics before denying an event.
+                            // Cover every filter and release-proof drop, not only payload preparation.
+                            let errors_before = ctx.query_env.errors.lock().unwrap().len();
                             let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
@@ -7587,6 +7596,9 @@ fn generate_graphql_operations_unfiltered(
                                     Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                                 }
                             }.await;
+                            if delivered.is_none() {
+                                ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+                            }
                             delivered.map(Ok)
                         }
                     });

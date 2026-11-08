@@ -46,8 +46,15 @@ checks and delivery; this is not a hard wall-clock revocation deadline.
 
 No write, including an unmatched, action-filtered or row-hidden write, triggers
 a forbidden frame or resets the timer. All per-event subscriber and delivery
-fence denials remain silent, as do row/key/field/provenance denials. Source
-closure and continuity-loss signals retain their existing timing properties.
+fence denials remain silent, as do row/key/field/provenance denials. Diagnostics
+buffered by a host policy during a dropped event are discarded and
+cannot appear on later frames; hosts need no changes for this correction.
+Closure and continuity-loss signals retain their existing timing properties.
+Lag is checked before filtering: hidden write volume can exceed the shared
+channel capacity and trigger `SUBSCRIPTION_CONTINUITY_LOST`, even before a revoked
+subscriber's next timer check. The frame omits keys, payloads and skipped-event
+counts, but its occurrence and timing remain observable (Related to
+[#387](https://github.com/Dastari/graphql-orm/issues/387)).
 Hosts must expose current session expiry/revocation through current checks and
 preserve typed errors or infrastructure codes for host failures; source-free
 authored refusals count as denials, not infrastructure failures.

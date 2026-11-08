@@ -351,7 +351,9 @@ reauthorize every event before release. Live payloads are fresh authorized rows,
 not historical snapshots. Key, keys and action filters run first, without any
 authority calls for unlisted/action-filtered events. Every per-event denial or
 host failure suppresses the whole event, including its identifier and provenance;
-no event causes a forbidden frame.
+no event causes a forbidden frame. Diagnostics added by host authorization
+callbacks while preparing a dropped event are discarded with that event, so
+they cannot attach to a later visible event or terminal continuity frame.
 
 Separately, a timer rechecks only the subscriber's own resolver authentication,
 scopes, assurance and entity access. It never loads a row or checks a key, field
@@ -373,7 +375,13 @@ Events never trigger or reset this deadline, including zero matches and empty
 key lists. Timers require stream polling; host policy latency, scheduler load
 and transport backpressure can delay detection/delivery. This is not a hard
 wall-clock guarantee or a claim of constant-time execution. Source-closure and
-queue-continuity signals retain their existing timing. CacheSync has a separate,
+queue-continuity signals retain their existing timing. In particular, lag is
+checked before event filtering: `SUBSCRIPTION_CONTINUITY_LOST` reveals that the
+shared channel exceeded this receiver's capacity, although it includes no key,
+payload or skipped-event count. Hidden write volume can cause that signal, and
+a revoked subscriber can receive it before the authority timer fires. This
+residual occurrence/timing signal is unchanged; Related to
+[#387](https://github.com/Dastari/graphql-orm/issues/387). CacheSync has a separate,
 unchanged event-triggered channel; Related to [#384](https://github.com/Dastari/graphql-orm/issues/384).
 
 Operations selecting a generated Changed root must have exactly one root-field

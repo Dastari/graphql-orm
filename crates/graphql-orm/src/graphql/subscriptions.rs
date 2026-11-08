@@ -829,8 +829,11 @@ pub(crate) fn subscription_end(code: &'static str, message: &'static str) -> asy
 ///
 /// Every event is passed on in order. When the subscriber fell behind and the
 /// channel dropped events, or the channel closed, the stream yields exactly one
-/// error and ends. The error carries no count, identifier or payload, so it
-/// reveals nothing about the events this subscriber may not see.
+/// error and ends. Neither error carries a skipped-event count, identifier or
+/// payload. A lag error's occurrence and timing still reveal that the shared channel
+/// exceeded this receiver's capacity, which hidden writes can cause. Lag is
+/// checked before authorization and can end a revoked stream before its next
+/// independent authority check.
 #[doc(hidden)]
 pub fn continuity_events<T>(
     receiver: tokio::sync::broadcast::Receiver<T>,
@@ -880,26 +883,6 @@ pub(crate) fn admit_subscription_key_count(
 pub use super::subscription_admission::GeneratedSubscriptionAdmission;
 #[doc(hidden)]
 pub use super::subscription_admission::admit_generated_operation;
-
-/// End immediately after yielding a terminal stream error, without polling the source again.
-#[doc(hidden)]
-pub fn terminal_errors<S, T>(stream: S) -> impl futures::Stream<Item = async_graphql::Result<T>>
-where
-    S: futures::Stream<Item = async_graphql::Result<T>>,
-{
-    use futures::StreamExt;
-    futures::stream::unfold(
-        (Box::pin(stream), false),
-        |(mut stream, ended)| async move {
-            if ended {
-                return None;
-            }
-            let item = stream.next().await?;
-            let ended = item.is_err();
-            Some((item, (stream, ended)))
-        },
-    )
-}
 
 fn authority_recheck_delay(interval: std::time::Duration) -> std::time::Duration {
     let interval = interval.clamp(
