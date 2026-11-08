@@ -16,7 +16,7 @@ struct Source {
     #[sortable]
     id: i32,
     tenant_id: i32,
-    #[relation(target = "Target", from = [tenant_id, id], to = [tenant_id, owner_id], multiple, emit_fk = false)]
+    #[relation(target = "Target", from = ["tenant_id", "id"], to = ["tenant_id", "owner_id"], multiple, emit_fk = false)]
     items: Vec<Target>,
 }
 fn main() {}

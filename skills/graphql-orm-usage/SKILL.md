@@ -25,8 +25,8 @@ local and target keys and condition columns readable. Cross-crate target
 metadata is required; update older targets or explicitly declare the
 `GeneratedRelationReadability` contract on hand-written targets. Generated Changed events require readable primary keys;
 use `RepositoryEntity` or omit `GraphQLOperations` for truly private keys.
-Automatic aggregates, search, catalogues and public cursors exclude unreadable
-fields. Explicit scalar filter/sort grants on `read = false` remain independent.
+Automatic aggregates, catalogues and public cursors exclude unreadable
+fields; incompatible search and relation-order declarations fail compilation. Explicit scalar filter/sort grants on `read = false` remain independent.
 
 ## What one entity generates
 
