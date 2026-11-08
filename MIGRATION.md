@@ -10,6 +10,22 @@ supersedes: []
 
 # Migration Guide
 
+## 0.98.0 to 0.99.0: dependent-delete catalogue integrity
+
+Upgrade ORM/macros together. No data migration is needed. Opted-in generated
+SQLite/PostgreSQL dependent deletes now repeat full physical catalogue validation
+after preparation hooks, before every prepared write, and before commit. A changed
+physical schema snapshot or failed validation returns only
+`Dependent delete refused` and rolls back all transactional rows, DDL and queued
+events. This includes persistent/temporary triggers, new FKs and cascading tables,
+and changes from After hooks between writes or after the final write.
+
+Keep DDL outside dependent-delete hooks. This does not make arbitrary hook DDL a
+supported schema migration mechanism: even unrelated modeled schema changes
+conservatively refuse. See the [comparison contract](docs/reference/graphql-orm/entities-and-relations.md#orm-driven-dependent-deletes).
+Row/depth bounds, direct dependent authority and after-commit callbacks are unchanged.
+External hook side effects cannot be rolled back; defer them until commit.
+
 ## 0.97.0 to 0.98.0: unreadable fields, relations and safe errors
 
 Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`

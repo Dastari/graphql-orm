@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.99.0 revalidates the complete dependent-delete catalogue after hooks, before each prepared write and before commit. Catalogue drift refuses atomically; upgrade ORM/macros together. No data migration is needed.
+
 Version 0.98.0 rejects unreadable SimpleObject fields without an object skip, masks internal SQLx errors, and corrects generated singular descriptions. See the root migration guide; no data migration is needed. Readable relations require readable local/target keys and condition columns, proven across crates; unresolved columns or missing target metadata fail compilation. Generated Changed events require readable primary keys. `input_only` relation getters leave the SDL, and incompatible search/order declarations are compile errors; see the complete migration inventory.
 
 Version 0.97.0 adds opt-in, bounded GraphQL dependent deletes on SQLite and PostgreSQL with single-column keys. Declare `dependent_deletes` on each participating entity and its declared deleting parents, then supply a bounded registry. No data migration is needed; see the root migration guide.
