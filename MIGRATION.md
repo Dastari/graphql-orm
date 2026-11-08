@@ -86,7 +86,8 @@ documented behavior.
 Operation catalog 0.7.2 preserves the legacy implicit descriptions byte for
 byte, so ORM/macros 0.95 consumers retain their descriptions and fingerprints
 when updating only that dependency. ORM/macros 0.96 explicitly supply the
-corrected descriptions; their SDL and catalogue wording agree.
+corrected descriptions; their SDL and catalogue wording agree, including the
+bounded authorization-scan description.
 
 Internal SQLx adapter errors now use safe messages and error codes rather than
 raw database diagnostics. Generated single-record operation descriptions use

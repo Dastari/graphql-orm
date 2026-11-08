@@ -24,7 +24,7 @@ ORM runtime/macros **0.96.0**, operation catalog **0.7.2**.
 - **SDL/security:** remove `input_only` relation getters, aggregate/group-by fields and semantic catalogue entries. Automatic read surfaces share the same readability predicate; explicitly granted scalar filters/sorts on `read = false` remain independent capabilities.
 - **Compatibility:** operation catalog 0.7.2 preserves legacy default descriptions/fingerprints for 0.95 consumers; 0.96 macros explicitly provide corrected descriptions.
 - **Security:** internal journal and result SQLx adapters now preserve safe error categories and operator reporting without publishing raw diagnostics. Fixes #354.
-- **Fixed:** generated single-record descriptions use singular wording; SDL and derived fingerprints change. Fixes #289. No data migration is needed.
+- **Fixed:** generated single-record descriptions use singular wording, and bounded scans share the exact SDL description with their catalogue entries; SDL and derived fingerprints change. Fixes #289. No data migration is needed.
 
 - **Fixed (ORM/macros 0.95.1):** in-memory SQLite helpers disable pooled connection retirement and retain a shared-cache keeper so replacement connections see the same schema and rows. Memory pools remain isolated unless the URL explicitly opts into `cache=shared`. No data migration is needed. Fixes #376.
 - **Tests (router 0.8.2):** wire children bind port zero and report their owned public/admin addresses, eliminating released-port races. The executable smoke test transfers an already-bound socket through the additive `run_with_listener` hook and Unix `--listen-stdin` option; default startup is unchanged. Fixes #366.
