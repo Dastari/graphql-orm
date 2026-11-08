@@ -13,6 +13,18 @@ supersedes: []
 These rules apply to the entire repository. More specific `AGENTS.md` files
 under a crate add package-local invariants.
 
+## Work queue
+
+- Open issues in `Dastari/graphql-orm` are the agent work queue. When no other
+  task is assigned, or the current one is finished, take the next open issue.
+- Skip issues labelled `parked`. Issues that ask for a product or privacy
+  decision ("Decide…", "Define…") need the maintainer's choice: bring the
+  options back instead of choosing one.
+- Work security and data-exposure issues first, then defects, then
+  enhancements.
+- Reference the issue in the pull request (`Fixes #<n>`). File newly found
+  defects or follow-ups as issues rather than widening the current change.
+
 ## Workspace boundaries
 
 - The workspace contains `graphql-orm`, `graphql-orm-macros`,
