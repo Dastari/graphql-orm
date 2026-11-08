@@ -13,7 +13,7 @@ supersedes: []
 ## Unreleased - 0.124.0
 
 - **Added:** optional, typed and bounded Codex read-marker tolerance; default wire bytes and strict admission are unchanged. Unknown effect-capable methods remain refused. See the migration guide for opt-in, method-only tracing and counters, and version readiness (related to #333). No data migration. Fixes #369.
-- **Tests:** adopt ORM 0.95.0 runtime collection declarations in fixtures and verify NodeId/live catalogs in the AI compiler. No AI runtime or persistent schema change.
+- **Tests:** adopt ORM 0.96.0 runtime collection declarations in fixtures and verify NodeId/live catalogs in the AI compiler. No AI runtime or persistent schema change.
 - **Tests:** isolate media fixtures sharing the bounded decoder pool so CPU contention does not turn unrelated tests into overload tests. Production busy-pool refusal, authorization, budgets and effect replay rules are unchanged. No data migration. Fixes #367.
 
 ## Unreleased - 0.123.0

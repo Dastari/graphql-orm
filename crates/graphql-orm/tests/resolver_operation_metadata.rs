@@ -669,6 +669,11 @@ async fn append_only_subscription_enforces_auth_before_database_runtime_lookup()
         SubscriptionRoot::default(),
     )
     .data(AuthSubject::new("event-reader-without-scope"))
+    .extension(
+        graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![
+            ResolverMetadataEvent::__GOM_CHANGED_ROOT_NAME,
+        ]),
+    )
     .finish();
     let mut stream =
         Box::pin(schema.execute_stream(format!("subscription {{ {field_name} {{ action }} }}")));
@@ -1073,6 +1078,11 @@ async fn fixed_write_scope_declarations_are_enforced_before_runtime_access() {
         SubscriptionRoot::default(),
     )
     .data(AuthSubject::new("writer-without-scopes"))
+    .extension(
+        graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![
+            scoped_write_surface::ScopedWriteRecord::__GOM_CHANGED_ROOT_NAME,
+        ]),
+    )
     .finish();
 
     for mutation in [

@@ -14,7 +14,7 @@ supersedes: []
 
 No data migration, public AI API or persistent AI schema change. This patch gives
 changed contract fixtures a new package identity. The fixtures adopt the two
-optional ORM 0.95.0 runtime collection fields and prove typed query compilation
+optional ORM 0.96.0 runtime collection fields and prove typed query compilation
 with local NodeId/live metadata. Runtime-schema hosts follow the root ORM
 migration guide; `AI_SCHEMA_MODULE_VERSION` is unchanged.
 

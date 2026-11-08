@@ -425,8 +425,29 @@ first if you waited for `After`.
 
 ## Subscriptions and propagation
 
-- **Use `<entity>Changed`** rather than hand-written signal subscriptions. It rechecks authorization
-  for each event and reports lost continuity.
+- **Use `<entity>Changed`** rather than hand-written signal subscriptions. Key/keys/action
+  filters run before authority calls; all per-event denials silently hide the event.
+  Diagnostics added by host policies for a dropped event are discarded with it.
+  An independent jittered timer checks subscriber authentication, scopes, assurance and entity
+  access: definite denial yields sanitized `FORBIDDEN` and ends; reauthenticate before reopening.
+  Typed host/DB failures or infrastructure categories yield `SUBSCRIPTION_CONTINUITY_LOST`;
+  resubscribe and refetch when the host recovers. Preserve error sources/codes for host failures;
+  source-free authored refusals mean denial.
+  Configure `db.with_subscription_authority_recheck_interval(Duration::from_secs(10))` before
+  building the schema. The default base is 30 s, clamped to 1–300 s, with independent 0–10%
+  positive jitter per period. Writes never trigger or reset the timer, including `keys: []`.
+  Polling, host latency and backpressure can delay it; it is not a wall-clock deadline.
+  Lag is checked before filtering: hidden write volume can exceed shared channel capacity and
+  cause continuity loss before a revoked subscriber's timer fires. The frame omits keys,
+  payloads and counts, but its occurrence/timing remains observable (Related to
+  [#387](https://github.com/Dastari/graphql-orm/issues/387)).
+  Closure/continuity signals keep their existing timing; CacheSync is unchanged (Related to
+  [#384](https://github.com/Dastari/graphql-orm/issues/384)).
+  Select exactly one root occurrence per operation, counting aliases, fragments and skipped fields;
+  split multi-root operations or expect `subscription_root_limit_exceeded` before sources open.
+  Generated builders install admission. Hand-built schemas must install
+  `GeneratedSubscriptionAdmission(vec!["recordChanged"])` with every actual Changed field name;
+  missing or misconfigured admission refuses with `SUBSCRIPTION_ADMISSION_REQUIRED`.
 - **Set `propagate_change = "up"`** on relations whose parent views show child state, rather than
   computing parent invalidations in hooks or keeping dependency tables in the frontend. The parent's
   stream gets a `PROPAGATED` event with `sourceEntity`, `sourceId` and `path`, limited to 16 hops and

@@ -829,8 +829,11 @@ pub(crate) fn subscription_end(code: &'static str, message: &'static str) -> asy
 ///
 /// Every event is passed on in order. When the subscriber fell behind and the
 /// channel dropped events, or the channel closed, the stream yields exactly one
-/// error and ends. The error carries no count, identifier or payload, so it
-/// reveals nothing about the events this subscriber may not see.
+/// error and ends. Neither error carries a skipped-event count, identifier or
+/// payload. A lag error's occurrence and timing still reveal that the shared channel
+/// exceeded this receiver's capacity, which hidden writes can cause. Lag is
+/// checked before authorization and can end a revoked stream before its next
+/// independent authority check.
 #[doc(hidden)]
 pub fn continuity_events<T>(
     receiver: tokio::sync::broadcast::Receiver<T>,
@@ -875,4 +878,201 @@ pub(crate) fn admit_subscription_key_count(
         );
     }
     Ok(())
+}
+
+pub use super::subscription_admission::GeneratedSubscriptionAdmission;
+#[doc(hidden)]
+pub use super::subscription_admission::admit_generated_operation;
+
+fn authority_recheck_delay(interval: std::time::Duration) -> std::time::Duration {
+    let interval = interval.clamp(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_secs(300),
+    );
+    let jitter_ns = interval.as_nanos() as u64 / 10;
+    let sample = uuid::Uuid::new_v4().as_u128() as u64;
+    interval + std::time::Duration::from_nanos(sample % (jitter_ns + 1))
+}
+
+fn authority_check_end(error: async_graphql::Error) -> async_graphql::Error {
+    let code = error
+        .extensions
+        .as_ref()
+        .and_then(|ext| ext.get("code"))
+        .and_then(|value| {
+            if let async_graphql::Value::String(code) = value {
+                Some(code.as_str())
+            } else {
+                None
+            }
+        });
+    // Preserve the callback authoring convention: source-free authored refusals
+    // are denials. Typed host failures and infrastructure categories are not.
+    let denial = error.source.is_none()
+        && !matches!(
+            code,
+            Some(
+                "INTERNAL_SERVER_ERROR" | SUBSCRIPTION_CONTINUITY_LOST | SUBSCRIPTION_SOURCE_CLOSED
+            )
+        )
+        && match code.and_then(super::errors::public_code) {
+            Some(
+                super::errors::OrmErrorCode::Forbidden
+                | super::errors::OrmErrorCode::Unauthenticated,
+            )
+            | None => true,
+            Some(_) => false,
+        };
+    if denial {
+        OrmPublicError::forbidden().into_graphql_error()
+    } else {
+        subscription_end(
+            SUBSCRIPTION_CONTINUITY_LOST,
+            "subscription authority check failed; subscribe again, then refetch",
+        )
+    }
+}
+
+/// Check subscriber-level authority on an event-independent, jittered schedule.
+///
+/// Event filtering must never yield a forbidden item. Only this timer converts
+/// a definite subscriber denial to FORBIDDEN; host failures lose continuity.
+/// The deadline is established before polling the source and is never reset by
+/// events. A due timer takes priority over the source, including an in-flight
+/// asynchronous event filter. As with every stream, progress requires polling.
+#[doc(hidden)]
+pub fn watch_subscription_authority<S, T, A, F>(
+    stream: S,
+    interval: std::time::Duration,
+    authorize: A,
+) -> impl futures::Stream<Item = async_graphql::Result<T>>
+where
+    S: futures::Stream<Item = async_graphql::Result<T>>,
+    A: FnMut() -> F,
+    F: std::future::Future<Output = async_graphql::Result<()>>,
+{
+    watch_authority_with_delay(stream, authorize, move || authority_recheck_delay(interval))
+}
+
+fn watch_authority_with_delay<S, T, A, F, D>(
+    stream: S,
+    authorize: A,
+    mut next_delay: D,
+) -> impl futures::Stream<Item = async_graphql::Result<T>>
+where
+    S: futures::Stream<Item = async_graphql::Result<T>>,
+    A: FnMut() -> F,
+    F: std::future::Future<Output = async_graphql::Result<()>>,
+    D: FnMut() -> std::time::Duration,
+{
+    use futures::{
+        StreamExt,
+        future::{Either, select},
+    };
+    let deadline = tokio::time::Instant::now() + next_delay();
+    futures::stream::unfold(
+        (
+            Box::pin(stream),
+            Box::pin(tokio::time::sleep_until(deadline)),
+            authorize,
+            next_delay,
+            false,
+        ),
+        move |(mut stream, mut timer, mut authorize, mut next_delay, ended)| async move {
+            if ended {
+                return None;
+            }
+            loop {
+                match select(timer.as_mut(), stream.next()).await {
+                    Either::Left(((), _)) => {
+                        if let Err(error) = authorize().await {
+                            return Some((
+                                Err(authority_check_end(error)),
+                                (stream, timer, authorize, next_delay, true),
+                            ));
+                        }
+                        timer
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + next_delay());
+                    }
+                    Either::Right((item, _)) => {
+                        let item = item?;
+                        let ended = item.is_err();
+                        return Some((item, (stream, timer, authorize, next_delay, ended)));
+                    }
+                }
+            }
+        },
+    )
+}
+
+#[cfg(test)]
+mod authority_timer_tests {
+    use super::*;
+    use futures::{StreamExt, future::poll_fn};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Poll,
+        time::Duration,
+    };
+
+    #[tokio::test(start_paused = true)]
+    async fn hidden_writes_cannot_change_the_independent_jittered_deadline() {
+        let deadline = Duration::from_millis(1037); // 1s plus a controlled 37ms jitter sample.
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let hidden = tokio_stream::wrappers::UnboundedReceiverStream::new(receiver)
+            .filter_map(|_| futures::future::ready(None::<async_graphql::Result<()>>));
+        let idle = futures::stream::pending::<async_graphql::Result<()>>();
+        let checks = Arc::new(AtomicUsize::new(0));
+        let make_check = || {
+            let checks = checks.clone();
+            move || {
+                checks.fetch_add(1, Ordering::SeqCst);
+                futures::future::ready(Err(OrmPublicError::forbidden().into_graphql_error()))
+            }
+        };
+        let mut busy = Box::pin(watch_authority_with_delay(
+            hidden,
+            make_check(),
+            move || deadline,
+        ));
+        let mut quiet = Box::pin(watch_authority_with_delay(idle, make_check(), move || {
+            deadline
+        }));
+        async fn pending<S: futures::Stream + Unpin>(stream: &mut S) {
+            poll_fn(|cx| match stream.poll_next_unpin(cx) {
+                Poll::Pending => Poll::Ready(()),
+                Poll::Ready(_) => panic!("an event must not trigger authority termination"),
+            })
+            .await;
+        }
+        pending(&mut busy).await;
+        pending(&mut quiet).await;
+        for _ in 0..103 {
+            sender.send(()).unwrap();
+            pending(&mut busy).await;
+            tokio::time::advance(Duration::from_millis(10)).await;
+            pending(&mut quiet).await;
+        }
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
+        tokio::time::advance(Duration::from_millis(6)).await;
+        pending(&mut busy).await;
+        pending(&mut quiet).await;
+        assert_eq!(checks.load(Ordering::SeqCst), 0);
+        // Queue an event at the deadline too: the timer still wins.
+        sender.send(()).unwrap();
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for stream in [
+            &mut busy as &mut (dyn futures::Stream<Item = async_graphql::Result<()>> + Unpin),
+            &mut quiet as &mut (dyn futures::Stream<Item = async_graphql::Result<()>> + Unpin),
+        ] {
+            let error = stream.next().await.unwrap().unwrap_err();
+            assert_eq!(error.message, "forbidden");
+            assert!(stream.next().await.is_none());
+        }
+        assert_eq!(checks.load(Ordering::SeqCst), 2);
+    }
 }
