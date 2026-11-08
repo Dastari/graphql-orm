@@ -259,3 +259,55 @@ pub mod propagation {
         }
     }
 }
+
+#[cfg(feature = "dependent-child")]
+mod dependent_parent_contract {
+    use super::*;
+    use cross_crate_ancestor_models::OptInParent;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "opt_in_children",
+        plural = "OptInChildren",
+        default_sort = "id ASC"
+    )]
+    pub struct OptInChild {
+        #[primary_key]
+        pub id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        pub parent_id: String,
+        #[relation(
+            target = "OptInParent",
+            from = "parent_id",
+            to = "id",
+            on_delete = "cascade"
+        )]
+        pub parent: Option<OptInParent>,
+    }
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "opt_in_nulls",
+        plural = "OptInNulls",
+        default_sort = "id ASC"
+    )]
+    pub struct OptInNull {
+        #[primary_key]
+        pub id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        pub parent_id: Option<String>,
+        #[relation(
+            target = "OptInParent",
+            from = "parent_id",
+            to = "id",
+            on_delete = "set_null"
+        )]
+        pub parent: Option<OptInParent>,
+    }
+}

@@ -101,6 +101,86 @@ singular wording. This changes SDL, schema hashes, operation catalogue
 fingerprints and any signed metadata derived from them: regenerate exported
 schemas, catalogues and consumer snapshots. No data migration is needed.
 
+## 0.96.0 to 0.97.0: optional dependent deletes
+
+No data migration is needed. Existing opt-out SQL and foreign-key DDL are
+unchanged. To run dependent hooks and Changed subscriptions, declare
+`dependent_deletes` on each participating GraphQL entity and attach a
+`StaticDependentDeletes::<Backend>::new(RuntimeDependentLimits::new(rows, depth)?)`
+registry registering each entity with `.register::<Entity>()?` to schema data.
+Opted-in root deletes require the registry and registration of that exact Rust
+entity type; another entity/view sharing its physical table cannot substitute. Their bulk GraphQL delete and catalog
+entry are omitted to prevent an authorization/limit bypass; remove explicit
+`delete_many` shape, operation-authorization and AI-policy declarations, and call
+the bounded single-row deletes. Repository delete helpers retain physical behavior. This release supports SQLite and
+PostgreSQL single-column primary-key references; composite keys and MSSQL opt-ins
+are rejected. Unknown physical dependents and cycles refuse the entire delete.
+
+**Declare and opt in every deleting ancestor.** An opted-in entity's declared
+`cascade` or `set_null` relation requires its parent to implement
+`StaticDeleteEntity` for the same backend when it is non-`multiple`, or when it is
+`multiple` with `emit_fk = true`. Non-`multiple` relations also require this when
+`emit_fk = false`. The derive emits a compile-time
+obligation, including when the parent is imported from another crate. Mark that
+parent with `#[graphql_entity(dependent_deletes)]` and generate its writable
+operations too; do not remove the check to retain a physical cascade.
+
+**Database-only foreign keys are not compiler-checkable.** If no relation is
+declared in code and the parent stays opted out, those children are deleted or
+set null physically, with no dependent hooks or Changed events, even if the child
+is opted in and registered. Opt the parent in too; planning then refuses unknown
+or unmodeled dependencies instead of falling back to physical writes. Audit
+other write aliases and trusted repository/raw-SQL delete surfaces as well.
+
+Refusal versus success inherently reveals whether the root has dependents the
+caller cannot write. The refusal hides dependent identity and count; it cannot
+hide that binary outcome. Review that disclosure for the exposed root.
+
+Each dependent enforces its own mutation assurance coordinate, including strict
+classification, while preserving the caller's request context. Root admission
+checks its entity/row policy before graph locks; direct root not-found results
+and version-conflict errors retain their existing shape. Only dependent failures
+become `Dependent delete refused`.
+
+SQLite requires matching FK column affinities and implicit BINARY collation.
+Because SQLite column metadata omits collation, any `COLLATE` token in a
+registered table's stored SQL conservatively refuses (even explicit BINARY or a
+comment/quoted token). PostgreSQL requires matching declared types/type modifiers
+and identical deterministic collations for collatable types. Extension/domain
+key types (including citext) and blank-padded character keys refuse because their
+equality with bound values is not modeled. Change an incompatible schema through
+an explicit reviewed migration, or keep that graph opted out; the ORM never
+rewrites it automatically. These checks protect both discovery and the final
+referencer recheck.
+
+PostgreSQL registered relations must be ordinary standalone heap tables. Before
+each write, only the relation-kind, inheritance/partition and rewrite-rule guard
+from planning is repeated: it refuses inheritance parents/children,
+partitioned tables/partitions, non-`_RETURN` rewrite rules, views and foreign
+tables. Trigger validation, physical-FK validation and hidden-FK detection run
+only during planning. SQLite performs no per-write catalogue revalidation; it
+has no PostgreSQL inheritance, partitioning, rewrite RULE or foreign-table
+equivalent, and registered SQLite views refuse planning.
+
+**Mutation hooks must not run DDL during a dependent delete.** Hooks are trusted
+host code. Creating triggers (including SQLite TEMP triggers), adding foreign
+keys or creating cascading tables inside a hook is unsupported and is not
+detected: no full catalogue recheck runs after hooks. Such changes can introduce physical writes
+outside the authorized plan. The narrower PostgreSQL guard catches a newly
+installed rewrite rule, but this is not general hook-DDL protection. Keep DDL
+outside dependent-delete hooks; broader revalidation is tracked in
+[#391](https://github.com/Dastari/graphql-orm/issues/391).
+
+The root's Before hook runs before dependent authorization, so a refused cascade
+may already have caused side effects outside the database, as with a direct
+delete whose SQL later fails; defer external work until after commit.
+
+Existing `notify_with` callbacks run after the graph commits with the original
+GraphQL context. Native RLS that can hide dependents refuses rather than cascading
+unseen rows. All dependent field-policy denials refuse the delete. Unmodeled database triggers
+on registered tables refuse planning; retain those schemas opted out or move the
+behavior to explicitly authorized ORM mutation hooks before opting in.
+
 ## 0.95.1 to 0.96.0: Changed admission and subscriber revocation
 
 Clients selecting a generated static/derived `Changed` root must select exactly

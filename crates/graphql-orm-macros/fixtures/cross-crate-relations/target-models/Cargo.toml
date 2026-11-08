@@ -11,6 +11,9 @@ sqlite = ["graphql-orm/sqlite", "cross-crate-ancestor-models/sqlite"]
 postgres = ["graphql-orm/postgres", "cross-crate-ancestor-models/postgres"]
 mssql = ["graphql-orm/mssql", "cross-crate-ancestor-models/mssql"]
 
+dependent-child = ["cross-crate-ancestor-models/dependent-parent"]
+dependent-parent-opt-in = ["dependent-child", "cross-crate-ancestor-models/dependent-parent-opt-in"]
+
 [dependencies]
 graphql-orm.workspace = true
 async-graphql = { workspace = true, features = ["dataloader", "uuid", "decimal"] }

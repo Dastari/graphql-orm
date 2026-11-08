@@ -92,3 +92,8 @@ pub use scalar_policy::*;
 pub use schema_manager::*;
 pub use schema_module::*;
 pub use search::*;
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+mod static_deletes;
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use static_deletes::*;
