@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.95.0 to 0.96.0: unreadable object fields and safe errors
+## 0.95.1 to 0.96.0: unreadable object fields and safe errors
 
 Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`
 fields on `SimpleObject` entities without `#[graphql(skip)]`. This also applies
@@ -35,17 +35,37 @@ fields. Existing input/filter exclusions for `skip = false` on ordinary public
 fields are preserved. Combined GraphQL attributes with an effective
 `skip` do.
 
-Breaking: readable relations now reject any local key marked `private`,
-`read = false`, or `input_only`, including each component of a composite key.
-The compiler identifies the relation and key. Make the relation unreadable
-with `#[graphql_orm(read = false)]` and `#[graphql(skip)]` (or
+Breaking: readable relations now reject every local and target key marked
+`private`, `read = false`, or `input_only`, including every composite component,
+both relation directions and targets in other crates. The same compile error
+applies to unreadable `source_condition(field = ...)` and
+`target_condition(column = ...)` columns: conditions can reveal equality even
+without selecting the hidden column. The compiler identifies the entity,
+relation and column. Make the relation unreadable with
+`#[graphql_orm(read = false)]` and `#[graphql(skip)]` (or
 `graphql_policy_object`), or remove `private`/`input_only` and set `read = true`
-on the key. Directly named self-relations also check target keys, resolving
-physical names and SQL quoting/case rules. Unresolved self-target columns now
-fail compilation: use a declared physical column name with matching SQL
-quoting (including quotes for case-sensitive PostgreSQL names). Other entities' target
-attributes are unavailable to the derive; inspect those keys yourself and
-hide relations that disclose them.
+on every column it reads.
+
+Unresolved physical target columns, including self-targets, are compile errors:
+use a declared physical database column name with matching SQL quoting and case.
+Rust field names apply to local `from` keys and source conditions; physical
+column names apply to target `to` keys and target conditions. Generated
+`GeneratedRelationReadability` metadata proves target readability across crate
+boundaries. Targets built with older macros or hand-written targets without this
+metadata fail compilation. Rebuild target crates with ORM/macros 0.96, or for a
+hand-written target explicitly implement
+`graphql_orm::graphql::orm::GeneratedRelationReadability`, listing physical
+columns and their actual static eligibility:
+
+```rust,ignore
+impl graphql_orm::graphql::orm::GeneratedRelationReadability for CustomTarget {
+    const COLUMNS: &'static [(&'static str, bool)] = &[("id", true), ("secret", false)];
+}
+```
+
+Omitted columns fail closed. Do not mark a hidden column readable to bypass the
+check. The hidden `generated_relation_column_is_readable` const helper performs
+the generated proofs; consumers normally use the derives without calling it.
 
 Breaking: `GraphQLOperations` rejects unreadable primary keys because generated
 Changed events expose them as `id`. Remove `private`/`input_only` and set
@@ -54,11 +74,14 @@ Changed events expose them as `id`. Remove `private`/`input_only` and set
 a Changed-event key. No data migration is needed.
 
 Aggregate/group-by fields and semantic catalogues now exclude `input_only`.
-Hidden relations cannot declare aggregate ordering, relation filtering or
-search; remove those declarations or make the relation readable. Scalar
-search also requires readable fields. Drop former selections of hidden data.
-Explicit scalar filter/sort grants on `read = false` retain their documented
-behavior.
+`input_only` relation getters are also removed from SDL: drop former selections
+or make the relation readable. These declarations now produce compile errors:
+`search_relation` on an unreadable relation; `order_aggregate` on an `input_only`
+relation; `searchable` on an `input_only` scalar; and `search_json` on
+`read = false` or `input_only` scalars. Remove those declarations or make their
+fields readable. Existing private/non-read scalar search refusals remain in
+force. Explicit scalar filter/sort grants on `read = false` retain their
+documented behavior.
 
 Operation catalog 0.7.2 preserves the legacy implicit descriptions byte for
 byte, so ORM/macros 0.95 consumers retain their descriptions and fingerprints

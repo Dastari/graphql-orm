@@ -1,0 +1,5 @@
+error: relation column arrays must contain string literals
+ --> tests/ui/recheck386/composite_target_key.rs:7:107
+  |
+7 | struct Source { #[primary_key] #[sortable] id: i32, tenant_id: i32, #[relation(target = "Target", from = [tenant_id, id], to = [tenan...
+  |                                                                                                           ^^^^^^^^^

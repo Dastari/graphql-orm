@@ -45,6 +45,64 @@ pub trait EntityRelations {
     }
 }
 
+/// Compile-time declaration of persisted columns eligible for GraphQL relation reads.
+///
+/// Generated automatically by the entity derives, including metadata-only entities.
+/// Hand-written relation targets must explicitly implement this contract: list every
+/// persisted physical column (not its Rust or GraphQL alias), with `true` only when
+/// it is readable, non-private and not input-only. Omitted columns fail closed.
+/// Names are unquoted physical identifiers; the relation's backend determines SQL
+/// case matching. Never mark a hidden column readable to bypass a relation check.
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "relation target `{Self}` has no generated column-readability metadata",
+    label = "readable relations require target column-readability metadata",
+    note = "derive GraphQLEntity or GraphQLSchemaEntity with current graphql-orm macros, or explicitly implement GeneratedRelationReadability for a hand-written target"
+)]
+pub trait GeneratedRelationReadability {
+    /// Every persisted physical column and its static GraphQL readability.
+    const COLUMNS: &'static [(&'static str, bool)];
+}
+
+/// Check a generated relation's physical target column at compile time.
+///
+/// Unknown columns and any unreadable matching declaration fail closed. PostgreSQL
+/// uses case-sensitive normalized SQL names; SQLite and MSSQL fold ASCII case.
+#[doc(hidden)]
+pub const fn generated_relation_column_is_readable(
+    columns: &[(&str, bool)],
+    column: &str,
+    case_sensitive: bool,
+) -> bool {
+    let mut found = false;
+    let mut index = 0;
+    while index < columns.len() {
+        let (name, readable) = columns[index];
+        let left = name.as_bytes();
+        let right = column.as_bytes();
+        let mut equal = left.len() == right.len();
+        let mut byte = 0;
+        while equal && byte < left.len() {
+            let mut a = left[byte];
+            let mut b = right[byte];
+            if !case_sensitive {
+                a = a.to_ascii_lowercase();
+                b = b.to_ascii_lowercase();
+            }
+            equal = a == b;
+            byte += 1;
+        }
+        if equal {
+            if !readable {
+                return false;
+            }
+            found = true;
+        }
+        index += 1;
+    }
+    found
+}
+
 pub trait DatabaseSearchSchema {
     fn search_index() -> Option<&'static SearchIndexDef> {
         None

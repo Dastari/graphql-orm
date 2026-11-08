@@ -1,0 +1,5 @@
+error: readable relation uses unreadable self-target condition column `TIER_CODE`; make the relation unreadable too with #[graphql_orm(read = false)], or remove private/input_only and set read = true on the key
+ --> tests/ui/recheck386/self_target_condition.rs:4:113
+  |
+4 | ...2, #[relation(target = "Source", from = "id", to = "id", target_condition(column = "TIER_CODE", equals = 7), multiple, emit_fk = false)] peers: Vec<Source>, }
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

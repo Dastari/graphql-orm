@@ -21,8 +21,9 @@ does. Examples use `Order`, `OrderLine` and `Customer`; they aren't a required m
 
 Unreadable fields (`private`, `read = false`, `input_only`) cannot be keys of a
 readable generated relation; make the relation unreadable too or make its
-local keys readable. Self-target keys are checked; inspect other entities'
-target keys manually. Generated Changed events require readable primary keys;
+local and target keys and condition columns readable. Cross-crate target
+metadata is required; update older targets or explicitly declare the
+`GeneratedRelationReadability` contract on hand-written targets. Generated Changed events require readable primary keys;
 use `RepositoryEntity` or omit `GraphQLOperations` for truly private keys.
 Automatic aggregates, search, catalogues and public cursors exclude unreadable
 fields. Explicit scalar filter/sort grants on `read = false` remain independent.

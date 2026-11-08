@@ -162,17 +162,24 @@ ordering, relation filters, and subscription fields. An explicitly enabled
 scalar `filterable` or `sortable` capability on `read = false` remains usable;
 it can reveal predicates or ordering and is an intentional independent grant.
 
-A readable relation requires every local `from` key (including arrays of key parts) to be
-GraphQL-readable too, or compilation fails. Make the relation unreadable with
-`#[graphql_orm(read = false)]` (and skip its object getter), or make every key
-readable. Self-relations naming the current entity directly (or `Self`) check
-the target keys as well, using physical database names and SQL quoting/case
-rules. Unresolved self-target columns fail compilation; spell the declared
-physical name with matching SQL quoting. A derive cannot resolve qualified/aliased target
-identities or inspect a different entity's field attributes, including
-cross-crate targets; hosts
-must ensure those target keys are readable or hide the relation. Target-side
-privacy across different entities is not statically guaranteed by this check.
+A readable relation requires every local `from` key, target `to` key, and
+source/target condition column to be GraphQL-readable too, or compilation fails.
+This includes every composite key component, both relation directions,
+self-relations and targets in other crates. Make the relation unreadable with
+`#[graphql_orm(read = false)]` (and skip its object getter), or make every
+referenced column readable. Local keys and source conditions name Rust fields;
+target keys and target conditions name physical database columns with matching
+SQL quoting/case. Unresolved target columns fail compilation.
+
+Entity derives emit hidden `GeneratedRelationReadability` metadata, and readable
+relations prove target eligibility with const assertions. Older macro targets
+and hand-written targets without this metadata fail compilation; rebuild with
+current macros or explicitly implement the trait for a hand-written target.
+Its `COLUMNS` lists physical column names and their actual readability; omitted
+columns fail closed. This metadata does not replace runtime authorization.
+`RuntimeSchema::from_static_entities` still lacks structural readability in its
+runtime field IR; that separate limitation is tracked in
+[issue #390](https://github.com/Dastari/graphql-orm/issues/390).
 
 `GraphQLOperations` generates Changed events carrying the primary key, so every
 primary-key component must be GraphQL-readable. An unreadable primary key is a

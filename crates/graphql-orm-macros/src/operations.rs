@@ -2087,6 +2087,8 @@ fn generate_graphql_operations_unfiltered(
     let single_operation_description = format!("Read one {struct_name_str} record");
     let search_operation_description = format!("Search {struct_name_str} records");
     let keyset_operation_description = format!("Page through {struct_name_str} records");
+    let scan_operation_description =
+        "Bounded forward authorization scan; continuation does not promise another visible row.";
     let create_operation_description = format!("Create one {struct_name_str} record");
     let upsert_operation_description = format!("Create or update one {struct_name_str} record");
     let update_operation_description = format!("Update one {struct_name_str} record");
@@ -5250,7 +5252,7 @@ fn generate_graphql_operations_unfiltered(
                 Ok(#connection_type::from_generic(connection))
             }
 
-            /// Bounded forward authorization scan; continuation does not promise another visible row.
+            #[doc = #scan_operation_description]
             #[graphql(#scan_query_skip name = #scan_query_name, #keyset_list_requires_scopes #authenticated_directive)]
             async fn authorized_scan(
                 &self,
@@ -7116,7 +7118,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
             &scan_query_name,
-            &keyset_operation_description,
+            scan_operation_description,
             vec![
                 argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
                 argument_descriptor(

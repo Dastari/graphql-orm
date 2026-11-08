@@ -4,9 +4,10 @@ use crate::backend::{
     resolve_backend,
 };
 use crate::entity::{
-    RelationConditionMetadata, RelationConditionValue, collect_parsed_fields, has_graphql_complex,
-    parse_entity_metadata, relation_change_propagation_tokens, relation_delete_policy_tokens,
-    resolver_auth_mode_tokens, validate_graphql_relation_keys,
+    RelationConditionMetadata, RelationConditionValue, collect_parsed_fields,
+    graphql_relation_target_checks, has_graphql_complex, parse_entity_metadata,
+    relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
+    validate_graphql_relation_keys,
 };
 use crate::naming::graphql_field_name;
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -265,6 +266,7 @@ pub(crate) fn generate_graphql_relations(
 
     // Collect relations
     let mut relations: Vec<RelationDef> = Vec::new();
+    let mut relation_target_checks = Vec::new();
 
     for parsed_field in &parsed_fields {
         let field = &parsed_field.field;
@@ -323,6 +325,13 @@ pub(crate) fn generate_graphql_relations(
             &from_cols,
             &to_cols,
         )?;
+        relation_target_checks.push(graphql_relation_target_checks(
+            backend,
+            struct_name,
+            field,
+            meta,
+            &to_cols,
+        )?);
         let mut source_field_idents = Vec::with_capacity(from_cols.len());
         let mut source_kinds = Vec::with_capacity(from_cols.len());
         let mut source_optional = Vec::with_capacity(from_cols.len());
@@ -1390,6 +1399,7 @@ pub(crate) fn generate_graphql_relations(
     };
 
     Ok(quote! {
+        #(#relation_target_checks)*
         impl ::graphql_orm::graphql::orm::RelationLoader<#backend_marker> for #struct_name {
             async fn load_relations(
                 &mut self,
