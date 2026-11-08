@@ -374,7 +374,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                     ::graphql_orm::async_graphql::EmptyMutation,
                     #readonly_subscription_value,
                 )
-                .data(database.clone());
+                .data(database.clone())
+            .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
+                vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
+            ));
                 let builder = limits.apply(builder);
                 #federation_enable
                 #schema_auth_data
@@ -532,7 +535,10 @@ pub(crate) fn expand(input: TokenStream) -> TokenStream {
                 #mutation_root_value,
                 #subscription_root_value,
             )
-            .data(database.clone());
+            .data(database.clone())
+            .extension(::graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(
+                vec![#(#entities::__GOM_CHANGED_ROOT_NAME),*]
+            ));
             let builder = limits.apply(builder);
             #federation_enable
             #schema_auth_data

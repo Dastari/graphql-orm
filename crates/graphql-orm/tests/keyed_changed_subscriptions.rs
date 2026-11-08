@@ -864,6 +864,94 @@ async fn a_replaced_event_channel_ends_its_subscribers(db: &Database) -> TestRes
     Ok(())
 }
 
+struct CurrentSubscriber(std::sync::Arc<std::sync::atomic::AtomicBool>);
+impl EntityPolicy for CurrentSubscriber {
+    fn can_access_entity<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            Ok(surface != EntityAccessSurface::GraphqlSubscription
+                || self.0.load(std::sync::atomic::Ordering::SeqCst))
+        })
+    }
+}
+
+async fn subscriber_loss_ends_direct_and_propagated_streams(db: &Database) -> TestResult {
+    parent(db, "p1", "alice").await?;
+    let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut db = db.clone();
+    db.set_entity_policy(CurrentSubscriber(allowed.clone()));
+    for keyed in [false, true] {
+        for propagated in [false, true] {
+            allowed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let args = if keyed {
+                keys_argument(&["p1"])
+            } else {
+                String::new()
+            };
+            let mut stream = open(&db, parent_subscription(&args), "alice");
+            admitted(&mut stream).await;
+            allowed.store(false, std::sync::atomic::Ordering::SeqCst);
+            if propagated {
+                let input = CreateKeyedChildInput {
+                    id: format!("child-{keyed}"),
+                    parent_id: "p1".into(),
+                    body: "hidden".into(),
+                };
+                KeyedChild::insert(&db, input).await?;
+            } else {
+                touch(&db, "p1", "hidden").await?;
+            }
+            ends_with(&mut stream, "FORBIDDEN").await;
+        }
+    }
+    Ok(())
+}
+
+async fn aliased_roots_cannot_multiply_the_key_budget(db: &Database) -> TestResult {
+    let mut limited = db.clone().with_subscription_key_limit(2);
+    let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    limited.set_entity_policy(CurrentSubscriber(allowed));
+    let sender = limited.ensure_event_sender::<graphql_orm::graphql::subscriptions::SubscriptionEvent<KeyedParentChangedEvent>>();
+    let field = parent_changed();
+    let args = argument_name("keys");
+    let root = <SubscriptionRoot as async_graphql::SubscriptionType>::type_name();
+    for extra in [
+        format!(
+            "b: {field}({args}: [\"k3\", \"k4\"]) {{ id }} c: {field}({args}: [\"k5\", \"k6\"]) {{ id }}"
+        ),
+        format!(
+            "...Roots }} fragment Roots on {root} {{ b: {field}({args}: [\"k3\", \"k4\"]) @skip(if: true) {{ id }}"
+        ),
+        format!(
+            "... on {root} {{ b: {field}({args}: [\"k3\", \"k4\"]) @include(if: false) {{ id }} }}"
+        ),
+    ] {
+        let mut stream = open(
+            &limited,
+            format!("subscription {{ a: {field}({args}: [\"k1\", \"k2\"]) {{ id }} {extra} }}"),
+            "alice",
+        );
+        assert_eq!(
+            refused(&mut stream).await.as_deref(),
+            Some("\"subscription_root_limit_exceeded\"")
+        );
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            sender.receiver_count(),
+            0,
+            "admission opened an event receiver"
+        );
+    }
+    Ok(())
+}
+
 macro_rules! scenarios {
     ($($scenario:ident),* $(,)?) => {
         #[cfg(feature = "sqlite")]
@@ -896,6 +984,8 @@ macro_rules! scenarios {
 }
 
 scenarios![
+    aliased_roots_cannot_multiply_the_key_budget,
+    subscriber_loss_ends_direct_and_propagated_streams,
     keys_deliver_only_listed_keys,
     one_key_matches_like_key,
     an_empty_list_matches_nothing,

@@ -2086,7 +2086,7 @@ fn generate_graphql_operations_unfiltered(
     let subscription_operation_description =
         format!("Observe changes to {struct_name_str} records");
     let subscription_operation_description = format!(
-        "{} Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Events recheck current authorization and may be suppressed; refresh authorized queries for richer data.",
+        "{} Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Subscriber authority loss emits one sanitized FORBIDDEN error and ends the stream; row, key, field and provenance denials silently suppress events. Select exactly one root occurrence per operation. Refresh authorized queries for richer data.",
         subscription_operation_description
     );
     let page_info_field_name = apply_graphql_case("pageInfo", field_case);
@@ -2321,6 +2321,9 @@ fn generate_graphql_operations_unfiltered(
             quote! { pub }
         };
     let subscription_key_method = quote! {
+        #[doc(hidden)]
+        pub const __GOM_CHANGED_ROOT_NAME: &'static str = #subscription_name;
+
         #[doc(hidden)]
         #subscription_key_visibility fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
             -> ::graphql_orm::async_graphql::Result<()> {
@@ -5617,6 +5620,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                     use ::graphql_orm::futures::StreamExt;
+                    ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #subscription_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -5647,7 +5651,7 @@ fn generate_graphql_operations_unfiltered(
                     let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
-                    Ok(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
+                    Ok(::graphql_orm::graphql::subscriptions::terminal_errors(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
                         let key = key.clone();
@@ -5658,7 +5662,33 @@ fn generate_graphql_operations_unfiltered(
                                 // Lost continuity or a closed event source: one error, then the stream ends.
                                 Err(error) => return Some(Err(error)),
                             };
-                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
+                            let subscriber_denied = ::std::sync::atomic::AtomicBool::new(false);
+                            let authorize_subject = || {
+                                let result = #struct_name::__gom_authorize_changed_operation(ctx)
+                                    .and_then(|_| ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription));
+                                if result.is_err() {
+                                    subscriber_denied.store(true, ::std::sync::atomic::Ordering::Relaxed);
+                                }
+                                result
+                            };
+                            let authorize_subscriber = || async {
+                                let result = async {
+                                    authorize_subject()?;
+                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
+                                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                                    // The entity-policy await must not outlive current subscriber authority.
+                                    authorize_subject()?;
+                                    Ok::<(), ::graphql_orm::async_graphql::Error>(())
+                                }.await;
+                                if result.is_err() {
+                                    subscriber_denied.store(true, ::std::sync::atomic::Ordering::Relaxed);
+                                }
+                                result
+                            };
+                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async {
+                                authorize_subscriber().await.ok()?;
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
                                 if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
@@ -5666,9 +5696,7 @@ fn generate_graphql_operations_unfiltered(
                                     != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
                                 if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
                                 let authorize_current = || async {
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                    #subscription_scope_enforcement
-                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    authorize_subject()?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
                                     if witness.trusted_delete
                                         && event.entity.as_ref().is_some_and(|entity|
@@ -5683,15 +5711,9 @@ fn generate_graphql_operations_unfiltered(
                                     }
                                     ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
                                     // Query and field-policy awaits must not outlive current authority.
-                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
-                                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                    #subscription_scope_enforcement
-                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    authorize_subscriber().await?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
-                                    #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                    authorize_subject()?;
                                     Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                                 };
                                 match authorize_current().await {
@@ -5715,9 +5737,19 @@ fn generate_graphql_operations_unfiltered(
                                     Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                                 }
                             }.await;
+                            // Never add an asynchronous policy call after a successful
+                            // complete row/key/field/provenance release proof.
+                            if delivered.is_none() {
+                                let _ = authorize_subscriber().await;
+                            } else {
+                                let _ = authorize_subject();
+                            }
+                            if subscriber_denied.load(::std::sync::atomic::Ordering::Relaxed) {
+                                return Some(Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()));
+                            }
                             delivered.map(Ok)
                         }
-                    }))
+                    })))
                 }
             }
 
@@ -7450,6 +7482,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                 use ::graphql_orm::futures::StreamExt;
+                    ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #subscription_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -7481,7 +7514,7 @@ fn generate_graphql_operations_unfiltered(
                 let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
-                    Ok(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
+                    Ok(::graphql_orm::graphql::subscriptions::terminal_errors(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
                         let key = key.clone();
@@ -7492,7 +7525,33 @@ fn generate_graphql_operations_unfiltered(
                                 // Lost continuity or a closed event source: one error, then the stream ends.
                                 Err(error) => return Some(Err(error)),
                             };
-                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
+                            let subscriber_denied = ::std::sync::atomic::AtomicBool::new(false);
+                            let authorize_subject = || {
+                                let result = #struct_name::__gom_authorize_changed_operation(ctx)
+                                    .and_then(|_| ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription));
+                                if result.is_err() {
+                                    subscriber_denied.store(true, ::std::sync::atomic::Ordering::Relaxed);
+                                }
+                                result
+                            };
+                            let authorize_subscriber = || async {
+                                let result = async {
+                                    authorize_subject()?;
+                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
+                                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
+                                    // The entity-policy await must not outlive current subscriber authority.
+                                    authorize_subject()?;
+                                    Ok::<(), ::graphql_orm::async_graphql::Error>(())
+                                }.await;
+                                if result.is_err() {
+                                    subscriber_denied.store(true, ::std::sync::atomic::Ordering::Relaxed);
+                                }
+                                result
+                            };
+                            let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async {
+                                authorize_subscriber().await.ok()?;
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
                                 if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
@@ -7500,9 +7559,7 @@ fn generate_graphql_operations_unfiltered(
                                     != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
                                 if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
                                 let authorize_current = || async {
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                    #subscription_scope_enforcement
-                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    authorize_subject()?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
                                     if witness.trusted_delete
                                         && event.entity.as_ref().is_some_and(|entity|
@@ -7517,15 +7574,9 @@ fn generate_graphql_operations_unfiltered(
                                     }
                                     ::graphql_orm::graphql::subscriptions::authorize_subscription_fields(&db, ctx, &row, #entity_result_field_name).await?;
                                     // Query and field-policy awaits must not outlive current authority.
-                                    db.ensure_entity_access(Some(ctx), #entity_name_lit,
-                                        <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
-                                        ::graphql_orm::graphql::orm::EntityAccessKind::Read,
-                                        ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
-                                    #subscription_scope_enforcement
-                                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                    authorize_subscriber().await?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
-                                    #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                    authorize_subject()?;
                                     Ok::<#struct_name, ::graphql_orm::async_graphql::Error>(row)
                                 };
                                 match authorize_current().await {
@@ -7550,9 +7601,19 @@ fn generate_graphql_operations_unfiltered(
                                     Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                                 }
                             }.await;
+                            // Never add an asynchronous policy call after a successful
+                            // complete row/key/field/provenance release proof.
+                            if delivered.is_none() {
+                                let _ = authorize_subscriber().await;
+                            } else {
+                                let _ = authorize_subject();
+                            }
+                            if subscriber_denied.load(::std::sync::atomic::Ordering::Relaxed) {
+                                return Some(Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error()));
+                            }
                             delivered.map(Ok)
                         }
-                    }))
+                    })))
             }
         }
 

@@ -161,6 +161,21 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     let completed = websocket.next_json();
     assert_eq!(completed["id"], "lost", "{completed}");
     assert_eq!(completed["type"], "complete", "{completed}");
+    websocket.send_json(&json!({
+        "id": "revoked", "type": "subscribe",
+        "payload": {"query": "subscription { endedRevoked: ended }"}
+    }));
+    let denied = websocket.next_json();
+    assert_eq!(denied["id"], "revoked");
+    assert_eq!(denied["type"], "next");
+    assert_eq!(
+        denied["payload"]["errors"][0]["extensions"]["code"],
+        "FORBIDDEN"
+    );
+    assert_eq!(denied["payload"]["errors"][0]["message"], "forbidden");
+    let completed = websocket.next_json();
+    assert_eq!(completed["id"], "revoked");
+    assert_eq!(completed["type"], "complete");
     websocket.close();
 
     let signal = Command::new("kill")
@@ -547,6 +562,18 @@ fn handle_upstream_websocket(mut stream: TcpStream, request: &str) -> std::io::R
                         // Changed stream loses continuity: one item whose
                         // response carries the error, then the end of the stream.
                         let id = message["id"].clone();
+                        let revoked = message["payload"]["query"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Revoked");
+                        let (code, text) = if revoked {
+                            ("FORBIDDEN", "forbidden")
+                        } else {
+                            (
+                                "SUBSCRIPTION_CONTINUITY_LOST",
+                                "subscription lost event continuity; subscribe again, then refetch",
+                            )
+                        };
                         for event in [
                             json!({
                                 "id": id,
@@ -554,8 +581,8 @@ fn handle_upstream_websocket(mut stream: TcpStream, request: &str) -> std::io::R
                                 "payload": {
                                     "data": null,
                                     "errors": [{
-                                        "message": "subscription lost event continuity; subscribe again, then refetch",
-                                        "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}
+                                        "message": text,
+                                        "extensions": {"code": code}
                                     }]
                                 }
                             }),

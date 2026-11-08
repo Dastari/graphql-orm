@@ -162,11 +162,16 @@ and reload failures use that
 same terminal, irrespective of whether a key was previously visible. Changes
 between events simply apply both fresh restrictions to the next read.
 Field or operation denial, including revocation of either purpose, quietly
-withholds the event and keeps the stream open, matching derived subscriptions;
-there is no key-dependent completion or diagnostic. Reauthorization can permit
-a later event. Authorizers must return current decisions, reject stale
+withholds the event and keeps the stream open. Runtime-IR's host grant/denial API
+does not distinguish subscriber-level loss from row-level denial; there is no
+key-dependent completion or diagnostic. Reauthorization can permit a later
+runtime-IR event. Authorizers must return current decisions, reject stale
 database-auth/cursor partitions and verify current principals rather than
 retaining an allow decision from registration.
+
+Generated static/derived subscriptions instead end with one sanitized
+`FORBIDDEN` error when the subscriber's own authentication, scopes, assurance or
+entity access is lost. Their row/key/field/provenance denials remain silent.
 
 Current rows hidden from this subscription produce no per-row frame. A reload
 that is invisible or missing can be reported as removed (`DELETED`, null entity)

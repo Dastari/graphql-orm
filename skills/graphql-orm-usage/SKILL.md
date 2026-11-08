@@ -417,7 +417,13 @@ first if you waited for `After`.
 ## Subscriptions and propagation
 
 - **Use `<entity>Changed`** rather than hand-written signal subscriptions. It rechecks authorization
-  for each event and reports lost continuity.
+  for each event and reports lost continuity. Subscriber-level authentication, scope, assurance or
+  entity-access loss yields one sanitized `FORBIDDEN` error and ends; reauthenticate before reopening.
+  Row/key/field/provenance denials silently hide the event and keep the stream open.
+  Select exactly one root occurrence per operation, including aliases, fragments and skipped fields;
+  split multi-root operations or expect `subscription_root_limit_exceeded` before sources open.
+  Generated schema builders install admission; hand-built schemas must install
+  `GeneratedSubscriptionAdmission(vec!["recordChanged"])` with every actual Changed field name.
 - **Set `propagate_change = "up"`** on relations whose parent views show child state, rather than
   computing parent invalidations in hooks or keeping dependency tables in the frontend. The parent's
   stream gets a `PROPAGATED` event with `sourceEntity`, `sourceId` and `path`, limited to 16 hops and

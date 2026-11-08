@@ -10,6 +10,33 @@ supersedes: []
 
 # Migration Guide
 
+## 0.95.0 to 0.96.0: Changed admission and subscriber revocation
+
+Clients selecting a generated static/derived `Changed` root must select exactly
+one root-field occurrence per operation, even with aliases, fragments or
+`@skip`/`@include`. Split multi-root operations into separate subscriptions.
+Detect refusal through `errors[].extensions.code == "subscription_root_limit_exceeded"`;
+admission happens before event receivers open or record reads. Generated
+`schema_builder` helpers install admission automatically. Manually assembled
+schemas must add `.extension(GeneratedSubscriptionAdmission(vec!["recordChanged"]))`
+from `graphql_orm::graphql::subscriptions`, listing every generated Changed
+field's actual GraphQL name; this also covers skipped generated roots alongside
+custom sibling sources. The resolver itself additionally refuses multiple roots
+when invoked.
+
+Generated keyed, unkeyed and propagated streams now emit one sanitized
+`FORBIDDEN` error and end when the subscriber's own resolver authentication,
+scopes, assurance or current entity access fails. Hosts must expose expired or
+revoked sessions through their current authority checks. Detect the error code,
+stop the old subscription, reauthenticate or regain authority, and then open a
+new subscription and refetch. Over the router this is a `next` frame carrying
+`errors`, followed by `complete`. Do not blindly retry forbidden streams.
+
+Row-, key-, selected-field and provenance denials still silently hide the event
+and leave the stream open. Runtime-IR live authority uses an undifferentiated
+host grant/denial API, so its denials still withhold events silently. No new host
+API is introduced and no data migration is needed.
+
 ## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 
 Breaking Rust IR construction: add `node_identity: None` and

@@ -348,8 +348,22 @@ and the instrumented query counter; this does not claim constant wall-clock time
 
 Generated ordinary and append-only subscriptions recheck current request,
 entity, row and selected-field authority before every event. Live payloads are
-fresh authorized rows, not historical snapshots. Errors or denials suppress the
-whole event, including its outer identifier and provenance. Propagated events
+fresh authorized rows, not historical snapshots. Loss of the subscriber's own
+resolver authentication, scopes, assurance or current entity access emits one
+sanitized `FORBIDDEN` error and ends the stream. Over the router it is a `next`
+frame with `errors`, then `complete`; reauthenticate before subscribing again.
+Row, key, field and provenance errors or denials suppress the whole event,
+including its outer identifier and provenance, and leave the stream open.
+Operations selecting a generated Changed root must select exactly one root-field
+occurrence, counting aliases, fragments and skipped/included fields. Otherwise
+`subscription_root_limit_exceeded` is returned before any source opens or record
+is read. The `scripts/run-owned-database-lanes.sh changed-subscriptions` lane
+checks keyed admission, direct and propagated revocation on SQLite and disposable
+PostgreSQL/MSSQL databases. Split multiple roots into separate subscriptions. Generated schema
+builders install this validation automatically. Hand-built schemas must install
+`graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission` with every
+generated Changed field name; resolver-only checks cannot see a skipped root
+before a custom sibling opens. Propagated events
 also require current authorization of each source primary key, foreign key and
 relationship for creates and updates. Deletes capture the parent tuple from the
 child preimage inside the transaction and require the first parent's current row,

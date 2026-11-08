@@ -876,3 +876,27 @@ pub(crate) fn admit_subscription_key_count(
     }
     Ok(())
 }
+
+pub use super::subscription_admission::GeneratedSubscriptionAdmission;
+#[doc(hidden)]
+pub use super::subscription_admission::admit_generated_operation;
+
+/// End immediately after yielding a terminal stream error, without polling the source again.
+#[doc(hidden)]
+pub fn terminal_errors<S, T>(stream: S) -> impl futures::Stream<Item = async_graphql::Result<T>>
+where
+    S: futures::Stream<Item = async_graphql::Result<T>>,
+{
+    use futures::StreamExt;
+    futures::stream::unfold(
+        (Box::pin(stream), false),
+        |(mut stream, ended)| async move {
+            if ended {
+                return None;
+            }
+            let item = stream.next().await?;
+            let ended = item.is_err();
+            Some((item, (stream, ended)))
+        },
+    )
+}

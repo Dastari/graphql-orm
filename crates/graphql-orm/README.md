@@ -10,6 +10,8 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.96.0 refuses multiple root occurrences in operations selecting generated Changed subscriptions and ends streams with one sanitized FORBIDDEN error when subscriber authority is lost. Row, key, field and provenance filtering stays silent. Split multi-root operations and handle reauthentication; no data migration is needed. See the root migration guide.
+
 Version 0.95.0 adds opt-in runtime NodeId, managed versions and authorized keyed live subscriptions. Rust runtime collection literals need the two new optional fields; see the root migration guide. Existing serialized schemas and derived APIs are unchanged.
 
 Version 0.95.0 also aligns searchable runtime list arguments in the semantic catalog with SDL.

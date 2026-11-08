@@ -13,3 +13,5 @@ pub mod subscriptions;
 
 #[cfg(feature = "runtime-graphql")]
 pub mod runtime;
+
+pub(crate) mod subscription_admission;

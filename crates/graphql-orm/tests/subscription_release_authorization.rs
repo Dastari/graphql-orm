@@ -307,12 +307,12 @@ async fn policy_revocation_after_subscription_start_prevents_event_release() {
     assert_eq!(authority.entity_checks.load(Ordering::SeqCst), 1);
     authority.entity_allowed.store(false, Ordering::SeqCst);
     publish(&schema, "SecureRecord", "revoked-alice", "alice").await;
-    assert!(
-        timeout(Duration::from_millis(100), stream.next())
-            .await
-            .is_err(),
-        "revoked subscriber received event metadata"
-    );
+    let response = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.errors[0].message, "forbidden");
+    assert!(stream.next().await.is_none());
     assert!(
         authority.entity_checks.load(Ordering::SeqCst) >= 2,
         "event was not reauthorized"
@@ -680,11 +680,20 @@ async fn exact_key_never_grants_owner_or_revoked_entity_authority() {
                 if revoke { "alice" } else { "bob" },
             )
             .await;
-            assert!(
-                timeout(Duration::from_millis(100), stream.next())
+            if revoke {
+                let response = timeout(Duration::from_secs(2), stream.next())
                     .await
-                    .is_err()
-            );
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(response.errors[0].message, "forbidden");
+                assert!(stream.next().await.is_none());
+            } else {
+                assert!(
+                    timeout(Duration::from_millis(100), stream.next())
+                        .await
+                        .is_err()
+                );
+            }
         }
     }
 }
@@ -735,5 +744,254 @@ async fn subscription_key_argument_is_in_both_sdl_and_operation_catalogue() {
                 .iter()
                 .any(|argument| argument.graphql_name() == "key")
         );
+    }
+}
+
+#[tokio::test]
+async fn subscriber_revocation_is_one_sanitized_error_then_end() {
+    for (entity, field) in [
+        ("SecureRecord", "secureRecordChanged"),
+        ("SecureAudit", "secureAuditChanged"),
+    ] {
+        for key in ["", "(key: \"wanted\")"] {
+            let (schema, authority) = setup().await;
+            let mut stream = Box::pin(
+                schema.execute_stream(
+                    Request::new(format!("subscription {{ {field}{key} {{ id }} }}"))
+                        .data(AuthSubject::new("alice")),
+                ),
+            );
+            registered(&mut stream).await;
+            authority.entity_allowed.store(false, Ordering::SeqCst);
+            publish(&schema, entity, "wanted", "alice").await;
+            let response = timeout(Duration::from_secs(2), stream.next())
+                .await
+                .expect("revocation error")
+                .expect("one item");
+            assert_eq!(response.errors.len(), 1);
+            assert_eq!(response.errors[0].message, "forbidden");
+            assert_eq!(
+                response.errors[0].extensions.as_ref().unwrap().get("code"),
+                Some(&graphql_orm::async_graphql::Value::from("FORBIDDEN"))
+            );
+            assert!(
+                timeout(Duration::from_secs(2), stream.next())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CurrentAssurance(Arc<AtomicBool>);
+impl AssuranceRequirementEvaluator for CurrentAssurance {
+    fn enforce(
+        &self,
+        _: &async_graphql::Context<'_>,
+        _: AssuranceActorClass,
+        _: &str,
+    ) -> async_graphql::Result<()> {
+        if self.0.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(async_graphql::Error::new(
+                "private session and policy diagnostic",
+            ))
+        }
+    }
+}
+
+#[tokio::test]
+async fn current_assurance_loss_is_sanitized_even_for_an_unmatched_event() {
+    let (_, _, db) = setup_db().await;
+    let catalog = graphql_orm_operation_catalog();
+    let mut builder = OperationAssuranceRegistry::builder(catalog, AssuranceSchemaConfig::legacy());
+    builder
+        .require(
+            GraphqlOperationKind::Subscription,
+            "secureRecordChanged",
+            "current-session",
+        )
+        .unwrap();
+    let allowed = Arc::new(AtomicBool::new(true));
+    let schema = schema_builder(db)
+        .data(AssuranceEnforcement::new(
+            Arc::new(builder.build().unwrap()),
+            Arc::new(CurrentAssurance(allowed.clone())),
+        ))
+        .finish();
+    let mut stream = Box::pin(
+        schema.execute_stream(
+            Request::new("subscription { secureRecordChanged(key: \"different\") { id } }")
+                .data(AuthSubject::new("alice")),
+        ),
+    );
+    registered(&mut stream).await;
+    allowed.store(false, Ordering::SeqCst);
+    publish(&schema, "SecureRecord", "hidden-trigger", "bob").await;
+    let response = timeout(Duration::from_secs(2), stream.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.errors.len(), 1);
+    assert_eq!(response.errors[0].message, "forbidden");
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from("FORBIDDEN"))
+    );
+    assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn ordinary_and_append_only_static_roots_refuse_aliases_before_authority() {
+    let (schema, authority) = setup().await;
+    for field in ["secureRecordChanged", "secureAuditChanged"] {
+        let mut stream = Box::pin(schema.execute_stream(format!(
+            "subscription {{ a: {field}(keys: [\"a\", \"b\"]) {{ id }} b: {field}(keys: [\"c\", \"d\"]) {{ id }} c: {field}(keys: [\"e\", \"f\"]) {{ id }} }}"
+        )));
+        let response = stream.next().await.unwrap();
+        assert_eq!(
+            response.errors[0].extensions.as_ref().unwrap().get("code"),
+            Some(&async_graphql::Value::from(
+                "subscription_root_limit_exceeded"
+            ))
+        );
+        assert!(stream.next().await.is_none());
+    }
+    assert_eq!(authority.entity_checks.load(Ordering::SeqCst), 0);
+    assert_eq!(authority.row_checks.load(Ordering::SeqCst), 0);
+}
+
+struct AdmissionSource;
+#[async_graphql::Subscription]
+impl AdmissionSource {
+    async fn source(&self, ctx: &async_graphql::Context<'_>) -> impl Stream<Item = i32> {
+        ctx.data_unchecked::<Arc<AtomicUsize>>()
+            .fetch_add(1, Ordering::SeqCst);
+        graphql_orm::futures::stream::pending()
+    }
+}
+#[derive(async_graphql::MergedSubscription)]
+struct AdmissionRoots(AdmissionSource, SecureRecordSubscriptions);
+
+#[tokio::test]
+async fn skipped_generated_root_refuses_before_a_custom_source_opens() {
+    use graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission;
+    let (_, authority, db) = setup_db().await;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let schema = async_graphql::Schema::build(
+        QueryRoot::default(),
+        async_graphql::EmptyMutation,
+        AdmissionRoots(AdmissionSource, SecureRecordSubscriptions),
+    )
+    .data(db)
+    .data(opened.clone())
+    .extension(GeneratedSubscriptionAdmission(vec!["secureRecordChanged"]))
+    .finish();
+    let mut stream = Box::pin(schema.execute_stream(
+        "subscription { source secureRecordChanged(keys: []) @skip(if: true) { id } }",
+    ));
+    let response = stream.next().await.unwrap();
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from(
+            "subscription_root_limit_exceeded"
+        ))
+    );
+    assert!(stream.next().await.is_none());
+    assert_eq!(opened.load(Ordering::SeqCst), 0);
+    assert_eq!(authority.entity_checks.load(Ordering::SeqCst), 0);
+}
+
+struct RevokeAssuranceDuringEntityCheck {
+    allowed: Arc<AtomicBool>,
+    calls: Arc<AtomicUsize>,
+    revoke_at: usize,
+}
+impl EntityPolicy for RevokeAssuranceDuringEntityCheck {
+    fn can_access_entity<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessKind,
+        surface: EntityAccessSurface,
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            if surface == EntityAccessSurface::GraphqlSubscription
+                && self.calls.fetch_add(1, Ordering::SeqCst) + 1 == self.revoke_at
+            {
+                self.allowed.store(false, Ordering::SeqCst);
+                tokio::task::yield_now().await;
+            }
+            Ok(true)
+        })
+    }
+}
+
+#[tokio::test]
+async fn assurance_revocation_at_every_async_entity_check_prevents_release() {
+    // Learn the number of policy boundaries from an authorized delivery, then
+    // revoke during each boundary, including the final release fence.
+    let mut boundaries = 0;
+    let mut revoke_at = 0;
+    loop {
+        let (_, _, mut db) = setup_db().await;
+        let allowed = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        db.set_entity_policy(RevokeAssuranceDuringEntityCheck {
+            allowed: allowed.clone(),
+            calls: calls.clone(),
+            revoke_at,
+        });
+        let mut registry = OperationAssuranceRegistry::builder(
+            graphql_orm_operation_catalog(),
+            AssuranceSchemaConfig::legacy(),
+        );
+        registry
+            .require(
+                GraphqlOperationKind::Subscription,
+                "secureRecordChanged",
+                "current-session",
+            )
+            .unwrap();
+        let schema = schema_builder(db)
+            .data(AssuranceEnforcement::new(
+                Arc::new(registry.build().unwrap()),
+                Arc::new(CurrentAssurance(allowed)),
+            ))
+            .finish();
+        let mut stream = Box::pin(
+            schema.execute_stream(
+                Request::new("subscription { secureRecordChanged { id } }")
+                    .data(AuthSubject::new("alice")),
+            ),
+        );
+        registered(&mut stream).await;
+        publish(&schema, "SecureRecord", "race-trigger", "alice").await;
+        let response = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        if revoke_at == 0 {
+            assert!(response.errors.is_empty());
+            boundaries = calls.load(Ordering::SeqCst);
+            assert!(boundaries > 1);
+        } else {
+            assert_eq!(
+                response.errors.len(),
+                1,
+                "released after boundary {revoke_at}: {response:?}"
+            );
+            assert_eq!(response.errors[0].message, "forbidden");
+            assert!(stream.next().await.is_none());
+        }
+        revoke_at = if revoke_at == 0 { 2 } else { revoke_at + 1 };
+        if revoke_at > boundaries {
+            break;
+        }
     }
 }

@@ -1560,3 +1560,21 @@ fn callback_error_privacy_preserves_authored_refusals() {
         assert_eq!(actual.extensions, expected_extensions);
     }
 }
+
+#[tokio::test]
+async fn changed_operations_have_one_structural_root() {
+    let schema = schema_builder(database().await).finish();
+    let response = schema
+        .execute_stream(as_user(
+            "subscription { a: orderChanged(keys: []) { id } b: orderChanged(keys: []) { id } }",
+        ))
+        .next()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&graphql_orm::async_graphql::Value::from(
+            "subscription_root_limit_exceeded"
+        ))
+    );
+}
