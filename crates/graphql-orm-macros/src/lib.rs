@@ -652,3 +652,5 @@ pub fn schema_roots(input: TokenStream) -> TokenStream {
 pub fn graphql_orm_custom_operations(args: TokenStream, input: TokenStream) -> TokenStream {
     custom_operations::expand(args, input)
 }
+
+mod dependent_deletes;

@@ -10,6 +10,9 @@ sqlite = ["graphql-orm/sqlite"]
 postgres = ["graphql-orm/postgres"]
 mssql = ["graphql-orm/mssql"]
 
+dependent-parent = []
+dependent-parent-opt-in = ["dependent-parent"]
+
 [dependencies]
 graphql-orm.workspace = true
 async-graphql = { workspace = true, features = ["dataloader", "uuid", "decimal"] }

@@ -142,3 +142,30 @@ where
         B::try_get_string(row, "id")
     }
 }
+
+#[cfg(feature = "dependent-parent")]
+#[derive(GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug)]
+#[cfg_attr(
+    feature = "dependent-parent-opt-in",
+    graphql_entity(
+        dependent_deletes,
+        table = "opt_in_parents",
+        plural = "OptInParents",
+        default_sort = "id ASC"
+    )
+)]
+#[cfg_attr(
+    not(feature = "dependent-parent-opt-in"),
+    graphql_entity(
+        table = "opt_in_parents",
+        plural = "OptInParents",
+        default_sort = "id ASC"
+    )
+)]
+pub struct OptInParent {
+    #[primary_key]
+    pub id: String,
+    #[sortable]
+    #[filterable(type = "string")]
+    pub name: String,
+}

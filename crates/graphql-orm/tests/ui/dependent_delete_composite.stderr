@@ -1,0 +1,15 @@
+error: dependent_deletes requires a single-column primary key; composite keys are unsupported
+ --> tests/ui/dependent_delete_composite.rs:3:1
+  |
+3 | / #[graphql_entity(dependent_deletes,table="composite_dependents",plural="CompositeDependents")]
+4 | | struct CompositeDependent {
+5 | |     #[primary_key] first:String,
+6 | |     #[primary_key] second:String,
+7 | | }
+  | |_^
+
+error: dependent_deletes requires a single-column primary key; composite keys are unsupported
+ --> tests/ui/dependent_delete_composite.rs:3:1
+  |
+3 | #[graphql_entity(dependent_deletes,table="composite_dependents",plural="CompositeDependents")]
+  | ^

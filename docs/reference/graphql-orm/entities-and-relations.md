@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-08
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -578,7 +578,10 @@ loaded and resolves to `None` or an empty connection. SQL `NULL = NULL` matching
 ## Physical Foreign Keys
 
 Relation metadata and physical foreign-key emission are separate. By default, relations emit
-migration metadata for physical foreign keys where migrations are supported. Disable physical FK
+migration metadata for physical foreign keys where migrations are supported. Physical cascade and
+set-null actions bypass dependent hooks, Changed subscribers, search maintenance, managed versions
+and propagation. Use [ORM-driven dependent deletes](#orm-driven-dependent-deletes) when those effects
+are needed on a supported generated GraphQL delete. Disable physical FK
 emission for external schemas:
 
 ```rust
@@ -847,3 +850,141 @@ Related-row filters are read-only. Bulk updates and deletes (including bounded r
 and `MutationContext` operations) reject relation filters anywhere under `and`, `or`,
 or `not` with `invalid_input` before writing. Select authorized rows through a read
 first and use supported key-based mutations when needed. No data migration is needed.
+
+## ORM-driven dependent deletes
+
+Available since ORM/macros 0.97.0.
+
+A declared `on_delete = "cascade"` or `"set_null"` normally executes inside the
+database: dependent mutation hooks, Changed subscribers, search maintenance,
+managed versions and change propagation do not run. Prefer a declared delete
+policy with the following opt-in when those effects matter.
+
+Declare `#[graphql_entity(dependent_deletes, ...)]` on each participating entity
+and supply schema/request data:
+
+```rust,ignore
+let dependents = StaticDependentDeletes::<SqliteBackend>::new(
+    RuntimeDependentLimits::new(256, 8)?,
+).register::<Parent>()?.register::<Child>()?;
+let schema = schema_builder(database).data(dependents).finish();
+```
+
+**Every declared deleting ancestor must opt in.** For an opted-in entity's
+declared `cascade` or `set_null` relation, the generated compile-time assertion
+requires the parent to implement `StaticDeleteEntity` for the same backend when
+the relation is non-`multiple`, or is `multiple` with `emit_fk = true`.
+Non-`multiple` relations require it even with `emit_fk = false`. This works
+across crate boundaries. Enable `dependent_deletes` and
+writable generated operations on the parent; `restrict` relations need no such
+assertion.
+
+**Foreign keys that exist only in the database cannot be checked at compile
+time.** An opted-out parent deletes or set-nulls those children physically,
+with no dependent hooks or Changed events, even when the child is opted in and
+registered. Opt the parent in too; an unknown/unmodeled dependency then refuses
+planning. Audit other GraphQL write aliases and trusted repository/raw-SQL
+surfaces, which the incremental registry cannot intercept.
+
+Refusal versus success inherently reveals whether the requested root has
+dependents the caller cannot write. Refusals disclose neither identities nor
+counts, but the required atomic refusal cannot conceal that binary outcome.
+
+The registry is mandatory for opted-in single-row GraphQL deletes. The exact
+Rust root entity must be registered; a different entity/view on the same physical
+table cannot supply its policies, hooks, assurance or event type. A registry
+supports one writer type per physical table; multiple opted-in write aliases for
+one table cannot share a registry. Bulk GraphQL
+delete is omitted from those entities and their operation catalog so it cannot
+bypass dependent authorization or limits. Explicit `delete_many` shape/policy
+declarations must be removed before opting in. Repository deletes retain their
+existing physical-FK behavior as a separate trusted Rust surface. Every dependent runs its direct generated GraphQL write
+checks (scopes, assurance, entity/row/field policies), input hooks and mutation
+hooks on the same transaction. Any denial refuses the entire delete with a
+sanitized error. Assurance uses each dependent's own generated mutation name and
+kind, including strict classification, rather than the initiating root field.
+Root entity/row admission precedes graph locks; its direct not-found result and
+version-conflict errors keep the direct mutation shape. Only dependent failures
+are sanitized as `Dependent delete refused`. Limits count dependent rows, excluding the requested parent,
+and relation hops. Planning locks precede all writes; cycles and unknown external
+dependents refuse. Set-nulls run first and deletes run leaf-first; Changed events
+are emitted only after commit. Physical FK actions remain as a backstop.
+
+This release supports SQLite/PostgreSQL, single-column primary keys and FKs
+referencing those primary keys. Composite-key and MSSQL opt-ins fail compilation. Both direct `delete` and
+`update` mutation shapes must be enabled; read-only and append-only entities
+cannot opt in.
+Non-primary-key references refuse at planning. Existing `notify_with` callbacks run after commit with their GraphQL context. PostgreSQL row security is set
+locally to fail rather than silently hide dependent rows; roles affected by RLS
+therefore refuse, and no bypass authority is granted. No DDL/data migration is
+needed and opt-out SQL is unchanged.
+
+PostgreSQL fences the registered tables with `SHARE ROW EXCLUSIVE` locks before
+catalog discovery and transaction-local auth settings, preventing concurrent FK
+DDL from introducing unplanned physical actions. This follows [PostgreSQL’s lock-before-query guidance](https://www.postgresql.org/docs/17/sql-lock.html).
+Register only the participating graph to limit contention. SQLite uses its immediate write transaction. Registry
+tables must exist in the introspected schema with portable managed identifiers;
+temporary-table shadowing and PostgreSQL search-path fallbacks refuse. Authority
+is checked again immediately before SQL after earlier hooks, without repeating
+input transforms or mutation hooks.
+
+FK comparisons must agree with physical FK enforcement. SQLite requires matching
+parent/child affinities and implicit BINARY collation. `pragma_table_xinfo` omits
+collations, so any `COLLATE` token anywhere in registered table SQL conservatively
+refuses, including explicit BINARY and tokens in comments or quoted identifiers.
+PostgreSQL requires identical declared types/type modifiers and the same
+deterministic collation on both columns when collatable. Nondeterministic ICU
+collations refuse. Extension/domain key types (including citext) and blank-padded
+character keys also refuse: equality against a bound value can differ from the
+FK's equality even when both columns have identical declared types.
+Planning verifies these comparison semantics under the schema/write fences for
+both discovery and the final pre-delete referencer lookup, assuming hooks keep
+the physical catalogue unchanged; it does not repeat these catalogue checks
+after hooks. No schema is rewritten automatically.
+
+**Inside dependent checks, `ctx.field()` still describes the initiating root,
+not the dependent operation.** Library auth,
+scope templates and native auth use request data and explicit generated
+entity/argument identities; dependent assurance uses an explicit coordinate.
+Policy callbacks receive the dependent entity/row/field, input hooks receive
+`WriteInputContext::entity_name`, and mutation hooks receive `MutationEvent`
+metadata/action. Hook and policy authors must use the explicit identity supplied
+by their callback API (entity/row/field, input-context entity, mutation-event
+entity/action, or assurance policy/coordinate) to identify and authorize the
+write. Do not use `ctx.field()` as the dependent operation identity; it is only
+initiating-selection provenance. Notifications retain
+the initiating context after commit.
+
+Unmodeled database triggers on registered tables refuse planning, including
+SQLite temporary triggers. A trigger can insert a new referencer inside a delete
+statement, leaving a physical cascade to change a row the ORM never authorized
+or counted. Use explicitly authorized ORM mutation hooks for such behavior;
+referencers covered by the original FK plan are checked before each delete.
+PostgreSQL's native
+FK/unique/exclusion constraint triggers remain supported.
+
+PostgreSQL only supports ordinary standalone heap tables for this option. Before
+each write, `validate_delete_relations` repeats only the relation-kind,
+inheritance/partition and rewrite-rule checks against `pg_class`, `pg_inherits`
+and `pg_rewrite`. Any registered inheritance parent/child, partitioned
+table/partition, non-`_RETURN` rewrite rule, view or foreign table refuses. This
+narrow guard also catches a rule installed by an earlier mutation hook. Trigger
+validation, `validate_postgres` physical-FK validation, hidden-FK detection and
+comparison-semantics checks run only during planning. SQLite performs no
+per-write catalogue revalidation; it has no PostgreSQL inheritance, declarative
+partitioning, rewrite RULE or foreign-table equivalent, and registered views
+refuse ordinary-table validation at planning.
+
+**Mutation hooks that run DDL during a dependent delete are unsupported.** Hooks
+are trusted host code. Creating triggers (including SQLite TEMP triggers),
+adding foreign keys or creating cascading tables after planning is unsupported
+and is not detected: no full catalogue recheck runs after hooks. Such changes can
+introduce physical writes outside the authorized plan, bypassing dependent
+checks, hooks, events and limits. The narrow
+PostgreSQL relation/rule guard does not provide general hook-DDL protection.
+Keep DDL outside these hooks. Full catalogue revalidation after hooks is tracked
+in [#391](https://github.com/Dastari/graphql-orm/issues/391).
+
+The root's Before hook runs before dependents are authorized, so a refused
+cascade may already have produced external hook side effects, as with a direct
+delete whose SQL later fails; defer external work until after commit.
