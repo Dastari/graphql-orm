@@ -26,6 +26,10 @@ pub trait StaticDeleteBackend: TransactionBackend {
     ) -> BoxFuture<'a, crate::Result<()>> {
         Box::pin(async { Ok(()) })
     }
+    /// Read and fully validate the catalogue on the pinned transaction.
+    /// Repeat even checks not represented in the returned model on every call.
+    /// The caller requires structural equality with the planning snapshot;
+    /// no rows are rediscovered and no changed dependency graph is accepted.
     fn dependencies<'a>(
         tx: &'a mut Self::Transaction<'_>,
         ownership: &'a ManagedTableSet,
@@ -218,8 +222,8 @@ impl StaticDeleteBackend for PostgresBackend {
             }
             // The planner and final no-referencer check use the child
             // column's equality semantics; FK enforcement uses the parent's.
-            // Prove them identical before either lookup. Relation locks keep
-            // these catalogue facts fixed through the final DELETE. Extension/
+            // Prove them identical before either lookup. Relation locks fence
+            // concurrent DDL; hook changes are revalidated before writes. Extension/
             // domain equality and blank-padded char vs bound text are unmodeled.
             let incompatible: bool = sqlx::query_scalar(
                 "SELECT EXISTS(
