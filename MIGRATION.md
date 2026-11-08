@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.96.0 to 0.97.0: unreadable fields, relations and safe errors
+## 0.97.0 to 0.98.0: unreadable fields, relations and safe errors
 
 Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`
 fields on `SimpleObject` entities without `#[graphql(skip)]`. This also applies
@@ -46,13 +46,19 @@ relation and column. Make the relation unreadable with
 `graphql_policy_object`), or remove `private`/`input_only` and set `read = true`
 on every column it reads.
 
+The same target-column assertions now run for `GraphQLEntity` with
+`schema_only = true`; disabling the generated object does not waive relation
+readability checks. A readable relation onto a private target column now fails
+compilation on this path too. The repairs above also apply here, including
+when `GraphQLRelations` is derived alongside the schema-only entity.
+
 Unresolved physical target columns, including self-targets, are compile errors:
 use a declared physical database column name with matching SQL quoting and case.
 Rust field names apply to local `from` keys and source conditions; physical
 column names apply to target `to` keys and target conditions. Generated
 `GeneratedRelationReadability` metadata proves target readability across crate
 boundaries. Targets built with older macros or hand-written targets without this
-metadata fail compilation. Rebuild target crates with the current ORM/macros 0.97 revision, or for a
+metadata fail compilation. Rebuild target crates with the current ORM/macros 0.98 revision, or for a
 hand-written target explicitly implement
 `graphql_orm::graphql::orm::GeneratedRelationReadability`, listing physical
 columns and their actual static eligibility:
@@ -85,7 +91,7 @@ documented behavior.
 
 Operation catalog 0.7.2 preserves the legacy implicit descriptions byte for
 byte, so ORM/macros 0.95/0.96 consumers retain their descriptions and fingerprints
-when updating only that dependency. ORM/macros 0.97 explicitly supply the
+when updating only that dependency. ORM/macros 0.98 explicitly supply the
 corrected descriptions; their SDL and catalogue wording agree, including the
 bounded authorization-scan description.
 

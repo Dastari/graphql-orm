@@ -5384,6 +5384,7 @@ fn generate_entity_impl(
     if schema_only {
         return Ok(quote! {
             #relation_readability_impl
+            #(#relation_target_checks)*
             #rls_impl
             #search_schema_impl
             #searchable_entity_impl

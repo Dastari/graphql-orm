@@ -16,13 +16,14 @@ for historical context.
 
 ## Unreleased
 
-ORM runtime/macros **0.97.0**, operation catalog **0.7.2**.
+ORM runtime/macros **0.98.0**, operation catalog **0.7.2**.
 
 - **Breaking:** reject `private`, `read = false`, and `input_only` fields on `GraphQLEntity` + `SimpleObject` entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.
 - **Breaking/security:** a readable relation is a compile error if any local or target key or source/target condition column is unreadable (`private`, `read = false`, `input_only`), including composite keys and cross-crate targets. Unresolved target physical columns (including self-targets) and targets without column-readability metadata also fail compilation. Make the relation unreadable or its columns readable; regenerate older targets or explicitly implement the metadata contract for hand-written targets.
+- **Defence in depth:** `GraphQLEntity(schema_only = true)` also emits the target-column assertions backed by hidden `GeneratedRelationReadability` and `generated_relation_column_is_readable`. Readable relations to unreadable target columns fail compilation on this path too; valid combinations with `GraphQLRelations` remain supported. No data migration is needed.
 - **Breaking/security:** unreadable primary keys with `GraphQLOperations` are compile errors because Changed events expose them. `search_relation` on an unreadable relation, `order_aggregate` on an `input_only` relation, `searchable` on an `input_only` field, and `search_json` on `read = false` / `input_only` fields are compile errors. Remove the declaration or make the field readable.
 - **SDL/security:** remove `input_only` relation getters, aggregate/group-by fields and semantic catalogue entries. Automatic read surfaces share the same readability predicate; explicitly granted scalar filters/sorts on `read = false` remain independent capabilities.
-- **Compatibility:** operation catalog 0.7.2 preserves legacy default descriptions/fingerprints for 0.95/0.96 consumers; 0.97 macros explicitly provide corrected descriptions.
+- **Compatibility:** operation catalog 0.7.2 preserves legacy default descriptions/fingerprints for 0.95/0.96 consumers; 0.98 macros explicitly provide corrected descriptions.
 - **Security:** internal journal and result SQLx adapters now preserve safe error categories and operator reporting without publishing raw diagnostics. Fixes #354.
 - **Fixed:** generated single-record descriptions use singular wording, and bounded scans share the exact SDL description with their catalogue entries; SDL and derived fingerprints change. Fixes #289. No data migration is needed.
 

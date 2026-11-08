@@ -172,7 +172,10 @@ target keys and target conditions name physical database columns with matching
 SQL quoting/case. Unresolved target columns fail compilation.
 
 Entity derives emit hidden `GeneratedRelationReadability` metadata, and readable
-relations prove target eligibility with const assertions. Older macro targets
+relations prove target eligibility with const assertions. `GraphQLEntity` with
+`schema_only = true` emits those assertions too, even without a generated object.
+Combining it with `GraphQLRelations` retains the same checks and is supported.
+Older macro targets
 and hand-written targets without this metadata fail compilation; rebuild with
 current macros or explicitly implement the trait for a hand-written target.
 Its `COLUMNS` lists physical column names and their actual readability; omitted
