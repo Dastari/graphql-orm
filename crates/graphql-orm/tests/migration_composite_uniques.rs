@@ -339,7 +339,8 @@ async fn mssql_composite_constraint_ddl_and_introspection() -> Result<(), Box<dy
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_rebuild_uses_target_append_only_policy() -> Result<(), Box<dyn std::error::Error>> {
+async fn sqlite_composite_rebuild_refuses_mixed_policy_changes()
+-> Result<(), Box<dyn std::error::Error>> {
     let db = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
     let mut metadata = Record::metadata().clone();
     metadata.append_only = true;
@@ -369,11 +370,17 @@ async fn sqlite_rebuild_uses_target_append_only_policy() -> Result<(), Box<dyn s
             PlanOptions::managed_tables_only(),
         )
         .await?;
-    db.schema()
+    let error = db
+        .schema()
         .apply_migration(&plan, ApplyOptions::default())
-        .await?;
-    sqlx::query("UPDATE unique_delta SET name='changed'")
-        .execute(db.pool())
-        .await?;
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("UnsupportedCapability"));
+    assert!(
+        sqlx::query("UPDATE unique_delta SET name='changed'")
+            .execute(db.pool())
+            .await
+            .is_err()
+    );
     Ok(())
 }

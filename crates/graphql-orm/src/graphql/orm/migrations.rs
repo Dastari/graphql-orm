@@ -1177,6 +1177,44 @@ fn order_tables_by_foreign_keys<'a>(
     ordered
 }
 
+fn unique_identifier(name: &str) -> (String, bool) {
+    for (open, close) in [('"', '"'), ('`', '`'), ('[', ']')] {
+        if let Some(inner) = name.strip_prefix(open).and_then(|s| s.strip_suffix(close)) {
+            return (
+                inner.replace(&format!("{close}{close}"), &close.to_string()),
+                true,
+            );
+        }
+    }
+    (name.to_string(), false)
+}
+
+fn canonical_unique_key(
+    backend: DatabaseBackend,
+    key: &[String],
+    existing_columns: &[ColumnModel],
+) -> Vec<String> {
+    key.iter()
+        .map(|name| {
+            let (name, quoted) = unique_identifier(name);
+            match backend {
+                DatabaseBackend::Sqlite => name.to_ascii_lowercase(),
+                DatabaseBackend::Postgres
+                    if !quoted
+                        && !existing_columns
+                            .iter()
+                            .any(|c| unique_identifier(&c.name).0 == name) =>
+                {
+                    name.to_ascii_lowercase()
+                }
+                // MSSQL identifier sensitivity depends on database collation, which
+                // is not in SchemaModel. Never assume a case-insensitive collation.
+                _ => name,
+            }
+        })
+        .collect()
+}
+
 pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> SchemaDiff {
     diff_schema_models_for_backend(DatabaseBackend::Postgres, current, target)
 }
@@ -1441,23 +1479,22 @@ pub(super) fn diff_schema_views_with(
                 retention_purge: target_table.retention_purge,
             });
         }
-        // SQLite merges a UNIQUE that exactly repeats the primary key into
-        // the PK autoindex (origin=pk). It cannot be introspected separately,
-        // and the primary key already enforces the declared uniqueness.
-        let unique_set = |table: &TableRef<'_>| {
-            let primary_keys = table.primary_keys();
-            table
+        let unique_set = |candidate: &TableRef<'_>| {
+            let primary = canonical_unique_key(backend, candidate.primary_keys(), table.columns);
+            candidate
                 .composite_unique_indexes
                 .iter()
-                .filter(|key| backend != DatabaseBackend::Sqlite || **key != primary_keys)
-                .cloned()
+                .map(|key| canonical_unique_key(backend, key, table.columns))
+                .filter(|key| backend != DatabaseBackend::Sqlite || *key != primary)
                 .collect::<std::collections::BTreeSet<_>>()
         };
-        if unique_set(table) != unique_set(target_table) {
+        let before = unique_set(table);
+        let after = unique_set(target_table);
+        if before != after {
             steps.push(OwnedMigrationStep::SetCompositeUniques {
                 table_name: table_name.clone(),
-                before: table.composite_unique_indexes.clone(),
-                after: target_table.composite_unique_indexes.clone(),
+                before: before.into_iter().collect(),
+                after: after.into_iter().collect(),
             });
         }
         if !check_constraints_equivalent(table.check_constraints, target_table.check_constraints) {
@@ -1613,8 +1650,8 @@ fn render_composite_unique_changes(
     after: &[Vec<String>],
 ) -> Vec<String> {
     if backend == DatabaseBackend::Sqlite {
-        return vec![format!(
-            "-- sqlite requires table rebuild for composite uniques on {table_name}"
+        return vec![sqlite_unique_rebuild_directive(
+            table_name, before, after, false,
         )];
     }
     let table = backend.render_identifier_path(table_name);
@@ -1680,7 +1717,11 @@ fn render_composite_unique_changes(
     for columns in after.iter().filter(|columns| !before.contains(columns)) {
         statements.push(format!(
             "ALTER TABLE {table} ADD UNIQUE ({})",
-            backend.render_identifier_list(columns.iter().map(String::as_str))
+            columns
+                .iter()
+                .map(|name| backend.quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     statements
@@ -2392,6 +2433,31 @@ fn attach_search_indexes(tables: &mut [OwnedTableModel], search_indexes: Vec<Sea
     }
 }
 
+// This is deliberately not executable outside the ORM migration executor.
+// A model-only CREATE TABLE cannot preserve physical SQLite DDL. The executor
+// expands this directive from sqlite_master in the migration transaction.
+pub(super) const SQLITE_UNIQUE_REBUILD_PREFIX: &str =
+    "SELECT graphql_orm_rebuild_composite_unique('";
+
+fn sqlite_unique_rebuild_directive(
+    table: &str,
+    before: &[Vec<String>],
+    after: &[Vec<String>],
+    mixed: bool,
+) -> String {
+    let json = serde_json::to_string(&(table, before, after, mixed))
+        .expect("string tuple is serializable");
+    format!(
+        "{}{}')",
+        SQLITE_UNIQUE_REBUILD_PREFIX,
+        json.replace('\'', "''")
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[path = "sqlite_unique_rebuild.rs"]
+pub(super) mod sqlite_unique_rebuild;
+
 fn render_sqlite_table_rebuild_statements(
     current_table: &TableRef<'_>,
     target_table: &TableRef<'_>,
@@ -2954,10 +3020,33 @@ pub(super) fn render_owned_plan_steps(
                                 current_tables.get(table_name),
                                 target_tables.get(table_name),
                             ) {
-                                statements.extend(render_sqlite_table_rebuild_statements(
-                                    current_table,
-                                    target_table,
-                                ));
+                                if let Some((before, after)) =
+                                    steps.iter().find_map(|step| match step {
+                                        OwnedMigrationStep::SetCompositeUniques {
+                                            table_name: name,
+                                            before,
+                                            after,
+                                        } if name == table_name => Some((before, after)),
+                                        _ => None,
+                                    })
+                                {
+                                    let mixed = steps.iter().any(|step| {
+                                        migration_step_table_name(&StepRef::from(step))
+                                            == Some(table_name)
+                                            && !matches!(
+                                                step,
+                                                OwnedMigrationStep::SetCompositeUniques { .. }
+                                            )
+                                    });
+                                    statements.push(sqlite_unique_rebuild_directive(
+                                        table_name, before, after, mixed,
+                                    ));
+                                } else {
+                                    statements.extend(render_sqlite_table_rebuild_statements(
+                                        current_table,
+                                        target_table,
+                                    ));
+                                }
                             }
                         }
                         continue;
@@ -3108,7 +3197,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
         }
 
         let pragma_table_info = format!(
-            "PRAGMA table_info({})",
+            "PRAGMA main.table_info({})",
             DatabaseBackend::Sqlite.quote_identifier(&table_name)
         );
         let column_rows = sqlx::query(&pragma_table_info)
@@ -3157,7 +3246,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
             .unwrap_or_else(|| "id".to_string());
 
         let pragma_index_list = format!(
-            "PRAGMA index_list({})",
+            "PRAGMA main.index_list({})",
             DatabaseBackend::Sqlite.quote_identifier(&table_name)
         );
         let index_rows = sqlx::query(&pragma_index_list)
@@ -3175,7 +3264,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 .unwrap_or_else(|_| "c".to_string());
 
             let pragma_index_info = format!(
-                "PRAGMA index_xinfo({})",
+                "PRAGMA main.index_xinfo({})",
                 DatabaseBackend::Sqlite.quote_identifier(&index_name)
             );
             let index_info_rows = sqlx::query(&pragma_index_info)
@@ -3264,7 +3353,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
         }
 
         let pragma_fk_list = format!(
-            "PRAGMA foreign_key_list({})",
+            "PRAGMA main.foreign_key_list({})",
             DatabaseBackend::Sqlite.quote_identifier(&table_name)
         );
         let foreign_key_rows = sqlx::query(&pragma_fk_list)

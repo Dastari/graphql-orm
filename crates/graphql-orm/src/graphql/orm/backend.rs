@@ -242,6 +242,19 @@ pub trait RlsIntrospectionBackend: OrmBackend {
 /// which keeps migration application unavailable even when entity DML is
 /// deliberately enabled for an externally managed SQL Server schema.
 pub trait MigrationBackend: IntrospectionBackend + WriteBackend {
+    /// Validate backend-specific migration directives without mutating the
+    /// database, before preparing migration infrastructure. Apply must repeat
+    /// this validation inside its transaction to guard against schema races.
+    async fn preflight_migration_statements<S>(
+        _pool: &Self::Pool,
+        _statements: &[S],
+    ) -> crate::Result<()>
+    where
+        S: AsRef<str> + Send + Sync,
+    {
+        Ok(())
+    }
+
     /// Prepare backend-owned migration infrastructure such as history tables.
     async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()>;
 
