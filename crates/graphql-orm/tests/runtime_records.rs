@@ -64,6 +64,7 @@ fn test_schema(table: &str) -> ValidatedRuntimeSchema {
     );
     let account_id = field("account_id", "id", RuntimeValueKind::Integer, false);
     RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![
             RuntimeCollection {

@@ -58,6 +58,7 @@ fn definition() -> RuntimeSchema {
     let mut version = field("rowVersion", RuntimeValueKind::Integer);
     version.default = Some(RuntimeDefault::Literal("1".into()));
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             id: CollectionId::new("records").unwrap(),

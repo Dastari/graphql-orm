@@ -71,6 +71,7 @@ fn definition(extra: bool, amount_scale: u8) -> RuntimeSchema {
         fields.push(tip);
     }
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

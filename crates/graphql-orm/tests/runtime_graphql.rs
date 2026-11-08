@@ -240,6 +240,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
     });
     Arc::new(
         RuntimeSchema {
+            repository_only: false,
             format_version: 1,
             collections: vec![parent, child],
         }
@@ -1288,6 +1289,31 @@ async fn static_hidden_columns_refuse_reads_before_permissive_authority() {
                 == RuntimeSchemaDiagnosticCode::UnsupportedCapability
                 && d.message.contains("statically unreadable")));
         }
+    }
+    let repository = RuntimeSchema::from_static_entities_for_repository(&[
+        Holder::metadata(),
+        Secret::metadata(),
+    ])
+    .unwrap();
+    assert!(repository.repository_only);
+    // The marker survives every ordinary round trip; a permissive authority
+    // cannot admit any GraphQL module containing these internal columns.
+    let wire = serde_json::to_vec(&repository).unwrap();
+    let decoded: RuntimeSchema = serde_json::from_slice(&wire).unwrap();
+    let validated = repository.validate().unwrap();
+    assert!(decoded.repository_only);
+    assert_eq!(
+        validated.fingerprint(),
+        decoded.clone().validate().unwrap().fingerprint()
+    );
+    for definition in [decoded, validated.into_schema()] {
+        let error = RuntimeGraphqlModule::compile(
+            Arc::new(definition.validate().unwrap()),
+            Default::default(),
+        )
+        .err()
+        .expect("repository schemas must not be served");
+        assert_eq!(error.0[0].code(), "repository_only_schema");
     }
     assert_eq!(authority.0.load(Ordering::SeqCst), 0);
 }

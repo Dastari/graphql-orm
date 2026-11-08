@@ -261,6 +261,7 @@ async fn all_runtime_value_kinds_match_actual_runtime_sdl() {
     };
     let runtime = Arc::new(
         RuntimeSchema {
+            repository_only: false,
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
             collections: vec![collection],
         }

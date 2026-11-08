@@ -46,6 +46,7 @@ fn field(id: &str, column: &str, kind: RuntimeValueKind, nullable: bool) -> Runt
 fn schema() -> ValidatedRuntimeSchema {
     let id = field("customer_id", "id", RuntimeValueKind::Integer, false);
     RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![RuntimeCollection {
             node_identity: None,

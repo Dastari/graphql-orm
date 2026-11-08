@@ -339,6 +339,9 @@ impl RuntimeGraphqlModule {
         schema: Arc<ValidatedRuntimeSchema>,
         options: RuntimeGraphqlOptions,
     ) -> Result<Self, RuntimeGraphqlDiagnostics> {
+        if schema.schema().repository_only {
+            return Err(RuntimeGraphqlError::new("repository_only_schema").into());
+        }
         let cost = RuntimeGraphqlCost::for_root_page(
             50,
             true,

@@ -652,6 +652,10 @@ fn valid_search_language(language: &str) -> bool {
 /// The serialized IR format version this crate reads and writes.
 pub const RUNTIME_SCHEMA_FORMAT_VERSION: u32 = 1;
 
+fn repository_schema_is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn current_format_version() -> u32 {
     RUNTIME_SCHEMA_FORMAT_VERSION
 }
@@ -660,6 +664,11 @@ fn current_format_version() -> u32 {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSchema {
+    /// Trusted repository queries only. GraphQL module compilation refuses this schema.
+    /// This marker is retained by serialization and both fingerprints. Never clear it
+    /// or copy its collections into a served schema to bypass static restrictions.
+    #[serde(default, skip_serializing_if = "repository_schema_is_false")]
+    pub repository_only: bool,
     /// Serialized format version; see [`RUNTIME_SCHEMA_FORMAT_VERSION`]. Documents written
     /// before versioning existed deserialize as version 1. Unsupported versions are rejected
     /// by [`RuntimeSchema::validate`].
@@ -671,6 +680,7 @@ pub struct RuntimeSchema {
 impl Default for RuntimeSchema {
     fn default() -> Self {
         Self {
+            repository_only: false,
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
             collections: Vec::new(),
         }
@@ -2244,6 +2254,9 @@ impl ValidatedRuntimeSchema {
         };
 
         let mut out = String::from("runtime-schema v1\n");
+        if schema.repository_only {
+            out.push_str("repository-only\n");
+        }
         for collection in collections {
             let cid = &collection.id;
             out.push_str("collection");
@@ -2844,6 +2857,31 @@ impl RuntimeSchema {
     pub fn from_static_entities(
         entities: &[&EntityMetadata],
     ) -> Result<Self, RuntimeSchemaDiagnostics> {
+        Self::convert_static_entities(entities, false)
+    }
+
+    /// Converts static metadata for trusted, server-authored repository queries only.
+    ///
+    /// Retains unreadable columns for internal identity, filtering, ordering and
+    /// projection. The returned schema is marked `repository_only`; runtime GraphQL
+    /// module compilation refuses it, including after serialization or revalidation.
+    /// This does not authorize any query or make private values safe for disclosure.
+    /// Hosts must keep this marker and must not serve copies of its collections.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same unsupported-capability and conversion diagnostics as
+    /// [`Self::from_static_entities`], except static column unreadability is allowed.
+    pub fn from_static_entities_for_repository(
+        entities: &[&EntityMetadata],
+    ) -> Result<Self, RuntimeSchemaDiagnostics> {
+        Self::convert_static_entities(entities, true)
+    }
+
+    fn convert_static_entities(
+        entities: &[&EntityMetadata],
+        repository_only: bool,
+    ) -> Result<Self, RuntimeSchemaDiagnostics> {
         let mut diagnostics = Vec::new();
         let mut collections = Vec::new();
 
@@ -2918,7 +2956,7 @@ impl RuntimeSchema {
                 // Refuse the entire conversion: dropping the field could also change
                 // relation keys, filters, or aggregates, while copying it would let
                 // a host grant reopen a statically hidden field.
-                if !field.is_readable {
+                if !repository_only && !field.is_readable {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::UnsupportedCapability,
                         format!(
@@ -3221,6 +3259,7 @@ impl RuntimeSchema {
 
         if diagnostics.is_empty() {
             Ok(Self {
+                repository_only,
                 format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
                 collections,
             })

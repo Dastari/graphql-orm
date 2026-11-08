@@ -77,6 +77,7 @@ fn tokenized(remove_diacritics: bool, min_token_len: Option<u8>) -> RuntimeSchem
         json_path: None,
     };
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

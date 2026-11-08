@@ -557,6 +557,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     RuntimeSchema {
+        repository_only: false,
         format_version: graphql_orm::graphql::orm::RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![customers, contact_details, customer_notes, note_attachments],
     }
@@ -1236,4 +1237,40 @@ fn static_conversion_retains_readability_and_refuses_each_hidden_column() {
             == RuntimeSchemaDiagnosticCode::UnsupportedCapability
             && d.message.contains("statically unreadable")));
     }
+}
+
+#[test]
+fn repository_conversion_is_distinct_and_preserves_other_fail_closed_diagnostics() {
+    let normal = RuntimeSchema::from_static_entities(&static_metadata())
+        .unwrap()
+        .validate()
+        .unwrap();
+    let repository =
+        RuntimeSchema::from_static_entities_for_repository(&static_metadata()).unwrap();
+    assert!(repository.repository_only);
+    let repository = repository.validate().unwrap();
+    assert_ne!(normal.fingerprint(), repository.fingerprint());
+    assert_ne!(
+        normal.structural_fingerprint(),
+        repository.structural_fingerprint()
+    );
+    assert!(
+        !serde_json::to_string(normal.schema())
+            .unwrap()
+            .contains("repository_only")
+    );
+    let legacy: RuntimeSchema =
+        serde_json::from_str(&serde_json::to_string(normal.schema()).unwrap()).unwrap();
+    assert!(!legacy.repository_only);
+    assert_eq!(
+        normal.fingerprint(),
+        legacy.validate().unwrap().fingerprint()
+    );
+
+    let mut entity = HiddenValues::metadata().clone();
+    entity.read_policy = Some("owner_only");
+    let diagnostics = RuntimeSchema::from_static_entities_for_repository(&[&entity]).unwrap_err();
+    assert!(diagnostics.diagnostics().iter().any(|d| d.code
+        == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+        && d.message.contains("policy hooks")));
 }

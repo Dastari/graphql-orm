@@ -62,13 +62,14 @@ fn limits() -> RuntimeQueryLimits {
 /// Ephemeral query description derived from owning entities, never a schema
 /// synchronization/migration or a second persistent projection.
 fn query_schema() -> Result<ValidatedRuntimeSchema, AiError> {
-    let mut schema = safe(RuntimeSchema::from_static_entities(&[
+    let mut schema = safe(RuntimeSchema::from_static_entities_for_repository(&[
         AiSessionRecord::metadata(),
         AiSessionEventRecord::metadata(),
         AiMessageRecord::metadata(),
         AiRunRecord::metadata(),
         AiRunFailureDispositionRecord::metadata(),
     ]))?;
+    // Repository-only schemas cannot be compiled into runtime GraphQL.
     // These private primary keys already define the durable keyset identity.
     // The fixed server-authored query admits them only as deterministic tie
     // breakers; this does not expose a new client-selectable sort surface.
@@ -598,7 +599,9 @@ mod tests {
 
     #[test]
     fn activity_query_schema_and_all_run_states_are_closed() {
-        query_schema().unwrap();
+        let schema = query_schema().unwrap();
+        assert!(schema.schema().repository_only);
+        assert!(RuntimeSchema::from_static_entities(&[AiSessionRecord::metadata()]).is_err());
         for state in [
             "queued",
             "leased",

@@ -49,6 +49,7 @@ fn schema(search: Option<RuntimeSearch>) -> RuntimeSchema {
     let mut id = field("id", RuntimeValueKind::Uuid);
     id.nullable = false;
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

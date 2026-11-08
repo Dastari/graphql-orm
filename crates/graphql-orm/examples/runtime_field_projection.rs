@@ -92,6 +92,7 @@ mod example {
         let file_ref = RuntimeFormatNamespace::new("example.file_ref")?;
         let email = RuntimeFormatNamespace::new("example.email")?;
         let definition = RuntimeSchema {
+            repository_only: false,
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
             collections: vec![RuntimeCollection {
                 node_identity: None,

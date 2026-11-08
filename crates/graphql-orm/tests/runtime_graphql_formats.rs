@@ -83,6 +83,7 @@ fn field(
 fn definition(formats: bool) -> RuntimeSchema {
     let file = formats.then(|| format(FILE_REF, 1));
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

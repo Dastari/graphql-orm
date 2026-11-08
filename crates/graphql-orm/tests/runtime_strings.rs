@@ -59,6 +59,7 @@ fn field(name: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
 }
 fn schema() -> ValidatedRuntimeSchema {
     RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![RuntimeCollection {
             node_identity: None,

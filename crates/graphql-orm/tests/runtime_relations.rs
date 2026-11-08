@@ -41,6 +41,7 @@ fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     let contact_id = field("contact_id", RuntimeValueKind::Integer, false);
     let note_id = field("note_id", RuntimeValueKind::Integer, false);
     RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![
             RuntimeCollection {
