@@ -3,7 +3,7 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-08
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -17,12 +17,42 @@ unchanged. To run dependent hooks and Changed subscriptions, declare
 `dependent_deletes` on each participating GraphQL entity and attach a
 `StaticDependentDeletes::<Backend>::new(RuntimeDependentLimits::new(rows, depth)?)`
 registry registering each entity with `.register::<Entity>()?` to schema data.
-Opted-in root deletes require the registry. Their bulk GraphQL delete and catalog
+Opted-in root deletes require the registry and registration of that exact Rust
+entity type; another entity/view sharing its physical table cannot substitute. Their bulk GraphQL delete and catalog
 entry are omitted to prevent an authorization/limit bypass; remove explicit
 `delete_many` shape, operation-authorization and AI-policy declarations, and call
 the bounded single-row deletes. Repository delete helpers retain physical behavior. This release supports SQLite and
 PostgreSQL single-column primary-key references; composite keys and MSSQL opt-ins
 are rejected. Unknown physical dependents and cycles refuse the entire delete.
+
+**Opt in every deleting ancestor, not only a dependent.** Registering/marking a
+child does not intercept deletes of an opted-out parent: those still use the
+physical FK action and skip the child's hooks/events. The registry is built
+incrementally without schema/database discovery and cannot prove that every
+other parent delete surface opts in. Audit every incoming cascade/set-null path
+and trusted repository/raw-SQL delete surface before relying on this guarantee.
+
+Refusal versus success inherently reveals whether the root has dependents the
+caller cannot write. The refusal hides dependent identity and count; it cannot
+hide that binary outcome. Review that disclosure for the exposed root.
+
+Each dependent enforces its own mutation assurance coordinate, including strict
+classification, while preserving the caller's request context. Root admission
+checks its entity/row policy before graph locks; direct root not-found results
+and version-conflict errors retain their existing shape. Only dependent failures
+become `Dependent delete refused`.
+
+SQLite requires matching FK column affinities and implicit BINARY collation.
+Because SQLite column metadata omits collation, any `COLLATE` token in a
+registered table's stored SQL conservatively refuses (even explicit BINARY or a
+comment/quoted token). PostgreSQL requires matching declared types/type modifiers
+and identical deterministic collations for collatable types. Extension/domain
+key types (including citext) and blank-padded character keys refuse because their
+equality with bound values is not modeled. Change an incompatible schema through
+an explicit reviewed migration, or keep that graph opted out; the ORM never
+rewrites it automatically. These checks protect both discovery and the final
+referencer recheck.
+
 Existing `notify_with` callbacks run after the graph commits with the original
 GraphQL context. Native RLS that can hide dependents refuses rather than cascading
 unseen rows. All dependent field-policy denials refuse the delete. Unmodeled database triggers

@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 )]
 #[graphql_entity(
     dependent_deletes,
-    notify_with = "Self::on_committed",
+    notify_with = "Self::enforce_resolver_assurance",
     table = "delete_parents",
     plural = "DeleteParents",
     default_sort = "id ASC"
@@ -54,7 +54,8 @@ struct DeleteChild {
 }
 
 impl DeleteParentMutations {
-    async fn on_committed(
+    // A user callback may share the library helper's final identifier.
+    async fn enforce_resolver_assurance(
         ctx: &async_graphql::Context<'_>,
         pool: &Pool,
         entity: &DeleteParent,
@@ -586,7 +587,7 @@ async fn rollback_discards_dependent_events() {
             .data(FailAfter),
         )
         .await;
-    assert_eq!(response.errors[0].message, "Dependent delete refused");
+    assert_eq!(response.errors[0].message, "private hook diagnostic");
     assert_intact(&pool).await;
     assert!(changes.try_recv().is_err());
 }
@@ -973,4 +974,612 @@ mod opt_out {
             "dependent hooks: {dependent_hooks}, dependent Changed: {dependent_change:?}, all hooks: {observed:?}"
         );
     }
+}
+
+// Regressions derived from the independent PR #388 assurance/collation probes.
+#[derive(Debug)]
+struct ReviewAssurance(Arc<Mutex<Vec<String>>>);
+impl graphql_orm::graphql::assurance::AssuranceRequirementEvaluator for ReviewAssurance {
+    fn enforce(
+        &self,
+        _: &async_graphql::Context<'_>,
+        _: graphql_orm::graphql::assurance::AssuranceActorClass,
+        policy: &str,
+    ) -> async_graphql::Result<()> {
+        let mut checks = self.0.lock().unwrap();
+        checks.push(policy.to_owned());
+        let count = checks.iter().filter(|p| p.as_str() == policy).count();
+        if policy == "step-up" || (policy == "recheck" && count > 1) {
+            Err(async_graphql::Error::new("step-up required"))
+        } else {
+            Ok(())
+        }
+    }
+}
+async fn review_assurance_case(
+    root: Option<&str>,
+    child: Option<&str>,
+    null: Option<&str>,
+    strict: bool,
+    succeeds: bool,
+) {
+    use graphql_orm::graphql::assurance::*;
+    let pool = fixture("dependent-assurance-review").await;
+    let checks = Arc::new(Mutex::new(Vec::new()));
+    // A strict registry may classify the root but omit dependent operations
+    // (for example, a host composing its own partial operation catalogue).
+    let catalog = GraphqlOperationCatalog::compose(std::iter::empty());
+    let mut builder = OperationAssuranceRegistry::builder(
+        &catalog,
+        AssuranceSchemaConfig::legacy().with_strict_mutation_classification(strict),
+    );
+    for (field, class) in [
+        ("deleteDeleteParent", root),
+        ("deleteDeleteChild", child),
+        ("updateDeleteNull", null),
+        ("deleteDeleteLeaf", Some("exempt")),
+    ] {
+        if let Some(class) = class {
+            builder
+                .register_custom(
+                    field,
+                    GraphqlOperationKind::Mutation,
+                    field,
+                    AssuranceActorClass::Interactive,
+                )
+                .unwrap();
+            if class == "exempt" {
+                builder
+                    .exempt(GraphqlOperationKind::Mutation, field, "test exemption")
+                    .unwrap();
+            } else {
+                builder
+                    .require(GraphqlOperationKind::Mutation, field, class)
+                    .unwrap();
+            }
+        }
+    }
+    let enforcement = AssuranceEnforcement::new(
+        Arc::new(builder.build().unwrap()),
+        Arc::new(ReviewAssurance(checks.clone())),
+    );
+    let mut db = Database::new(pool.clone());
+    db.set_field_policy(Policy {
+        deny_entity: false,
+        deny_field: false,
+    });
+    let mut child_events = db
+        .ensure_event_sender::<DeleteChildChangedEvent>()
+        .subscribe();
+    let mut null_events = db
+        .ensure_event_sender::<DeleteNullChangedEvent>()
+        .subscribe();
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(10, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap();
+    let schema = schema_builder(db)
+        .data(AuthSubject::new("test-principal"))
+        .data(enforcement)
+        .data(registry)
+        .finish();
+    // Direct controls: the same dependent coordinate must be refused directly.
+    for (class, document) in [
+        (
+            child,
+            "mutation { deleteDeleteChild(id:\"child\") { success } }",
+        ),
+        (
+            null,
+            "mutation { updateDeleteNull(id:\"null\", input:{parentId:null}) { success } }",
+        ),
+    ] {
+        if class == Some("step-up") || (strict && class.is_none()) {
+            assert!(!schema.execute(document).await.errors.is_empty());
+        }
+    }
+    checks.lock().unwrap().clear();
+    let response = schema
+        .execute("mutation { deleteDeleteParent(id:\"parent\") { success } }")
+        .await;
+    if succeeds {
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        // The required root is checked at admission, pinned preparation and
+        // immediately before SQL; exempt dependents must not borrow it.
+        let observed = checks.lock().unwrap();
+        for (class, count) in [(root, 3), (child, 2), (null, 2)] {
+            if let Some(class) = class.filter(|c| *c != "exempt") {
+                assert_eq!(
+                    observed.iter().filter(|p| p.as_str() == class).count(),
+                    count,
+                    "{observed:?}"
+                );
+            }
+        }
+        assert!(child_events.try_recv().is_ok());
+        assert!(null_events.try_recv().is_ok());
+    } else {
+        assert!(
+            !response.errors.is_empty(),
+            "dependent assurance was bypassed: {:?}",
+            response.data
+        );
+        if root.is_some() && root != Some("step-up") {
+            assert_eq!(response.errors[0].message, "Dependent delete refused");
+            assert!(response.errors[0].extensions.is_none());
+        }
+        assert_intact(&pool).await;
+        assert!(child_events.try_recv().is_err());
+        assert!(null_events.try_recv().is_err());
+    }
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn review_dependent_assurance_uses_its_own_coordinate() {
+    review_assurance_case(
+        Some("exempt"),
+        Some("step-up"),
+        Some("exempt"),
+        false,
+        false,
+    )
+    .await;
+    review_assurance_case(
+        Some("exempt"),
+        Some("exempt"),
+        Some("step-up"),
+        false,
+        false,
+    )
+    .await;
+    review_assurance_case(
+        Some("exempt"),
+        Some("child-approved"),
+        Some("null-approved"),
+        true,
+        true,
+    )
+    .await;
+    review_assurance_case(
+        Some("exempt"),
+        Some("recheck"),
+        Some("exempt"),
+        false,
+        false,
+    )
+    .await;
+    review_assurance_case(
+        Some("exempt"),
+        Some("exempt"),
+        Some("recheck"),
+        false,
+        false,
+    )
+    .await;
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn review_required_root_does_not_override_exempt_dependents() {
+    review_assurance_case(
+        Some("root-approved"),
+        Some("exempt"),
+        Some("exempt"),
+        false,
+        true,
+    )
+    .await;
+    review_assurance_case(
+        Some("root-approved"),
+        Some("exempt"),
+        Some("exempt"),
+        true,
+        true,
+    )
+    .await;
+    review_assurance_case(
+        Some("step-up"),
+        Some("exempt"),
+        Some("exempt"),
+        false,
+        false,
+    )
+    .await;
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn review_strict_assurance_refuses_unregistered_dependent_and_root() {
+    review_assurance_case(Some("exempt"), None, Some("exempt"), true, false).await;
+    review_assurance_case(Some("exempt"), Some("exempt"), None, true, false).await;
+    review_assurance_case(None, Some("exempt"), Some("exempt"), true, false).await;
+}
+
+async fn review_comparison_case(parent_type: &str, child_type: &str, parent: &str, child: &str) {
+    #[cfg(feature = "sqlite")]
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    #[cfg(feature = "postgres")]
+    let pool = owned_postgres::OwnedPostgres::pool("dependent-collation-review", 5)
+        .await
+        .unwrap();
+    #[cfg(feature = "postgres")]
+    sqlx::query(
+        "CREATE COLLATION review_ci (provider=icu, locale='und-u-ks-level2', deterministic=false)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    #[cfg(feature = "postgres")]
+    if parent_type == "citext" {
+        sqlx::query("CREATE EXTENSION citext")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let (parent_type, table_option) = parent_type
+        .strip_suffix(" STRICT")
+        .map(|ty| (ty, " STRICT"))
+        .unwrap_or((parent_type, ""));
+    for sql in [
+        format!(
+            "CREATE TABLE delete_parents(id {parent_type} PRIMARY KEY,name TEXT NOT NULL){table_option}"
+        ),
+        format!(
+            "CREATE TABLE delete_children(id TEXT PRIMARY KEY,parent_id {child_type} NOT NULL REFERENCES delete_parents(id) ON DELETE CASCADE)"
+        ),
+        format!(
+            "CREATE TABLE delete_nulls(id TEXT PRIMARY KEY,parent_id {child_type} REFERENCES delete_parents(id) ON DELETE SET NULL)"
+        ),
+        format!("INSERT INTO delete_parents VALUES('{parent}','parent')"),
+        format!("INSERT INTO delete_children VALUES('child','{child}')"),
+        format!("INSERT INTO delete_nulls VALUES('null','{child}')"),
+    ] {
+        sqlx::query(&sql).execute(&pool).await.unwrap();
+    }
+    let hooks = Hook::default();
+    let mut db = Database::with_mutation_hook(pool.clone(), hooks.clone());
+    db.set_entity_policy(Policy {
+        deny_entity: true,
+        deny_field: false,
+    });
+    let mut events = db
+        .ensure_event_sender::<DeleteChildChangedEvent>()
+        .subscribe();
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(10, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteNull>()
+            .unwrap();
+    let schema = schema_builder(db)
+        .data(AuthSubject::new("test-principal"))
+        .data(registry)
+        .finish();
+    assert!(
+        !schema
+            .execute("mutation { deleteDeleteChild(id:\"child\") { success } }")
+            .await
+            .errors
+            .is_empty()
+    );
+    let response = schema
+        .execute(format!(
+            "mutation {{ deleteDeleteParent(id:\"{parent}\") {{ success }} }}"
+        ))
+        .await;
+    assert!(
+        !response.errors.is_empty(),
+        "unsupported FK comparison was not refused before writes: {:?}",
+        response.data
+    );
+    for table in ["delete_parents", "delete_children", "delete_nulls"] {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "{table}");
+    }
+    let linked: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM delete_nulls WHERE parent_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(linked, 1);
+    assert!(hooks.0.lock().unwrap().is_empty());
+    assert!(events.try_recv().is_err());
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn review_unsafe_fk_collations_refuse_before_planning_or_recheck() {
+    #[cfg(feature = "sqlite")]
+    {
+        review_comparison_case("TEXT COLLATE NOCASE", "TEXT", "P", "p").await;
+        review_comparison_case("TEXT", "TEXT COLLATE NOCASE", "P", "P").await;
+        review_comparison_case("TEXT COLLATE BINARY", "TEXT", "P", "P").await;
+    }
+    #[cfg(feature = "postgres")]
+    {
+        review_comparison_case("TEXT COLLATE review_ci", "TEXT", "P", "p").await;
+        review_comparison_case("TEXT", "TEXT COLLATE review_ci", "P", "P").await;
+        review_comparison_case("TEXT COLLATE review_ci", "TEXT COLLATE review_ci", "P", "p").await;
+    }
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn review_unsafe_fk_type_or_affinity_refuses() {
+    #[cfg(feature = "sqlite")]
+    {
+        review_comparison_case("INTEGER", "TEXT", "1", "01").await;
+        review_comparison_case("TEXT", "NUMERIC", "P", "P").await;
+        review_comparison_case("ANY STRICT", "NUMERIC", "P", "P").await;
+    }
+    #[cfg(feature = "postgres")]
+    review_comparison_case("TEXT", "VARCHAR(64)", "P", "P").await;
+}
+
+#[derive(Default)]
+struct ReviewDenyRootRow;
+impl RowPolicy for ReviewDenyRootRow {
+    fn can_read_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        _: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async { Ok(true) })
+    }
+    fn can_write_row<'a>(
+        &'a self,
+        _: Option<&'a async_graphql::Context<'_>>,
+        _: &'a Database,
+        entity: &'static str,
+        _: Option<&'static str>,
+        _: EntityAccessSurface,
+        _: &'a (dyn std::any::Any + Send + Sync),
+    ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+        Box::pin(async move {
+            assert_eq!(
+                entity, "DeleteParent",
+                "denied root must precede dependent authorization"
+            );
+            Ok(false)
+        })
+    }
+}
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn review_root_row_denial_precedes_graph_locks_and_discovery() {
+    let pool = fixture("root-preflight-review").await;
+    #[cfg(feature = "postgres")]
+    let mut blocker = pool.begin().await.unwrap();
+    #[cfg(feature = "postgres")]
+    sqlx::query("LOCK TABLE delete_children IN ROW EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    #[cfg(feature = "sqlite")]
+    sqlx::query("DROP TABLE delete_leaves")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut db = Database::new(pool.clone());
+    db.set_row_policy(ReviewDenyRootRow);
+    let registry =
+        StaticDependentDeletes::<DefaultBackend>::new(RuntimeDependentLimits::new(10, 4).unwrap())
+            .register::<DeleteParent>()
+            .unwrap()
+            .register::<DeleteChild>()
+            .unwrap()
+            .register::<DeleteLeaf>()
+            .unwrap();
+    let schema = schema_builder(db)
+        .data(AuthSubject::new("test-principal"))
+        .data(registry)
+        .finish();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        schema.execute("mutation { deleteDeleteParent(id:\"parent\") { success } }"),
+    )
+    .await
+    .expect("denied root must not wait for graph locks");
+    assert_eq!(response.errors.len(), 1);
+    assert_eq!(response.errors[0].message, "forbidden");
+    #[cfg(feature = "postgres")]
+    blocker.rollback().await.unwrap();
+}
+
+mod review_root_errors {
+    use super::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "review_root_errors",
+        plural = "ReviewRoots",
+        default_sort = "id ASC"
+    )]
+    struct ReviewRoot {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+        #[graphql_orm(version = "managed", default = "0")]
+        version: i64,
+    }
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "review_root_errors",
+        plural = "DirectRoots",
+        default_sort = "id ASC"
+    )]
+    struct DirectRoot {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+        #[graphql_orm(version = "managed", default = "0")]
+        version: i64,
+    }
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "review_root_errors",
+        plural = "UnregisteredRoots",
+        default_sort = "id ASC"
+    )]
+    struct UnregisteredRoot {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+    }
+    schema_roots! { query_custom_ops: [], entities: [ReviewRoot,DirectRoot,UnregisteredRoot], }
+    async fn root_schema() -> (
+        Pool,
+        async_graphql::Schema<QueryRoot, MutationRoot, SubscriptionRoot>,
+    ) {
+        #[cfg(feature = "sqlite")]
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        #[cfg(feature = "postgres")]
+        let pool = owned_postgres::OwnedPostgres::pool("root-errors-review", 5)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE review_root_errors(id TEXT PRIMARY KEY,name TEXT NOT NULL,version BIGINT NOT NULL DEFAULT 0)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO review_root_errors VALUES('root','root',2)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let registry = StaticDependentDeletes::<DefaultBackend>::new(
+            RuntimeDependentLimits::new(10, 4).unwrap(),
+        )
+        .register::<ReviewRoot>()
+        .unwrap();
+        let schema = schema_builder(Database::new(pool.clone()))
+            .data(AuthSubject::new("test-principal"))
+            .data(registry)
+            .finish();
+        (pool, schema)
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        feature = "postgres",
+        ignore = "requires test-owned PostgreSQL container"
+    )]
+    async fn review_root_registry_cannot_substitute_a_different_entity_on_the_same_table() {
+        let (pool, schema) = root_schema().await;
+        let response = schema
+            .execute("mutation { deleteUnregisteredRoot(id: \"root\") { success } }")
+            .await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_root_errors")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !response.errors.is_empty(),
+            "unregistered root reused a different writer: {:?}; rows left={count}",
+            response.data
+        );
+        assert_eq!(response.errors[0].message, "Dependent delete refused");
+        assert_eq!(count, 1);
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        feature = "postgres",
+        ignore = "requires test-owned PostgreSQL container"
+    )]
+    async fn review_root_errors_match_direct_not_found_and_conflict() {
+        let (pool, schema) = root_schema().await;
+        let mut mismatches = Vec::new();
+        for args in ["id:\"absent\"", "id:\"root\",expectedVersion:1"] {
+            let direct = schema
+                .execute(format!(
+                    "mutation {{ result:deleteDirectRoot({args}) {{ success error }} }}"
+                ))
+                .await;
+            let opted = schema
+                .execute(format!(
+                    "mutation {{ result:deleteReviewRoot({args}) {{ success error }} }}"
+                ))
+                .await;
+            if args.contains("expectedVersion") {
+                assert_eq!(
+                    direct.errors[0].extensions.as_ref().unwrap().get("code"),
+                    Some(&async_graphql::Value::from("CONFLICT"))
+                );
+            } else {
+                assert!(direct.errors.is_empty());
+                assert_eq!(
+                    direct.data.clone().into_json().unwrap()["result"]["error"],
+                    "Entity not found"
+                );
+            }
+            if opted.data != direct.data || opted.errors != direct.errors {
+                mismatches.push(format!("{args}: opted={opted:?}; direct={direct:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM review_root_errors")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn review_extension_equality_cannot_hide_dependents() {
+    // String binds as text; citext=text uses different equality from the FK's
+    // citext=citext, even though both columns have identical type/collation.
+    review_comparison_case("citext", "citext", "P", "p").await;
+}
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn review_blank_padded_equality_refuses() {
+    review_comparison_case("CHAR(4)", "CHAR(4)", "P", "P").await;
 }

@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-08
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -820,14 +820,33 @@ let dependents = StaticDependentDeletes::<SqliteBackend>::new(
 let schema = schema_builder(database).data(dependents).finish();
 ```
 
-The registry is mandatory for opted-in single-row GraphQL deletes. Bulk GraphQL
+**Every deleting ancestor must opt in.** An opted-in/registered child can still
+be physically cascaded or set-null by an opted-out parent, without hooks/events.
+The incremental registry has no complete schema/database catalogue at build
+time and cannot intercept those other delete surfaces. Audit all incoming
+cascade/set-null paths, including trusted repository/raw-SQL deletes, before
+relying on dependent observation.
+
+Refusal versus success inherently reveals whether the requested root has
+dependents the caller cannot write. Refusals disclose neither identities nor
+counts, but the required atomic refusal cannot conceal that binary outcome.
+
+The registry is mandatory for opted-in single-row GraphQL deletes. The exact
+Rust root entity must be registered; a different entity/view on the same physical
+table cannot supply its policies, hooks, assurance or event type. A registry
+supports one writer type per physical table; multiple opted-in write aliases for
+one table cannot share a registry. Bulk GraphQL
 delete is omitted from those entities and their operation catalog so it cannot
 bypass dependent authorization or limits. Explicit `delete_many` shape/policy
 declarations must be removed before opting in. Repository deletes retain their
 existing physical-FK behavior as a separate trusted Rust surface. Every dependent runs its direct generated GraphQL write
 checks (scopes, assurance, entity/row/field policies), input hooks and mutation
 hooks on the same transaction. Any denial refuses the entire delete with a
-sanitized error. Limits count dependent rows, excluding the requested parent,
+sanitized error. Assurance uses each dependent's own generated mutation name and
+kind, including strict classification, rather than the initiating root field.
+Root entity/row admission precedes graph locks; its direct not-found result and
+version-conflict errors keep the direct mutation shape. Only dependent failures
+are sanitized as `Dependent delete refused`. Limits count dependent rows, excluding the requested parent,
 and relation hops. Planning locks precede all writes; cycles and unknown external
 dependents refuse. Set-nulls run first and deletes run leaf-first; Changed events
 are emitted only after commit. Physical FK actions remain as a backstop.
@@ -849,6 +868,27 @@ tables must exist in the introspected schema with portable managed identifiers;
 temporary-table shadowing and PostgreSQL search-path fallbacks refuse. Authority
 is checked again immediately before SQL after earlier hooks, without repeating
 input transforms or mutation hooks.
+
+FK comparisons must agree with physical FK enforcement. SQLite requires matching
+parent/child affinities and implicit BINARY collation. `pragma_table_xinfo` omits
+collations, so any `COLLATE` token anywhere in registered table SQL conservatively
+refuses, including explicit BINARY and tokens in comments or quoted identifiers.
+PostgreSQL requires identical declared types/type modifiers and the same
+deterministic collation on both columns when collatable. Nondeterministic ICU
+collations refuse. Extension/domain key types (including citext) and blank-padded
+character keys also refuse: equality against a bound value can differ from the
+FK's equality even when both columns have identical declared types.
+Catalogue checks run under the schema/write fences and protect both planning and
+the final pre-delete referencer check; no schema is rewritten automatically.
+
+The original GraphQL context still describes the initiating root. Library auth,
+scope templates and native auth use request data and explicit generated
+entity/argument identities; dependent assurance uses an explicit coordinate.
+Policy callbacks receive the dependent entity/row/field, input hooks receive
+`WriteInputContext::entity_name`, and mutation hooks receive `MutationEvent`
+metadata/action. Callbacks must use those explicit identities for the write and
+`ctx.field()` only for the initiating GraphQL selection. Notifications retain
+the initiating context after commit.
 
 Unmodeled database triggers on registered tables refuse planning, including
 SQLite temporary triggers. A trigger can insert a new referencer inside a delete

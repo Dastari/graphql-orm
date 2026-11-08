@@ -103,7 +103,51 @@ pub(crate) fn generate(
                 _ => None,
             })
             .ok_or_else(|| error("dependent_deletes requires delete and update mutation shapes"))?;
+        let operation_name = method
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("graphql"))
+            .filter_map(|a| {
+                a.parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .ok()
+            })
+            .flatten()
+            .find_map(|meta| match meta {
+                syn::Meta::NameValue(value) if value.path.is_ident("name") => match value.value {
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(name),
+                        ..
+                    }) => Some(name),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .ok_or_else(|| error("missing generated mutation coordinate"))?;
         let mut body = method.block.clone();
+        // The GraphQL Context deliberately retains the caller's root selection.
+        // Internal writes must classify their own generated operation instead.
+        struct ExplicitAssurance(syn::LitStr);
+        impl VisitMut for ExplicitAssurance {
+            fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
+                if let syn::Expr::Path(path) = call.func.as_mut()
+                    && path.path.segments.iter().map(|s| s.ident.to_string()).eq([
+                        "graphql_orm",
+                        "graphql",
+                        "assurance",
+                        "enforce_resolver_assurance",
+                    ])
+                    && let Some(last) = path.path.segments.last_mut()
+                {
+                    last.ident = format_ident!("enforce_operation_assurance");
+                    let coordinate = &self.0;
+                    call.args.push(syn::parse_quote! { #coordinate });
+                }
+                syn::visit_mut::visit_expr_call_mut(self, call);
+            }
+        }
+        ExplicitAssurance(operation_name).visit_block_mut(&mut body);
         // Both paths share the same generated checks, transforms and hooks. Only
         // transaction ownership and postcommit dispatch belong to the caller.
         body.stmts.retain(|stmt| !matches!(stmt,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="hook_ctx")));
@@ -186,24 +230,30 @@ pub(crate) fn generate(
         }
         let split=body.stmts.iter().position(|s|matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="sql"))).ok_or_else(||error("missing generated write boundary"))?;
         let suffix = body.stmts.split_off(split);
-        // Prefix returns a prepared object, so direct not-found/no-op results
-        // become a refusal rather than an apparently successful dependent write.
-        struct RefuseReturns;
-        impl VisitMut for RefuseReturns {
+        // Retain direct false/not-found results separately from GraphQL errors.
+        // The caller preserves root results and sanitizes dependent rejections.
+        struct CaptureRejections(syn::Type);
+        impl VisitMut for CaptureRejections {
             fn visit_expr_return_mut(&mut self, r: &mut syn::ExprReturn) {
                 if r.expr
                     .as_ref()
                     .is_some_and(|e| e.to_token_stream().to_string().starts_with("Ok"))
                 {
-                    r.expr = Some(Box::new(
-                        syn::parse_quote! {Err(::graphql_orm::async_graphql::Error::new("Dependent delete refused"))},
-                    ));
+                    let result = r.expr.take().unwrap();
+                    let result_return = &self.0;
+                    r.expr = Some(Box::new(syn::parse_quote! {{
+                        let result: #result_return = #result;
+                        match result {
+                            Ok(result) => Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(result.error.unwrap_or_default())),
+                            Err(error) => Err(error),
+                        }
+                    }}));
                 } else {
                     syn::visit_mut::visit_expr_return_mut(self, r);
                 }
             }
         }
-        RefuseReturns.visit_block_mut(&mut body);
+        CaptureRejections((*result_return).clone()).visit_block_mut(&mut body);
         // Prepare all grants before writes, then recheck the same direct
         // GraphQL authority immediately before SQL: earlier dependent hooks may
         // revoke a later grant. Input transforms and mutation hooks run once.
@@ -258,15 +308,15 @@ pub(crate) fn generate(
                 id:#pkty,
                 __gom_expected_version:Option<i64>
                 #extra_params
-            )->::graphql_orm::async_graphql::Result<Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>> {
+            )->::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>> {
                 #(#statements)*
                 #delete_changes
-                Ok(Box::new(#prepared {id,__gom_expected_version,before_state,mutation_changes,#extra_init}))
+                Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(Box::new(#prepared {id,__gom_expected_version,before_state,mutation_changes,#extra_init})))
             }
         });
         let completed = format_ident!("__Gom{}Committed{}", name, action);
         let completion = if notifications.is_empty() {
-            quote! {Ok(None)}
+            quote! {Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(None))}
         } else {
             let image = if action == "delete" {
                 quote! {entity}
@@ -287,21 +337,21 @@ pub(crate) fn generate(
                     }
                 }
             });
-            quote! {Ok(Some(Box::new(#completed{entity:#image}) as Box<dyn ::graphql_orm::graphql::orm::StaticCommittedNotification<#marker>>))}
+            quote! {Ok(::graphql_orm::graphql::orm::StaticWriteResult::Ready(Some(Box::new(#completed{entity:#image}) as Box<dyn ::graphql_orm::graphql::orm::StaticCommittedNotification<#marker>>)))}
         };
         structs.push(quote!{
             #[allow(non_camel_case_types)]
             struct #prepared {id:#pkty,__gom_expected_version:Option<i64>,before_state: ::graphql_orm::graphql::orm::EntityState,mutation_changes:Vec<::graphql_orm::graphql::orm::MutationFieldValue>,#extra_fields}
             #[allow(unused_variables, unused_mut)]
             impl ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker> for #prepared {
-                fn apply<'a>(self:Box<Self>,ctx:&'a ::graphql_orm::async_graphql::Context<'_>,mut hook_ctx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteCompletion<#marker>>> {
+                fn apply<'a>(self:Box<Self>,ctx:&'a ::graphql_orm::async_graphql::Context<'_>,mut hook_ctx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<::graphql_orm::graphql::orm::StaticWriteCompletion<#marker>>>> {
                     Box::pin(async move {
                         let Self{id,__gom_expected_version,before_state,mutation_changes,#extra_bind}=*self;
                         #(#reauthorize)*
                         #(#reauthorize_fields)*
                         let result: #result_return = async {#(#suffix)*}.await;
                         let result=result?;
-                        if !result.success {return Err(::graphql_orm::async_graphql::Error::new("Dependent delete refused"));}
+                        if !result.success {return Ok(::graphql_orm::graphql::orm::StaticWriteResult::Rejected(result.error.unwrap_or_default()));}
                         #completion
                     })
                 }
@@ -309,11 +359,28 @@ pub(crate) fn generate(
         });
         if action == "delete" {
             let boundary=method.block.stmts.iter().position(|s|matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="hook_ctx"))).ok_or_else(||error("missing direct transaction boundary"))?;
-            let preamble = &method.block.stmts[..boundary];
+            let end = method.block.stmts.iter().position(|s| matches!(s,syn::Stmt::Local(l) if matches!(&l.pat,syn::Pat::Ident(p) if p.ident=="before_state"))).ok_or_else(||error("missing root authorization boundary"))?;
+            let mut admission = syn::Block {
+                brace_token: Default::default(),
+                stmts: method.block.stmts[..end].to_vec(),
+            };
+            admission.stmts.remove(boundary);
+            struct UnlockedAdmission;
+            impl VisitMut for UnlockedAdmission {
+                fn visit_expr_method_call_mut(&mut self, call: &mut syn::ExprMethodCall) {
+                    if call.method == "fetch_one_for_write_in_transaction" {
+                        call.method = format_ident!("fetch_one_with_auth");
+                        call.args = syn::parse_quote! { db, auth_context.as_ref() };
+                    }
+                    syn::visit_mut::visit_expr_method_call_mut(self, call);
+                }
+            }
+            UnlockedAdmission.visit_block_mut(&mut admission);
+            let admission = &admission.stmts;
             method.block = syn::parse_quote! {{
-                #(#preamble)*
+                #(#admission)*
                 let registry=ctx.data::<::graphql_orm::graphql::orm::StaticDependentDeletes<#marker>>()?;
-                registry.delete(ctx,<#name as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,#name::__gom_key_values(&id).remove(0),__gom_expected_version).await?;
+                let __gom_root_rejection=registry.delete::<#name>(ctx,#name::__gom_key_values(&id).remove(0),__gom_expected_version).await?;
                 Ok(::std::default::Default::default())
             }};
         }
@@ -337,7 +404,10 @@ pub(crate) fn generate(
             if method.sig.ident == "delete" {
                 let stmt = method.block.stmts.last_mut().unwrap();
                 *stmt = syn::Stmt::Expr(
-                    syn::parse_quote! { Ok(#actual {success:true,error:None,entity:None}) },
+                    syn::parse_quote! { Ok(match __gom_root_rejection {
+                        Some(message) => #actual::err(message),
+                        None => #actual {success:true,error:None,entity:None},
+                    }) },
                     None,
                 );
             }
@@ -379,7 +449,7 @@ pub(crate) fn generate(
                     Ok(rows.into_iter().map(|entity|::graphql_orm::graphql::orm::StaticDeleteRow{key:Self::__gom_key_values(&entity.#pk).remove(0),entity: ::std::sync::Arc::new(entity)}).collect())
                 })
             }
-            fn prepare<'a>(ctx:&'a ::graphql_orm::async_graphql::Context<'_>,tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,row: ::graphql_orm::graphql::orm::StaticDeleteRow,nulls:Vec<String>,expected:Option<i64>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>> {
+            fn prepare<'a>(ctx:&'a ::graphql_orm::async_graphql::Context<'_>,tx:&'a mut ::graphql_orm::graphql::orm::MutationContext<'_,#marker>,row: ::graphql_orm::graphql::orm::StaticDeleteRow,nulls:Vec<String>,expected:Option<i64>)->::graphql_orm::futures::future::BoxFuture<'a,::graphql_orm::async_graphql::Result<::graphql_orm::graphql::orm::StaticWriteResult<Box<dyn ::graphql_orm::graphql::orm::StaticPreparedWrite<#marker>>>>> {
                 Box::pin(async move {
                     let entity=row.entity.downcast_ref::<Self>().ok_or_else(||::graphql_orm::async_graphql::Error::new("Dependent delete refused"))?;
                     if nulls.is_empty() {Self::#delete_prep(ctx,tx,entity.#pk.clone(),expected).await}

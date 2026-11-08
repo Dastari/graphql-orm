@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-08
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased
 
-- **Added (ORM/macros 0.96.0):** opt-in bounded static GraphQL dependent deletes run declared cascade and set-null writes through dependent GraphQL authorization and hooks in one transaction, with Changed events after commit. SQLite/PostgreSQL single-column keys only; unsupported dependencies refuse. No data migration is needed. Fixes #283.
+- **Added (ORM/macros 0.96.0):** opt-in bounded static GraphQL dependent deletes run declared cascade and set-null writes through dependent GraphQL authorization and hooks in one transaction, with Changed events after commit. SQLite/PostgreSQL single-column keys only; unsupported dependencies refuse. Dependents enforce their own assurance coordinates (including strict mode), and catalogue validation refuses incompatible FK types/affinities/collations before both discovery and referencer rechecks. Root row admission precedes graph locks, binds the exact registered entity type, and preserves direct not-found/conflict errors. Every deleting ancestor must opt in; refusal/success inherently reveals unwritable dependence. AI effect-policy coverage is tracked separately in #389. No data migration is needed. Fixes #283.
 
 AI **0.124.0**, ORM runtime/macros **0.96.0**, tool profiles **0.21.1**, operation catalog **0.7.1**.
 

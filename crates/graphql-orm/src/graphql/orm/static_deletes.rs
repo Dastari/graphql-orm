@@ -3,7 +3,7 @@ use super::*;
 use crate::async_graphql::{Context, Error, Result};
 use futures::future::BoxFuture;
 use std::{
-    any::Any,
+    any::{Any, TypeId},
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
     sync::Arc,
@@ -21,6 +21,30 @@ pub trait StaticDeleteBackend: TransactionBackend {
         tx: &'a mut Self::Transaction<'_>,
         ownership: &'a ManagedTableSet,
     ) -> BoxFuture<'a, crate::Result<OwnedSchemaModel>>;
+}
+#[cfg(feature = "sqlite")]
+fn sqlite_affinity(declared: &str, strict: bool) -> &'static str {
+    let declared = declared.to_ascii_uppercase();
+    // SQLite changes STRICT ANY to BLOB affinity instead of NUMERIC.
+    if strict && declared.trim() == "ANY" {
+        "BLOB"
+    } else if declared.contains("INT") {
+        "INTEGER"
+    } else if ["CHAR", "CLOB", "TEXT"]
+        .iter()
+        .any(|kind| declared.contains(kind))
+    {
+        "TEXT"
+    } else if declared.is_empty() || declared.contains("BLOB") {
+        "BLOB"
+    } else if ["REAL", "FLOA", "DOUB"]
+        .iter()
+        .any(|kind| declared.contains(kind))
+    {
+        "REAL"
+    } else {
+        "NUMERIC"
+    }
 }
 #[cfg(feature = "sqlite")]
 impl StaticDeleteBackend for SqliteBackend {
@@ -53,8 +77,68 @@ impl StaticDeleteBackend for SqliteBackend {
             super::owned_foreign_keys::validate_sqlite(tx.as_mut(), ownership)
                 .await
                 .map_err(|_| sqlx::Error::Protocol("Dependent delete refused".into()))?;
-            super::migrations::introspect_owned_sqlite_connection_with_internal(tx.as_mut(), true)
-                .await
+            let physical = super::migrations::introspect_owned_sqlite_connection_with_internal(
+                tx.as_mut(),
+                true,
+            )
+            .await?;
+            let mut affinities = BTreeMap::new();
+            for table in ownership.tables() {
+                let ddl: Option<String> = sqlx::query_scalar(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                )
+                .bind(table)
+                .fetch_optional(tx.as_mut())
+                .await?
+                .flatten();
+                let Some(ddl) = ddl else {
+                    return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+                };
+                // table_xinfo omits collations. Conservatively refuse any
+                // explicit COLLATE token in the table SQL, including quoted
+                // identifiers/comments: parsing a subset must never miss one.
+                if ddl
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|token| token.eq_ignore_ascii_case("COLLATE"))
+                {
+                    return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+                }
+                let strict: i64 = sqlx::query_scalar(
+                    "SELECT strict FROM pragma_table_list() WHERE schema='main' AND name=?",
+                )
+                .bind(table)
+                .fetch_one(tx.as_mut())
+                .await?;
+                let columns: Vec<(String, String)> =
+                    sqlx::query_as("SELECT name, type FROM pragma_table_xinfo(?)")
+                        .bind(table)
+                        .fetch_all(tx.as_mut())
+                        .await?;
+                for (column, declared) in columns {
+                    affinities.insert(
+                        (table.to_owned(), column),
+                        sqlite_affinity(&declared, strict != 0),
+                    );
+                }
+            }
+            for source in &physical.tables {
+                for fk in &source.foreign_keys {
+                    if ownership.tables().any(|target| target == fk.target_table) {
+                        for pair in &fk.column_pairs {
+                            let parent = affinities
+                                .get(&(fk.target_table.clone(), pair.target_column.clone()));
+                            let child = affinities
+                                .get(&(source.table_name.clone(), pair.source_column.clone()));
+                            if parent.is_none() || child.is_none() || parent != child {
+                                return Err(sqlx::Error::Protocol(
+                                    "Dependent delete refused".into(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(physical)
         })
     }
 }
@@ -94,6 +178,37 @@ impl StaticDeleteBackend for PostgresBackend {
             // effects. User and extension trigger bodies are opaque.
             let triggered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger tr JOIN pg_class t ON t.oid=tr.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=tr.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_constraint con ON con.oid=tr.tgconstraint WHERE n.nspname=current_schema() AND t.relname=ANY($1) AND NOT COALESCE(tr.tgisinternal AND pn.nspname='pg_catalog' AND con.contype IN ('f','u','x'),false))").bind(ownership.tables().collect::<Vec<_>>()).fetch_one(tx.as_mut()).await?;
             if triggered {
+                return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+            }
+            // The planner and final no-referencer check use the child
+            // column's equality semantics; FK enforcement uses the parent's.
+            // Prove them identical before either lookup. Relation locks keep
+            // these catalogue facts fixed through the final DELETE. Extension/
+            // domain equality and blank-padded char vs bound text are unmodeled.
+            let incompatible: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pg_constraint con
+                    JOIN pg_class t ON t.oid=con.confrelid
+                    JOIN pg_namespace n ON n.oid=t.relnamespace
+                    CROSS JOIN LATERAL unnest(con.conkey,con.confkey) AS pair(child_att,parent_att)
+                    JOIN pg_attribute child ON child.attrelid=con.conrelid AND child.attnum=pair.child_att
+                    JOIN pg_attribute parent ON parent.attrelid=con.confrelid AND parent.attnum=pair.parent_att
+                    JOIN pg_type key_type ON key_type.oid=parent.atttypid
+                    JOIN pg_namespace type_ns ON type_ns.oid=key_type.typnamespace
+                    LEFT JOIN pg_collation cc ON cc.oid=child.attcollation
+                    LEFT JOIN pg_collation pc ON pc.oid=parent.attcollation
+                    WHERE con.contype='f' AND n.nspname=current_schema() AND t.relname=ANY($1)
+                    AND (child.atttypid<>parent.atttypid OR child.atttypmod<>parent.atttypmod
+                         OR child.attcollation<>parent.attcollation
+                         OR NOT COALESCE(cc.collisdeterministic,true)
+                         OR NOT COALESCE(pc.collisdeterministic,true)
+                         OR type_ns.nspname<>'pg_catalog' OR key_type.typname='bpchar')
+                )",
+            )
+            .bind(ownership.tables().collect::<Vec<_>>())
+            .fetch_one(tx.as_mut())
+            .await?;
+            if incompatible {
                 return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
             }
             let physical = super::migrations::introspect_owned_postgres_connection_with_internal(
@@ -137,6 +252,23 @@ pub trait StaticCommittedNotification<B: StaticDeleteBackend>: Send {
 /// Optional captured post-commit work from one direct generated write.
 #[doc(hidden)]
 pub type StaticWriteCompletion<B> = Option<Box<dyn StaticCommittedNotification<B>>>;
+/// Direct mutation result retained across a transaction-bound internal step.
+/// A dependent rejection is sanitized; a root rejection keeps its direct result.
+#[doc(hidden)]
+pub enum StaticWriteResult<T> {
+    /// The direct operation succeeded or is ready to apply.
+    Ready(T),
+    /// The direct operation returned a false mutation result and public message.
+    Rejected(String),
+}
+impl<T> StaticWriteResult<T> {
+    fn dependent(self) -> Result<T> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Rejected(_) => Err(refusal()),
+        }
+    }
+}
 /// Prepared direct GraphQL write. Authorization and before hooks have finished;
 /// applying it rechecks direct GraphQL authority, performs SQL and after hooks,
 /// and queues events on the same transaction.
@@ -146,7 +278,7 @@ pub trait StaticPreparedWrite<B: StaticDeleteBackend>: Send {
         self: Box<Self>,
         ctx: &'a Context<'_>,
         tx: &'a mut MutationContext<'_, B>,
-    ) -> BoxFuture<'a, Result<StaticWriteCompletion<B>>>;
+    ) -> BoxFuture<'a, Result<StaticWriteResult<StaticWriteCompletion<B>>>>;
 }
 /// Generated capability, available only on opted-in single-key writable entities.
 #[doc(hidden)]
@@ -163,9 +295,10 @@ pub trait StaticDeleteEntity<B: StaticDeleteBackend>: Entity + Send + Sync + 'st
         row: StaticDeleteRow,
         nulls: Vec<String>,
         expected: Option<i64>,
-    ) -> BoxFuture<'a, Result<Box<dyn StaticPreparedWrite<B>>>>;
+    ) -> BoxFuture<'a, Result<StaticWriteResult<Box<dyn StaticPreparedWrite<B>>>>>;
 }
 trait Adapter<B: StaticDeleteBackend>: Send + Sync {
+    fn entity_type_id(&self) -> TypeId;
     fn metadata(&self) -> &'static EntityMetadata;
     fn select<'a>(
         &self,
@@ -181,10 +314,13 @@ trait Adapter<B: StaticDeleteBackend>: Send + Sync {
         row: StaticDeleteRow,
         nulls: Vec<String>,
         expected: Option<i64>,
-    ) -> BoxFuture<'a, Result<Box<dyn StaticPreparedWrite<B>>>>;
+    ) -> BoxFuture<'a, Result<StaticWriteResult<Box<dyn StaticPreparedWrite<B>>>>>;
 }
 struct TypedAdapter<T>(PhantomData<T>);
 impl<B: StaticDeleteBackend, T: StaticDeleteEntity<B>> Adapter<B> for TypedAdapter<T> {
+    fn entity_type_id(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
     fn metadata(&self) -> &'static EntityMetadata {
         T::metadata()
     }
@@ -204,7 +340,7 @@ impl<B: StaticDeleteBackend, T: StaticDeleteEntity<B>> Adapter<B> for TypedAdapt
         row: StaticDeleteRow,
         nulls: Vec<String>,
         expected: Option<i64>,
-    ) -> BoxFuture<'a, Result<Box<dyn StaticPreparedWrite<B>>>> {
+    ) -> BoxFuture<'a, Result<StaticWriteResult<Box<dyn StaticPreparedWrite<B>>>>> {
         T::prepare(ctx, tx, row, nulls, expected)
     }
 }
@@ -243,17 +379,26 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
     }
     /// Execute one generated GraphQL delete. Events publish only after commit.
     #[doc(hidden)]
-    pub async fn delete(
+    pub async fn delete<T: StaticDeleteEntity<B>>(
         &self,
         ctx: &Context<'_>,
-        table: &str,
         key: SqlValue,
         expected: Option<i64>,
-    ) -> Result<()> {
-        let notifications = self
-            .delete_inner(ctx, table, key, expected)
-            .await
-            .map_err(|_| refusal())?;
+    ) -> Result<Option<String>> {
+        let table = T::TABLE_NAME;
+        // A physical table may have multiple GraphQL views. Never substitute
+        // another view's policies, assurance, hooks or event type for this root.
+        if self
+            .entities
+            .get(table)
+            .is_none_or(|entry| entry.entity_type_id() != TypeId::of::<T>())
+        {
+            return Err(refusal());
+        }
+        let (rejection, notifications) = self.delete_inner(ctx, table, key, expected).await?;
+        if rejection.is_some() {
+            return Ok(rejection);
+        }
         let db = ctx.data::<crate::db::Database<B>>()?;
         let mut failure = None;
         for notification in notifications {
@@ -263,7 +408,7 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         }
         match failure {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => Ok(None),
         }
     }
     async fn delete_inner(
@@ -272,12 +417,12 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         table: &str,
         key: SqlValue,
         expected: Option<i64>,
-    ) -> Result<Vec<Box<dyn StaticCommittedNotification<B>>>> {
+    ) -> Result<(Option<String>, Vec<Box<dyn StaticCommittedNotification<B>>>)> {
         let db = ctx.data::<crate::db::Database<B>>()?;
         let auth = ctx.data_opt::<DbAuthContext>();
         let mut tx = MutationContext::<B>::begin(db, TransactionMode::StateMachine)
             .await
-            .map_err(|_| refusal())?;
+            .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
         let ownership = ManagedTableSet::new(self.entities.keys().map(|s| s.to_string()))
             .map_err(|_| refusal())?;
         let physical = B::dependencies(&mut tx.tx, &ownership)
@@ -298,6 +443,9 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         let mut rows = root
             .select(&mut tx, root.metadata().primary_key, key, 2)
             .await?;
+        if rows.is_empty() {
+            return Ok((Some("Entity not found".to_owned()), Vec::new()));
+        }
         if rows.len() != 1 {
             return Err(refusal());
         }
@@ -364,7 +512,8 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                             source_key.clone(),
                             self.limits.max_rows() + 1,
                         )
-                        .await?;
+                        .await
+                        .map_err(|_| refusal())?;
                     if !found.is_empty() && depth > self.limits.max_depth() {
                         return Err(refusal());
                     }
@@ -438,16 +587,22 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         if nodes.len() - 1 + nulls.len() > self.limits.max_rows() {
             return Err(refusal());
         }
-        let root_write = root
+        let root_write = match root
             .prepare(ctx, &mut tx, nodes[0].row.clone(), Vec::new(), expected)
-            .await?;
+            .await?
+        {
+            StaticWriteResult::Ready(write) => write,
+            StaticWriteResult::Rejected(message) => return Ok((Some(message), Vec::new())),
+        };
         let mut prepared = Vec::new();
         for (table, row, fields) in nulls {
             prepared.push((
                 None,
                 self.entities[table.as_str()]
                     .prepare(ctx, &mut tx, row, fields, None)
-                    .await?,
+                    .await
+                    .map_err(|_| refusal())?
+                    .dependent()?,
             ));
         }
         for i in order.into_iter().filter(|i| *i != 0) {
@@ -462,7 +617,9 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                         Vec::new(),
                         if i == 0 { expected } else { None },
                     )
-                    .await?,
+                    .await
+                    .map_err(|_| refusal())?
+                    .dependent()?,
             ));
         }
         prepared.push((Some(0), root_write));
@@ -489,7 +646,8 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                                 node.row.key.clone(),
                                 1,
                             )
-                            .await?
+                            .await
+                            .map_err(|_| refusal())?
                             .is_empty()
                         {
                             return Err(refusal());
@@ -497,11 +655,25 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                     }
                 }
             }
-            if let Some(notification) = write.apply(ctx, &mut tx).await? {
+            let outcome = if deletion == Some(0) {
+                write.apply(ctx, &mut tx).await?
+            } else {
+                write.apply(ctx, &mut tx).await.map_err(|_| refusal())?
+            };
+            let notification = match outcome {
+                StaticWriteResult::Ready(notification) => notification,
+                StaticWriteResult::Rejected(message) if deletion == Some(0) => {
+                    return Ok((Some(message), Vec::new()));
+                }
+                StaticWriteResult::Rejected(_) => return Err(refusal()),
+            };
+            if let Some(notification) = notification {
                 notifications.push(notification);
             }
         }
-        tx.commit_and_emit().await.map_err(|_| refusal())?;
-        Ok(notifications)
+        tx.commit_and_emit()
+            .await
+            .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
+        Ok((None, notifications))
     }
 }

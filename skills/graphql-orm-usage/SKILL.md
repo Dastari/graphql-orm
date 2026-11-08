@@ -5,7 +5,7 @@ title: Using graphql-orm
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-08
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -423,11 +423,20 @@ let dependents = StaticDependentDeletes::<SqliteBackend>::new(
 let schema = schema_builder(database).data(dependents).finish();
 ```
 
+Register the exact root Rust type; another view on the same table cannot substitute
+its writer. Each registry supports one writer type per physical table.
 SQLite/PostgreSQL single-column primary-key references only. Composite-key and MSSQL opt-ins fail
 compilation; unknown physical dependents, cycles and denied dependent/set-null writes refuse the
 whole delete. Opted-in entities omit bulk GraphQL delete and its catalog entry so it cannot
 bypass these checks; remove explicit `delete_many` shape/policy declarations. Repository deletes
-retain physical behavior. Existing `notify_with` callbacks run after commit with their GraphQL context. For other paths, retain `restrict` and use explicitly
+retain physical behavior. Opt every deleting ancestor in too: an opted-out parent
+still physically changes opted-in children without hooks/events, and registry construction
+cannot detect every other delete surface. Refusal versus success reveals whether the root
+has unwritable dependents, while hiding their identities/counts. Dependent assurance uses
+its own mutation coordinate; root admission/errors retain the direct-write contract.
+SQLite requires matching affinities and no explicit `COLLATE` token in registered table SQL;
+PostgreSQL requires matching native types and identical deterministic collations;
+extension/domain and blank-padded character keys refuse. Existing `notify_with` callbacks run after commit with their GraphQL context. For other paths, retain `restrict` and use explicitly
 authorized transactional cleanup in `Before`; `After` is too late for a restrict backstop. No data
 migration is needed. See the canonical [relations reference](../../docs/reference/graphql-orm/entities-and-relations.md#orm-driven-dependent-deletes)
 for native-RLS, schema and locking limits.
