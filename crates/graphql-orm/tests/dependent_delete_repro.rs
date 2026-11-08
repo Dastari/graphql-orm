@@ -1760,6 +1760,14 @@ async fn hook_ddl_revalidates_catalogue_and_rolls_back_rows_and_events() {
     // comparison with the verified snapshot can detect it.
     let mut cases = cases;
     cases.push(vec!["ALTER TABLE hook_victims ADD COLUMN extra TEXT"]);
+    #[cfg(feature = "postgres")]
+    cases.extend([
+        vec!["CREATE TABLE hook_inherited () INHERITS (delete_parents)"],
+        vec!["CREATE RULE hook_cleanup AS ON DELETE TO delete_parents DO ALSO DELETE FROM hook_victims WHERE parent_id=OLD.id"],
+    ]);
+    cases.push(vec![
+        "CREATE TEMP TABLE delete_parents(id TEXT PRIMARY KEY,name TEXT NOT NULL)",
+    ]);
     for statements in cases {
         for (entity, phase) in [
             ("DeleteParent", MutationPhase::Before),
