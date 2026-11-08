@@ -41,9 +41,11 @@ pub struct ConnectionOptions {
     /// lifetime retirement and keep at least one pooled connection. A separate,
     /// unleased shared-cache keeper preserves schema/data even if a pooled
     /// connection is lost. This also applies to explicit pool sizes; memory URLs
-    /// use shared cache internally; `cache=private` URLs receive a unique pool
-    /// name to preserve isolation between pools. Raw pools passed
-    /// to `Database::new` are outside this guarantee.
+    /// use shared cache internally. Every memory pool receives a unique internal
+    /// name unless its URL explicitly requests `cache=shared`; only that opt-in
+    /// retains a named URL's name for sharing between pools. Omitting `cache`
+    /// and specifying `cache=private` both preserve isolation between pools.
+    /// Raw pools passed to `Database::new` are outside this guarantee.
     pub max_connections: Option<u32>,
 }
 
@@ -1664,20 +1666,30 @@ impl Database<crate::graphql::orm::SqliteBackend> {
     ) -> crate::Result<Self> {
         use sqlx::{ConnectOptions, Connection};
 
-        let mut connect_options: sqlx::sqlite::SqliteConnectOptions =
-            database_url.as_ref().parse()?;
+        let database_url = database_url.as_ref();
+        let mut connect_options: sqlx::sqlite::SqliteConnectOptions = database_url.parse()?;
         // Serialize flags with a neutral filename: sqlx 0.8's URL formatter
         // cannot round-trip its own colon-bearing anonymous memory filenames.
-        let flags = connect_options
-            .clone()
-            .filename("memory-detection")
-            .to_url_lossy();
-        let in_memory = flags
-            .query_pairs()
-            .any(|(key, value)| key == "mode" && value == "memory");
-        let private_cache = flags
-            .query_pairs()
-            .any(|(key, value)| key == "cache" && value == "private");
+        let (in_memory, shared_cache_requested) = {
+            let mut flags = connect_options
+                .clone()
+                .filename("memory-detection")
+                .to_url_lossy();
+            let in_memory = flags
+                .query_pairs()
+                .any(|(key, value)| key == "mode" && value == "memory");
+            // Driver defaults must not count as an opt-in to sharing. Decode
+            // the original query using the same URL parser, with the last cache
+            // option taking precedence just as it does in the driver.
+            flags.set_query(database_url.split_once('?').map(|(_, query)| query));
+            let mut shared_cache_requested = false;
+            for (key, value) in flags.query_pairs() {
+                if key == "cache" {
+                    shared_cache_requested = value == "shared";
+                }
+            }
+            (in_memory, shared_cache_requested)
+        };
         let mut pool_options = sqlx::sqlite::SqlitePoolOptions::new();
         if let Some(max_connections) = options.max_connections.or(in_memory.then_some(1)) {
             pool_options = pool_options.max_connections(max_connections);
@@ -1686,10 +1698,9 @@ impl Database<crate::graphql::orm::SqliteBackend> {
             // A dedicated keeper is never lent to callers or subject to pool
             // retirement/release pings. Every replacement opens the same database.
             connect_options = connect_options.shared_cache(true);
-            // Sharing is internal to this pool for explicitly private URLs.
-            // Do not expose one private pool's schema/data to another pool
-            // that happens to use the same logical memory database name.
-            if private_cache || connect_options.get_filename().as_os_str().is_empty() {
+            // Share internally with the keeper, while isolating pools unless
+            // the caller explicitly opted into a shared named memory database.
+            if !shared_cache_requested || connect_options.get_filename().as_os_str().is_empty() {
                 connect_options = connect_options
                     .filename(format!("file:graphql-orm-memory-{}", uuid::Uuid::new_v4()));
             }

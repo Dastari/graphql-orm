@@ -34,10 +34,12 @@ and maximum-lifetime retirement, and set at least one minimum connection. An
 additional unleased keeper connection holds the shared-cache memory database for
 the pool lifetime. If cancellation, a failed release ping or explicit connection
 closure replaces a pooled connection, its replacement sees the existing schema
-and rows. Explicit pool sizes use the same database. Memory URLs use shared cache internally.
-Explicit `cache=private` URLs and anonymous memory URLs get unique database names,
-preserving isolation between independent pools. This
-costs one additional SQLite connection per memory pool. Closing the pool still
+and rows. Explicit pool sizes use the same database. Memory URLs use shared cache
+internally, but each pool gets a unique internal database name unless the URL
+explicitly requests `cache=shared`. Only that opt-in retains a named URL's name
+and permits sharing between pools. Omitting `cache` and specifying `cache=private`
+both preserve isolation; anonymous databases also receive unique names. This costs
+one additional SQLite connection per memory pool. Closing the pool still
 refuses acquisitions normally, and process exit loses memory data. These guarantees
 do not apply to caller-built raw pools.
 

@@ -15,9 +15,11 @@ supersedes: []
 No data migration or caller changes are needed. ORM-owned in-memory SQLite pools
 now disable idle/lifetime retirement, keep at least one pooled connection and
 retain an unleased shared-cache keeper for the pool lifetime. Replaced connections
-see the same schema and rows. Memory URLs use shared cache internally; `cache=private` URLs and anonymous
-memory URLs receive a unique name, retaining isolation between pools. Explicit pool sizes remain
-supported. Raw pools passed to `Database::new` retain caller-owned lifetime rules.
+see the same schema and rows. Memory URLs use shared cache internally, but every
+pool receives a unique internal name unless the URL explicitly requests
+`cache=shared`. Only that opt-in retains a named URL's name and permits sharing
+between pools. Omitting `cache` and specifying `cache=private` both retain
+isolation. Explicit pool sizes remain supported. Raw pools passed to `Database::new` retain caller-owned lifetime rules.
 A pool still fails normally when closed; memory databases are not durable across
 process exit. Router 0.8.2 adds optional owned-listener startup (`run_with_listener` and Unix
 `--listen-stdin`) for race-free executable tests; default startup is unchanged.

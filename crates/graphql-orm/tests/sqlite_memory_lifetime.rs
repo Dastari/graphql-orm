@@ -99,3 +99,55 @@ async fn private_named_memory_pools_do_not_share_with_each_other() {
         "cache=private must retain isolation between pools"
     );
 }
+
+#[tokio::test]
+async fn named_memory_without_cache_option_is_isolated_between_pools() {
+    let url = "sqlite:file:implicit-pool-proof?mode=memory";
+    let first = Database::<SqliteBackend>::connect_sqlite(url)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE implicit_proof (value INTEGER)")
+        .execute(first.pool())
+        .await
+        .unwrap();
+    let second = Database::<SqliteBackend>::connect_sqlite(url)
+        .await
+        .unwrap();
+    let tables: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name = 'implicit_proof'")
+            .fetch_one(second.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        tables, 0,
+        "sharing requires an explicit cache=shared opt-in"
+    );
+}
+
+#[tokio::test]
+async fn explicit_shared_memory_preserves_sharing_between_pools() {
+    for url in [
+        "sqlite:file:shared-pool-proof?mode=memory&cache=shared",
+        "sqlite:file:encoded-shared-pool-proof?mode=memory&ca%63he=sha%72ed",
+    ] {
+        let first = Database::<SqliteBackend>::connect_sqlite(url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE shared_pool_proof (value INTEGER)")
+            .execute(first.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO shared_pool_proof VALUES (42)")
+            .execute(first.pool())
+            .await
+            .unwrap();
+        let second = Database::<SqliteBackend>::connect_sqlite(url)
+            .await
+            .unwrap();
+        let value: i64 = sqlx::query_scalar("SELECT value FROM shared_pool_proof")
+            .fetch_one(second.pool())
+            .await
+            .unwrap();
+        assert_eq!(value, 42);
+    }
+}

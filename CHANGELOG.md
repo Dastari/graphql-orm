@@ -16,7 +16,7 @@ for historical context.
 
 ## Unreleased
 
-- **Fixed (ORM/macros 0.95.1):** in-memory SQLite helpers disable pooled connection retirement and retain a shared-cache keeper so replacement connections see the same schema and rows. No data migration is needed. Fixes #376.
+- **Fixed (ORM/macros 0.95.1):** in-memory SQLite helpers disable pooled connection retirement and retain a shared-cache keeper so replacement connections see the same schema and rows. Memory pools remain isolated unless the URL explicitly opts into `cache=shared`. No data migration is needed. Fixes #376.
 - **Tests (router 0.8.2):** wire children bind port zero and report their owned public/admin addresses, eliminating released-port races. The executable smoke test transfers an already-bound socket through the additive `run_with_listener` hook and Unix `--listen-stdin` option; default startup is unchanged. Fixes #366.
 - **Tests (ORM/macros 0.95.1):** OS-backed coordination prevents concurrent trybuild projects from truncating a live generated lockfile; timeout sanitization setup uses normal deadlines and blocked acquisitions use virtual time. Fixes #380. Fixes #381.
 
