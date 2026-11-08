@@ -33,7 +33,7 @@ compile_error!("Enable one relationship-capability backend feature.");
     table = "CapabilityParents",
     plural = "CapabilityParents",
     schema_policy = "external_read_only",
-    default_sort = "Id ASC",
+    default_sort = "id ASC",
     auth = "none"
 )]
 pub struct CapabilityParent {
@@ -45,12 +45,13 @@ pub struct CapabilityParent {
     /// Optional profile identity.
     #[filterable(type = "number")]
     pub profile_id: Option<i32>,
-    /// Bounded child records.
+    /// Bounded child records; relation keys name physical columns, while
+    /// the public GraphQL fields retain PascalCase names.
     #[graphql(skip)]
     #[relation(
         target = "CapabilityChild",
         from = "id",
-        to = "ParentId",
+        to = "parent_id",
         multiple,
         emit_fk = false
     )]
@@ -60,7 +61,7 @@ pub struct CapabilityParent {
     #[relation(
         target = "CapabilityProfile",
         from = "profile_id",
-        to = "Id",
+        to = "id",
         emit_fk = false
     )]
     pub profile: Option<CapabilityProfile>,
@@ -73,7 +74,7 @@ pub struct CapabilityParent {
     table = "CapabilityChildren",
     plural = "CapabilityChildren",
     schema_policy = "external_read_only",
-    default_sort = "Id ASC",
+    default_sort = "id ASC",
     auth = "none"
 )]
 pub struct CapabilityChild {
@@ -98,7 +99,7 @@ pub struct CapabilityChild {
     table = "CapabilityProfiles",
     plural = "CapabilityProfiles",
     schema_policy = "external_read_only",
-    default_sort = "Id ASC",
+    default_sort = "id ASC",
     auth = "none"
 )]
 pub struct CapabilityProfile {
@@ -127,7 +128,7 @@ pub struct CapabilityProfile {
     table = "CompositeCapabilityParents",
     plural = "CompositeCapabilityParents",
     schema_policy = "external_read_only",
-    default_sort = "TenantId ASC, ParentId ASC",
+    default_sort = "tenant_id ASC, parent_id ASC",
     auth = "none"
 )]
 pub struct CompositeCapabilityParent {
@@ -146,7 +147,7 @@ pub struct CompositeCapabilityParent {
     #[relation(
         target = "CompositeCapabilityChild",
         from = ["tenant_id", "parent_id"],
-        to = ["TenantId", "ParentId"],
+        to = ["tenant_id", "parent_id"],
         multiple,
         emit_fk = false
     )]
@@ -160,7 +161,7 @@ pub struct CompositeCapabilityParent {
     table = "CompositeCapabilityChildren",
     plural = "CompositeCapabilityChildren",
     schema_policy = "external_read_only",
-    default_sort = "TenantId ASC, ParentId ASC, LineId ASC",
+    default_sort = "tenant_id ASC, parent_id ASC, line_id ASC",
     auth = "none"
 )]
 pub struct CompositeCapabilityChild {
@@ -185,7 +186,7 @@ macro_rules! impl_fixture_batch_loader {
     ($entity:ty) => {
         impl graphql_orm::graphql::loaders::BatchLoadEntity for $entity {
             fn batch_column() -> &'static str {
-                "Id"
+                "id"
             }
 
             fn batch_key_from_row(
@@ -536,7 +537,7 @@ mod secret_generated_results {
         #[relation(
             target = "SecretSettings",
             from = "settings_id",
-            to = "Id",
+            to = "id",
             propagate_change = "none",
             emit_fk = false
         )]
@@ -545,7 +546,7 @@ mod secret_generated_results {
         #[relation(
             target = "HiddenSettings",
             from = "hidden_settings_id",
-            to = "Id",
+            to = "id",
             propagate_change = "none",
             emit_fk = false
         )]
