@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.95.0 to 0.96.0: Changed admission and subscriber revocation
+## 0.95.1 to 0.96.0: Changed admission and subscriber revocation
 
 Clients selecting a generated static/derived `Changed` root must select exactly
 one root-field occurrence per operation, even with aliases, fragments or
@@ -63,6 +63,20 @@ Runtime-IR live authority still uses an undifferentiated host grant/denial API,
 so its denials withhold events silently. CacheSync is unchanged; its separate
 event-triggered termination channel is tracked in [#384](https://github.com/Dastari/graphql-orm/issues/384).
 No data migration is needed.
+
+## 0.95.0 to 0.95.1: in-memory SQLite lifetime
+
+No data migration or caller changes are needed. ORM-owned in-memory SQLite pools
+now disable idle/lifetime retirement, keep at least one pooled connection and
+retain an unleased shared-cache keeper for the pool lifetime. Replaced connections
+see the same schema and rows. Memory URLs use shared cache internally, but every
+pool receives a unique internal name unless the URL explicitly requests
+`cache=shared`. Only that opt-in retains a named URL's name and permits sharing
+between pools. Omitting `cache` and specifying `cache=private` both retain
+isolation. Explicit pool sizes remain supported. Raw pools passed to `Database::new` retain caller-owned lifetime rules.
+A pool still fails normally when closed; memory databases are not durable across
+process exit. Router 0.8.2 adds optional owned-listener startup (`run_with_listener` and Unix
+`--listen-stdin`) for race-free executable tests; default startup is unchanged.
 
 ## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 

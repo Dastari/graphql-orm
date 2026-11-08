@@ -545,7 +545,7 @@ fn directive_enum_argument(directive: &Directive, name: &str) -> Option<String> 
 }
 
 #[cfg(test)]
-mod wire_tests;
+pub(crate) mod wire_tests;
 
 #[cfg(test)]
 mod tests {

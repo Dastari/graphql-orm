@@ -373,12 +373,14 @@ fn timeout_connection_and_decode_diagnostics_do_not_enter_public_fields() {
 async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() {
     let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_millis(50))
         .connect("sqlite::memory:")
         .await
         .unwrap();
     let schema = schema_builder(Database::new(pool.clone())).finish();
     let lease = pool.acquire().await.unwrap();
+    // Setup uses the normal driver deadline and real time. Only blocked queries
+    // use virtual time: the sole connection cannot become available by racing.
+    tokio::time::pause();
     let queries = [
         "{ sanitizerNode(id: \"a\") { id label } }",
         "{ sanitizerNodes { edges { node { id } } } }",
@@ -388,6 +390,7 @@ async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() 
         let response = schema.execute(request(query)).await;
         assert_code(&response, "SERVICE_UNAVAILABLE", "service unavailable");
     }
+    tokio::time::resume();
     drop(lease);
     pool.close().await;
     for query in queries {

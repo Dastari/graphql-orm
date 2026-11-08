@@ -37,7 +37,15 @@ pub struct ConnectionOptions {
     ///
     /// When omitted, the backend driver's default is used except for in-memory
     /// SQLite URLs, where graphql-orm uses one connection so schema and data
-    /// stay visible for the lifetime of the pool.
+    /// stay visible for the lifetime of the pool. Memory pools disable idle and
+    /// lifetime retirement and keep at least one pooled connection. A separate,
+    /// unleased shared-cache keeper preserves schema/data even if a pooled
+    /// connection is lost. This also applies to explicit pool sizes; memory URLs
+    /// use shared cache internally. Every memory pool receives a unique internal
+    /// name unless its URL explicitly requests `cache=shared`; only that opt-in
+    /// retains a named URL's name for sharing between pools. Omitting `cache`
+    /// and specifying `cache=private` both preserve isolation between pools.
+    /// Raw pools passed to `Database::new` are outside this guarantee.
     pub max_connections: Option<u32>,
 }
 
@@ -1695,7 +1703,8 @@ impl Database<crate::graphql::orm::SqliteBackend> {
     /// This is the normal app-facing constructor when callers do not need raw
     /// SQLX pool customization. For `sqlite::memory:` and `mode=memory` URLs,
     /// the helper uses one pooled connection so temporary schema/data are not
-    /// split across independent in-memory databases.
+    /// split across independent in-memory databases. See [`ConnectionOptions`]
+    /// for the shared-cache keeper and connection replacement guarantee.
     pub async fn connect_sqlite(database_url: impl AsRef<str>) -> crate::Result<Self> {
         Self::connect_sqlite_with_options(database_url, ConnectionOptions::default()).await
     }
@@ -1705,19 +1714,71 @@ impl Database<crate::graphql::orm::SqliteBackend> {
         database_url: impl AsRef<str>,
         options: ConnectionOptions,
     ) -> crate::Result<Self> {
+        use sqlx::{ConnectOptions, Connection};
+
         let database_url = database_url.as_ref();
-        let max_connections = options.max_connections.or_else(|| {
-            if database_url == "sqlite::memory:" || database_url.contains("mode=memory") {
-                Some(1)
-            } else {
-                None
+        let mut connect_options: sqlx::sqlite::SqliteConnectOptions = database_url.parse()?;
+        // Serialize flags with a neutral filename: sqlx 0.8's URL formatter
+        // cannot round-trip its own colon-bearing anonymous memory filenames.
+        let (in_memory, shared_cache_requested) = {
+            let mut flags = connect_options
+                .clone()
+                .filename("memory-detection")
+                .to_url_lossy();
+            let in_memory = flags
+                .query_pairs()
+                .any(|(key, value)| key == "mode" && value == "memory");
+            // Driver defaults must not count as an opt-in to sharing. Decode
+            // the original query using the same URL parser, with the last cache
+            // option taking precedence just as it does in the driver.
+            flags.set_query(database_url.split_once('?').map(|(_, query)| query));
+            let mut shared_cache_requested = false;
+            for (key, value) in flags.query_pairs() {
+                if key == "cache" {
+                    shared_cache_requested = value == "shared";
+                }
             }
-        });
+            (in_memory, shared_cache_requested)
+        };
         let mut pool_options = sqlx::sqlite::SqlitePoolOptions::new();
-        if let Some(max_connections) = max_connections {
+        if let Some(max_connections) = options.max_connections.or(in_memory.then_some(1)) {
             pool_options = pool_options.max_connections(max_connections);
         }
-        let pool = pool_options.connect(database_url).await?;
+        if in_memory {
+            // A dedicated keeper is never lent to callers or subject to pool
+            // retirement/release pings. Every replacement opens the same database.
+            connect_options = connect_options.shared_cache(true);
+            // Share internally with the keeper, while isolating pools unless
+            // the caller explicitly opted into a shared named memory database.
+            if !shared_cache_requested || connect_options.get_filename().as_os_str().is_empty() {
+                connect_options = connect_options
+                    .filename(format!("file:graphql-orm-memory-{}", uuid::Uuid::new_v4()));
+            }
+            // SQLite shares named memory databases only with URI filenames.
+            // Escape every name, including existing file: names, so literal
+            // '?'/'#' in decoded filenames cannot override the memory/cache flags.
+            let filename = connect_options.get_filename().to_string_lossy();
+            let name = filename.strip_prefix("file:").unwrap_or(&filename);
+            let mut encoded = String::new();
+            for byte in name.as_bytes() {
+                use std::fmt::Write as _;
+                write!(&mut encoded, "%{byte:02X}").expect("writing to a String");
+            }
+            connect_options = connect_options.filename(format!("file:{encoded}"));
+            let keeper = Arc::new(std::sync::Mutex::new(
+                sqlx::SqliteConnection::connect_with(&connect_options).await?,
+            ));
+            pool_options = pool_options
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .min_connections(1)
+                .after_connect(move |_, _| {
+                    // PoolOptions owns this closure for the entire pool lifetime.
+                    let _keep_alive = &keeper;
+                    Box::pin(async { Ok(()) })
+                });
+        }
+        let pool = pool_options.connect_with(connect_options).await?;
         Ok(Self::new(pool))
     }
 

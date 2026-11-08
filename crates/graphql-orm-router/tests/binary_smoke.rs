@@ -40,7 +40,8 @@ const TOKEN_KID: &str = "binary-smoke-key";
 fn executable_routes_http_and_websocket_then_handles_sigterm() {
     let subgraph = FixtureSubgraph::start();
     let token = bearer_token();
-    let router_address = reserve_address();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let router_address = listener.local_addr().unwrap();
     let config = TemporaryConfig::new(format!(
         r#"{{
           "listener": "{router_address}",
@@ -86,13 +87,21 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     );
     assert!(String::from_utf8_lossy(&checked.stdout).contains("configuration ready"));
     assert!(
-        TcpListener::bind(router_address).is_ok(),
-        "--check must not bind the public listener"
+        TcpListener::bind(router_address).is_err(),
+        "the test must retain its listener throughout --check"
     );
 
+    let mut runtime_json: Value =
+        serde_json::from_slice(&fs::read(config.path()).unwrap()).unwrap();
+    runtime_json["listener"] = json!("127.0.0.1:0");
+    let runtime_config = TemporaryConfig::new(serde_json::to_string(&runtime_json).unwrap());
+    // Stdio duplicates the owned socket into the child before closing the
+    // parent's copy. There is no release-before-bind window.
     let mut child = Command::new(env!("CARGO_BIN_EXE_graphql-orm-router"))
+        .stdin(Stdio::from(std::os::fd::OwnedFd::from(listener)))
+        .arg("--listen-stdin")
         .arg("--config")
-        .arg(config.path())
+        .arg(runtime_config.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -189,6 +198,34 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     assert!(TcpStream::connect_timeout(&router_address, Duration::from_millis(100)).is_err());
 }
 
+#[test]
+fn inherited_listener_refuses_non_socket_stdin_and_check_combination() {
+    let config = TemporaryConfig::new(
+        r#"{"listener":"127.0.0.1:0","anonymousDevelopment":true,"subgraphs":[]}"#.to_owned(),
+    );
+    for (check, expected) in [
+        (false, "failed to read public listener address"),
+        (true, "--check cannot be combined with --listen-stdin"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_graphql-orm-router"));
+        command
+            .arg("--config")
+            .arg(config.path())
+            .arg("--listen-stdin")
+            .stdin(Stdio::null());
+        if check {
+            command.arg("--check");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{:?}",
+            output
+        );
+    }
+}
+
 fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
     let deadline = Instant::now() + TIMEOUT;
     loop {
@@ -226,11 +263,6 @@ fn wait_until_ready(address: SocketAddr, child: &mut Child) {
         assert!(Instant::now() < deadline, "router readiness timed out");
         thread::sleep(Duration::from_millis(25));
     }
-}
-
-fn reserve_address() -> SocketAddr {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    listener.local_addr().unwrap()
 }
 
 fn http(

@@ -10,6 +10,14 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.8.1 to 0.8.2: owned wire-test listener addresses
+
+No caller changes or data migration are needed. Wire-test children bind port zero
+and report addresses after owning their listeners. The additive `run_with_listener`
+API and Unix `--listen-stdin` command option transfer an already-bound public
+listener without rebinding. Its actual address replaces the configured public
+address before preparation; default startup and administration are unchanged.
+
 ## 0.8.0 to 0.8.1: subscription error frame test
 
 No change is required. The release adds a test only.

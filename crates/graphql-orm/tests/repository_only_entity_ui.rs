@@ -1,7 +1,11 @@
+#[cfg(any(feature = "sqlite", feature = "mssql"))]
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn repository_only_entities_enforce_the_non_graphql_boundary() {
     #[cfg(any(feature = "sqlite", feature = "mssql"))]
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     #[cfg(feature = "sqlite")]
     {
         cases.compile_fail("tests/ui/repository_only_not_graphql_types.rs");
