@@ -853,6 +853,8 @@ first and use supported key-based mutations when needed. No data migration is ne
 
 ## ORM-driven dependent deletes
 
+Available since ORM/macros 0.97.0.
+
 A declared `on_delete = "cascade"` or `"set_null"` normally executes inside the
 database: dependent mutation hooks, Changed subscribers, search maintenance,
 managed versions and change propagation do not run. Prefer a declared delete

@@ -10,9 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.95.1 to 0.96.0
-
-### Optional dependent deletes
+## 0.96.0 to 0.97.0: optional dependent deletes
 
 No data migration is needed. Existing opt-out SQL and foreign-key DDL are
 unchanged. To run dependent hooks and Changed subscriptions, declare
@@ -79,8 +77,7 @@ unseen rows. All dependent field-policy denials refuse the delete. Unmodeled dat
 on registered tables refuse planning; retain those schemas opted out or move the
 behavior to explicitly authorized ORM mutation hooks before opting in.
 
-
-### Changed admission and subscriber revocation
+## 0.95.1 to 0.96.0: Changed admission and subscriber revocation
 
 Clients selecting a generated static/derived `Changed` root must select exactly
 one root-field occurrence per operation, even with aliases, fragments or

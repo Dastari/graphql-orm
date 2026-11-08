@@ -10,7 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.96.0 adds opt-in, bounded GraphQL dependent deletes on SQLite and PostgreSQL with single-column keys. It also bounds Changed operations to one root and requires admission on hand-built schemas. An independent jittered timer rechecks subscriber authority (30-second base; configurable 1–300 seconds): definite denial ends with FORBIDDEN, host failures with SUBSCRIPTION_CONTINUITY_LOST. Per-event denials remain silent. No data migration; see the root migration guide for configuration, client handling and timing limits.
+Version 0.97.0 adds opt-in, bounded GraphQL dependent deletes on SQLite and PostgreSQL with single-column keys. Declare `dependent_deletes` on each participating entity and its declared deleting parents, then supply a bounded registry. No data migration is needed; see the root migration guide.
+
+Version 0.96.0 bounds Changed operations to one root and requires admission on hand-built schemas. An independent jittered timer rechecks subscriber authority (30-second base; configurable 1–300 seconds): definite denial ends with FORBIDDEN, host failures with SUBSCRIPTION_CONTINUITY_LOST. Per-event denials remain silent. No data migration; see the root migration guide for configuration, client handling and timing limits.
 
 Version 0.95.1 stays aligned with the ORM memory-pool fix; generated code is unchanged. No data migration is needed.
 

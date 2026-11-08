@@ -422,8 +422,8 @@ update ([#283](https://github.com/Dastari/graphql-orm/issues/283)).
 | Explicitly authorized cleanup in a `Before` hook | Each ORM write runs its hooks and queues events | Application-specific cleanup outside the supported option |
 
 Prefer a declared policy when nothing needs to observe the children. When hooks, subscribers,
-search, managed versions or propagation matter, opt each participating entity into
-`#[graphql_entity(dependent_deletes)]` and attach schema/request data:
+search, managed versions or propagation matter, use ORM/macros 0.97.0 or newer and opt each
+participating entity into `#[graphql_entity(dependent_deletes)]`, then attach schema/request data:
 
 ```rust,ignore
 let dependents = StaticDependentDeletes::<SqliteBackend>::new(
