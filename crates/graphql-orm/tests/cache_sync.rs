@@ -647,12 +647,14 @@ async fn cache_stream_denies_initial_and_live_metadata_after_current_authority_l
     use std::sync::atomic::{AtomicBool, Ordering};
     let db = fixture().await;
     let sync = CacheSync::new(db.clone(), Arc::new(Store));
+    tokio::time::pause();
     let mut denied = Box::pin(sync.changes(key("tenant-a"), |_| async {
         Err(async_graphql::Error::new("private-authority-detail"))
     }));
     let error = denied.next().await.unwrap().unwrap_err();
     assert!(!error.message.contains("private-authority-detail"));
     assert!(denied.next().await.is_none());
+    tokio::time::resume();
     let allowed = Arc::new(AtomicBool::new(true));
     let current = allowed.clone();
     let mut stream = Box::pin(sync.changes(key("tenant-a"), move |_| {
@@ -678,6 +680,12 @@ async fn cache_stream_denies_initial_and_live_metadata_after_current_authority_l
     )
     .await
     .unwrap();
+    tokio::time::pause();
+    assert!(
+        timeout(Duration::from_secs(1), stream.next())
+            .await
+            .is_err()
+    );
     assert!(stream.next().await.unwrap().is_err());
     assert!(stream.next().await.is_none());
 }
@@ -729,6 +737,12 @@ async fn cache_stream_lag_requests_refetch_and_reauthorizes_gap_signals() {
     assert_eq!(gap.generation, None);
     assert_eq!(read_state(&db, "tenant-a").await.generation(), 257);
     allowed.store(false, Ordering::SeqCst);
+    tokio::time::pause();
+    assert!(
+        timeout(Duration::from_secs(1), denied_gap.next())
+            .await
+            .is_err()
+    );
     assert!(denied_gap.next().await.unwrap().is_err());
     assert!(denied_gap.next().await.is_none());
 }

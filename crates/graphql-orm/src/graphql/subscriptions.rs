@@ -954,7 +954,7 @@ where
     watch_authority_with_delay(stream, authorize, move || authority_recheck_delay(interval))
 }
 
-fn watch_authority_with_delay<S, T, A, F, D>(
+pub(crate) fn watch_authority_with_delay<S, T, A, F, D>(
     stream: S,
     authorize: A,
     mut next_delay: D,

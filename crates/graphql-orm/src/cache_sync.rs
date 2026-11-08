@@ -337,6 +337,7 @@ pub struct CacheSyncChange {
 }
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug))]
 struct CommittedCacheChange {
     key: CachePartitionKey,
     generation: i64,
@@ -346,7 +347,52 @@ struct CacheChangeStream<A> {
     key: CachePartitionKey,
     authorize: A,
     initial: bool,
-    terminated: bool,
+}
+
+fn cache_change_stream<A, F>(
+    state: CacheChangeStream<A>,
+) -> impl futures::Stream<Item = async_graphql::Result<CacheSyncChange>>
+where
+    A: FnMut(CachePartitionKey) -> F,
+    F: std::future::Future<Output = async_graphql::Result<()>>,
+{
+    futures::stream::unfold(state, |mut state| async move {
+        let mut refetch = state.initial;
+        loop {
+            let mut notice = if state.initial {
+                state.initial = false;
+                CacheSyncChange {
+                    generation: None,
+                    refetch_required: true,
+                }
+            } else {
+                match state.receiver.recv().await {
+                    Ok(event) if event.key == state.key => CacheSyncChange {
+                        generation: Some(event.generation.to_string()),
+                        refetch_required: false,
+                    },
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        refetch = true;
+                        CacheSyncChange {
+                            generation: None,
+                            refetch_required: true,
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            };
+            if (state.authorize)(state.key.clone()).await.is_ok() {
+                if refetch {
+                    notice.generation = None;
+                    notice.refetch_required = true;
+                }
+                return Some((Ok(notice), state));
+            }
+            // Keep reconciliation pending across denied initial/gap signals.
+            refetch |= notice.refetch_required;
+        }
+    })
 }
 
 /// Generic refresh coordinator; all durable state remains service-owned.
@@ -374,9 +420,16 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     /// assurance and source-owner policy. It grants no provider write authority.
     /// Prefer `changes_with_agql` when using the owned Auth bridge.
     ///
+    /// The same callback is also called on the Database handle's independent
+    /// authority timer (30 seconds by default, clamped to 1–300 seconds, plus
+    /// 0–10% jitter). It must describe current access to this entire partition,
+    /// independently of notices. Use [`Self::changes_with_authority`] when
+    /// event filtering and subscriber authority need separate checks.
+    ///
     /// # Errors
-    /// The stream emits one sanitized forbidden error and ends when the callback
-    /// denies/fails. No generation or partition metadata is released on denial.
+    /// Event denials/failures silently withhold signals. Only the independent
+    /// timer terminates authority: definite denial yields sanitized `FORBIDDEN`,
+    /// host/infrastructure failure yields `SUBSCRIPTION_CONTINUITY_LOST`.
     pub fn changes<A, F>(
         &self,
         key: CachePartitionKey,
@@ -384,56 +437,66 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     ) -> impl futures::Stream<Item = async_graphql::Result<CacheSyncChange>> + Send + 'static
     where
         A: FnMut(CachePartitionKey) -> F + Send + 'static,
-        F: std::future::Future<Output = async_graphql::Result<()>> + Send,
+        F: std::future::Future<Output = async_graphql::Result<()>> + Send + 'static,
     {
+        // Lock only callback construction, never an authority await. A pending
+        // event check must not prevent the independent current-authority check.
+        let authorize = Arc::new(std::sync::Mutex::new(authorize));
+        let current = authorize.clone();
+        self.changes_with_authority(
+            key,
+            move |key| (current.lock().unwrap())(key),
+            move |key| (authorize.lock().unwrap())(key),
+        )
+    }
+
+    /// Register with separate current-partition authority and event checks.
+    ///
+    /// `current_authority` must rehydrate subscriber authority for the complete
+    /// partition without consulting notices. It runs only on an independent
+    /// jittered timer configured by `Database::with_subscription_authority_recheck_interval`.
+    /// `authorize_event` enforces complete partition/row/field/source policy
+    /// before every initial, committed or gap signal; every failure is silent.
+    /// It must also rehydrate current subscriber, scope and assurance authority;
+    /// a successful timer check never grants delivery authority.
+    /// A denied initial/gap signal remains pending as a refetch requirement until
+    /// a later authorized signal, so no generation can bypass reconciliation.
+    /// Neither notices nor event checks reset the timer. A due timer takes
+    /// priority even over pending event checks. Checks may overlap; hosts must
+    /// bound callback work and latency. Polling/backpressure can delay delivery.
+    ///
+    /// # Errors
+    /// Only timer failures terminate authority. Source-free authored refusals
+    /// mean definite denial (`FORBIDDEN`); typed host failures and infrastructure
+    /// categories mean `SUBSCRIPTION_CONTINUITY_LOST`. Private details are removed.
+    pub fn changes_with_authority<A, F, C, G>(
+        &self,
+        key: CachePartitionKey,
+        mut current_authority: C,
+        authorize_event: A,
+    ) -> impl futures::Stream<Item = async_graphql::Result<CacheSyncChange>> + Send + 'static
+    where
+        A: FnMut(CachePartitionKey) -> F + Send + 'static,
+        F: std::future::Future<Output = async_graphql::Result<()>> + Send + 'static,
+        C: FnMut(CachePartitionKey) -> G + Send + 'static,
+        G: std::future::Future<Output = async_graphql::Result<()>> + Send + 'static,
+    {
+        let current_key = key.clone();
         let state = CacheChangeStream {
             receiver: self
                 .db
                 .ensure_event_sender::<CommittedCacheChange>()
                 .subscribe(),
             key,
-            authorize,
+            authorize: authorize_event,
             initial: true,
-            terminated: false,
         };
-        futures::stream::unfold(state, |mut state| async move {
-            if state.terminated {
-                return None;
-            }
-            let notice = if state.initial {
-                state.initial = false;
-                CacheSyncChange {
-                    generation: None,
-                    refetch_required: true,
-                }
-            } else {
-                loop {
-                    match state.receiver.recv().await {
-                        Ok(event) if event.key == state.key => {
-                            break CacheSyncChange {
-                                generation: Some(event.generation.to_string()),
-                                refetch_required: false,
-                            };
-                        }
-                        Ok(_) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            break CacheSyncChange {
-                                generation: None,
-                                refetch_required: true,
-                            };
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-                    }
-                }
-            };
-            let released = if (state.authorize)(state.key.clone()).await.is_ok() {
-                Ok(notice)
-            } else {
-                state.terminated = true;
-                Err(OrmPublicError::forbidden().into_graphql_error())
-            };
-            Some((released, state))
-        })
+        let stream = cache_change_stream(state);
+        crate::graphql::subscriptions::watch_subscription_authority(
+            stream,
+            self.db.subscription_authority_recheck_interval(),
+            move || current_authority(current_key.clone()),
+        )
     }
 
     /// Register cache changes using the existing owned current-authority bridge.
@@ -444,8 +507,8 @@ impl<B: TransactionBackend, S: CacheSyncStore<B>> CacheSync<B, S> {
     /// awaits; this adapter uses it for initial, committed and gap signals.
     ///
     /// # Errors
-    /// Denied/unavailable current authority emits a sanitized error and ends
-    /// the stream without releasing metadata.
+    /// Event denials are silent; the independent timer emits a sanitized
+    /// forbidden or continuity error for denied/unavailable current authority.
     #[cfg(feature = "auth-agql")]
     pub fn changes_with_agql(
         &self,
@@ -675,5 +738,199 @@ impl RefreshBudget {
         self.remaining_rows = next.0.1;
         self.remaining_bytes = next.1;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use futures::{StreamExt, future::poll_fn};
+    use std::{task::Poll, time::Duration};
+
+    async fn pending<S: futures::Stream + Unpin>(stream: &mut S) {
+        poll_fn(|cx| match stream.poll_next_unpin(cx) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(_) => panic!("hidden notices must not emit a signal"),
+        })
+        .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn quiet_and_hidden_notices_terminate_at_the_same_independent_deadline() {
+        for infrastructure in [false, true] {
+            let key = CachePartitionKey::new("dataset", "private-partition").unwrap();
+            let (sender, _) = tokio::sync::broadcast::channel(4);
+            let make_stream = || {
+                let state = CacheChangeStream {
+                    receiver: sender.subscribe(),
+                    key: key.clone(),
+                    initial: true,
+                    authorize: |_| async { Err(async_graphql::Error::new("private-event-detail")) },
+                };
+                crate::graphql::subscriptions::watch_authority_with_delay(
+                    cache_change_stream(state),
+                    move || async move {
+                        if infrastructure {
+                            Err(OrmPublicError::new(OrmErrorCode::ServiceUnavailable)
+                                .into_graphql_error())
+                        } else {
+                            Err(async_graphql::Error::new("private-authority-detail"))
+                        }
+                    },
+                    || Duration::from_millis(1037),
+                )
+            };
+            let mut hidden = Box::pin(make_stream());
+            pending(&mut hidden).await;
+            // Only hidden receives matching and mismatching notices, including lag.
+            let (idle_sender, idle_receiver) = tokio::sync::broadcast::channel(4);
+            // Replace quiet with a separate channel that receives no notices.
+            let mut quiet = Box::pin(crate::graphql::subscriptions::watch_authority_with_delay(
+                cache_change_stream(CacheChangeStream {
+                    receiver: idle_receiver,
+                    key: key.clone(),
+                    initial: true,
+                    authorize: |_| async { Err(async_graphql::Error::new("private-event-detail")) },
+                }),
+                move || async move {
+                    Err(if infrastructure {
+                        OrmPublicError::new(OrmErrorCode::ServiceUnavailable).into_graphql_error()
+                    } else {
+                        async_graphql::Error::new("private-authority-detail")
+                    })
+                },
+                || Duration::from_millis(1037),
+            ));
+            pending(&mut quiet).await;
+            for step in 0..103 {
+                for generation in 0..8 {
+                    sender
+                        .send(CommittedCacheChange {
+                            key: key.clone(),
+                            generation,
+                        })
+                        .unwrap();
+                }
+                sender
+                    .send(CommittedCacheChange {
+                        key: CachePartitionKey::new("dataset", "other-partition").unwrap(),
+                        generation: step,
+                    })
+                    .unwrap();
+                pending(&mut hidden).await;
+                pending(&mut quiet).await;
+                tokio::time::advance(Duration::from_millis(10)).await;
+            }
+            tokio::time::advance(Duration::from_millis(6)).await;
+            pending(&mut hidden).await;
+            pending(&mut quiet).await;
+            tokio::time::advance(Duration::from_millis(1)).await;
+            let errors = [
+                hidden.next().await.unwrap().unwrap_err(),
+                quiet.next().await.unwrap().unwrap_err(),
+            ];
+            for error in errors {
+                assert!(!format!("{error:?}").contains("private"));
+                assert_eq!(
+                    error.extensions.unwrap().get("code"),
+                    Some(&async_graphql::Value::from(if infrastructure {
+                        "SUBSCRIPTION_CONTINUITY_LOST"
+                    } else {
+                        "FORBIDDEN"
+                    }))
+                );
+            }
+            assert!(hidden.next().await.is_none());
+            assert!(quiet.next().await.is_none());
+            drop(idle_sender);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn denied_initial_and_gap_require_refetch_before_releasing_generations() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let key = CachePartitionKey::new("dataset", "partition").unwrap();
+        let (sender, receiver) = tokio::sync::broadcast::channel(2);
+        let allowed = Arc::new(AtomicBool::new(false));
+        let check = allowed.clone();
+        let mut stream = Box::pin(cache_change_stream(CacheChangeStream {
+            receiver,
+            key: key.clone(),
+            initial: true,
+            authorize: move |_| {
+                let allowed = check.load(Ordering::SeqCst);
+                async move {
+                    if allowed {
+                        Ok(())
+                    } else {
+                        Err(async_graphql::Error::new("hidden"))
+                    }
+                }
+            },
+        }));
+        pending(&mut stream).await;
+        allowed.store(true, Ordering::SeqCst);
+        sender
+            .send(CommittedCacheChange {
+                key: key.clone(),
+                generation: 1,
+            })
+            .unwrap();
+        let initial = stream.next().await.unwrap().unwrap();
+        assert!(initial.refetch_required);
+        assert!(initial.generation.is_none());
+        allowed.store(false, Ordering::SeqCst);
+        for generation in 2..8 {
+            sender
+                .send(CommittedCacheChange {
+                    key: key.clone(),
+                    generation,
+                })
+                .unwrap();
+        }
+        pending(&mut stream).await;
+        allowed.store(true, Ordering::SeqCst);
+        sender
+            .send(CommittedCacheChange { key, generation: 8 })
+            .unwrap();
+        let gap = stream.next().await.unwrap().unwrap();
+        assert!(gap.refetch_required);
+        assert!(gap.generation.is_none());
+    }
+}
+
+#[cfg(test)]
+mod pending_authority_test {
+    use super::*;
+    use futures::StreamExt;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn pending_event_policy_cannot_block_or_trigger_authority_termination() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(2);
+        let stream = cache_change_stream(CacheChangeStream {
+            receiver,
+            key: CachePartitionKey::new("dataset", "partition").unwrap(),
+            initial: true,
+            authorize: |_| futures::future::pending::<async_graphql::Result<()>>(),
+        });
+        let mut stream = Box::pin(crate::graphql::subscriptions::watch_authority_with_delay(
+            stream,
+            || async {
+                Err(async_graphql::Error::from(std::io::Error::other(
+                    "private host error",
+                )))
+            },
+            || Duration::from_millis(1037),
+        ));
+        let started = tokio::time::Instant::now();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(started.elapsed(), Duration::from_millis(1037));
+        assert_eq!(
+            error.extensions.unwrap().get("code"),
+            Some(&async_graphql::Value::from("SUBSCRIPTION_CONTINUITY_LOST"))
+        );
+        assert!(stream.next().await.is_none());
+        drop(sender);
     }
 }
