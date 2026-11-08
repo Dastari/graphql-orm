@@ -1,0 +1,7 @@
+error: relation(filter) requires an unconditional public collection without a field policy
+  --> tests/ui/review386/input_only_relation_filter.rs:10:5
+   |
+10 | /     #[input_only]
+11 | |     #[relation(target = "Record", from = "owner_id", to = "id", emit_fk = false, multiple, filter)]
+12 | |     owner: Vec<Record>,
+   | |______________________^

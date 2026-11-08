@@ -1,0 +1,6 @@
+error: readable relation uses unreadable self-target key `"SecretKey"`; make the relation unreadable too with #[graphql_orm(read = false)], or remove private/input_only and set read = true on the key
+  --> tests/ui/review386/self_target_quoted.rs:10:5
+   |
+10 | /     #[relation(target = "Record", from = "id", to = "\"SecretKey\"", emit_fk = false)]
+11 | |     owner: Vec<Record>,
+   | |______________________^

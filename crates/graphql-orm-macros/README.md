@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-macros`
 
-Version 0.96.0 rejects unreadable SimpleObject fields without an object skip, masks internal SQLx errors, and corrects generated singular descriptions. See the root migration guide; no data migration is needed.
+Version 0.96.0 rejects unreadable SimpleObject fields without an object skip, masks internal SQLx errors, and corrects generated singular descriptions. See the root migration guide; no data migration is needed. Readable relations require readable local keys (and self-target keys), and generated Changed events require readable primary keys. Automatic reads consistently exclude `input_only`.
 
 Version 0.95.0 adds opt-in runtime NodeId, managed versions and authorized keyed live subscriptions. Rust runtime collection literals need the two new optional fields; see the root migration guide. Existing serialized schemas and derived APIs are unchanged.
 

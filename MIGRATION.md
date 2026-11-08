@@ -35,8 +35,35 @@ fields. Existing input/filter exclusions for `skip = false` on ordinary public
 fields are preserved. Combined GraphQL attributes with an effective
 `skip` do.
 
-Operation catalog 0.7.2 aligns its default singular descriptions with the
-macros and runtime SDL.
+Breaking: readable relations now reject any local key marked `private`,
+`read = false`, or `input_only`, including each component of a composite key.
+The compiler identifies the relation and key. Make the relation unreadable
+with `#[graphql_orm(read = false)]` and `#[graphql(skip)]` (or
+`graphql_policy_object`), or remove `private`/`input_only` and set `read = true`
+on the key. Directly named self-relations also check target keys, resolving
+physical names and SQL quoting/case rules. Unresolved self-target columns now
+fail compilation: use a declared physical column name with matching SQL
+quoting (including quotes for case-sensitive PostgreSQL names). Other entities' target
+attributes are unavailable to the derive; inspect those keys yourself and
+hide relations that disclose them.
+
+Breaking: `GraphQLOperations` rejects unreadable primary keys because generated
+Changed events expose them as `id`. Remove `private`/`input_only` and set
+`read = true` on every primary-key component, or omit `GraphQLOperations`/use
+`RepositoryEntity` for private persistence. An object skip alone cannot hide
+a Changed-event key. No data migration is needed.
+
+Aggregate/group-by fields and semantic catalogues now exclude `input_only`.
+Hidden relations cannot declare aggregate ordering, relation filtering or
+search; remove those declarations or make the relation readable. Scalar
+search also requires readable fields. Drop former selections of hidden data.
+Explicit scalar filter/sort grants on `read = false` retain their documented
+behavior.
+
+Operation catalog 0.7.2 preserves the legacy implicit descriptions byte for
+byte, so ORM/macros 0.95 consumers retain their descriptions and fingerprints
+when updating only that dependency. ORM/macros 0.96 explicitly supply the
+corrected descriptions; their SDL and catalogue wording agree.
 
 Internal SQLx adapter errors now use safe messages and error codes rather than
 raw database diagnostics. Generated single-record operation descriptions use

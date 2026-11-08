@@ -1,0 +1,5 @@
+error: generated Changed events disclose primary keys; remove private/input_only and set read = true on every primary-key field, or omit GraphQLOperations/use RepositoryEntity for private persistence
+  --> tests/ui/review386/private_changed_key.rs:17:5
+   |
+17 |     id: String,
+   |     ^^

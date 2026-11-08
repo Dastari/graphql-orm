@@ -183,7 +183,7 @@ pub(crate) fn resolve_federation_keys(
                     ),
                 ));
             }
-            if candidate.meta.is_private || !candidate.meta.read || candidate.meta.input_only {
+            if !candidate.meta.graphql_readable() {
                 return Err(syn::Error::new(
                     candidate.span,
                     format!(
@@ -676,7 +676,7 @@ pub(crate) fn resolve_node_id_parts(
     for field in primary_key_fields {
         let name = &field.graphql_name;
         let meta = &field.meta;
-        if meta.is_private || !meta.read || meta.input_only || meta.read_policy.is_some() {
+        if !meta.graphql_readable() || meta.read_policy.is_some() {
             return Err(syn::Error::new(
                 span,
                 format!(

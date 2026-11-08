@@ -371,9 +371,12 @@ fn timeout_connection_and_decode_diagnostics_do_not_enter_public_fields() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn generated_pool_timeout_and_closed_connection_are_service_unavailable() {
+    // The acquisition budget also covers initial connection creation. Allow
+    // shared-host startup latency; the held lease below still forces real
+    // PoolTimedOut errors rather than depending on a slow connection setup.
     let pool = graphql_orm::sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
-        .acquire_timeout(std::time::Duration::from_millis(50))
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect("sqlite::memory:")
         .await
         .unwrap();

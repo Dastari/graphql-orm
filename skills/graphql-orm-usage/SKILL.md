@@ -19,6 +19,14 @@ ones skips the hooks, policies and events that make every write path behave the 
 This skill says which approach to choose. The linked reference documents say what each feature
 does. Examples use `Order`, `OrderLine` and `Customer`; they aren't a required model.
 
+Unreadable fields (`private`, `read = false`, `input_only`) cannot be keys of a
+readable generated relation; make the relation unreadable too or make its
+local keys readable. Self-target keys are checked; inspect other entities'
+target keys manually. Generated Changed events require readable primary keys;
+use `RepositoryEntity` or omit `GraphQLOperations` for truly private keys.
+Automatic aggregates, search, catalogues and public cursors exclude unreadable
+fields. Explicit scalar filter/sort grants on `read = false` remain independent.
+
 ## What one entity generates
 
 For an entity `Order` with `plural = "Orders"`, in the default naming:

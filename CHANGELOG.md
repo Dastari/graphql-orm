@@ -19,6 +19,8 @@ for historical context.
 ORM runtime/macros **0.96.0**, operation catalog **0.7.2**.
 
 - **Breaking:** reject `private`, `read = false`, and `input_only` fields on SimpleObject entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.
+- **Breaking/security:** reject readable relations with unreadable local keys (and self-target keys, including physical names and SQL quoting/case), and reject unreadable primary keys in generated Changed events. Automatic reads, aggregates, search, cursors and semantic catalogues consistently exclude `input_only`. Cross-entity target attributes require host review because derives cannot inspect another entity.
+- **Compatibility:** operation catalog 0.7.2 preserves legacy default descriptions/fingerprints for 0.95 consumers; 0.96 macros explicitly provide corrected descriptions.
 - **Security:** internal journal and result SQLx adapters now preserve safe error categories and operator reporting without publishing raw diagnostics. Fixes #354.
 - **Fixed:** generated single-record descriptions use singular wording; SDL and derived fingerprints change. Fixes #289. No data migration is needed.
 

@@ -121,7 +121,7 @@ pub(crate) fn expand(mut input: ItemStruct) -> syn::Result<proc_macro2::TokenStr
         if metadata.graphql_skip || has_graphql_object_skip(field) {
             continue;
         }
-        if !metadata.read || metadata.is_private || metadata.input_only {
+        if !metadata.graphql_readable() {
             field.attrs.push(syn::parse_quote!(#[graphql(skip)]));
             continue;
         }

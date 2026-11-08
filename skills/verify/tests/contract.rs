@@ -227,7 +227,12 @@ struct LedgerEntry {
 
 // Private and sensitive fields on the two object forms.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "profiles", plural = "Profiles", default_sort = "name ASC")]
+#[graphql_entity(
+    table = "profiles",
+    plural = "Profiles",
+    default_sort = "name ASC",
+    aggregate = true
+)]
 struct Profile {
     #[primary_key]
     id: Uuid,
@@ -235,6 +240,8 @@ struct Profile {
     name: String,
     #[graphql_orm(private)]
     hidden_note: String,
+    #[input_only]
+    write_only_note: String,
     #[graphql_orm(sensitive)]
     flagged_note: String,
 }
@@ -276,6 +283,7 @@ struct Account {
 )]
 struct Credential {
     #[primary_key]
+    #[graphql_orm(private)]
     id: Uuid,
     #[sortable]
     username: String,
@@ -1327,6 +1335,18 @@ async fn private_hides_generated_and_skipped_simple_object_fields_but_sensitive_
     assert!(!object("Profile").contains("hiddenNote"));
     assert!(object("Profile").contains("flaggedNote"));
     assert!(!object("Account").contains("privateNote"));
+    assert!(!object("Profile").contains("writeOnlyNote"));
+    let start = sdl.find("enum ProfileAggregateField").unwrap();
+    let fields = &sdl[start..start + sdl[start..].find('}').unwrap()];
+    assert!(!fields.contains("hiddenNote"));
+    assert!(!fields.contains("writeOnlyNote"));
+    let metadata = <Profile as Entity>::graphql_semantic_metadata().unwrap();
+    assert!(
+        !metadata
+            .fields
+            .iter()
+            .any(|field| matches!(field.field_name.as_str(), "hiddenNote" | "writeOnlyNote"))
+    );
 }
 
 #[tokio::test]

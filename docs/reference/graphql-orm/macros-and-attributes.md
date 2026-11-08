@@ -114,7 +114,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[graphql(skip)]`, `#[graphql_orm(skip_input)]` | omits the field from generated inputs; `graphql(skip)` also supports relation implementation fields |
 | `#[skip_db]` | excludes a field from persisted row decoding |
 | `#[input_only]` | keeps a writable field in inputs even where it is skipped from GraphQL reads |
-| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails |
+| `#[graphql_orm(private)]` | removes generated read/filter/order/subscription exposure and inputs. On a `GraphQLEntity` + `SimpleObject` entity this requires `#[graphql(skip)]` or `graphql_policy_object`; otherwise compilation fails. Metadata-only `GraphQLSchemaEntity` is exempt |
 | `#[graphql_orm(sensitive)]` | emits `Secret` plus structural `NeverExport`; it does not by itself remove the field from ordinary GraphQL |
 | `#[graphql_orm(classification = "…")]` | overrides the inherited public/internal/confidential/restricted/secret classification |
 | `#[graphql_orm(non_exportable)]` | structurally excludes the field from external-provider result projections while retaining ordinary GraphQL visibility |
@@ -131,7 +131,7 @@ still subject to entity policy and backend/schema-policy restrictions.
 | `#[transform(write = "…", read = "…")]` | names generated write/read transforms |
 | `#[backup(include | exclude | redact)]` | per-field backup treatment |
 
-On a `SimpleObject` entity, `private`, `read = false`, and `input_only` must
+On a `GraphQLEntity` + `SimpleObject` entity, `private`, `read = false`, and `input_only` must
 also remove the object getter: add `#[graphql(skip)]`, or place
 `#[graphql_orm::graphql_policy_object]` before the derives and use
 `#[graphql(complex)]`. `GraphQLEntity` rejects a missing skip rather than changing
@@ -151,7 +151,35 @@ The skip requirement also applies to `GraphQLEntity` with `schema_only = true`,
 which delegates object ownership. Rustc strips derive lists, so the check uses
 these explicit ownership modes and works independently of derive order or
 imports. The separate metadata-only `GraphQLSchemaEntity` derive retains its
-existing contract.
+existing contract: it does not own or validate `SimpleObject` getters. Hosts using
+`GraphQLSchemaEntity` must explicitly skip any fields their object must hide.
+
+Automatic read surfaces share one eligibility rule: `read = true`, no
+`private`, and no `input_only`. This covers object and relation getters,
+aggregate metrics and group-by/distinct fields, semantic scalar/relation
+catalogues, search declarations, public keyset cursors, relation aggregate
+ordering, relation filters, and subscription fields. An explicitly enabled
+scalar `filterable` or `sortable` capability on `read = false` remains usable;
+it can reveal predicates or ordering and is an intentional independent grant.
+
+A readable relation requires every local `from` key (including arrays of key parts) to be
+GraphQL-readable too, or compilation fails. Make the relation unreadable with
+`#[graphql_orm(read = false)]` (and skip its object getter), or make every key
+readable. Self-relations naming the current entity directly (or `Self`) check
+the target keys as well, using physical database names and SQL quoting/case
+rules. Unresolved self-target columns fail compilation; spell the declared
+physical name with matching SQL quoting. A derive cannot resolve qualified/aliased target
+identities or inspect a different entity's field attributes, including
+cross-crate targets; hosts
+must ensure those target keys are readable or hide the relation. Target-side
+privacy across different entities is not statically guaranteed by this check.
+
+`GraphQLOperations` generates Changed events carrying the primary key, so every
+primary-key component must be GraphQL-readable. An unreadable primary key is a
+compile error even if skipped from the object. Make the key readable, or omit
+`GraphQLOperations`/use `RepositoryEntity` for private persistence.
+`RepositoryEntity` emits no GraphQL getters or events, so these key restrictions
+do not apply to its persistence-only relations.
 
 Validation metadata accepted inside `graphql_orm` is `min`, `max`,
 `min_exclusive`, `max_exclusive` (numeric), `non_negative`, `min_length`,
@@ -434,7 +462,8 @@ these options:
 | `search_relation` | `(fields = ["…"], weight = "A" | "B" | "C" | "D", max_items = integer, policy = "…", propagate_change = "up")`; fields are required and `max_items` defaults to 100 |
 | `spatial` | `(kind = "geometry", geometry_type = "Geometry" | "Point" | "LineString" | "Polygon" | "MultiPoint" | "MultiLineString" | "MultiPolygon" | "GeometryCollection", srid = integer, index = bool, index_method = "gist")`; defaults: geometry, `Geometry`, 4326, false, GiST |
 
-Private fields cannot be searchable. A protected searchable field needs an
+Unreadable fields (`private`, `read = false`, or `input_only`) cannot declare
+scalar, JSON-path or relation search. A protected searchable field needs an
 explicit `policy`. Spatial fields are JSON-shaped and cannot be ordered. The
 [backend guide](backends.md#spatial-support) explains the PostgreSQL/SQLite
 execution difference and the MSSQL compile-time limitation.

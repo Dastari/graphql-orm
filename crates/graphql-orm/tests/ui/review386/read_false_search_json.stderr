@@ -1,0 +1,5 @@
+error: unreadable fields cannot use full-text search_json paths
+  --> tests/ui/review386/read_false_search_json.rs:15:5
+   |
+15 |     #[graphql_orm(read = false)]
+   |     ^

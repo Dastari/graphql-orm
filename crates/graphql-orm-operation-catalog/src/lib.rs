@@ -150,15 +150,7 @@ fn default_operation_description(
         GeneratedGraphqlOperationCategory::DeleteMany => "Delete matching",
         GeneratedGraphqlOperationCategory::Subscription => "Observe changes to",
     };
-    let noun = match category {
-        GeneratedGraphqlOperationCategory::SingleRead
-        | GeneratedGraphqlOperationCategory::Create
-        | GeneratedGraphqlOperationCategory::Upsert
-        | GeneratedGraphqlOperationCategory::Update
-        | GeneratedGraphqlOperationCategory::Delete => "record",
-        _ => "records",
-    };
-    format!("{action} {entity_name} {noun}")
+    format!("{action} {entity_name} records")
 }
 
 fn default_argument_description(value: &str) -> String {
@@ -1308,6 +1300,61 @@ impl FingerprintBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Macro versions through 0.95 call the implicit-description constructors.
+    // Patch upgrades must preserve these bytes, even their legacy grammar.
+    #[test]
+    fn legacy_default_descriptions_remain_patch_compatible() {
+        use GeneratedGraphqlOperationCategory::*;
+        for (category, action) in [
+            (List, "List"),
+            (SingleRead, "Read one"),
+            (Search, "Search"),
+            (KeysetList, "Page through"),
+            (Aggregate, "Aggregate"),
+            (Create, "Create one"),
+            (Upsert, "Create or update one"),
+            (Update, "Update one"),
+            (UpdateMany, "Update matching"),
+            (Delete, "Delete one"),
+            (DeleteMany, "Delete matching"),
+            (Subscription, "Observe changes to"),
+        ] {
+            let expected = format!("{action} Record records");
+            let descriptor = GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+                "example::Record",
+                "Record",
+                "records",
+                "sqlite",
+                GraphqlOperationKind::Mutation,
+                category,
+                "operation",
+                vec![],
+                "Record",
+                "Record!",
+                "shape-v1",
+                GraphqlAuthorizationRequirement::default(),
+            );
+            assert_eq!(descriptor.description, expected);
+            let descriptor =
+                GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_ai_policy(
+                    "example::Record",
+                    "Record",
+                    "records",
+                    "sqlite",
+                    GraphqlOperationKind::Mutation,
+                    category,
+                    "operation",
+                    vec![],
+                    "Record",
+                    "Record!",
+                    "shape-v1",
+                    GraphqlAuthorizationRequirement::default(),
+                    AiMutationExecutionPolicy::Prohibited,
+                );
+            assert_eq!(descriptor.description, expected);
+        }
+    }
 
     #[test]
     fn resolved_exposure_and_catalog_order_change_fingerprints_deterministically() {

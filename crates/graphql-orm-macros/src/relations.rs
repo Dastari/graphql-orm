@@ -6,7 +6,7 @@ use crate::backend::{
 use crate::entity::{
     RelationConditionMetadata, RelationConditionValue, collect_parsed_fields, has_graphql_complex,
     parse_entity_metadata, relation_change_propagation_tokens, relation_delete_policy_tokens,
-    resolver_auth_mode_tokens,
+    resolver_auth_mode_tokens, validate_graphql_relation_keys,
 };
 use crate::naming::graphql_field_name;
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -269,7 +269,7 @@ pub(crate) fn generate_graphql_relations(
     for parsed_field in &parsed_fields {
         let field = &parsed_field.field;
         let meta = &parsed_field.meta;
-        if !meta.is_relation || !meta.read || meta.input_only {
+        if !meta.is_relation || !meta.graphql_readable() {
             continue;
         }
 
@@ -314,6 +314,15 @@ pub(crate) fn generate_graphql_relations(
             ));
         }
 
+        validate_graphql_relation_keys(
+            backend,
+            struct_name,
+            field,
+            meta,
+            &parsed_fields,
+            &from_cols,
+            &to_cols,
+        )?;
         let mut source_field_idents = Vec::with_capacity(from_cols.len());
         let mut source_kinds = Vec::with_capacity(from_cols.len());
         let mut source_optional = Vec::with_capacity(from_cols.len());

@@ -1,0 +1,8 @@
+error: search_relation requires a GraphQL-readable relation
+  --> tests/ui/review386/input_only_relation_search.rs:10:5
+   |
+10 | /     #[input_only]
+11 | |     #[graphql_orm(search_relation(fields = ["label"]))]
+12 | |     #[relation(target = "Record", from = "owner_id", to = "id", emit_fk = false, multiple)]
+13 | |     owner: Vec<Record>,
+   | |______________________^

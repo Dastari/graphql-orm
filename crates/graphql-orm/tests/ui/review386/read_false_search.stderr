@@ -1,0 +1,5 @@
+error: unreadable fields cannot be full-text searchable
+ --> tests/ui/review386/read_false_search.rs:9:5
+  |
+9 |     #[graphql_orm(read = false)]
+  |     ^
