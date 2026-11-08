@@ -1,0 +1,5 @@
+error: append_only composite primary keys require non-nullable, host-supplied writable components (auto_generated = false)
+ --> tests/ui/append_only_composite_unwritable.rs:8:5
+  |
+8 |     tenant: i32,
+  |     ^^^^^^

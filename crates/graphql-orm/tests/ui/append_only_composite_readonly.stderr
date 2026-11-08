@@ -1,0 +1,5 @@
+error: append_only cannot be combined with a read-only schema policy; creates require a writable schema policy
+ --> tests/ui/append_only_composite_readonly.rs:5:8
+  |
+5 | struct Audit {
+  |        ^^^^^

@@ -1588,6 +1588,25 @@ fn generate_graphql_operations_unfiltered(
         }
     }
     let has_composite_primary_key = primary_key_fields.len() > 1;
+    if entity_meta.append_only && schema_policy_read_only {
+        return Err(syn::Error::new_spanned(
+            struct_name,
+            "append_only cannot be combined with a read-only schema policy; creates require a writable schema policy",
+        ));
+    }
+    if entity_meta.append_only && has_composite_primary_key {
+        for key in &primary_key_fields {
+            if is_option_type(&key.field_type)
+                || !key.meta.write
+                || key.meta.auto_generated == Some(true)
+            {
+                return Err(syn::Error::new_spanned(
+                    &key.field_name,
+                    "append_only composite primary keys require non-nullable, host-supplied writable components (auto_generated = false)",
+                ));
+            }
+        }
+    }
     let composite_repository_mutations =
         has_composite_primary_key && entity_meta.repository_mutations;
     if entity_meta.retention_policy.is_some() && (!backend_writable || schema_policy_read_only) {
@@ -1656,10 +1675,11 @@ fn generate_graphql_operations_unfiltered(
         .unwrap_or(&first_primary_key.rust_name);
     let pk_type_ty: syn::Type = first_primary_key.field_type.clone();
     let pk_type = quote! { #pk_type_ty };
-    let auto_generated_pk = first_primary_key
-        .meta
-        .auto_generated
-        .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
+    let auto_generated_pk = !(has_composite_primary_key && entity_meta.append_only)
+        && first_primary_key
+            .meta
+            .auto_generated
+            .unwrap_or_else(|| pk_field == syn::Ident::new("id", pk_field.span()));
     if composite_repository_mutations && auto_generated_pk {
         return Err(syn::Error::new_spanned(
             &first_primary_key.field_name,
@@ -3918,6 +3938,7 @@ fn generate_graphql_operations_unfiltered(
 
     let composite_write_stubs = if (has_composite_primary_key || schema_policy_read_only)
         && backend != BackendKind::Mssql
+        && !entity_meta.append_only
     {
         quote! {
             #[derive(Default)]
@@ -5543,7 +5564,69 @@ fn generate_graphql_operations_unfiltered(
         quote! {}
     };
 
+    // A committed create does not grant permission to disclose the resulting row.
+    // Keep ordinary and append-only GraphQL creates on the same release contract.
+    let create_output_authorization = quote! {
+        let entity = if ctx.look_ahead().field(#entity_result_field_name).exists() {
+            use ::graphql_orm::async_graphql::ErrorExtensions as _;
+            let output_errors_before = ctx.query_env.errors.lock().unwrap().len();
+            let output = async {
+                let committed_output_error = |error| {
+                    ::graphql_orm::graphql::errors::graphql_error_from_callback(error)
+                        .extend_with(|_, extensions| {
+                            extensions.set("outcome", "committed");
+                            extensions.set("retryable", false);
+                        })
+                };
+                db.ensure_entity_access(
+                    Some(ctx), #entity_name_lit,
+                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
+                ).await.map_err(committed_output_error)?;
+                let visible = db.can_read_row(
+                    Some(ctx), #entity_name_lit,
+                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
+                    &entity as &(dyn ::std::any::Any + Send + Sync),
+                ).await.map_err(committed_output_error)?;
+                Ok::<_, ::graphql_orm::async_graphql::Error>(if visible { Some(entity) } else { None })
+            }.await;
+            // A withheld row must not release private host diagnostics either.
+            if !matches!(&output, Ok(Some(_))) {
+                ctx.query_env.errors.lock().unwrap().truncate(output_errors_before);
+            }
+            output?
+        } else {
+            None
+        };
+    };
+
     let append_only_surface = if entity_meta.append_only {
+        let append_event_source_id = if has_composite_primary_key {
+            quote! { ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_key_values(&id)) }
+        } else {
+            pk_id_for_entity.clone()
+        };
+        let append_release_key_field = if has_composite_primary_key {
+            quote! { key: event.key.clone(), }
+        } else {
+            quote! {}
+        };
+        let append_created_key = if has_composite_primary_key {
+            let components = primary_key_fields.iter().map(|key| {
+                let field = &key.field_name;
+                quote! { #field: input.#field.clone() }
+            });
+            quote! { let created_pk = #key_type { #(#components),* }; }
+        } else {
+            created_pk_init.clone()
+        };
+        let append_created_id = if has_composite_primary_key {
+            quote! { ::graphql_orm::graphql::orm::composite_key_id(&Self::__gom_key_values(&created_pk)) }
+        } else {
+            created_pk_id_string.clone()
+        };
         quote! {
             #[derive(Clone, Debug)]
             pub struct #create_input { #(#create_input_fields)* }
@@ -5573,7 +5656,8 @@ fn generate_graphql_operations_unfiltered(
                 pub action: ::graphql_orm::graphql::orm::ChangeAction,
                 #[graphql(name = #change_kind_field_name)]
                 pub change_kind: ::graphql_orm::graphql::orm::ChangeKind,
-                pub id: #pk_type,
+                pub id: #subscription_identity_type,
+                #subscription_extra_key_field
                 #[graphql(name = #source_entity_field_name)]
                 pub source_entity: Option<String>,
                 #[graphql(name = #source_id_field_name)]
@@ -5609,13 +5693,17 @@ fn generate_graphql_operations_unfiltered(
                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlMutation,
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
                     let auth = ctx.data_opt::<::graphql_orm::graphql::orm::DbAuthContext>().cloned();
-                    let input: #create_input = input.into();
+                    let mut input: #create_input = input.into();
+                    #(#create_policy_checks)*
                     match db.transaction_with_auth(
                         ::graphql_orm::graphql::orm::TransactionMode::Default,
                         auth.as_ref(),
                         move |tx| Box::pin(async move { tx.insert::<#struct_name>(input).await.map_err(Into::into) }),
                     ).await {
-                        Ok(entity) => Ok(#result_type { success: true, error: None, entity: Some(entity) }),
+                        Ok(entity) => {
+                            #create_output_authorization
+                            Ok(#result_type { success: true, error: None, entity })
+                        },
                         Err(error) => Ok(#result_type { success: false, error: Some(error.to_string()), entity: None }),
                     }
                 }
@@ -5688,7 +5776,7 @@ fn generate_graphql_operations_unfiltered(
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
                                 if keys.as_ref().is_some_and(|keys| !keys.contains(&::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys))) { return None; }
                                 if ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)
-                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&event.id)) { return None; }
+                                    != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
                                 if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
                                 let authorize_current = || async {
                                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
@@ -5725,6 +5813,7 @@ fn generate_graphql_operations_unfiltered(
                                             action: event.action,
                                             change_kind: event.change_kind,
                                             id: event.id.clone(),
+                                            #append_release_key_field
                                             source_entity: event.source_entity.clone(),
                                             source_id: event.source_id.clone(),
                                             path: event.path.clone(),
@@ -5812,11 +5901,13 @@ fn generate_graphql_operations_unfiltered(
                     entity: &Self,
                 ) -> ::graphql_orm::Result<()> {
                     #search_write_maintenance
-                    let source_id = #pk_id_for_entity;
+                    let id = #propagation_entity_key;
+                    let source_id = #append_event_source_id;
                     let event = #changed_event {
                         action,
                         change_kind: ::graphql_orm::graphql::orm::ChangeKind::Direct,
-                        id: entity.#pk_field.clone(),
+                        id: #propagated_event_id,
+                        #subscription_key_initializer
                         source_entity: None, source_id: None, path: Vec::new(), entity: Some(entity.clone()),
                     };
                     hook_ctx.queue_event(event.clone());
@@ -5841,7 +5932,7 @@ fn generate_graphql_operations_unfiltered(
                         &db,
                         &input as &(dyn ::std::any::Any + Send + Sync),
                     ).await?;
-                    #created_pk_init
+                    #append_created_key
                     let sql = Self::__gom_rebind_sql(#insert_sql, 1);
                     let mut bind_values: Vec<SqlValue> = Vec::new();
                     #prepend_pk_bind
@@ -5852,7 +5943,7 @@ fn generate_graphql_operations_unfiltered(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: #created_pk_id_string,
+                        id: #append_created_id,
                         changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                         before_state: None,
                         after_state: None,
@@ -5866,7 +5957,7 @@ fn generate_graphql_operations_unfiltered(
                         entity_name: #entity_name_lit,
                         table_name: #table_name,
                         metadata: <Self as ::graphql_orm::graphql::orm::Entity>::metadata(),
-                        id: #pk_id_for_entity,
+                        id: #append_created_id,
                         changes: ::graphql_orm::graphql::orm::mutation_changes(&[#(#create_mutation_field_literals),*], &bind_values),
                         before_state: None,
                         after_state: Some(::graphql_orm::graphql::orm::entity_state(&entity)?),
@@ -5883,18 +5974,18 @@ fn generate_graphql_operations_unfiltered(
                 #[allow(clippy::ptr_arg)]
                 async fn __gom_fetch_by_id_on(
                     hook_ctx: &mut ::graphql_orm::graphql::orm::MutationContext<'_, #backend_marker>,
-                    id: &#pk_type_ty,
+                    id: &#key_type,
                 ) -> ::graphql_orm::Result<Option<Self>> {
                     use ::graphql_orm::graphql::orm::{DatabaseEntity, FromSqlRow};
                     let sql = Self::__gom_rebind_sql(&format!(
-                        "SELECT {} FROM {}{} WHERE {} = ?{}",
+                        "SELECT {} FROM {}{} WHERE {}{}",
                         Self::column_names().join(", "),
                         #sql_table_name,
                         #upsert_read_lock_hint,
-                        #sql_dialect.render_identifier_path(Self::PRIMARY_KEY),
+                        Self::__gom_key_where_clause(),
                         #write_read_lock_suffix,
                     ), 1);
-                    let rows = hook_ctx.fetch_rows(&sql, &[#pk_bind_value_ref]).await?;
+                    let rows = hook_ctx.fetch_rows(&sql, &Self::__gom_key_values(id)).await?;
                     rows.first().map(<Self as FromSqlRow<#backend_marker>>::from_row).transpose()
                 }
 
@@ -8463,7 +8554,8 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 hook_ctx.commit_and_emit().await.map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                 #notify_on_created
-                Ok(#result_type::ok(entity))
+                #create_output_authorization
+                Ok(#result_type { success: true, error: None, entity })
             }
 
             #upsert_graphql_method

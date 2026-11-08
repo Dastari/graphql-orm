@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.102.0**.
+
+- **Breaking/security:** append-only GraphQL creates enforce declared field-write policies using the ordinary create checks. Strict mode refuses missing field providers before inserting. Ordinary and append-only creates now share entity/row read authorization before disclosing committed output: missing read providers fail closed, entity denial refuses output, and row denial withholds the entity. Output errors identify the committed outcome and forbid retry. Fixes #408.
+
+- **Fixed (ORM/macros 0.102.0):** append-only composite-key entities generate one create-only mutation surface with complete-key readback and Changed event identity. Fixes #394.
+
 ORM runtime/macros **0.99.0**.
 
 - **Security:** bounded static dependent deletes repeat full physical catalogue validation after hooks before every prepared write and before commit, comparing the physical schema snapshot to the verified plan. Trigger, FK, cascading-table and other invalidating catalogue changes refuse with sanitized errors and atomic rollback, including changes between writes. Authorization, bounds and after-commit events remain intact. Fixes #391.
