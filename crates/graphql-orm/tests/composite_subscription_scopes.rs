@@ -142,6 +142,13 @@ fn schema() -> AppSchema {
         SubscriptionRoot::default(),
     )
     .enable_subscription_in_federation()
+    .extension(
+        graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![
+            ScopedComposite::__GOM_CHANGED_ROOT_NAME,
+            ScopedProjection::__GOM_CHANGED_ROOT_NAME,
+            DescriptionRow::__GOM_CHANGED_ROOT_NAME,
+        ]),
+    )
     .finish()
 }
 #[tokio::test]

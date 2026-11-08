@@ -346,24 +346,50 @@ and the instrumented query counter; this does not claim constant wall-clock time
 
 ## Subscription release authorization
 
-Generated ordinary and append-only subscriptions recheck current request,
-entity, row and selected-field authority before every event. Live payloads are
-fresh authorized rows, not historical snapshots. Loss of the subscriber's own
-resolver authentication, scopes, assurance or current entity access emits one
-sanitized `FORBIDDEN` error and ends the stream. Over the router it is a `next`
-frame with `errors`, then `complete`; reauthenticate before subscribing again.
-Row, key, field and provenance errors or denials suppress the whole event,
-including its outer identifier and provenance, and leave the stream open.
-Operations selecting a generated Changed root must select exactly one root-field
+Generated ordinary, append-only, keyed, unkeyed and propagated subscriptions
+reauthorize every event before release. Live payloads are fresh authorized rows,
+not historical snapshots. Key, keys and action filters run first, without any
+authority calls for unlisted/action-filtered events. Every per-event denial or
+host failure suppresses the whole event, including its identifier and provenance;
+no event causes a forbidden frame.
+
+Separately, a timer rechecks only the subscriber's own resolver authentication,
+scopes, assurance and entity access. It never loads a row or checks a key, field
+or provenance policy. A definite denial (`Ok(false)`, an authorization refusal,
+or a source-free authored refusal) produces one sanitized `FORBIDDEN` error,
+then ends. Typed host/DB errors and infrastructure categories instead produce
+`SUBSCRIPTION_CONTINUITY_LOST`. Preserve error sources or infrastructure codes
+when reporting host failures; do not author a source-free refusal for an outage.
+Over the router both are `next` frames with `errors`, then `complete`.
+Reauthenticate before reopening a forbidden stream; after continuity loss,
+resubscribe and refetch once the host recovers.
+
+The Database getter, setter, `with_subscription_authority_recheck_interval`
+and Database builder `subscription_authority_recheck_interval` configure the
+base period for new streams. The default is 30 seconds; values clamp to 1–300
+seconds. Every period adds independently sampled 0–10% positive jitter, so the
+default scheduled delay is 30–33 seconds. Configure before schema construction.
+Events never trigger or reset this deadline, including zero matches and empty
+key lists. Timers require stream polling; host policy latency, scheduler load
+and transport backpressure can delay detection/delivery. This is not a hard
+wall-clock guarantee or a claim of constant-time execution. Source-closure and
+queue-continuity signals retain their existing timing. CacheSync has a separate,
+unchanged event-triggered channel; Related to [#384](https://github.com/Dastari/graphql-orm/issues/384).
+
+Operations selecting a generated Changed root must have exactly one root-field
 occurrence, counting aliases, fragments and skipped/included fields. Otherwise
 `subscription_root_limit_exceeded` is returned before any source opens or record
-is read. The `scripts/run-owned-database-lanes.sh changed-subscriptions` lane
-checks keyed admission, direct and propagated revocation on SQLite and disposable
-PostgreSQL/MSSQL databases. Split multiple roots into separate subscriptions. Generated schema
-builders install this validation automatically. Hand-built schemas must install
-`graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission` with every
-generated Changed field name; resolver-only checks cannot see a skipped root
-before a custom sibling opens. Propagated events
+is read. Split roots into separate subscriptions. Generated schema builders
+install `GeneratedSubscriptionAdmission` automatically. Hand-built schemas must
+install it with every actual generated Changed field name. Its private request
+mark is required by the resolver; absence or a missing field name fails closed
+with `SUBSCRIPTION_ADMISSION_REQUIRED` before authority calls or receiver creation.
+
+The `scripts/run-owned-database-lanes.sh changed-subscriptions` lane checks
+admission, direct/propagated revocation and silent event filtering on SQLite and
+disposable PostgreSQL/MSSQL databases.
+
+Propagated events
 also require current authorization of each source primary key, foreign key and
 relationship for creates and updates. Deletes capture the parent tuple from the
 child preimage inside the transaction and require the first parent's current row,

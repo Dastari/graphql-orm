@@ -154,16 +154,7 @@ mod tests {
             // Materialization/commit succeeds independently of subscriber policy.
             UpLeaf::insert(&db, CreateUpLeafInput { id: "assured".into(), tenant: "tenant-a".into(), middle_id: "middle".into(), status: "ok".into() }).await.unwrap();
             denied.store(denied_bit, Ordering::SeqCst);
-            if denied_bit == 1 {
-                // The root subscriber's own authority is terminal; source and
-                // intermediate proofs remain event-specific silent filtering.
-                let response = timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
-                assert_eq!(response.errors.len(), 1);
-                assert_eq!(response.errors[0].message, "forbidden");
-                assert_eq!(response.errors[0].extensions.as_ref().unwrap().get("code"),
-                    Some(&async_graphql::Value::from("FORBIDDEN")));
-                assert!(timeout(Duration::from_secs(2), stream.next()).await.unwrap().is_none());
-            } else if denied_bit != 0 { assert!(timeout(Duration::from_millis(100), stream.next()).await.is_err()); }
+            if denied_bit != 0 { assert!(timeout(Duration::from_millis(100), stream.next()).await.is_err()); }
             else {
                 assert!(timeout(Duration::from_secs(2), stream.next()).await.unwrap().unwrap().errors.is_empty());
                 let log = calls.lock().unwrap();

@@ -416,14 +416,24 @@ first if you waited for `After`.
 
 ## Subscriptions and propagation
 
-- **Use `<entity>Changed`** rather than hand-written signal subscriptions. It rechecks authorization
-  for each event and reports lost continuity. Subscriber-level authentication, scope, assurance or
-  entity-access loss yields one sanitized `FORBIDDEN` error and ends; reauthenticate before reopening.
-  Row/key/field/provenance denials silently hide the event and keep the stream open.
-  Select exactly one root occurrence per operation, including aliases, fragments and skipped fields;
+- **Use `<entity>Changed`** rather than hand-written signal subscriptions. Key/keys/action
+  filters run before authority calls; all per-event denials silently hide the event.
+  An independent jittered timer checks subscriber authentication, scopes, assurance and entity
+  access: definite denial yields sanitized `FORBIDDEN` and ends; reauthenticate before reopening.
+  Typed host/DB failures or infrastructure categories yield `SUBSCRIPTION_CONTINUITY_LOST`;
+  resubscribe and refetch when the host recovers. Preserve error sources/codes for host failures;
+  source-free authored refusals mean denial.
+  Configure `db.with_subscription_authority_recheck_interval(Duration::from_secs(10))` before
+  building the schema. The default base is 30 s, clamped to 1–300 s, with independent 0–10%
+  positive jitter per period. Writes never trigger or reset the timer, including `keys: []`.
+  Polling, host latency and backpressure can delay it; it is not a wall-clock deadline.
+  Closure/continuity signals keep their existing timing; CacheSync is unchanged (Related to
+  [#384](https://github.com/Dastari/graphql-orm/issues/384)).
+  Select exactly one root occurrence per operation, counting aliases, fragments and skipped fields;
   split multi-root operations or expect `subscription_root_limit_exceeded` before sources open.
-  Generated schema builders install admission; hand-built schemas must install
-  `GeneratedSubscriptionAdmission(vec!["recordChanged"])` with every actual Changed field name.
+  Generated builders install admission. Hand-built schemas must install
+  `GeneratedSubscriptionAdmission(vec!["recordChanged"])` with every actual Changed field name;
+  missing or misconfigured admission refuses with `SUBSCRIPTION_ADMISSION_REQUIRED`.
 - **Set `propagate_change = "up"`** on relations whose parent views show child state, rather than
   computing parent invalidations in hooks or keeping dependency tables in the frontend. The parent's
   stream gets a `PROPAGATED` event with `sourceEntity`, `sourceId` and `path`, limited to 16 hops and

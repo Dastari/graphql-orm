@@ -1578,3 +1578,37 @@ async fn changed_operations_have_one_structural_root() {
         ))
     );
 }
+
+#[tokio::test]
+async fn authority_recheck_period_is_explicit_bounded_and_inherited() {
+    let db = database().await;
+    assert_eq!(
+        db.subscription_authority_recheck_interval(),
+        Duration::from_secs(30)
+    );
+    let db = db.with_subscription_authority_recheck_interval(Duration::ZERO);
+    assert_eq!(
+        db.clone().subscription_authority_recheck_interval(),
+        Duration::from_secs(1)
+    );
+}
+
+#[tokio::test]
+async fn hand_built_changed_schema_requires_admission() {
+    let schema = async_graphql::Schema::build(
+        QueryRoot::default(),
+        MutationRoot::default(),
+        SubscriptionRoot::default(),
+    )
+    .data(database().await)
+    .finish();
+    let response = schema.execute_stream(as_user(
+        "subscription { a: orderChanged(keys: []) { id } b: orderChanged(keys: []) @skip(if: true) { id } }"
+    )).next().await.unwrap();
+    assert_eq!(
+        response.errors[0].extensions.as_ref().unwrap().get("code"),
+        Some(&async_graphql::Value::from(
+            "SUBSCRIPTION_ADMISSION_REQUIRED"
+        ))
+    );
+}

@@ -297,6 +297,11 @@ async fn generated_subscriptions_fail_explicitly_when_database_runtime_is_missin
         SubscriptionRoot::default(),
     )
     .data("test-user".to_string())
+    .extension(
+        graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission(vec![
+            Record::__GOM_CHANGED_ROOT_NAME,
+        ]),
+    )
     .finish();
 
     let mut stream = Box::pin(

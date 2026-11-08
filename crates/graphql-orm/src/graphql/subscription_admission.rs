@@ -61,9 +61,20 @@ fn error(code: &str) -> async_graphql::Error {
     async_graphql::Error::new(code).extend_with(|_, extensions| extensions.set("code", code))
 }
 
-/// Admission for manually assembled schemas as well as generated schema builders.
+/// Require the extension's private request mark before any generated resolver work.
+/// Missing or misconfigured admission fails with SUBSCRIPTION_ADMISSION_REQUIRED.
 #[doc(hidden)]
 pub fn admit_generated_operation(ctx: &Context<'_>) -> async_graphql::Result<()> {
+    if !ctx
+        .data_opt::<AdmissionMark>()
+        .is_some_and(|mark| mark.0.contains(&ctx.item.node.name.node.as_str()))
+    {
+        use async_graphql::ErrorExtensions;
+        return Err(async_graphql::Error::new(
+            "Generated Changed subscriptions require GeneratedSubscriptionAdmission",
+        )
+        .extend_with(|_, extensions| extensions.set("code", "SUBSCRIPTION_ADMISSION_REQUIRED")));
+    }
     let document = ExecutableDocument {
         operations: async_graphql::parser::types::DocumentOperations::Single(
             ctx.query_env.operation.clone(),
@@ -85,7 +96,10 @@ pub fn admit_generated_operation(ctx: &Context<'_>) -> async_graphql::Result<()>
 /// Generated `schema_builder` helpers install this automatically. Manually built
 /// schemas must install it too, including every generated Changed field's actual
 /// GraphQL name (after resolver-case configuration). This ensures skipped roots
-/// and custom sibling sources are checked before any resolver starts.
+/// and custom sibling sources are checked before any resolver starts. The
+/// extension installs a private request mark; resolvers without the mark, or
+/// whose field name is absent from the configured list, fail closed with
+/// `SUBSCRIPTION_ADMISSION_REQUIRED` before authority checks or receiver creation.
 ///
 /// ```
 /// use graphql_orm::graphql::subscriptions::GeneratedSubscriptionAdmission;
@@ -104,6 +118,8 @@ impl ExtensionFactory for GeneratedSubscriptionAdmission {
         })
     }
 }
+struct AdmissionMark(Vec<&'static str>);
+
 struct Admission {
     selected: Mutex<Option<String>>,
     roots: Vec<&'static str>,
@@ -117,7 +133,9 @@ impl Extension for Admission {
         request: async_graphql::Request,
         next: NextPrepareRequest<'_>,
     ) -> async_graphql::ServerResult<async_graphql::Request> {
-        let request = next.run(ctx, request).await?;
+        let request = next
+            .run(ctx, request.data(AdmissionMark(self.roots.clone())))
+            .await?;
         *self.selected.lock().unwrap() = request.operation_name.clone();
         Ok(request)
     }

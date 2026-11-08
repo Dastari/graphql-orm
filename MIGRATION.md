@@ -21,21 +21,41 @@ admission happens before event receivers open or record reads. Generated
 schemas must add `.extension(GeneratedSubscriptionAdmission(vec!["recordChanged"]))`
 from `graphql_orm::graphql::subscriptions`, listing every generated Changed
 field's actual GraphQL name; this also covers skipped generated roots alongside
-custom sibling sources. The resolver itself additionally refuses multiple roots
-when invoked.
+custom sibling sources. A generated resolver without this request-private admission
+mark refuses before opening a receiver or calling authority policies, with
+`SUBSCRIPTION_ADMISSION_REQUIRED`. A root name missing from the configured
+extension is treated the same way. Generated schema builders are unaffected.
 
-Generated keyed, unkeyed and propagated streams now emit one sanitized
-`FORBIDDEN` error and end when the subscriber's own resolver authentication,
-scopes, assurance or current entity access fails. Hosts must expose expired or
-revoked sessions through their current authority checks. Detect the error code,
-stop the old subscription, reauthenticate or regain authority, and then open a
-new subscription and refetch. Over the router this is a `next` frame carrying
-`errors`, followed by `complete`. Do not blindly retry forbidden streams.
+Generated keyed, unkeyed and propagated streams now recheck the subscriber's own
+resolver authentication, scopes, assurance and entity access on an independent
+timer. A definite denial produces one sanitized `FORBIDDEN` error and ends;
+reauthenticate or regain authority, then subscribe and refetch. Typed host/DB
+errors and infrastructure error categories instead produce
+`SUBSCRIPTION_CONTINUITY_LOST`; resubscribe and refetch when the host recovers.
+Both use a router `next` frame with `errors`, then `complete`.
 
-Row-, key-, selected-field and provenance denials still silently hide the event
-and leave the stream open. Runtime-IR live authority uses an undifferentiated
-host grant/denial API, so its denials still withhold events silently. No new host
-API is introduced and no data migration is needed.
+The base period defaults to 30 seconds. Configure before building the schema,
+for example
+`db.with_subscription_authority_recheck_interval(Duration::from_secs(10))`;
+use `Database::set_subscription_authority_recheck_interval` or the
+`DatabaseBuilder::subscription_authority_recheck_interval` option as alternatives.
+Values clamp to 1–300 seconds. Each period adds independent 0–10% positive
+jitter (default scheduled delay 30–33 seconds). Existing streams retain their
+setting. Timers require stream polling, and host latency/backpressure can delay
+checks and delivery; this is not a hard wall-clock revocation deadline.
+
+No write, including an unmatched, action-filtered or row-hidden write, triggers
+a forbidden frame or resets the timer. All per-event subscriber and delivery
+fence denials remain silent, as do row/key/field/provenance denials. Source
+closure and continuity-loss signals retain their existing timing properties.
+Hosts must expose current session expiry/revocation through current checks and
+preserve typed errors or infrastructure codes for host failures; source-free
+authored refusals count as denials, not infrastructure failures.
+
+Runtime-IR live authority still uses an undifferentiated host grant/denial API,
+so its denials withhold events silently. CacheSync is unchanged; its separate
+event-triggered termination channel is tracked in [#384](https://github.com/Dastari/graphql-orm/issues/384).
+No data migration is needed.
 
 ## 0.94.0 to 0.95.0: opt-in runtime identity and live contracts
 

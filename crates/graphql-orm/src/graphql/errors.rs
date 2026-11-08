@@ -331,7 +331,7 @@ fn public_error_transport(error: OrmPublicError) -> String {
     format!("graphql-orm-public:{}", error.code.as_str())
 }
 
-fn public_code(code: &str) -> Option<OrmErrorCode> {
+pub(crate) fn public_code(code: &str) -> Option<OrmErrorCode> {
     match code {
         "INVALID_INPUT" => Some(OrmErrorCode::InvalidInput),
         "UNAUTHENTICATED" => Some(OrmErrorCode::Unauthenticated),

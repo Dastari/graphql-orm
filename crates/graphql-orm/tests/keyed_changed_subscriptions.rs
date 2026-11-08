@@ -34,6 +34,9 @@ mod owned_mssql;
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
 
+#[path = "support/subscription_time.rs"]
+mod subscription_time;
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -885,11 +888,14 @@ impl EntityPolicy for CurrentSubscriber {
 async fn subscriber_loss_ends_direct_and_propagated_streams(db: &Database) -> TestResult {
     parent(db, "p1", "alice").await?;
     let allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let mut db = db.clone();
+    let mut db = db
+        .clone()
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
     db.set_entity_policy(CurrentSubscriber(allowed.clone()));
     for keyed in [false, true] {
         for propagated in [false, true] {
             allowed.store(true, std::sync::atomic::Ordering::SeqCst);
+            let clock = subscription_time::ManualTime::pause();
             let args = if keyed {
                 keys_argument(&["p1"])
             } else {
@@ -908,6 +914,9 @@ async fn subscriber_loss_ends_direct_and_propagated_streams(db: &Database) -> Te
             } else {
                 touch(&db, "p1", "hidden").await?;
             }
+            admitted(&mut stream).await;
+            tokio::time::advance(Duration::from_secs(2)).await;
+            drop(clock);
             ends_with(&mut stream, "FORBIDDEN").await;
         }
     }
@@ -957,7 +966,7 @@ macro_rules! scenarios {
         #[cfg(feature = "sqlite")]
         mod sqlite_scenarios {
             $(
-                #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+                #[tokio::test]
                 async fn $scenario() -> super::TestResult {
                     let fixture = super::fixture().await?;
                     super::$scenario(&fixture.db).await?;
@@ -967,7 +976,7 @@ macro_rules! scenarios {
         }
 
         #[cfg(not(feature = "sqlite"))]
-        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[tokio::test]
         #[ignore = "starts a test-owned database container"]
         async fn every_scenario_on_an_owned_database() -> TestResult {
             let fixture = fixture().await?;

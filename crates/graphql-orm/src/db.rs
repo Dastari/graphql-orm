@@ -74,6 +74,11 @@ impl Default for ConnectionOptions {
 /// subscription accepts. See [`Database::subscription_key_limit`].
 pub const DEFAULT_SUBSCRIPTION_KEY_LIMIT: usize = 500;
 
+/// Default base period for event-independent Changed authority checks.
+/// Each period adds independent jitter of up to ten percent.
+pub const DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 pub struct Database<B: OrmBackend = DefaultBackend> {
     pool: B::Pool,
     mutation_hook: Option<Arc<dyn Any + Send + Sync>>,
@@ -90,6 +95,7 @@ pub struct Database<B: OrmBackend = DefaultBackend> {
     scan_config: Option<crate::graphql::orm::AuthorizedScanConfig>,
     read_observer: Option<Arc<dyn crate::graphql::orm::ReadQueryObserver>>,
     subscription_key_limit: usize,
+    subscription_authority_recheck_interval: std::time::Duration,
     _backend: PhantomData<B>,
 }
 
@@ -111,6 +117,7 @@ impl<B: OrmBackend> Clone for Database<B> {
             scan_config: self.scan_config.clone(),
             read_observer: self.read_observer.clone(),
             subscription_key_limit: self.subscription_key_limit,
+            subscription_authority_recheck_interval: self.subscription_authority_recheck_interval,
             _backend: PhantomData,
         }
     }
@@ -124,6 +131,10 @@ impl<B: OrmBackend> std::fmt::Debug for Database<B> {
         debug.field("pagination_config", &self.pagination_config);
         debug.field("authorization_mode", &self.authorization_mode);
         debug.field("subscription_key_limit", &self.subscription_key_limit);
+        debug.field(
+            "subscription_authority_recheck_interval",
+            &self.subscription_authority_recheck_interval,
+        );
         debug.field("has_mutation_hook", &self.mutation_hook.is_some());
         debug
             .field("has_field_policy", &self.field_policy.is_some())
@@ -157,6 +168,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -184,6 +197,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -208,6 +223,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -232,6 +249,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -256,6 +275,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -283,6 +304,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -317,6 +340,8 @@ impl<B: OrmBackend> Database<B> {
             scan_config: None,
             read_observer: None,
             subscription_key_limit: DEFAULT_SUBSCRIPTION_KEY_LIMIT,
+            subscription_authority_recheck_interval:
+                DEFAULT_SUBSCRIPTION_AUTHORITY_RECHECK_INTERVAL,
             _backend: PhantomData,
         }
     }
@@ -399,6 +424,31 @@ impl<B: OrmBackend> Database<B> {
     /// Return a copy of this handle with a different maximum `Keys` list length.
     pub fn with_subscription_key_limit(mut self, limit: usize) -> Self {
         self.subscription_key_limit = limit;
+        self
+    }
+
+    /// Base period for event-independent subscriber authority checks on new Changed streams.
+    /// Defaults to 30 seconds; each period adds independently chosen 0–10% jitter.
+    pub fn subscription_authority_recheck_interval(&self) -> std::time::Duration {
+        self.subscription_authority_recheck_interval
+    }
+
+    /// Set the base authority-check period for new Changed streams on this handle.
+    /// Values are clamped to 1–300 seconds. Existing streams retain their schedule.
+    pub fn set_subscription_authority_recheck_interval(&mut self, interval: std::time::Duration) {
+        self.subscription_authority_recheck_interval = interval.clamp(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(300),
+        );
+    }
+
+    /// Return this handle configured with a clamped 1–300 second authority-check period.
+    /// Clones inherit the setting; each new stream chooses independent positive jitter.
+    pub fn with_subscription_authority_recheck_interval(
+        mut self,
+        interval: std::time::Duration,
+    ) -> Self {
+        self.set_subscription_authority_recheck_interval(interval);
         self
     }
 
@@ -1787,6 +1837,17 @@ impl<B: OrmBackend> DatabaseBuilder<B> {
     /// Disable both the default connection limit and max-limit cap.
     pub fn unbounded_pagination(mut self) -> Self {
         self.database.pagination_config = PaginationConfig::unbounded();
+        self
+    }
+
+    /// Configure event-independent Changed authority checks (base 1–300 seconds).
+    /// The default is 30 seconds, plus independently chosen 0–10% jitter per period.
+    pub fn subscription_authority_recheck_interval(
+        mut self,
+        interval: std::time::Duration,
+    ) -> Self {
+        self.database
+            .set_subscription_authority_recheck_interval(interval);
         self
     }
 

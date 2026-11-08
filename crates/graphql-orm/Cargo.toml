@@ -85,7 +85,7 @@ serde_json = "1"
 sha2 = { workspace = true }
 sqlx = { workspace = true }
 tiberius = { workspace = true, optional = true }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
@@ -96,7 +96,7 @@ graphql-orm-ai-tool-profiles = { workspace = true }
 axum = "0.8.9"
 graphql-orm-router-protocol = { workspace = true }
 time = "0.3"
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "test-util"] }
 trybuild = "1"
 
 [[example]]
