@@ -29,6 +29,16 @@ addresses. `--check` loads environment secrets, initializes JWKS, fetches every
 SDL and descriptor, composes the graph, and constructs the executable runtime;
 it does not bind a listener.
 
+On Unix, `--listen-stdin` consumes an already-bound TCP listener inherited as file
+descriptor 0, without releasing or rebinding its port. The actual socket address
+overrides the configured public `listener` before preparation, including
+subscription endpoint validation. It cannot be combined with `--check`; invalid
+or non-socket stdin fails startup. Administrative listeners retain their normal
+configuration. An embedding launcher can pass a `TcpListener` through
+`Command::stdin(Stdio::from(OwnedFd::from(listener)))`. Library hosts can use
+`graphql_orm_router::run_with_listener(config, listener)` on the owned runtime.
+The default command continues to bind the configured address normally.
+
 ## Programmatic configuration types
 
 The strict JSON file is represented by `RouterFileConfig`; applications using

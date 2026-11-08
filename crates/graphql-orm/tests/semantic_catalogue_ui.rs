@@ -1,8 +1,11 @@
 #![cfg(feature = "sqlite")]
 
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn semantic_declarations_reject_unsafe_or_malformed_metadata() {
-    let tests = trybuild::TestCases::new();
+    let tests = ui::test_cases();
     tests.compile_fail("tests/ui/semantic_invalid_classification.rs");
     tests.compile_fail("tests/ui/semantic_sensitive_downgrade.rs");
     tests.compile_fail("tests/ui/semantic_classification_downgrade.rs");

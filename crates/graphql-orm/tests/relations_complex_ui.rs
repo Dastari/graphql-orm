@@ -4,9 +4,12 @@
 //! names that declaration. Schema-only entities have no generated object and
 //! keep the relation resolvers as their object.
 
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn relations_without_complex_name_the_supported_declaration() {
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     cases.compile_fail("tests/ui/relations_without_complex.rs");
     cases.pass("tests/ui/relations_schema_only_supported.rs");
 }
