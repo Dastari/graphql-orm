@@ -3,8 +3,8 @@ title: "Router Subgraph Lifecycle Resilience Backlog"
 kind: plan
 status: draft
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
-review_by: 2026-11-07
+last_reviewed: 2026-11-08
+review_by: 2027-02-08
 supersedes: []
 ---
 

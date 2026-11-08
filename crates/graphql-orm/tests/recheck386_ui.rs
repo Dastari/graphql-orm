@@ -1,7 +1,10 @@
 #![cfg(feature = "sqlite")]
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn relation_columns_cannot_disclose_hidden_values() {
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     cases.pass("tests/ui/recheck386/pass.rs");
     cases.compile_fail("tests/ui/recheck386/composite_target_key.rs");
     cases.compile_fail("tests/ui/recheck386/has_many_target_key.rs");

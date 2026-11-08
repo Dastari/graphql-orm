@@ -11,9 +11,12 @@
 //! whose prose varies by toolchain, so it is probed by a `compile_fail`
 //! doctest in the library's `generated_api_absence_probes` instead.
 
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn invalid_federation_key_declarations_are_rejected() {
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     cases.compile_fail("tests/ui/federation_key_unknown_field.rs");
     cases.compile_fail("tests/ui/federation_key_unknown_option.rs");
     cases.compile_fail("tests/ui/federation_key_private_field.rs");

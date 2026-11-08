@@ -1,8 +1,11 @@
 #![cfg(feature = "sqlite")]
 
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn invalid_typed_projection_declarations_are_rejected() {
-    let tests = trybuild::TestCases::new();
+    let tests = ui::test_cases();
     tests.compile_fail("tests/ui/projection_unknown_field.rs");
     tests.compile_fail("tests/ui/projection_duplicate_field.rs");
     tests.compile_fail("tests/ui/projection_empty.rs");

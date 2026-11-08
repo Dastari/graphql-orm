@@ -1,5 +1,8 @@
 #![cfg(feature = "sqlite")]
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn skip_false_keeps_legacy_input_exclusions() {
-    trybuild::TestCases::new().pass("tests/ui/simple_object_skip_false_public.rs");
+    ui::test_cases().pass("tests/ui/simple_object_skip_false_public.rs");
 }

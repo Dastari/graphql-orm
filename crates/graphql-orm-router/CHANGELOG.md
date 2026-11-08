@@ -10,6 +10,15 @@ supersedes: []
 
 # Changelog
 
+## 0.8.2 (unreleased)
+
+- Wire-test child processes bind OS-assigned public/admin ports and report the
+  actual owned addresses. The Hive fixture uses its app configuration seam with
+  an owned listener. This removes the release-before-bind race. Fixes #366.
+  The executable smoke test transfers its owned socket through stdin using the
+  new Unix `--listen-stdin` option and `run_with_listener` library hook. Default
+  startup is unchanged; no data migration is needed.
+
 ## 0.8.1 (unreleased)
 
 - Test the frames a client receives when a subgraph subscription yields an

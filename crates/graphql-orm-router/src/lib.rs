@@ -27,7 +27,7 @@ pub use config::{
     StaticSubgraph, SubscriptionConfig, TrustedSubgraph,
 };
 pub use file_config::RouterFileConfig;
-pub use server::{ActiveGraphIdentity, PreparedRouter, run};
+pub use server::{ActiveGraphIdentity, PreparedRouter, run, run_with_listener};
 
 use thiserror::Error;
 

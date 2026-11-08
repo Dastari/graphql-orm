@@ -1,6 +1,9 @@
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn rls_backend_and_attribute_validation() {
-    let t = trybuild::TestCases::new();
+    let t = ui::test_cases();
 
     #[cfg(feature = "sqlite")]
     t.compile_fail("tests/ui/rls_sqlite_backend.rs");

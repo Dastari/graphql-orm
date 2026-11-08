@@ -1,7 +1,10 @@
 #![cfg(feature = "sqlite")]
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn unreadable_generated_keys_and_search_are_rejected() {
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     cases.pass("tests/ui/review386/schema_entity_object.rs");
     cases.pass("tests/ui/review386/repository_private_keys.rs");
     cases.compile_fail("tests/ui/review386/private_relation_key.rs");

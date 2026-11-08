@@ -1,7 +1,10 @@
 #![cfg(feature = "sqlite")]
+#[path = "support/ui.rs"]
+mod ui;
+
 #[test]
 fn hidden_fields_require_object_skips() {
-    let cases = trybuild::TestCases::new();
+    let cases = ui::test_cases();
     cases.compile_fail("tests/ui/simple_object_hidden_private.rs");
     cases.compile_fail("tests/ui/simple_object_hidden_read.rs");
     cases.compile_fail("tests/ui/simple_object_hidden_input.rs");
