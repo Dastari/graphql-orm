@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+## 0.112.0
+
+ORM runtime/macros **0.112.0**.
+
+- Consumer fixture builds respect the caller’s `CARGO_TARGET_DIR`, sharing its `fixtures` subdirectory; the default remains workspace `target/fixtures`. Fixes #407. No runtime or macro behavior changes.
+
 ## 0.111.0
 
 ORM runtime/macros **0.111.0**.

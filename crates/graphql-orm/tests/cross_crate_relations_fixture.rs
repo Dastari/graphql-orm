@@ -1,5 +1,8 @@
 #![cfg(any(feature = "sqlite", feature = "postgres"))]
 
+#[path = "support/fixture_target.rs"]
+mod fixture_target;
+
 #[test]
 fn generated_relationships_execute_across_real_crate_boundaries() {
     let manifest = concat!(
@@ -12,9 +15,7 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
     } else {
         "sqlite"
     };
-    // Every fixture workspace builds into one shared directory, so dependency
-    // builds they have in common are compiled once.
-    let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let target_dir = fixture_target::target_dir();
     let status = std::process::Command::new(&cargo)
         .env("CARGO_INCREMENTAL", "0")
         .env("CARGO_TARGET_DIR", &target_dir)

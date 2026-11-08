@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.111.0 to 0.112.0: isolated consumer fixture builds
+
+Upgrade ORM/macros together. No API or data migration is needed. Consumer
+fixture runners now place shared builds in `$CARGO_TARGET_DIR/fixtures` when
+set; relative paths resolve from the runner’s working directory. With no
+override, workspace `target/fixtures` remains the default.
+
 ## 0.111.0: SQLite column/check/FK rebuild preservation
 
 Upgrade runtime and macros together. These rebuilds now emit an executor-only

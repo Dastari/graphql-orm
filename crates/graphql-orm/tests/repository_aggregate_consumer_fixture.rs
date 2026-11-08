@@ -1,12 +1,13 @@
+#[path = "support/fixture_target.rs"]
+mod fixture_target;
+
 #[test]
 fn external_repository_aggregate_consumer_requires_no_direct_graphql_dependency() {
     let manifest = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/repository-aggregate-consumer/Cargo.toml"
     );
-    // Every fixture workspace builds into one shared directory, so dependency
-    // builds they have in common are compiled once.
-    let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
+    let target_dir = fixture_target::target_dir();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let lane = if cfg!(feature = "sqlite") {
         "sqlite"
