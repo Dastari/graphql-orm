@@ -12,7 +12,7 @@ supersedes: []
 
 ## Unreleased - 0.125.0
 
-- **Fixed:** bounded session activity uses the explicitly repository-only static conversion, retaining private durable keys for server-authored queries after ORM 0.99.0 made ordinary conversion fail closed. Repository-only schemas cannot compile into runtime GraphQL. No public AI API, persistent schema or data migration change. Related to #390.
+- **Fixed:** bounded session activity uses the explicitly repository-only static conversion, retaining private durable keys for server-authored queries after ORM 0.103.0 made ordinary conversion fail closed. Repository-only schemas cannot compile into runtime GraphQL. No public AI API, persistent schema or data migration change. Related to #390.
 
 ## Unreleased - 0.124.0
 

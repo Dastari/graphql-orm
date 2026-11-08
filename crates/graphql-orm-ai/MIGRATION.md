@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.124.0 to 0.125.0: private-key session activity
 
-Session activity now uses ORM 0.99.0's explicit repository-only conversion for
+Session activity now uses ORM 0.103.0's explicit repository-only conversion for
 its bounded, server-authored metadata queries. Ordinary static-to-runtime
 conversion still refuses unreadable columns, and runtime GraphQL refuses
 repository-only schemas before host authority can authorize a read.
