@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.96.0 adds opt-in, bounded GraphQL dependent deletes on SQLite and PostgreSQL with single-column keys. No data migration is needed; see the relations reference and root migration guide.
+Version 0.96.0 adds opt-in, bounded GraphQL dependent deletes on SQLite and PostgreSQL with single-column keys. It also bounds Changed operations to one root and requires admission on hand-built schemas. An independent jittered timer rechecks subscriber authority (30-second base; configurable 1–300 seconds): definite denial ends with FORBIDDEN, host failures with SUBSCRIPTION_CONTINUITY_LOST. Per-event denials remain silent. No data migration; see the root migration guide for configuration, client handling and timing limits.
 
 Version 0.95.1 keeps in-memory SQLite schema and data across pooled connection replacement and makes release test coordination deterministic. Memory pools remain isolated unless the URL explicitly opts into `cache=shared`. No data migration is needed.
 

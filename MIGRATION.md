@@ -3,14 +3,16 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-08
+last_reviewed: 2026-11-06
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
 
-## ORM/macros 0.96.0: optional dependent deletes
+## 0.95.1 to 0.96.0
+
+### Optional dependent deletes
 
 No data migration is needed. Existing opt-out SQL and foreign-key DDL are
 unchanged. To run dependent hooks and Changed subscriptions, declare
@@ -76,6 +78,61 @@ GraphQL context. Native RLS that can hide dependents refuses rather than cascadi
 unseen rows. All dependent field-policy denials refuse the delete. Unmodeled database triggers
 on registered tables refuse planning; retain those schemas opted out or move the
 behavior to explicitly authorized ORM mutation hooks before opting in.
+
+
+### Changed admission and subscriber revocation
+
+Clients selecting a generated static/derived `Changed` root must select exactly
+one root-field occurrence per operation, even with aliases, fragments or
+`@skip`/`@include`. Split multi-root operations into separate subscriptions.
+Detect refusal through `errors[].extensions.code == "subscription_root_limit_exceeded"`;
+admission happens before event receivers open or record reads. Generated
+`schema_builder` helpers install admission automatically. Manually assembled
+schemas must add `.extension(GeneratedSubscriptionAdmission(vec!["recordChanged"]))`
+from `graphql_orm::graphql::subscriptions`, listing every generated Changed
+field's actual GraphQL name; this also covers skipped generated roots alongside
+custom sibling sources. A generated resolver without this request-private admission
+mark refuses before opening a receiver or calling authority policies, with
+`SUBSCRIPTION_ADMISSION_REQUIRED`. A root name missing from the configured
+extension is treated the same way. Generated schema builders are unaffected.
+
+Generated keyed, unkeyed and propagated streams now recheck the subscriber's own
+resolver authentication, scopes, assurance and entity access on an independent
+timer. A definite denial produces one sanitized `FORBIDDEN` error and ends;
+reauthenticate or regain authority, then subscribe and refetch. Typed host/DB
+errors and infrastructure error categories instead produce
+`SUBSCRIPTION_CONTINUITY_LOST`; resubscribe and refetch when the host recovers.
+Both use a router `next` frame with `errors`, then `complete`.
+
+The base period defaults to 30 seconds. Configure before building the schema,
+for example
+`db.with_subscription_authority_recheck_interval(Duration::from_secs(10))`;
+use `Database::set_subscription_authority_recheck_interval` or the
+`DatabaseBuilder::subscription_authority_recheck_interval` option as alternatives.
+Values clamp to 1–300 seconds. Each period adds independent 0–10% positive
+jitter (default scheduled delay 30–33 seconds). Existing streams retain their
+setting. Timers require stream polling, and host latency/backpressure can delay
+checks and delivery; this is not a hard wall-clock revocation deadline.
+
+No write, including an unmatched, action-filtered or row-hidden write, triggers
+a forbidden frame or resets the timer. All per-event subscriber and delivery
+fence denials remain silent, as do row/key/field/provenance denials. Diagnostics
+buffered by a host policy during a dropped event are discarded and
+cannot appear on later frames; hosts need no changes for this correction.
+Closure and continuity-loss signals retain their existing timing properties.
+Lag is checked before filtering: hidden write volume can exceed the shared
+channel capacity and trigger `SUBSCRIPTION_CONTINUITY_LOST`, even before a revoked
+subscriber's next timer check. The frame omits keys, payloads and skipped-event
+counts, but its occurrence and timing remain observable (Related to
+[#387](https://github.com/Dastari/graphql-orm/issues/387)).
+Hosts must expose current session expiry/revocation through current checks and
+preserve typed errors or infrastructure codes for host failures; source-free
+authored refusals count as denials, not infrastructure failures.
+
+Runtime-IR live authority still uses an undifferentiated host grant/denial API,
+so its denials withhold events silently. CacheSync is unchanged; its separate
+event-triggered termination channel is tracked in [#384](https://github.com/Dastari/graphql-orm/issues/384).
+No data migration is needed.
 
 ## 0.95.0 to 0.95.1: in-memory SQLite lifetime
 

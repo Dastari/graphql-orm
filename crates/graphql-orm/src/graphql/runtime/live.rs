@@ -397,59 +397,31 @@ pub(super) fn admit_operation(
     modules: &[RuntimeGraphqlModule],
     limits: RuntimeGraphqlLimits,
 ) -> Result<(), RuntimeGraphqlError> {
-    use async_graphql::parser::types::{OperationType, Selection};
-    if operation.ty != OperationType::Subscription
-        || !modules.iter().any(|module| {
-            module
-                .schema
-                .schema()
-                .collections
-                .iter()
-                .any(|collection| collection.live_subscriptions.is_some())
-        })
-    {
+    if !modules.iter().any(|module| {
+        module
+            .schema
+            .schema()
+            .collections
+            .iter()
+            .any(|collection| collection.live_subscriptions.is_some())
+    }) {
         return Ok(());
     }
-    let mut stack = vec![(&operation.selection_set.node, 0usize)];
-    let mut expanded = 0usize;
-    let mut roots = 0usize;
-    let mut live = false;
-    while let Some((selections, depth)) = stack.pop() {
-        if depth > limits.max_depth {
-            return Err(RuntimeGraphqlError::new("cost_exceeded"));
-        }
-        for selection in &selections.items {
-            expanded = expanded.checked_add(1).ok_or_else(invalid)?;
-            if expanded > limits.max_selections {
-                return Err(RuntimeGraphqlError::new("cost_exceeded"));
-            }
-            match &selection.node {
-                Selection::Field(field) => {
-                    roots += 1;
-                    live |= modules.iter().any(|module| {
-                        module.schema.schema().collections.iter().any(|collection| {
-                            collection.live_subscriptions.is_some()
-                                && field.node.name.node == changed_name(module, collection)
-                        })
-                    });
-                }
-                Selection::InlineFragment(fragment) => {
-                    stack.push((&fragment.node.selection_set.node, depth + 1));
-                }
-                Selection::FragmentSpread(spread) => {
-                    let fragment = document
-                        .fragments
-                        .get(&spread.node.fragment_name.node)
-                        .ok_or_else(invalid)?;
-                    stack.push((&fragment.node.selection_set.node, depth + 1));
-                }
-            }
-        }
-    }
-    if live && roots > 1 {
-        return Err(RuntimeGraphqlError::new("subscription_root_limit_exceeded"));
-    }
-    Ok(())
+    crate::graphql::subscription_admission::admit(
+        document,
+        operation,
+        |name| {
+            modules.iter().any(|module| {
+                module.schema.schema().collections.iter().any(|collection| {
+                    collection.live_subscriptions.is_some()
+                        && name == changed_name(module, collection)
+                })
+            })
+        },
+        limits.max_depth,
+        limits.max_selections,
+    )
+    .map_err(RuntimeGraphqlError::new)
 }
 
 // Authorize fresh plans for BOTH purposes. Intersect every layer, including

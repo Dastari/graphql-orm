@@ -2087,7 +2087,7 @@ fn generate_graphql_operations_unfiltered(
     let subscription_operation_description =
         format!("Observe changes to {struct_name_str} records");
     let subscription_operation_description = format!(
-        "{} Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Events recheck current authorization and may be suppressed; refresh authorized queries for richer data.",
+        "{} Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Subscriber authority is rechecked on an event-independent jittered timer: definite denial ends with FORBIDDEN and host failures with SUBSCRIPTION_CONTINUITY_LOST. Per-event denials silently suppress events. Select exactly one root occurrence per operation. Refresh authorized queries for richer data.",
         subscription_operation_description
     );
     let page_info_field_name = apply_graphql_case("pageInfo", field_case);
@@ -2322,6 +2322,9 @@ fn generate_graphql_operations_unfiltered(
             quote! { pub }
         };
     let subscription_key_method = quote! {
+        #[doc(hidden)]
+        pub const __GOM_CHANGED_ROOT_NAME: &'static str = #subscription_name;
+
         #[doc(hidden)]
         #subscription_key_visibility fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
             -> ::graphql_orm::async_graphql::Result<()> {
@@ -5627,6 +5630,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                     use ::graphql_orm::futures::StreamExt;
+                    ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
                     let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                     #subscription_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -5657,7 +5661,9 @@ fn generate_graphql_operations_unfiltered(
                     let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
-                    Ok(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
+                    let interval = db.subscription_authority_recheck_interval();
+                    let timer_db = db.clone();
+                    let events = ::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
                         let key = key.clone();
@@ -5668,6 +5674,9 @@ fn generate_graphql_operations_unfiltered(
                                 // Lost continuity or a closed event source: one error, then the stream ends.
                                 Err(error) => return Some(Err(error)),
                             };
+                            // Host policies may buffer private diagnostics before denying an event.
+                            // Cover every filter and release-proof drop, not only payload preparation.
+                            let errors_before = ctx.query_env.errors.lock().unwrap().len();
                             let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
@@ -5725,9 +5734,40 @@ fn generate_graphql_operations_unfiltered(
                                     Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                                 }
                             }.await;
+                            if delivered.is_none() {
+                                ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+                            }
                             delivered.map(Ok)
                         }
-                    }))
+                    });
+                    Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
+                        events, interval, move || {
+                            let db = timer_db.clone();
+                            async move {
+                                let result = async {
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                                    ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                if !db.can_access_entity(Some(ctx), #entity_name_lit,
+                                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await? {
+                                    return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                                }
+                                // Current principal/scopes/assurance must survive the policy await.
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                                    ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)
+                                }.await;
+                                if result.is_err() {
+                                    // A timer may preempt a pending event preparation.
+                                    // Never attach its private diagnostics to the terminal frame.
+                                    ctx.query_env.errors.lock().unwrap().clear();
+                                }
+                                result
+                            }
+                        }
+                    ))
                 }
             }
 
@@ -7463,6 +7503,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #subscription_keys_arg_name, desc = #subscription_keys_arg_description)] keys: Option<Vec<#key_type>>,
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                 use ::graphql_orm::futures::StreamExt;
+                    ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
                 let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
                 #subscription_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -7494,7 +7535,9 @@ fn generate_graphql_operations_unfiltered(
                 let actions = _filter.and_then(|filter| filter.actions);
                     let rx = db.ensure_event_sender::<::graphql_orm::graphql::subscriptions::SubscriptionEvent<#changed_event, #backend_marker>>().subscribe();
                     let db = db.clone();
-                    Ok(::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
+                    let interval = db.subscription_authority_recheck_interval();
+                    let timer_db = db.clone();
+                    let events = ::graphql_orm::graphql::subscriptions::continuity_events(rx).filter_map(move |result| {
                         let db = db.clone();
                         let actions = actions.clone();
                         let key = key.clone();
@@ -7505,6 +7548,9 @@ fn generate_graphql_operations_unfiltered(
                                 // Lost continuity or a closed event source: one error, then the stream ends.
                                 Err(error) => return Some(Err(error)),
                             };
+                            // Host policies may buffer private diagnostics before denying an event.
+                            // Cover every filter and release-proof drop, not only payload preparation.
+                            let errors_before = ctx.query_env.errors.lock().unwrap().len();
                             let delivered: Option<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>> = async move {
                                 let event = witness.event.as_ref();
                                 if key.as_ref().is_some_and(|key| ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(key)) != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&witness.keys)) { return None; }
@@ -7563,9 +7609,40 @@ fn generate_graphql_operations_unfiltered(
                                     Err(error) => { let _ = ::graphql_orm::graphql::loaders::relation_authorization_error(error); None }
                                 }
                             }.await;
+                            if delivered.is_none() {
+                                ctx.query_env.errors.lock().unwrap().truncate(errors_before);
+                            }
                             delivered.map(Ok)
                         }
-                    }))
+                    });
+                    Ok(::graphql_orm::graphql::subscriptions::watch_subscription_authority(
+                        events, interval, move || {
+                            let db = timer_db.clone();
+                            async move {
+                                let result = async {
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                                    ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
+                                if !db.can_access_entity(Some(ctx), #entity_name_lit,
+                                    <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
+                                    ::graphql_orm::graphql::orm::EntityAccessKind::Read,
+                                    ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await? {
+                                    return Err(::graphql_orm::graphql::errors::OrmPublicError::forbidden().into_graphql_error());
+                                }
+                                // Current principal/scopes/assurance must survive the policy await.
+                                #struct_name::__gom_authorize_changed_operation(ctx)?;
+                                ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                                    ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)
+                                }.await;
+                                if result.is_err() {
+                                    // A timer may preempt a pending event preparation.
+                                    // Never attach its private diagnostics to the terminal frame.
+                                    ctx.query_env.errors.lock().unwrap().clear();
+                                }
+                                result
+                            }
+                        }
+                    ))
             }
         }
 
