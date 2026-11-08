@@ -18,7 +18,7 @@ for historical context.
 
 ORM runtime/macros **0.96.0**, operation catalog **0.7.2**.
 
-- **Breaking:** reject `private`, `read = false`, and `input_only` fields on SimpleObject entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.
+- **Breaking:** reject `private`, `read = false`, and `input_only` fields on `GraphQLEntity` + `SimpleObject` entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.
 - **Breaking/security:** a readable relation is a compile error if any local or target key or source/target condition column is unreadable (`private`, `read = false`, `input_only`), including composite keys and cross-crate targets. Unresolved target physical columns (including self-targets) and targets without column-readability metadata also fail compilation. Make the relation unreadable or its columns readable; regenerate older targets or explicitly implement the metadata contract for hand-written targets.
 - **Breaking/security:** unreadable primary keys with `GraphQLOperations` are compile errors because Changed events expose them. `search_relation` on an unreadable relation, `order_aggregate` on an `input_only` relation, `searchable` on an `input_only` field, and `search_json` on `read = false` / `input_only` fields are compile errors. Remove the declaration or make the field readable.
 - **SDL/security:** remove `input_only` relation getters, aggregate/group-by fields and semantic catalogue entries. Automatic read surfaces share the same readability predicate; explicitly granted scalar filters/sorts on `read = false` remain independent capabilities.

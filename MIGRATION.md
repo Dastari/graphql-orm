@@ -16,7 +16,7 @@ Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`
 fields on `SimpleObject` entities without `#[graphql(skip)]`. This also applies
 to `GraphQLEntity` with `schema_only = true`, which delegates object ownership;
 add explicit skips there as well. The metadata-only `GraphQLSchemaEntity` derive
-is unchanged. The compiler names the affected field. Add `#[graphql(skip)]` to each such field, or place
+remains exempt from this object-getter check. The compiler names the affected field. Add `#[graphql(skip)]` to each such field, or place
 `#[graphql_orm::graphql_policy_object]` before the derives (with
 `#[graphql(complex)]`) to install the skips and scalar policy guards. For example:
 
