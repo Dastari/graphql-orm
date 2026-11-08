@@ -1204,6 +1204,14 @@ enum StepObject {
         #[serde(deserialize_with = "super::bounded_decode::payload")]
         retention_purge: bool,
     },
+    SetCompositeUniques {
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
+        table_name: String,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
+        before: Vec<Vec<String>>,
+        #[serde(deserialize_with = "super::bounded_decode::payload")]
+        after: Vec<Vec<String>>,
+    },
     SetCheckConstraints {
         #[serde(deserialize_with = "super::bounded_decode::payload")]
         table_name: String,
@@ -1299,6 +1307,15 @@ impl Decode for StepObject {
                 table_name: table_name.finish(),
                 enabled: enabled.finish(),
                 retention_purge: retention_purge.finish(),
+            },
+            Self::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => OwnedMigrationStep::SetCompositeUniques {
+                table_name: table_name.finish(),
+                before: before.finish(),
+                after: after.finish(),
             },
             Self::SetCheckConstraints {
                 table_name,
@@ -1440,6 +1457,18 @@ impl Wire for OwnedMigrationStep {
                 o.serialize_field("retentionPurge", &Enc(retention_purge))?;
                 o.end()
             }
+            Self::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => {
+                let mut o = s.serialize_struct("Step", 4)?;
+                o.serialize_field("kind", "setCompositeUniques")?;
+                o.serialize_field("tableName", &Enc(table_name))?;
+                o.serialize_field("before", &Enc(before))?;
+                o.serialize_field("after", &Enc(after))?;
+                o.end()
+            }
             Self::SetCheckConstraints {
                 table_name,
                 before,
@@ -1569,6 +1598,18 @@ impl Wire for OwnedMigrationStep {
                 enabled.inventory(i)?;
                 i.member("retentionPurge")?;
                 retention_purge.inventory(i)?;
+            }
+            Self::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => {
+                i.member("tableName")?;
+                table_name.inventory(i)?;
+                i.member("before")?;
+                before.inventory(i)?;
+                i.member("after")?;
+                after.inventory(i)?;
             }
             Self::SetCheckConstraints {
                 table_name,

@@ -834,6 +834,30 @@ where
             }
         }
 
+        // A legacy rebuild must retain host triggers as well as modeled indexes.
+        // Owned plans continue to reject unmodeled triggers before this point.
+        let mut preserved_triggers = Vec::new();
+        if suspend_foreign_keys {
+            let triggers: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT tbl_name, name, sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL",
+            ).fetch_all(&mut *tx).await?;
+            for (table, name, sql) in triggers {
+                let managed_name = super::migrations::append_only_name(&table);
+                let managed = (name == format!("{managed_name}_update")
+                    && super::migrations::sqlite_append_only_trigger_matches(&sql, &name, &table, "update"))
+                    || (name == format!("{managed_name}_delete")
+                        && (super::migrations::sqlite_append_only_trigger_matches(&sql, &name, &table, "delete")
+                            || super::migrations::sqlite_retention_delete_trigger_matches(&sql, &name, &table)));
+                // The target rebuild owns canonical ORM enforcement triggers,
+                // including intentional removal or retention-policy changes.
+                if managed { continue; }
+                let drop = format!("DROP TABLE {}", super::DatabaseBackend::Sqlite.render_identifier_path(&table));
+                if statements.iter().any(|statement| statement.as_ref().trim() == drop) {
+                    preserved_triggers.push((name, sql));
+                }
+            }
+        }
+
         for statement in statements {
             let statement = statement.as_ref().trim();
             if statement.is_empty()
@@ -842,7 +866,15 @@ where
             {
                 continue;
             }
-            sqlx::query(statement).execute(&mut *tx).await?;
+            sqlx::query(statement).execute(&mut *tx).await.map_err(sanitize_migration_constraint_error)?;
+        }
+
+        for (name, sql) in preserved_triggers {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?")
+                .bind(name).fetch_one(&mut *tx).await?;
+            if exists == 0 {
+                sqlx::query(&sql).execute(&mut *tx).await?;
+            }
         }
 
         if suspend_foreign_keys {
@@ -890,6 +922,18 @@ where
     }
 
     final_result
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn sanitize_migration_constraint_error(error: sqlx::Error) -> sqlx::Error {
+    if error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
+    {
+        sqlx::Error::Protocol("Migration refused: existing rows violate a unique constraint".into())
+    } else {
+        error
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -1041,7 +1085,10 @@ where
         if statement.is_empty() {
             continue;
         }
-        sqlx::query(statement).execute(&mut *tx).await?;
+        sqlx::query(statement)
+            .execute(&mut *tx)
+            .await
+            .map_err(sanitize_migration_constraint_error)?;
     }
 
     if record_history {

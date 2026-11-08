@@ -1168,6 +1168,11 @@ pub(super) enum OwnedMigrationStep {
         /// Whether enforcement admits exact ORM bounded-retention context.
         retention_purge: bool,
     },
+    SetCompositeUniques {
+        table_name: String,
+        before: Vec<Vec<String>>,
+        after: Vec<Vec<String>>,
+    },
     SetCheckConstraints {
         table_name: String,
         before: Vec<CheckConstraintModel>,
@@ -1232,6 +1237,11 @@ pub(super) enum StepRef<'a> {
         enabled: bool,
         /// Whether enforcement admits exact ORM bounded-retention context.
         retention_purge: bool,
+    },
+    SetCompositeUniques {
+        table_name: &'a String,
+        before: &'a Vec<Vec<String>>,
+        after: &'a Vec<Vec<String>>,
     },
     SetCheckConstraints {
         table_name: &'a String,
@@ -1316,6 +1326,15 @@ impl<'a> From<&'a MigrationStep> for StepRef<'a> {
                 table_name,
                 enabled: *enabled,
                 retention_purge: *retention_purge,
+            },
+            MigrationStep::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => Self::SetCompositeUniques {
+                table_name,
+                before,
+                after,
             },
             MigrationStep::SetCheckConstraints {
                 table_name,
@@ -1406,6 +1425,15 @@ impl<'a> From<&'a OwnedMigrationStep> for StepRef<'a> {
                 table_name,
                 enabled: *enabled,
                 retention_purge: *retention_purge,
+            },
+            OwnedMigrationStep::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => Self::SetCompositeUniques {
+                table_name,
+                before,
+                after,
             },
             OwnedMigrationStep::SetCheckConstraints {
                 table_name,
@@ -1515,6 +1543,15 @@ impl OwnedMigrationStep {
                 table_name,
                 enabled,
                 retention_purge,
+            },
+            Self::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => MigrationStep::SetCompositeUniques {
+                table_name,
+                before,
+                after,
             },
             Self::SetCheckConstraints {
                 table_name,

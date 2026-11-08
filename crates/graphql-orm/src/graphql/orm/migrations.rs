@@ -1441,6 +1441,25 @@ pub(super) fn diff_schema_views_with(
                 retention_purge: target_table.retention_purge,
             });
         }
+        // SQLite merges a UNIQUE that exactly repeats the primary key into
+        // the PK autoindex (origin=pk). It cannot be introspected separately,
+        // and the primary key already enforces the declared uniqueness.
+        let unique_set = |table: &TableRef<'_>| {
+            let primary_keys = table.primary_keys();
+            table
+                .composite_unique_indexes
+                .iter()
+                .filter(|key| backend != DatabaseBackend::Sqlite || **key != primary_keys)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        if unique_set(table) != unique_set(target_table) {
+            steps.push(OwnedMigrationStep::SetCompositeUniques {
+                table_name: table_name.clone(),
+                before: table.composite_unique_indexes.clone(),
+                after: target_table.composite_unique_indexes.clone(),
+            });
+        }
         if !check_constraints_equivalent(table.check_constraints, target_table.check_constraints) {
             steps.push(OwnedMigrationStep::SetCheckConstraints {
                 table_name: table_name.clone(),
@@ -1490,6 +1509,7 @@ pub(super) fn migration_step_table_name<'a>(step: &StepRef<'a>) -> Option<&'a st
         StepRef::AddForeignKey { table_name, .. } => Some(table_name),
         StepRef::DropForeignKey { table_name, .. } => Some(table_name),
         StepRef::SetAppendOnly { table_name, .. } => Some(table_name),
+        StepRef::SetCompositeUniques { table_name, .. } => Some(table_name),
         StepRef::SetCheckConstraints { table_name, .. } => Some(table_name),
     }
 }
@@ -1509,6 +1529,7 @@ fn sqlite_requires_table_rebuild(step: &StepRef<'_>) -> bool {
                 | StepRef::AlterColumn { .. }
                 | StepRef::AddForeignKey { .. }
                 | StepRef::DropForeignKey { .. }
+                | StepRef::SetCompositeUniques { .. }
                 | StepRef::SetCheckConstraints { .. }
         ),
     }
@@ -1581,6 +1602,88 @@ fn render_create_index_statement(
         columns,
         predicate,
     )
+}
+
+// Existing CREATE TABLE constraints have database-assigned names. Resolve those
+// names by their ordered members rather than guessing a backend naming scheme.
+fn render_composite_unique_changes(
+    backend: DatabaseBackend,
+    table_name: &str,
+    before: &[Vec<String>],
+    after: &[Vec<String>],
+) -> Vec<String> {
+    if backend == DatabaseBackend::Sqlite {
+        return vec![format!(
+            "-- sqlite requires table rebuild for composite uniques on {table_name}"
+        )];
+    }
+    let table = backend.render_identifier_path(table_name);
+    let mut statements = Vec::new();
+    for columns in before.iter().filter(|columns| !after.contains(columns)) {
+        let statement = match backend {
+            DatabaseBackend::Postgres => {
+                let members = columns
+                    .iter()
+                    .map(|c| sql_string_literal(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let body = format!(
+                    "DECLARE r record; BEGIN FOR r IN SELECT con.conname FROM pg_constraint con \
+                     WHERE con.conrelid = {}::regclass AND con.contype = 'u' \
+                     AND (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(con.conkey) \
+                     WITH ORDINALITY k(num, ord) JOIN pg_attribute a ON a.attrelid = con.conrelid \
+                     AND a.attnum = k.num) = ARRAY[{members}]::text[] LOOP \
+                     EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', {}::regclass, r.conname); \
+                     END LOOP; END",
+                    sql_string_literal(&table),
+                    sql_string_literal(&table)
+                );
+                format!("DO {}", sql_string_literal(&body))
+            }
+            DatabaseBackend::Mssql => {
+                let members = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let raw = c
+                            .strip_prefix('[')
+                            .and_then(|s| s.strip_suffix(']'))
+                            .map(|s| s.replace("]]", "]"))
+                            .unwrap_or_else(|| c.clone());
+                        format!("({}, N{})", i + 1, sql_string_literal(&raw))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "DECLARE @sql nvarchar(max) = N''; \
+                     SELECT @sql = @sql + N'ALTER TABLE ' + QUOTENAME(OBJECT_SCHEMA_NAME(k.parent_object_id)) + N'.' + \
+                     QUOTENAME(OBJECT_NAME(k.parent_object_id)) + N' DROP CONSTRAINT ' + QUOTENAME(k.name) + N';' \
+                     FROM sys.key_constraints k WHERE k.parent_object_id = OBJECT_ID(N{}) AND k.type = 'UQ' \
+                     AND (SELECT COUNT(*) FROM sys.index_columns ic WHERE ic.object_id = k.parent_object_id \
+                     AND ic.index_id = k.unique_index_id AND ic.key_ordinal > 0) = {} \
+                     AND NOT EXISTS (SELECT 1 FROM (VALUES {members}) v(ord, name) WHERE NOT EXISTS \
+                     (SELECT 1 FROM sys.index_columns ic JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+                     WHERE ic.object_id = k.parent_object_id AND ic.index_id = k.unique_index_id AND ic.key_ordinal = v.ord AND c.name = v.name)); \
+                     EXEC sp_executesql @sql",
+                    sql_string_literal(&table),
+                    columns.len()
+                )
+            }
+            // MySQL is not an executable backend in this workspace.
+            DatabaseBackend::Mysql => {
+                format!("-- unsupported composite unique change on {table_name}")
+            }
+            DatabaseBackend::Sqlite => unreachable!(),
+        };
+        statements.push(statement);
+    }
+    for columns in after.iter().filter(|columns| !before.contains(columns)) {
+        statements.push(format!(
+            "ALTER TABLE {table} ADD UNIQUE ({})",
+            backend.render_identifier_list(columns.iter().map(String::as_str))
+        ));
+    }
+    statements
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -1810,7 +1913,7 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_append_only_trigger_matches(
+pub(super) fn sqlite_append_only_trigger_matches(
     sql: &str,
     expected_name: &str,
     expected_table: &str,
@@ -1848,7 +1951,7 @@ fn sqlite_append_only_trigger_matches(
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_retention_delete_trigger_matches(
+pub(super) fn sqlite_retention_delete_trigger_matches(
     sql: &str,
     expected_name: &str,
     expected_table: &str,
@@ -2618,6 +2721,11 @@ pub(super) fn render_migration_step_view(
             enabled,
             retention_purge,
         } => render_append_only_statements(backend, table_name, *enabled, *retention_purge),
+        StepRef::SetCompositeUniques {
+            table_name,
+            before,
+            after,
+        } => render_composite_unique_changes(backend, table_name, before, after),
         StepRef::SetCheckConstraints {
             table_name,
             before,
@@ -2742,6 +2850,10 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
         StepRef::SetAppendOnly { enabled: false, .. } => (
             MigrationRisk::Risky,
             "removes append-only database enforcement",
+        ),
+        StepRef::SetCompositeUniques { .. } => (
+            MigrationRisk::Risky,
+            "changes composite uniqueness and may reject existing duplicate rows",
         ),
         StepRef::SetCheckConstraints { .. } => (
             MigrationRisk::Risky,
@@ -3317,7 +3429,7 @@ impl IntrospectionBackend for super::SqliteBackend {
 #[cfg(feature = "sqlite")]
 impl RlsIntrospectionBackend for super::SqliteBackend {}
 
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", feature = "mssql"))]
 fn classify_postgres_unique_constraints(
     mut members: Vec<(String, String, i64)>,
 ) -> (std::collections::HashSet<String>, Vec<Vec<String>>) {
@@ -3987,7 +4099,8 @@ pub async fn introspect_mssql_schema(
 
         let unique_rows = super::MssqlBackend::fetch_rows(
             pool,
-            "SELECT kcu.COLUMN_NAME AS column_name
+            "SELECT kcu.CONSTRAINT_NAME AS constraint_name, kcu.COLUMN_NAME AS column_name,
+                    CAST(kcu.ORDINAL_POSITION AS bigint) AS key_ordinal
              FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
              JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
                ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
@@ -3995,20 +4108,29 @@ pub async fn introspect_mssql_schema(
               AND tc.TABLE_NAME = kcu.TABLE_NAME
              WHERE tc.TABLE_SCHEMA = @P1
                AND tc.TABLE_NAME = @P2
-               AND tc.CONSTRAINT_TYPE = 'UNIQUE'",
+               AND tc.CONSTRAINT_TYPE = 'UNIQUE'
+             ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
             &[
                 SqlValue::String(schema_name.clone()),
                 SqlValue::String(raw_table_name.clone()),
             ],
         )
         .await?;
-        let unique_columns = unique_rows
+        let unique_members = unique_rows
             .into_iter()
             .map(|row| {
-                super::MssqlBackend::try_get_string(&row, "column_name")
-                    .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
+                Ok((
+                    super::MssqlBackend::try_get_string(&row, "constraint_name")?,
+                    DatabaseBackend::Mssql.quote_identifier(&super::MssqlBackend::try_get_string(
+                        &row,
+                        "column_name",
+                    )?),
+                    row.try_get::<i64, _>("key_ordinal")?,
+                ))
             })
-            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
+        let (unique_columns, composite_unique_indexes) =
+            classify_postgres_unique_constraints(unique_members);
 
         let columns = column_rows
             .into_iter()
@@ -4035,7 +4157,7 @@ pub async fn introspect_mssql_schema(
             default_sort: format!("{primary_key} ASC"),
             columns,
             indexes: Vec::new(),
-            composite_unique_indexes: Vec::new(),
+            composite_unique_indexes,
             foreign_keys: Vec::new(),
             search_indexes: Vec::new(),
             append_only: false,

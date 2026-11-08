@@ -60,6 +60,7 @@ mod glob_import {
             | AddForeignKey { .. }
             | DropForeignKey { .. }
             | SetAppendOnly { .. }
+            | SetCompositeUniques { .. }
             | SetCheckConstraints { .. } => false,
         }
     }
