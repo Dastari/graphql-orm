@@ -15,8 +15,10 @@ The catalogue owns `ReceiverPurposeV1`, `ReceiverPurposeMetadata`,
 `RECEIVER_PURPOSE_CLAIM`, `canonical_json_hash` and `exact_document_hash`; profiles
 re-exports them for issuers. Existing exact-operation claims and private-remote hashes
 retain their byte format. Generated SDL and discovery/authorization fingerprints
-are unchanged. ORM/macros 0.94.0, catalogue 0.7.1, profiles 0.21.1 and AI 0.123.0
-are compatible patch releases. There is no persistent change or data migration.
+are unchanged. Admission is opt-in and additive. It shipped in ORM/macros 0.94.0
+and AI 0.123.0, which are minor releases that also carry unrelated breaking changes
+(see `MIGRATION.md`), and in catalogue 0.7.1 and profiles 0.21.1, which are patch
+releases. There is no persistent change or data migration.
 
 Register one reviewed exact named query/root per operation name in an immutable
 `AgqlReceiverRegistry`. Contracts bind receiver, target, schema, capability,
