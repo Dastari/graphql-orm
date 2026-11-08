@@ -35,35 +35,6 @@ package_version() {
   awk -F ' *= *' '/^version = / {gsub(/"/, "", $2); print $2; exit}' "$1"
 }
 
-
-# A main-branch development snapshot is not a published package release.
-# Only an explicitly announced, untagged paired ORM release may be co-developed.
-announced_core_version() {
-  git -C "${repository_root}" show "$1:CHANGELOG.md" 2>/dev/null | python3 -c '
-import re, sys
-text = sys.stdin.read()
-section = re.search(r"^## Unreleased\s*\n", text, re.MULTILINE)
-if section is None:
-    sys.exit(1)
-paragraph = text[section.end():].lstrip().split("\n\n", 1)[0]
-version = re.search(r"ORM runtime/macros \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", paragraph)
-if version is None:
-    sys.exit(1)
-print(version.group(1))
-'
-}
-
-coordinated_unreleased_core_version() {
-  case "$1" in graphql-orm|graphql-orm-macros) ;; *) return 1 ;; esac
-  if git -C "${repository_root}" show-ref --verify --quiet "refs/tags/$1-v$2"; then
-    return 1
-  fi
-  local baseline_announced head_announced
-  baseline_announced=$(announced_core_version "${base}") || return 1
-  head_announced=$(announced_core_version HEAD) || return 1
-  [[ "${baseline_announced}" == "$2" && "${head_announced}" == "$2" ]]
-}
-
 for package in "${packages[@]}"; do
   crate_prefix="crates/${package}"
   if ! git -C "${repository_root}" cat-file -e \
@@ -116,12 +87,8 @@ for package in "${packages[@]}"; do
     exit 1
   fi
   if [[ "${current_version}" == "${baseline_version}" ]]; then
-    if coordinated_unreleased_core_version "${package}" "${current_version}"; then
-      echo "package-release-policy: ${package} joins announced untagged ${current_version}"
-    else
-      echo "package-release-policy: ${package} public/runtime changes require a SemVer version change" >&2
-      exit 1
-    fi
+    echo "package-release-policy: ${package} public/runtime changes require a SemVer version change" >&2
+    exit 1
   fi
   highest=$(printf '%s\n%s\n' "${baseline_version}" "${current_version}" | sort -V | tail -n 1)
   if [[ "${highest}" != "${current_version}" ]]; then

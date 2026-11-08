@@ -10,7 +10,7 @@ supersedes: []
 
 # Migration Guide
 
-## 0.95.1 to 0.96.0: subscriptions, unreadable fields and safe errors
+## 0.96.0 to 0.97.0: unreadable fields, relations and safe errors
 
 Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`
 fields on `SimpleObject` entities without `#[graphql(skip)]`. This also applies
@@ -52,7 +52,7 @@ Rust field names apply to local `from` keys and source conditions; physical
 column names apply to target `to` keys and target conditions. Generated
 `GeneratedRelationReadability` metadata proves target readability across crate
 boundaries. Targets built with older macros or hand-written targets without this
-metadata fail compilation. Rebuild target crates with the current ORM/macros 0.96 revision, or for a
+metadata fail compilation. Rebuild target crates with the current ORM/macros 0.97 revision, or for a
 hand-written target explicitly implement
 `graphql_orm::graphql::orm::GeneratedRelationReadability`, listing physical
 columns and their actual static eligibility:
@@ -84,8 +84,8 @@ force. Explicit scalar filter/sort grants on `read = false` retain their
 documented behavior.
 
 Operation catalog 0.7.2 preserves the legacy implicit descriptions byte for
-byte, so ORM/macros 0.95 consumers retain their descriptions and fingerprints
-when updating only that dependency. ORM/macros 0.96 explicitly supply the
+byte, so ORM/macros 0.95/0.96 consumers retain their descriptions and fingerprints
+when updating only that dependency. ORM/macros 0.97 explicitly supply the
 corrected descriptions; their SDL and catalogue wording agree, including the
 bounded authorization-scan description.
 
@@ -94,6 +94,8 @@ raw database diagnostics. Generated single-record operation descriptions use
 singular wording. This changes SDL, schema hashes, operation catalogue
 fingerprints and any signed metadata derived from them: regenerate exported
 schemas, catalogues and consumer snapshots. No data migration is needed.
+
+## 0.95.1 to 0.96.0: Changed admission and subscriber revocation
 
 Clients selecting a generated static/derived `Changed` root must select exactly
 one root-field occurrence per operation, even with aliases, fragments or

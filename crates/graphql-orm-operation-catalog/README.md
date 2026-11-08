@@ -10,7 +10,7 @@ supersedes: []
 
 # `graphql-orm-operation-catalog`
 
-Version `0.7.2` pins legacy default descriptions for patch compatibility. ORM/macros 0.96 explicitly supply corrected SDL descriptions through existing constructors; consumers of 0.95 keep their descriptions and fingerprints when updating only this package. No data migration is needed.
+Version `0.7.2` pins legacy default descriptions for patch compatibility. ORM/macros 0.97 explicitly supply corrected SDL descriptions through existing constructors; consumers of 0.95/0.96 keep their descriptions and fingerprints when updating only this package. No data migration is needed.
 
 Version `0.7.1` adds pure receiver-purpose bindings and canonical hash functions with golden vectors. Existing catalogue fingerprints and signed encodings are unchanged; no data migration is needed.
 

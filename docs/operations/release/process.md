@@ -48,15 +48,6 @@ features, wire contract, runtime behavior, or documented compatibility changes
 under that package's release rules. A workspace release does not require a new
 version for an unchanged package.
 
-The paired ORM/runtime and macro version may receive coordinated changes before
-release when both the reviewed base and the new commit explicitly announce that
-same version in the first version paragraph under root `CHANGELOG.md`'s
-`Unreleased` heading. Neither changed package may already have its qualified
-`<package>-v<version>` tag. README, changelog and migration updates, aligned
-versions and compatibility checks remain required. Once a qualified tag exists,
-changed package source requires a new version; published identities never move.
-Other packages retain their own version-increment rules.
-
 `graphql-orm-ai` additionally versions its persistent schema module. Router,
 semantic-catalogue, tool-manifest, and operation-assurance protocols keep their
 own contract versions. The generated release manifest records these values
