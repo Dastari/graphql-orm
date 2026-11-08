@@ -601,7 +601,16 @@ mod tests {
     fn activity_query_schema_and_all_run_states_are_closed() {
         let schema = query_schema().unwrap();
         assert!(schema.schema().repository_only);
-        assert!(RuntimeSchema::from_static_entities(&[AiSessionRecord::metadata()]).is_err());
+        let diagnostics = RuntimeSchema::from_static_entities(&[AiRunRecord::metadata()])
+            .expect_err("restricted run metadata must not enter a served schema");
+        assert!(
+            diagnostics
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code
+                    == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+                    && diagnostic.subject.as_deref() == Some("principal_reference"))
+        );
         for state in [
             "queued",
             "leased",

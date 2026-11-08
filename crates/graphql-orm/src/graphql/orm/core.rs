@@ -2938,7 +2938,9 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_generated: bool,
-    /// Static GraphQL output eligibility, independent of host authorization.
+    /// Scalar output eligibility under the static object owner, independent of
+    /// host authorization. False also marks output restrictions the runtime IR
+    /// cannot preserve (such as delegated visibility or field policy hooks).
     pub is_readable: bool,
     pub is_filterable: bool,
     /// The derive generated an order-input term for this column.
@@ -3095,7 +3097,9 @@ pub struct FieldMetadata {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_generated: bool,
-    /// Static GraphQL output eligibility, independent of host authorization.
+    /// Scalar output eligibility under the static object owner, independent of
+    /// host authorization. False also marks output restrictions the runtime IR
+    /// cannot preserve (such as delegated visibility or field policy hooks).
     pub is_readable: bool,
     pub is_filterable: bool,
     /// The derive generated an order-input term for this column.

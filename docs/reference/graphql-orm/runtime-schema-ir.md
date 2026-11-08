@@ -419,7 +419,12 @@ compare converted schemas by `structural_fingerprint()`, not `fingerprint()`.
 To make conversion faithful, static metadata records the following facts, emitted by the
 derives and available on `ColumnDef`/`FieldMetadata`:
 
-- `is_readable` — static output eligibility; default conversion refuses unreadable columns;
+- `is_readable` — scalar output eligibility under the owning object; default conversion
+  refuses unreadable columns. Delegated and metadata-only output honors effective
+  `skip`, `skip_output`, flattening and unrepresented visibility/guards.
+  ORM-owned getters retain their generated behavior. Metadata-only repository
+  declarations retain ordinary readable columns. Relation implementation skips
+  are handled independently;
 - `api_name` — the public GraphQL field name after rename attributes and case features;
 - `is_sortable` — the derive generated an order-input term;
 - `is_date_time` — the column is a `#[date_field]`; its `logical_type` remains `String` so backup
@@ -428,12 +433,14 @@ derives and available on `ColumnDef`/`FieldMetadata`:
 Trusted server-authored repository queries may use
 `RuntimeSchema::from_static_entities_for_repository` to retain unreadable columns.
 This marks the entire schema `repository_only: true`. Runtime GraphQL module
-compilation rejects marked schemas before consulting any host authority.
+compilation rejects marked schemas with `repository_only_schema` before consulting any host authority.
 Serialization, revalidation, and both fingerprints retain the marker; do not
 strip it or copy internal collections into served schemas. This conversion
 grants no authorization and does not make repository results safe to disclose.
 Ordinary schemas default the marker to false and retain existing serialized
-bytes/fingerprints. Other unsupported capabilities still fail closed.
+bytes/fingerprints. Other unsupported capabilities still fail closed. Previously converted stored
+catalogs must be regenerated from current static metadata; old runtime documents
+cannot reconstruct static visibility attributes during deserialization.
 
 Static decimal columns convert to `RuntimeValueKind::Decimal` with their definition, and their
 backend default SQL to the canonical literal.
