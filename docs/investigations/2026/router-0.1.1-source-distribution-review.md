@@ -1,14 +1,19 @@
 ---
 title: GraphQL ORM Router 0.1.1 source distribution review
 kind: investigation
-status: accepted
+status: archived
 owner: workspace-maintainers
-last_reviewed: 2026-08-07
-review_by: 2026-11-07
+last_reviewed: 2026-11-08
+review_by: none
 supersedes: []
 ---
 
 # GraphQL ORM Router 0.1.1 source distribution review
+
+> **Archived 2026-11-08.** This approval covers only the router version and root
+> `Cargo.lock` named below. Later router releases are reviewed per lockfile through
+> `config/router-notice-review.v1.json` and the release process in
+> [`docs/operations/release/process.md`](../../operations/release/process.md).
 
 ## Question
 
