@@ -52,7 +52,7 @@ Rust field names apply to local `from` keys and source conditions; physical
 column names apply to target `to` keys and target conditions. Generated
 `GeneratedRelationReadability` metadata proves target readability across crate
 boundaries. Targets built with older macros or hand-written targets without this
-metadata fail compilation. Rebuild target crates with ORM/macros 0.96, or for a
+metadata fail compilation. Rebuild target crates with the current ORM/macros 0.96 revision, or for a
 hand-written target explicitly implement
 `graphql_orm::graphql::orm::GeneratedRelationReadability`, listing physical
 columns and their actual static eligibility:
