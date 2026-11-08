@@ -89,6 +89,11 @@ per surface.
 - **Generated (static) entity operations and subscriptions** use upper case:
   the codes above, plus `SUBSCRIPTION_CONTINUITY_LOST` and
   `SUBSCRIPTION_SOURCE_CLOSED` on generated `Changed` subscriptions.
+  Their structural multi-root admission refusal uses `subscription_root_limit_exceeded`.
+  Missing/misconfigured admission on a hand-built schema refuses with
+  `SUBSCRIPTION_ADMISSION_REQUIRED`. An event-independent authority timer uses
+  `FORBIDDEN` for definite subscriber denial and `SUBSCRIPTION_CONTINUITY_LOST`
+  for host/DB failures, once, then ends. All per-event denials stay silent.
 - **Runtime GraphQL** (fields installed by a `RuntimeGraphqlModule`) and the
   runtime host APIs use lower case, for example `authorization_denied`,
   `resource_limit`, `cursor_invalid` and `search_index_not_ready`. See

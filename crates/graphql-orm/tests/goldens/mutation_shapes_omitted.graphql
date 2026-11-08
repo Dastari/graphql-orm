@@ -479,7 +479,7 @@ input StringFilter {
 
 type Subscription {
 	"""
-	Observe changes to Shelf records Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Events recheck current authorization and may be suppressed; refresh authorized queries for richer data.
+	Observe changes to Shelf records Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Subscriber authority is rechecked on an event-independent jittered timer: definite denial ends with FORBIDDEN and host failures with SUBSCRIPTION_CONTINUITY_LOST. Per-event denials silently suppress events. Select exactly one root occurrence per operation. Refresh authorized queries for richer data.
 	"""
 	shelfChanged(
 		"""
@@ -496,7 +496,7 @@ type Subscription {
 		keys: [UUID!]
 	): ShelfChangedEvent!
 	"""
-	Observe changes to Parcel records Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Events recheck current authorization and may be suppressed; refresh authorized queries for richer data.
+	Observe changes to Parcel records Payload selections support persisted subscribable scalars only; relation/computed/custom selections are rejected. Subscriber authority is rechecked on an event-independent jittered timer: definite denial ends with FORBIDDEN and host failures with SUBSCRIPTION_CONTINUITY_LOST. Per-event denials silently suppress events. Select exactly one root occurrence per operation. Refresh authorized queries for richer data.
 	"""
 	parcelChanged(
 		"""

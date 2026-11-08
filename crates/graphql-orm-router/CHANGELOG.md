@@ -12,6 +12,10 @@ supersedes: []
 
 ## 0.8.2 (unreleased)
 
+- Extend the executable subscription wire test to pin sanitized `FORBIDDEN`
+  delivery as a `next` frame with errors followed by `complete`. Router behavior
+  is unchanged; no data migration is needed.
+
 - Wire-test child processes bind OS-assigned public/admin ports and report the
   actual owned addresses. The Hive fixture uses its app configuration seam with
   an owned listener. This removes the release-before-bind race. Fixes #366.
