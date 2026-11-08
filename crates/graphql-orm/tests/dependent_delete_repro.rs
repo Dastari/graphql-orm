@@ -1583,3 +1583,124 @@ async fn review_extension_equality_cannot_hide_dependents() {
 async fn review_blank_padded_equality_refuses() {
     review_comparison_case("CHAR(4)", "CHAR(4)", "P", "P").await;
 }
+
+// A DB-only FK has no declared parent type on which the macro can impose a
+// marker obligation. Keep the documented opt-out behavior explicit.
+mod database_only_parent {
+    use super::*;
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        table = "db_only_parents",
+        plural = "DbOnlyParents",
+        default_sort = "id ASC"
+    )]
+    struct DbOnlyParent {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        name: String,
+    }
+    #[derive(
+        GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug,
+    )]
+    #[graphql_entity(
+        dependent_deletes,
+        table = "db_only_children",
+        plural = "DbOnlyChildren",
+        default_sort = "id ASC"
+    )]
+    struct DbOnlyChild {
+        #[primary_key]
+        id: String,
+        #[sortable]
+        #[filterable(type = "string")]
+        parent_id: String,
+    }
+    schema_roots! { query_custom_ops: [], entities: [DbOnlyParent,DbOnlyChild], }
+    struct DenyChild;
+    impl EntityPolicy for DenyChild {
+        fn can_access_entity<'a>(
+            &'a self,
+            _: Option<&'a async_graphql::Context<'_>>,
+            _: &'a Database,
+            entity: &'static str,
+            _: Option<&'static str>,
+            kind: EntityAccessKind,
+            _: EntityAccessSurface,
+        ) -> graphql_orm::futures::future::BoxFuture<'a, async_graphql::Result<bool>> {
+            Box::pin(
+                async move { Ok(!(entity == "DbOnlyChild" && kind == EntityAccessKind::Write)) },
+            )
+        }
+    }
+    #[tokio::test]
+    #[cfg_attr(
+        feature = "postgres",
+        ignore = "requires test-owned PostgreSQL container"
+    )]
+    async fn database_only_fk_under_opted_out_parent_still_skips_child_hooks_and_events() {
+        #[cfg(feature = "sqlite")]
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        #[cfg(feature = "postgres")]
+        let pool = owned_postgres::OwnedPostgres::pool("db-only-delete-policy", 5)
+            .await
+            .unwrap();
+        for sql in [
+            "CREATE TABLE db_only_parents(id TEXT PRIMARY KEY,name TEXT NOT NULL)",
+            "CREATE TABLE db_only_children(id TEXT PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES db_only_parents(id) ON DELETE CASCADE)",
+            "INSERT INTO db_only_parents VALUES('parent','parent')",
+            "INSERT INTO db_only_children VALUES('child','parent')",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let hook = Hook::default();
+        let mut db = Database::with_mutation_hook(pool.clone(), hook.clone());
+        db.set_entity_policy(DenyChild);
+        let mut events = db
+            .ensure_event_sender::<DbOnlyChildChangedEvent>()
+            .subscribe();
+        let registry = StaticDependentDeletes::<DefaultBackend>::new(
+            RuntimeDependentLimits::new(10, 4).unwrap(),
+        )
+        .register::<DbOnlyChild>()
+        .unwrap();
+        let schema = schema_builder(db)
+            .data(AuthSubject::new("test-principal"))
+            .data(registry)
+            .finish();
+        assert!(
+            !schema
+                .execute("mutation { deleteDbOnlyChild(id:\"child\") { success } }")
+                .await
+                .errors
+                .is_empty()
+        );
+        let response = schema
+            .execute("mutation { deleteDbOnlyParent(id:\"parent\") { success } }")
+            .await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM db_only_children")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "opted-out parents retain their physical FK actions"
+        );
+        assert!(
+            hook.0
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(entity, _)| *entity == "DbOnlyParent")
+        );
+        assert!(events.try_recv().is_err());
+    }
+}

@@ -17,6 +17,15 @@ fn refusal() -> Error {
 /// Only SQLite and PostgreSQL implement this capability.
 #[doc(hidden)]
 pub trait StaticDeleteBackend: TransactionBackend {
+    /// Refuse physical relation behavior that can bypass the planned writes.
+    /// PostgreSQL repeats this check before every write; SQLite has no
+    /// inheritance, partitions, rewrite rules or foreign-table equivalent.
+    fn validate_delete_relations<'a>(
+        _tx: &'a mut Self::Transaction<'_>,
+        _ownership: &'a ManagedTableSet,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn dependencies<'a>(
         tx: &'a mut Self::Transaction<'_>,
         ownership: &'a ManagedTableSet,
@@ -144,6 +153,32 @@ impl StaticDeleteBackend for SqliteBackend {
 }
 #[cfg(feature = "postgres")]
 impl StaticDeleteBackend for PostgresBackend {
+    fn validate_delete_relations<'a>(
+        tx: &'a mut Self::Transaction<'_>,
+        ownership: &'a ManagedTableSet,
+    ) -> BoxFuture<'a, crate::Result<()>> {
+        Box::pin(async move {
+            // DELETE also visits inheritance/partition descendants, and rules
+            // can execute unrelated writes. Only ordinary standalone heap
+            // tables have the dependency semantics modeled by this planner.
+            let unsupported: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                    WHERE n.nspname=current_schema() AND c.relname=ANY($1)
+                      AND (c.relkind<>'r' OR c.relispartition
+                           OR EXISTS(SELECT 1 FROM pg_inherits i WHERE i.inhparent=c.oid OR i.inhrelid=c.oid)
+                           OR EXISTS(SELECT 1 FROM pg_rewrite r WHERE r.ev_class=c.oid AND r.rulename<>'_RETURN'))
+                )",
+            )
+            .bind(ownership.tables().collect::<Vec<_>>())
+            .fetch_one(tx.as_mut())
+            .await?;
+            if unsupported {
+                return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
+            }
+            Ok(())
+        })
+    }
     fn dependencies<'a>(
         tx: &'a mut Self::Transaction<'_>,
         ownership: &'a ManagedTableSet,
@@ -166,6 +201,7 @@ impl StaticDeleteBackend for PostgresBackend {
                     return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
                 }
             }
+            Self::validate_delete_relations(tx, ownership).await?;
             // Turning row_security off does not bypass RLS: PostgreSQL errors
             // rather than silently hiding dependents for a non-bypass role.
             sqlx::query("SET LOCAL row_security = off")
@@ -282,6 +318,9 @@ pub trait StaticPreparedWrite<B: StaticDeleteBackend>: Send {
 }
 /// Generated capability, available only on opted-in single-key writable entities.
 #[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "dependent_deletes requires `{Self}` to also opt in with #[graphql_entity(dependent_deletes)]"
+)]
 pub trait StaticDeleteEntity<B: StaticDeleteBackend>: Entity + Send + Sync + 'static {
     fn select<'a>(
         tx: &'a mut MutationContext<'_, B>,
@@ -625,6 +664,9 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
         prepared.push((Some(0), root_write));
         let mut notifications = Vec::new();
         for (deletion, write) in prepared {
+            B::validate_delete_relations(&mut tx.tx, &ownership)
+                .await
+                .map_err(|_| refusal())?;
             // Hooks may create or re-link rows after discovery. Refuse instead
             // of letting the physical FK action perform an unplanned write.
             if let Some(i) = deletion {

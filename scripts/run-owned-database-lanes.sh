@@ -27,7 +27,8 @@ cd "${repository_root}"
 
 run_dependent_deletes() {
   cargo test -p graphql-orm --locked --no-default-features --features sqlite --test dependent_delete_repro
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro -- --ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro --test dependent_delete_pg_physical -- --ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_ui declared_parent_opt_in_is_enforced_across_crates
   cargo check -p graphql-orm --locked --no-default-features --features mssql --all-targets
   cargo test -p graphql-orm --locked --no-default-features --features mssql --test dependent_delete_ui
 }
@@ -77,7 +78,7 @@ run_postgres() {
 }
 
 run_postgres_legacy() {
-  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro -- --ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres --test dependent_delete_repro --test dependent_delete_pg_physical -- --ignored --test-threads=1
 
   cargo test -p graphql-orm --locked --no-default-features --features postgres \
     --test static_related_filter \

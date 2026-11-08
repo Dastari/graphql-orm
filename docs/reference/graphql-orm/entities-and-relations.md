@@ -820,12 +820,19 @@ let dependents = StaticDependentDeletes::<SqliteBackend>::new(
 let schema = schema_builder(database).data(dependents).finish();
 ```
 
-**Every deleting ancestor must opt in.** An opted-in/registered child can still
-be physically cascaded or set-null by an opted-out parent, without hooks/events.
-The incremental registry has no complete schema/database catalogue at build
-time and cannot intercept those other delete surfaces. Audit all incoming
-cascade/set-null paths, including trusted repository/raw-SQL deletes, before
-relying on dependent observation.
+**Every declared deleting ancestor must opt in.** For an opted-in entity's
+declared to-one `cascade` or `set_null` relation, the generated compile-time
+assertion requires the parent to implement `StaticDeleteEntity` for the same
+backend. This works across crate boundaries. Enable `dependent_deletes` and
+writable generated operations on the parent; `restrict` relations need no such
+assertion.
+
+**Foreign keys that exist only in the database cannot be checked at compile
+time.** An opted-out parent deletes or set-nulls those children physically,
+with no dependent hooks or Changed events, even when the child is opted in and
+registered. Opt the parent in too; an unknown/unmodeled dependency then refuses
+planning. Audit other GraphQL write aliases and trusted repository/raw-SQL
+surfaces, which the incremental registry cannot intercept.
 
 Refusal versus success inherently reveals whether the requested root has
 dependents the caller cannot write. Refusals disclose neither identities nor
@@ -881,13 +888,17 @@ FK's equality even when both columns have identical declared types.
 Catalogue checks run under the schema/write fences and protect both planning and
 the final pre-delete referencer check; no schema is rewritten automatically.
 
-The original GraphQL context still describes the initiating root. Library auth,
+**Inside dependent checks, `ctx.field()` still describes the initiating root,
+not the dependent operation.** Library auth,
 scope templates and native auth use request data and explicit generated
 entity/argument identities; dependent assurance uses an explicit coordinate.
 Policy callbacks receive the dependent entity/row/field, input hooks receive
 `WriteInputContext::entity_name`, and mutation hooks receive `MutationEvent`
-metadata/action. Callbacks must use those explicit identities for the write and
-`ctx.field()` only for the initiating GraphQL selection. Notifications retain
+metadata/action. Hook and policy authors must use the explicit identity supplied
+by their callback API (entity/row/field, input-context entity, mutation-event
+entity/action, or assurance policy/coordinate) to identify and authorize the
+write. Do not use `ctx.field()` as the dependent operation identity; it is only
+initiating-selection provenance. Notifications retain
 the initiating context after commit.
 
 Unmodeled database triggers on registered tables refuse planning, including
@@ -896,3 +907,16 @@ statement, leaving a physical cascade to change a row the ORM never authorized
 or counted. Use explicitly authorized ORM mutation hooks for such behavior;
 unplanned referencers are checked before each delete. PostgreSQL's native
 FK/unique/exclusion constraint triggers remain supported.
+
+PostgreSQL only supports ordinary standalone heap tables for this option. The
+same guard checks `pg_class`, `pg_inherits` and `pg_rewrite` at planning and before
+each write. Any registered inheritance parent/child, partitioned table/partition,
+non-`_RETURN` rewrite rule, view or foreign table refuses. These objects can make
+a delete change rows outside the named table and its modeled FK graph. The
+recheck also catches a rule installed by an earlier mutation hook. SQLite has no
+PostgreSQL inheritance, declarative partitioning, rewrite RULE or foreign-table
+equivalent; its registered views already refuse ordinary-table validation.
+
+The root's Before hook runs before dependents are authorized, so a refused
+cascade may already have produced external hook side effects, as with a direct
+delete whose SQL later fails; defer external work until after commit.

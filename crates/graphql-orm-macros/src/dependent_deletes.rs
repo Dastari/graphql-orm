@@ -3,7 +3,7 @@ use crate::{
     backend::{BackendKind, backend_marker_tokens, resolve_backend},
     entity::{is_option_type, parse_entity_metadata, parse_field_metadata},
 };
-use quote::{ToTokens, format_ident, quote};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::{spanned::Spanned, visit_mut::VisitMut};
 
 pub(crate) fn generate(
@@ -69,6 +69,34 @@ pub(crate) fn generate(
     let marker = backend_marker_tokens(backend);
     let pk = keys[0].ident.as_ref().unwrap();
     let pkty = &keys[0].ty;
+    let mut parent_assertions = Vec::new();
+    for field in &data.fields {
+        let relation = parse_field_metadata(field)?;
+        if relation.is_relation
+            && (!relation.relation_multiple || relation.relation_emit_foreign_key == Some(true))
+            && matches!(
+                relation.relation_on_delete.as_deref(),
+                Some("cascade" | "set_null")
+            )
+        {
+            let parent: syn::Type =
+                syn::parse_str(relation.relation_target.as_deref().ok_or_else(|| {
+                    error(
+                        "dependent_deletes requires a declared parent target for cascade/set_null",
+                    )
+                })?)?;
+            // A trait obligation, not a textual lookup: this works for parent
+            // models imported from another crate and for recursive models.
+            parent_assertions.push(quote_spanned! { field.span() =>
+                const _: () = {
+                    fn __gom_declared_cascade_or_set_null_parent_must_opt_in<P: ::graphql_orm::graphql::orm::StaticDeleteEntity<#marker>>() {}
+                    fn __gom_check_parent() {
+                        __gom_declared_cascade_or_set_null_parent_must_opt_in::<#parent>();
+                    }
+                };
+            });
+        }
+    }
     let update_input = format_ident!("Update{}Input", name);
     let mut file: syn::File = syn::parse2(output)?;
     let target = format!("{}Mutations", name);
@@ -438,6 +466,7 @@ pub(crate) fn generate(
     let update_prep = &prep_names[1];
     Ok(quote! {
         #file
+        #(#parent_assertions)*
         #(#structs)*
         impl #name {#(#methods)*}
         impl ::graphql_orm::graphql::orm::StaticDeleteEntity<#marker> for #name {

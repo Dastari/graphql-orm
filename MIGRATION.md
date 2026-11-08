@@ -25,12 +25,19 @@ the bounded single-row deletes. Repository delete helpers retain physical behavi
 PostgreSQL single-column primary-key references; composite keys and MSSQL opt-ins
 are rejected. Unknown physical dependents and cycles refuse the entire delete.
 
-**Opt in every deleting ancestor, not only a dependent.** Registering/marking a
-child does not intercept deletes of an opted-out parent: those still use the
-physical FK action and skip the child's hooks/events. The registry is built
-incrementally without schema/database discovery and cannot prove that every
-other parent delete surface opts in. Audit every incoming cascade/set-null path
-and trusted repository/raw-SQL delete surface before relying on this guarantee.
+**Declare and opt in every deleting ancestor.** An opted-in entity's declared
+to-one `cascade` or `set_null` relation now requires its parent to implement
+`StaticDeleteEntity` for the same backend. The derive emits a compile-time
+obligation, including when the parent is imported from another crate. Mark that
+parent with `#[graphql_entity(dependent_deletes)]` and generate its writable
+operations too; do not remove the check to retain a physical cascade.
+
+**Database-only foreign keys are not compiler-checkable.** If no relation is
+declared in code and the parent stays opted out, those children are deleted or
+set null physically, with no dependent hooks or Changed events, even if the child
+is opted in and registered. Opt the parent in too; planning then refuses unknown
+or unmodeled dependencies instead of falling back to physical writes. Audit
+other write aliases and trusted repository/raw-SQL delete surfaces as well.
 
 Refusal versus success inherently reveals whether the root has dependents the
 caller cannot write. The refusal hides dependent identity and count; it cannot
@@ -52,6 +59,17 @@ equality with bound values is not modeled. Change an incompatible schema through
 an explicit reviewed migration, or keep that graph opted out; the ORM never
 rewrites it automatically. These checks protect both discovery and the final
 referencer recheck.
+
+PostgreSQL registered relations must be ordinary standalone heap tables. The
+same catalogue guard runs at planning and before every write and refuses
+inheritance parents/children, partitioned tables/partitions, non-`_RETURN` rewrite
+rules, views and foreign tables. SQLite has no inheritance, declarative
+partitioning, rewrite RULE or foreign-table equivalent; registered SQLite views
+also refuse table validation.
+
+The root's Before hook runs before dependent authorization, so a refused cascade
+may already have caused side effects outside the database, as with a direct
+delete whose SQL later fails; defer external work until after commit.
 
 Existing `notify_with` callbacks run after the graph commits with the original
 GraphQL context. Native RLS that can hide dependents refuses rather than cascading

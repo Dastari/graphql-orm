@@ -430,8 +430,9 @@ compilation; unknown physical dependents, cycles and denied dependent/set-null w
 whole delete. Opted-in entities omit bulk GraphQL delete and its catalog entry so it cannot
 bypass these checks; remove explicit `delete_many` shape/policy declarations. Repository deletes
 retain physical behavior. Opt every deleting ancestor in too: an opted-out parent
-still physically changes opted-in children without hooks/events, and registry construction
-cannot detect every other delete surface. Refusal versus success reveals whether the root
+still physically changes opted-in children without hooks/events. Declared to-one cascade/set-null
+relations now require the parent's opt-in at compile time, including across crates. Database-only
+FKs and other write aliases cannot all be detected by registry construction; audit those paths. Refusal versus success reveals whether the root
 has unwritable dependents, while hiding their identities/counts. Dependent assurance uses
 its own mutation coordinate; root admission/errors retain the direct-write contract.
 SQLite requires matching affinities and no explicit `COLLATE` token in registered table SQL;
