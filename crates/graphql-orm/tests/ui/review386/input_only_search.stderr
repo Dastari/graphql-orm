@@ -1,0 +1,5 @@
+error: unreadable fields cannot be full-text searchable
+ --> tests/ui/review386/input_only_search.rs:9:5
+  |
+9 |     #[input_only]
+  |     ^

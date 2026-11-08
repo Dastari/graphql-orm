@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: readable relation `Source.peers` uses unreadable or unresolved target condition `Target.TIER_CODE`; make the relation unreadable too with #[graphql_orm(read = false)], or make the target column GraphQL-readable (remove private/input_only and set read = true); target metadata must declare the physical column
+  --> tests/ui/recheck386/target_condition.rs:11:10
+   |
+11 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^ evaluation of `_` failed here

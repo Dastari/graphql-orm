@@ -4,9 +4,10 @@ use crate::backend::{
     resolve_backend,
 };
 use crate::entity::{
-    RelationConditionMetadata, RelationConditionValue, collect_parsed_fields, has_graphql_complex,
-    parse_entity_metadata, relation_change_propagation_tokens, relation_delete_policy_tokens,
-    resolver_auth_mode_tokens,
+    RelationConditionMetadata, RelationConditionValue, collect_parsed_fields,
+    graphql_relation_target_checks, has_graphql_complex, parse_entity_metadata,
+    relation_change_propagation_tokens, relation_delete_policy_tokens, resolver_auth_mode_tokens,
+    validate_graphql_relation_keys,
 };
 use crate::naming::graphql_field_name;
 use crate::relationship_contract::GeneratedRelationshipArgumentContract;
@@ -265,11 +266,12 @@ pub(crate) fn generate_graphql_relations(
 
     // Collect relations
     let mut relations: Vec<RelationDef> = Vec::new();
+    let mut relation_target_checks = Vec::new();
 
     for parsed_field in &parsed_fields {
         let field = &parsed_field.field;
         let meta = &parsed_field.meta;
-        if !meta.is_relation || !meta.read {
+        if !meta.is_relation || !meta.graphql_readable() {
             continue;
         }
 
@@ -314,6 +316,22 @@ pub(crate) fn generate_graphql_relations(
             ));
         }
 
+        validate_graphql_relation_keys(
+            backend,
+            struct_name,
+            field,
+            meta,
+            &parsed_fields,
+            &from_cols,
+            &to_cols,
+        )?;
+        relation_target_checks.push(graphql_relation_target_checks(
+            backend,
+            struct_name,
+            field,
+            meta,
+            &to_cols,
+        )?);
         let mut source_field_idents = Vec::with_capacity(from_cols.len());
         let mut source_kinds = Vec::with_capacity(from_cols.len());
         let mut source_optional = Vec::with_capacity(from_cols.len());
@@ -1381,6 +1399,7 @@ pub(crate) fn generate_graphql_relations(
     };
 
     Ok(quote! {
+        #(#relation_target_checks)*
         impl ::graphql_orm::graphql::orm::RelationLoader<#backend_marker> for #struct_name {
             async fn load_relations(
                 &mut self,
@@ -1468,4 +1487,33 @@ pub(crate) fn generate_graphql_relations(
 
         #complex_object_impl
     })
+}
+
+#[cfg(test)]
+mod object_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn input_only_relations_do_not_regenerate_skipped_getters() {
+        for backend in crate::backend::enabled_backends() {
+            let backend = backend.name();
+            let input: DeriveInput = syn::parse_str(&format!(
+                r#"
+                #[graphql(complex)]
+                #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                struct Record {{
+                    #[primary_key]
+                    id: String,
+                    #[input_only]
+                    #[graphql(skip)]
+                    #[relation(target = "Target", from = "id", to = "id", emit_fk = false)]
+                    hidden_relation: Option<Target>,
+                }}
+            "#
+            ))
+            .unwrap();
+            let generated = generate_graphql_relations(&input).unwrap().to_string();
+            assert!(!generated.contains("async fn hidden_relation"));
+        }
+    }
 }

@@ -10,6 +10,97 @@ supersedes: []
 
 # Migration Guide
 
+## 0.97.0 to 0.98.0: unreadable fields, relations and safe errors
+
+Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`
+fields on `SimpleObject` entities without `#[graphql(skip)]`. This also applies
+to `GraphQLEntity` with `schema_only = true`, which delegates object ownership;
+add explicit skips there as well. The metadata-only `GraphQLSchemaEntity` derive
+remains exempt from this object-getter check. The compiler names the affected field. Add `#[graphql(skip)]` to each such field, or place
+`#[graphql_orm::graphql_policy_object]` before the derives (with
+`#[graphql(complex)]`) to install the skips and scalar policy guards. For example:
+
+```rust,ignore
+#[graphql_orm(private)]
+#[graphql(skip)]
+secret: String,
+```
+
+Generated relation getters now also honor `input_only`; remove that attribute
+from a relation intended to remain readable. `graphql_policy_object` also installs
+output skips on private and non-read relation fields; drop client selections of
+those formerly exposed relations. `#[graphql(skip = false)]` does not
+satisfy the skip requirement; replace it with `#[graphql(skip)]` on unreadable
+fields. Existing input/filter exclusions for `skip = false` on ordinary public
+fields are preserved. Combined GraphQL attributes with an effective
+`skip` do.
+
+Breaking: readable relations now reject every local and target key marked
+`private`, `read = false`, or `input_only`, including every composite component,
+both relation directions and targets in other crates. The same compile error
+applies to unreadable `source_condition(field = ...)` and
+`target_condition(column = ...)` columns: conditions can reveal equality even
+without selecting the hidden column. The compiler identifies the entity,
+relation and column. Make the relation unreadable with
+`#[graphql_orm(read = false)]` and `#[graphql(skip)]` (or
+`graphql_policy_object`), or remove `private`/`input_only` and set `read = true`
+on every column it reads.
+
+The same target-column assertions now run for `GraphQLEntity` with
+`schema_only = true`; disabling the generated object does not waive relation
+readability checks. A readable relation onto a private target column now fails
+compilation on this path too. The repairs above also apply here, including
+when `GraphQLRelations` is derived alongside the schema-only entity.
+
+Unresolved physical target columns, including self-targets, are compile errors:
+use a declared physical database column name with matching SQL quoting and case.
+Rust field names apply to local `from` keys and source conditions; physical
+column names apply to target `to` keys and target conditions. Generated
+`GeneratedRelationReadability` metadata proves target readability across crate
+boundaries. Targets built with older macros or hand-written targets without this
+metadata fail compilation. Rebuild target crates with the current ORM/macros 0.98 revision, or for a
+hand-written target explicitly implement
+`graphql_orm::graphql::orm::GeneratedRelationReadability`, listing physical
+columns and their actual static eligibility:
+
+```rust,ignore
+impl graphql_orm::graphql::orm::GeneratedRelationReadability for CustomTarget {
+    const COLUMNS: &'static [(&'static str, bool)] = &[("id", true), ("secret", false)];
+}
+```
+
+Omitted columns fail closed. Do not mark a hidden column readable to bypass the
+check. The hidden `generated_relation_column_is_readable` const helper performs
+the generated proofs; consumers normally use the derives without calling it.
+
+Breaking: `GraphQLOperations` rejects unreadable primary keys because generated
+Changed events expose them as `id`. Remove `private`/`input_only` and set
+`read = true` on every primary-key component, or omit `GraphQLOperations`/use
+`RepositoryEntity` for private persistence. An object skip alone cannot hide
+a Changed-event key. No data migration is needed.
+
+Aggregate/group-by fields and semantic catalogues now exclude `input_only`.
+`input_only` relation getters are also removed from SDL: drop former selections
+or make the relation readable. These declarations now produce compile errors:
+`search_relation` on an unreadable relation; `order_aggregate` on an `input_only`
+relation; `searchable` on an `input_only` scalar; and `search_json` on
+`read = false` or `input_only` scalars. Remove those declarations or make their
+fields readable. Existing private/non-read scalar search refusals remain in
+force. Explicit scalar filter/sort grants on `read = false` retain their
+documented behavior.
+
+Operation catalog 0.7.2 preserves the legacy implicit descriptions byte for
+byte, so ORM/macros 0.95/0.96 consumers retain their descriptions and fingerprints
+when updating only that dependency. ORM/macros 0.98 explicitly supply the
+corrected descriptions; their SDL and catalogue wording agree, including the
+bounded authorization-scan description.
+
+Internal SQLx adapter errors now use safe messages and error codes rather than
+raw database diagnostics. Generated single-record operation descriptions use
+singular wording. This changes SDL, schema hashes, operation catalogue
+fingerprints and any signed metadata derived from them: regenerate exported
+schemas, catalogues and consumer snapshots. No data migration is needed.
+
 ## 0.96.0 to 0.97.0: optional dependent deletes
 
 No data migration is needed. Existing opt-out SQL and foreign-key DDL are

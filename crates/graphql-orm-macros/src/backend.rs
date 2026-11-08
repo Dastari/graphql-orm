@@ -360,7 +360,8 @@ const POSTGRES_RESERVED_IDENTIFIERS: &[&str] = &[
 
 // SQL identifier delimiters may contain dots and doubled closing delimiters.
 // Slice only at unquoted dots; byte offsets are safe because delimiters are ASCII.
-fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
+/// Split SQL identifier paths while preserving quoted dots and escapes.
+pub(crate) fn identifier_path_parts(identifier: &str) -> impl Iterator<Item = &str> {
     let bytes = identifier.as_bytes();
     let mut start = 0;
     let mut offset = 0;

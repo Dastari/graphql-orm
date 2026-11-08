@@ -1180,7 +1180,7 @@ fn generated_resolver_schema_signature(
             && !is_timestamp
             && meta.write
             && (!meta.skip_input || meta.input_only);
-        let output_visible = meta.read && !meta.input_only;
+        let output_visible = meta.graphql_readable();
         let search = meta
             .search
             .as_ref()
@@ -1577,6 +1577,16 @@ fn generate_graphql_operations_unfiltered(
     }
     let primary_key_fields =
         collect_primary_key_fields(struct_name, fields, graphql_rename_fields, serde_rename_all)?;
+    if !crate::entity::has_repository_entity_attribute(&input.attrs) {
+        for key in &primary_key_fields {
+            if !key.meta.graphql_readable() {
+                return Err(syn::Error::new_spanned(
+                    &key.field_name,
+                    "generated Changed events disclose primary keys; remove private/input_only and set read = true on every primary-key field, or omit GraphQLOperations/use RepositoryEntity for private persistence",
+                ));
+            }
+        }
+    }
     let has_composite_primary_key = primary_key_fields.len() > 1;
     let composite_repository_mutations =
         has_composite_primary_key && entity_meta.repository_mutations;
@@ -2075,14 +2085,16 @@ fn generate_graphql_operations_unfiltered(
     let filter_arg_description = semantic_argument_description(&filter_arg_name);
     let list_operation_description = format!("List {struct_name_str} records");
     let aggregate_operation_description = format!("Aggregate {struct_name_str} records");
-    let single_operation_description = format!("Read one {struct_name_str} records");
+    let single_operation_description = format!("Read one {struct_name_str} record");
     let search_operation_description = format!("Search {struct_name_str} records");
     let keyset_operation_description = format!("Page through {struct_name_str} records");
-    let create_operation_description = format!("Create one {struct_name_str} records");
-    let upsert_operation_description = format!("Create or update one {struct_name_str} records");
-    let update_operation_description = format!("Update one {struct_name_str} records");
+    let scan_operation_description =
+        "Bounded forward authorization scan; continuation does not promise another visible row.";
+    let create_operation_description = format!("Create one {struct_name_str} record");
+    let upsert_operation_description = format!("Create or update one {struct_name_str} record");
+    let update_operation_description = format!("Update one {struct_name_str} record");
     let update_many_operation_description = format!("Update matching {struct_name_str} records");
-    let delete_operation_description = format!("Delete one {struct_name_str} records");
+    let delete_operation_description = format!("Delete one {struct_name_str} record");
     let delete_many_operation_description = format!("Delete matching {struct_name_str} records");
     let subscription_operation_description =
         format!("Observe changes to {struct_name_str} records");
@@ -4703,9 +4715,7 @@ fn generate_graphql_operations_unfiltered(
     let scan_query_name = apply_graphql_case(&format!("{}Scan", plural_name), resolver_case);
     let keyset_order_input = quote::format_ident!("{}KeysetOrderByInput", struct_name);
     let runtime_keyset_available = primary_key_fields.iter().all(|field| {
-        field.meta.read
-            && !field.meta.is_private
-            && !field.meta.input_only
+        field.meta.graphql_readable()
             && !field.meta.graphql_skip
             && field.meta.transform_read.is_none()
             && field.meta.transform_write.is_none()
@@ -4725,9 +4735,7 @@ fn generate_graphql_operations_unfiltered(
                 .any(|key| &key.field_name == ident);
             if meta.is_relation
                 || meta.skip_db
-                || meta.is_private
-                || !meta.read
-                || meta.input_only
+                || !meta.graphql_readable()
                 || meta.graphql_skip
                 || meta.transform_read.is_some()
                 || meta.transform_write.is_some()
@@ -4788,9 +4796,7 @@ fn generate_graphql_operations_unfiltered(
                 graphql_rename_fields,
                 serde_rename_all,
             );
-            let graphql_readable = meta.read
-                && !meta.is_private
-                && !meta.input_only
+            let graphql_readable = meta.graphql_readable()
                 && !meta.graphql_skip
                 && meta.transform_read.is_none()
                 && meta.transform_write.is_none();
@@ -5259,7 +5265,7 @@ fn generate_graphql_operations_unfiltered(
                 Ok(#connection_type::from_generic(connection))
             }
 
-            /// Bounded forward authorization scan; continuation does not promise another visible row.
+            #[doc = #scan_operation_description]
             #[graphql(#scan_query_skip name = #scan_query_name, #keyset_list_requires_scopes #authenticated_directive)]
             async fn authorized_scan(
                 &self,
@@ -7002,11 +7008,12 @@ fn generate_graphql_operations_unfiltered(
     let descriptor = |kind: proc_macro2::TokenStream,
                       category: proc_macro2::TokenStream,
                       field_name: &str,
+                      description: &str,
                       arguments: Vec<proc_macro2::TokenStream>,
                       rust_result_type: proc_macro2::TokenStream,
                       operation_authorization: &proc_macro2::TokenStream| {
         quote! {
-            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+            ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_description(
                 concat!(module_path!(), "::", stringify!(#struct_name)),
                 stringify!(#struct_name),
                 #table_name,
@@ -7014,6 +7021,7 @@ fn generate_graphql_operations_unfiltered(
                 #kind,
                 #category,
                 #field_name,
+                #description,
                 vec![#(#arguments),*],
                 stringify!(#rust_result_type),
                 <#rust_result_type as ::graphql_orm::async_graphql::OutputType>
@@ -7040,12 +7048,13 @@ fn generate_graphql_operations_unfiltered(
         |category: proc_macro2::TokenStream,
          category_name: &str,
          field_name: &str,
+         description: &str,
          arguments: Vec<proc_macro2::TokenStream>,
          rust_result_type: proc_macro2::TokenStream,
          operation_authorization: &proc_macro2::TokenStream| {
             let policy = ai_mutation_policy(category_name);
             quote! {
-                ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_ai_policy(
+                ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_description_and_ai_policy(
                     concat!(module_path!(), "::", stringify!(#struct_name)),
                     stringify!(#struct_name),
                     #table_name,
@@ -7053,6 +7062,7 @@ fn generate_graphql_operations_unfiltered(
                     ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation,
                     #category,
                     #field_name,
+                    #description,
                     vec![#(#arguments),*],
                     stringify!(#rust_result_type),
                     <#rust_result_type as ::graphql_orm::async_graphql::OutputType>
@@ -7074,7 +7084,7 @@ fn generate_graphql_operations_unfiltered(
         ),
     ];
     operation_descriptors.push(quote! {
-        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_description(
             concat!(module_path!(), "::", stringify!(#struct_name)),
             stringify!(#struct_name),
             #table_name,
@@ -7082,6 +7092,7 @@ fn generate_graphql_operations_unfiltered(
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::List,
             #list_query_name,
+            #list_operation_description,
             vec![#(#list_metadata_arguments),*],
             stringify!(#connection_type),
             <#connection_type as ::graphql_orm::async_graphql::OutputType>
@@ -7095,6 +7106,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Aggregate },
             &aggregate_query_name,
+            &aggregate_operation_description,
             vec![
                 argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
                 argument_descriptor(&group_by_arg_name, quote! { Vec<#aggregate_field> }),
@@ -7110,6 +7122,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Search },
             &search_query_name,
+            &search_operation_description,
             vec![
                 argument_descriptor(
                     &search_arg_name,
@@ -7144,6 +7157,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
             &keyset_query_name,
+            &keyset_operation_description,
             arguments,
             quote! { #connection_type },
             &keyset_list_operation_authorization,
@@ -7154,6 +7168,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::KeysetList },
             &scan_query_name,
+            scan_operation_description,
             vec![
                 argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
                 argument_descriptor(
@@ -7172,7 +7187,7 @@ fn generate_graphql_operations_unfiltered(
         })
         .collect::<Vec<_>>();
     operation_descriptors.push(quote! {
-        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization(
+        ::graphql_orm::graphql::orm::GeneratedGraphqlOperationDescriptor::generated_with_authorization_and_description(
             concat!(module_path!(), "::", stringify!(#struct_name)),
             stringify!(#struct_name),
             #table_name,
@@ -7180,6 +7195,7 @@ fn generate_graphql_operations_unfiltered(
             ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
             ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::SingleRead,
             #single_query_name,
+            #single_operation_description,
             vec![#(#single_metadata_arguments),*],
             stringify!(Option<#struct_name>),
             <Option<#struct_name> as ::graphql_orm::async_graphql::OutputType>
@@ -7194,6 +7210,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Create },
             "create",
             &create_mutation_name,
+            &create_operation_description,
             vec![argument_descriptor(
                 &input_arg_name,
                 quote! { #graphql_create_input },
@@ -7207,6 +7224,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription },
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Subscription },
             &subscription_name,
+            &subscription_operation_description,
             vec![
                 argument_descriptor(
                     &filter_arg_name,
@@ -7236,6 +7254,7 @@ fn generate_graphql_operations_unfiltered(
                 quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Upsert },
                 "upsert",
                 &upsert_mutation_name,
+                &upsert_operation_description,
                 vec![argument_descriptor(
                     &input_arg_name,
                     quote! { #graphql_create_input },
@@ -7248,6 +7267,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Update },
             "update",
             &update_mutation_name,
+            &update_operation_description,
             vec![
                 argument_descriptor(&id_arg_name, quote! { #pk_type_ty }),
                 argument_descriptor(&input_arg_name, quote! { #graphql_update_input }),
@@ -7259,6 +7279,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::UpdateMany },
             "update_many",
             &update_many_mutation_name,
+            &update_many_operation_description,
             vec![
                 argument_descriptor(&where_arg_name, quote! { Option<#where_input> }),
                 argument_descriptor(&input_arg_name, quote! { #graphql_update_input }),
@@ -7270,6 +7291,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::Delete },
             "delete",
             &delete_mutation_name,
+            &delete_operation_description,
             vec![argument_descriptor(&id_arg_name, quote! { #pk_type_ty })],
             quote! { #result_type },
             &delete_operation_authorization,
@@ -7278,6 +7300,7 @@ fn generate_graphql_operations_unfiltered(
             quote! { ::graphql_orm::graphql::orm::GeneratedGraphqlOperationCategory::DeleteMany },
             "delete_many",
             &delete_many_mutation_name,
+            &delete_many_operation_description,
             vec![argument_descriptor(
                 &where_arg_name,
                 quote! { Option<#where_input> },

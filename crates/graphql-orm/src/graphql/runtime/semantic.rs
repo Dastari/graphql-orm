@@ -30,9 +30,9 @@ pub(super) fn list_description(object: &str) -> String {
 
 pub(super) fn mutation_description(action: RuntimeMutationAction, object: &str) -> String {
     match action {
-        RuntimeMutationAction::Create => format!("Create one {object} records"),
-        RuntimeMutationAction::Update => format!("Update one {object} records"),
-        RuntimeMutationAction::Delete => format!("Delete one {object} records"),
+        RuntimeMutationAction::Create => format!("Create one {object} record"),
+        RuntimeMutationAction::Update => format!("Update one {object} record"),
+        RuntimeMutationAction::Delete => format!("Delete one {object} record"),
     }
 }
 

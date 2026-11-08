@@ -35,7 +35,10 @@ pub struct Endpoint {
     #[primary_key]
     #[graphql_orm(auto_generated = false)]
     pub id: String,
-    #[graphql_orm(read = false, filter = false, order = false, subscribe = false)]
+    // A public composite relation discloses equality on this column, so it is
+    // statically readable. The negative fixture deliberately restores the ban.
+    #[cfg_attr(feature = "unreadable-target-key", graphql_orm(read = false))]
+    #[graphql_orm(filter = false, order = false, subscribe = false)]
     pub tenant_id: String,
     #[filterable(type = "string")]
     #[sortable]

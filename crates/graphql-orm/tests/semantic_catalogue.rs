@@ -558,6 +558,21 @@ fn semantic_descriptions_match_finished_schema_documentation() {
     assert!(sdl.contains("\t\tLimit\n\t\t\"\"\"\n\t\tlimit: Int!"));
     assert!(!sdl.contains("implementationMarker"));
     assert!(sdl.contains("List SemanticRecord records"));
+    assert!(
+        !sdl.contains('#'),
+        "generated SDL contains template residue"
+    );
+    let catalog = graphql_orm_semantic_catalog();
+    catalog
+        .validate()
+        .expect("descriptions have fresh fingerprints");
+    for operation in &catalog.operations {
+        assert!(!operation.description.contains('#'));
+        assert!(!operation.description.contains("one SemanticRecord records"));
+        if operation.generated_entity_name.is_some() {
+            assert!(sdl.contains(&operation.description));
+        }
+    }
 }
 
 #[test]

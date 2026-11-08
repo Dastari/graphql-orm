@@ -928,10 +928,11 @@ mod tests {
             drop(connection);
             TARGET_SELECTS.store(0, Ordering::SeqCst);
         }
-        let response = schema.execute("{ sessions { id endpoint { id name } } activities { id endpointName endpoint { id name } } }").await;
+        let response = schema.execute("{ sessions { id endpoint { id name tenantId } } activities { id endpointName endpoint { id name } } }").await;
         assert!(response.errors.is_empty(), "{:?}", response.errors);
         let data = response.data.into_json()?;
         assert_eq!(data["sessions"][0]["endpoint"]["name"], "Current A");
+        assert_eq!(data["sessions"][0]["endpoint"]["tenantId"], "one");
         assert_eq!(data["sessions"][1]["endpoint"]["name"], "Current B");
         assert!(
             data["sessions"][2]["endpoint"].is_null(),
@@ -947,9 +948,12 @@ mod tests {
             2,
             "one bounded target dispatch per source relation"
         );
+        // A public composite relation reveals equality on every join part.
+        // This positive model therefore declares the join column readable;
+        // the unreadable-target-key feature must reject the same relation.
         assert!(
-            !schema.sdl().contains("tenantId:"),
-            "redacted target exposes no ownership storage field"
+            schema.sdl().contains("tenantId:"),
+            "public relation keys are explicitly readable"
         );
 
         allowed.store(false, Ordering::SeqCst);

@@ -1,0 +1,6 @@
+error: cannot resolve self-target key `missing_key` to a declared database column; use its physical column name with matching SQL quoting
+  --> tests/ui/review386/self_target_unknown.rs:10:5
+   |
+10 | /     #[relation(target = "Record", from = "id", to = "missing_key", emit_fk = false)]
+11 | |     owner: Vec<Record>,
+   | |______________________^

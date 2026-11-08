@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: readable relation `Source.items` uses unreadable or unresolved target key `Target.owner_id`; make the relation unreadable too with #[graphql_orm(read = false)], or make the target column GraphQL-readable (remove private/input_only and set read = true); target metadata must declare the physical column
+  --> tests/ui/recheck386/composite_target_key.rs:12:10
+   |
+12 | #[derive(GraphQLEntity, Clone, Debug, serde::Serialize, serde::Deserialize)]
+   |          ^^^^^^^^^^^^^ evaluation of `_` failed here

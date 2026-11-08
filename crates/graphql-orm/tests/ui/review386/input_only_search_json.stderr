@@ -1,0 +1,5 @@
+error: unreadable fields cannot use full-text search_json paths
+  --> tests/ui/review386/input_only_search_json.rs:15:5
+   |
+15 |     #[input_only]
+   |     ^

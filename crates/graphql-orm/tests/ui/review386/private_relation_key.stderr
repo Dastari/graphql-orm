@@ -1,0 +1,6 @@
+error: readable relation uses unreadable local key `owner_id`; make the relation unreadable too with #[graphql_orm(read = false)], or remove private/input_only and set read = true on the key
+  --> tests/ui/review386/private_relation_key.rs:10:5
+   |
+10 | /     #[relation(target = "Record", from = "owner_id", to = "id", emit_fk = false)]
+11 | |     owner: Vec<Record>,
+   | |______________________^

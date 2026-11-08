@@ -15,9 +15,9 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
     // Every fixture workspace builds into one shared directory, so dependency
     // builds they have in common are compiled once.
     let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fixtures");
-    let status = std::process::Command::new(cargo)
+    let status = std::process::Command::new(&cargo)
         .env("CARGO_INCREMENTAL", "0")
-        .env("CARGO_TARGET_DIR", target_dir)
+        .env("CARGO_TARGET_DIR", &target_dir)
         .args([
             "test",
             "--manifest-path",
@@ -33,4 +33,24 @@ fn generated_relationships_execute_across_real_crate_boundaries() {
         .status()
         .expect("run cross-crate fixture");
     assert!(status.success(), "external fixture failed");
+
+    let output = std::process::Command::new(cargo)
+        .env("CARGO_INCREMENTAL", "0")
+        .env("CARGO_TARGET_DIR", target_dir)
+        .args([
+            "check",
+            "--manifest-path",
+            manifest,
+            "--locked",
+            "-p",
+            "cross-crate-source-models",
+            "--no-default-features",
+            "--features",
+            &format!("{backend},unreadable-target-key"),
+        ])
+        .output()
+        .expect("check unreadable target across crate boundaries");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "private cross-crate key compiled");
+    assert!(stderr.contains("readable relation `Session.endpoint` uses unreadable or unresolved target key `Endpoint.tenant_id`"), "{stderr}");
 }

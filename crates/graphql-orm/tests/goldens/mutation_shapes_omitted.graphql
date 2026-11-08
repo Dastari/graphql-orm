@@ -54,7 +54,7 @@ type DeleteShelvesResult {
 
 type Mutation {
 	"""
-	Create one Shelf records
+	Create one Shelf record
 	"""
 	createShelf(
 		"""
@@ -63,7 +63,7 @@ type Mutation {
 		input: CreateShelfInput!
 	): ShelfResult!
 	"""
-	Update one Shelf records
+	Update one Shelf record
 	"""
 	updateShelf(
 		"""
@@ -76,7 +76,7 @@ type Mutation {
 		input: UpdateShelfInput!
 	): ShelfResult!
 	"""
-	Delete one Shelf records
+	Delete one Shelf record
 	"""
 	deleteShelf(
 		"""
@@ -107,7 +107,7 @@ type Mutation {
 		where: ShelfWhereInput
 	): DeleteShelvesResult!
 	"""
-	Create one Parcel records
+	Create one Parcel record
 	"""
 	createParcel(
 		"""
@@ -116,7 +116,7 @@ type Mutation {
 		input: CreateParcelInput!
 	): ParcelResult!
 	"""
-	Create or update one Parcel records
+	Create or update one Parcel record
 	"""
 	upsertParcel(
 		"""
@@ -125,7 +125,7 @@ type Mutation {
 		input: CreateParcelInput!
 	): UpsertParcelResult!
 	"""
-	Update one Parcel records
+	Update one Parcel record
 	"""
 	updateParcel(
 		"""
@@ -138,7 +138,7 @@ type Mutation {
 		input: UpdateParcelInput!
 	): ParcelResult!
 	"""
-	Delete one Parcel records
+	Delete one Parcel record
 	"""
 	deleteParcel(
 		"""
@@ -340,7 +340,7 @@ type Query {
 		page: PageInput
 	): ShelfConnection!
 	"""
-	Read one Shelf records
+	Read one Shelf record
 	"""
 	shelf(
 		"""
@@ -366,7 +366,7 @@ type Query {
 		page: PageInput
 	): ParcelConnection!
 	"""
-	Read one Parcel records
+	Read one Parcel record
 	"""
 	parcel(
 		"""

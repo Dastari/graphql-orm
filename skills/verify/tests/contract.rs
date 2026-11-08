@@ -227,7 +227,12 @@ struct LedgerEntry {
 
 // Private and sensitive fields on the two object forms.
 #[derive(GraphQLEntity, GraphQLOperations, Clone, Debug, serde::Serialize, serde::Deserialize)]
-#[graphql_entity(table = "profiles", plural = "Profiles", default_sort = "name ASC")]
+#[graphql_entity(
+    table = "profiles",
+    plural = "Profiles",
+    default_sort = "name ASC",
+    aggregate = true
+)]
 struct Profile {
     #[primary_key]
     id: Uuid,
@@ -235,6 +240,8 @@ struct Profile {
     name: String,
     #[graphql_orm(private)]
     hidden_note: String,
+    #[input_only]
+    write_only_note: String,
     #[graphql_orm(sensitive)]
     flagged_note: String,
 }
@@ -257,6 +264,7 @@ struct Account {
     #[sortable]
     name: String,
     #[graphql_orm(private)]
+    #[graphql(skip)]
     private_note: String,
     #[filterable(type = "uuid")]
     customer_id: Uuid,
@@ -275,6 +283,7 @@ struct Account {
 )]
 struct Credential {
     #[primary_key]
+    #[graphql_orm(private)]
     id: Uuid,
     #[sortable]
     username: String,
@@ -1020,6 +1029,11 @@ async fn custom_resolvers_reach_policies_with_no_request_context() {
 async fn the_generated_mutation_denylist_keeps_repository_writes_and_changed() {
     let db = database().await;
     let sdl = schema_builder(db.clone()).finish().sdl();
+    assert!(
+        !sdl.contains("#struct_name_str"),
+        "generated descriptions must interpolate the entity name"
+    );
+    assert!(!sdl.contains("one Bin records"));
     assert!(!sdl.contains("createWarehouse("));
     assert!(!sdl.contains("deleteWarehouse("));
     assert!(sdl.contains("warehouseChanged("));
@@ -1310,7 +1324,7 @@ async fn callback_only_row_policies_need_a_scan_budget_for_paged_reads() {
 }
 
 #[tokio::test]
-async fn private_hides_fields_only_on_generated_objects_and_sensitive_hides_nothing() {
+async fn private_hides_generated_and_skipped_simple_object_fields_but_sensitive_does_not() {
     let db = database().await;
     let sdl = schema_builder(db).finish().sdl();
     let object = |name: &str| {
@@ -1320,7 +1334,19 @@ async fn private_hides_fields_only_on_generated_objects_and_sensitive_hides_noth
     };
     assert!(!object("Profile").contains("hiddenNote"));
     assert!(object("Profile").contains("flaggedNote"));
-    assert!(object("Account").contains("privateNote"));
+    assert!(!object("Account").contains("privateNote"));
+    assert!(!object("Profile").contains("writeOnlyNote"));
+    let start = sdl.find("enum ProfileAggregateField").unwrap();
+    let fields = &sdl[start..start + sdl[start..].find('}').unwrap()];
+    assert!(!fields.contains("hiddenNote"));
+    assert!(!fields.contains("writeOnlyNote"));
+    let metadata = <Profile as Entity>::graphql_semantic_metadata().unwrap();
+    assert!(
+        !metadata
+            .fields
+            .iter()
+            .any(|field| matches!(field.field_name.as_str(), "hiddenNote" | "writeOnlyNote"))
+    );
 }
 
 #[tokio::test]

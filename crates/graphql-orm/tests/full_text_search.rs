@@ -70,6 +70,12 @@ struct JsonSearchTag {
     pub value: Option<String>,
 }
 
+// Searchable JSON is readable; these test values have explicit output scalars.
+#[cfg(feature = "sqlite")]
+graphql_orm::async_graphql::scalar!(JsonSearchContent);
+#[cfg(feature = "sqlite")]
+graphql_orm::async_graphql::scalar!(JsonSearchTag);
+
 #[cfg(feature = "sqlite")]
 #[derive(
     GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
@@ -89,7 +95,7 @@ struct JsonSearchRecord {
     #[sortable]
     pub display_title: String,
 
-    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    #[graphql_orm(json, filter = false, order = false, subscribe = false)]
     #[graphql_orm(search_json(path = "$.description.summary", weight = "C"))]
     #[graphql_orm(search_json(path = "$.historical.summary", weight = "C"))]
     #[graphql_orm(search_json(path = "$.classification.primary.label", weight = "B"))]
@@ -97,7 +103,7 @@ struct JsonSearchRecord {
     #[graphql_orm(search_json(path = "$.classification.keywords[*].label", weight = "C"))]
     pub content: JsonSearchContent,
 
-    #[graphql_orm(json, read = false, filter = false, order = false, subscribe = false)]
+    #[graphql_orm(json, filter = false, order = false, subscribe = false)]
     #[graphql_orm(search_json(path = "$[*].value", weight = "C"))]
     pub tags: Vec<JsonSearchTag>,
 }

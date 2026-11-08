@@ -1307,6 +1307,187 @@ fn rls_impl_tokens(
     }
 }
 
+/// Check the effective SimpleObject skip independently of the legacy ORM
+/// input/filter exclusion metadata.
+pub(crate) fn has_graphql_object_skip(field: &Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        attr.path().is_ident("graphql")
+            && attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|options| {
+                    options.iter().any(|option| match option {
+                        syn::Meta::Path(path) => path.is_ident("skip"),
+                        syn::Meta::NameValue(value) if value.path.is_ident("skip") => {
+                            if let syn::Expr::Lit(literal) = &value.value {
+                                matches!(&literal.lit, syn::Lit::Bool(value) if value.value)
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    })
+                })
+    })
+}
+
+// Resolve target references as generated SQL does. Metadata column names are
+// physical names; PostgreSQL folds only unquoted SQL references.
+fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -> String {
+    let rendered = reference.then(|| backend_render_identifier_path(backend, name));
+    let name = rendered.as_deref().map_or(name, |rendered| {
+        crate::backend::identifier_path_parts(rendered)
+            .last()
+            .unwrap_or("")
+    });
+    if name.len() >= 2 {
+        if name.starts_with('"') && name.ends_with('"') {
+            return name[1..name.len() - 1].replace("\"\"", "\"");
+        }
+        if backend != BackendKind::Postgres && name.starts_with('[') && name.ends_with(']') {
+            return name[1..name.len() - 1].replace("]]", "]");
+        }
+        if backend == BackendKind::Sqlite && name.starts_with('`') && name.ends_with('`') {
+            return name[1..name.len() - 1].replace("``", "`");
+        }
+    }
+    if reference && backend == BackendKind::Postgres {
+        name.to_ascii_lowercase()
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Refuse generated relation reads that disclose statically unreadable keys.
+/// Validate local and self-target columns available in this derive's input AST.
+pub(crate) fn validate_graphql_relation_keys(
+    backend: BackendKind,
+    entity: &syn::Ident,
+    field: &Field,
+    metadata: &FieldMetadata,
+    fields: &[ParsedField],
+    source_columns: &[String],
+    target_columns: &[String],
+) -> syn::Result<()> {
+    if !metadata.graphql_readable() {
+        return Ok(());
+    }
+    let check = |columns: &[String], side: &str, physical: bool| -> syn::Result<()> {
+        for column in columns {
+            let target_name = physical.then(|| relation_column_identity(backend, column, true));
+            let mut matched = false;
+            for key in fields.iter().filter(|parsed| {
+                if physical && (parsed.meta.is_relation || parsed.meta.skip_db) {
+                    return false;
+                }
+                parsed.field.ident.as_ref().is_some_and(|name| {
+                    if let Some(target_name) = &target_name {
+                        let rust_name = name.to_string();
+                        let physical_name = parsed.meta.db_column.as_deref().unwrap_or(&rust_name);
+                        let physical_name = relation_column_identity(backend, physical_name, false);
+                        if backend == BackendKind::Postgres {
+                            physical_name == *target_name
+                        } else {
+                            physical_name.eq_ignore_ascii_case(target_name)
+                        }
+                    } else {
+                        name == column
+                    }
+                })
+            }) {
+                matched = true;
+                if !key.meta.graphql_readable() {
+                    return Err(syn::Error::new_spanned(
+                        field,
+                        format!(
+                            "readable relation uses unreadable {side} `{column}`; make the relation unreadable too with #[graphql_orm(read = false)], or remove private/input_only and set read = true on the key"
+                        ),
+                    ));
+                }
+            }
+            if physical && !matched {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    format!(
+                        "cannot resolve {side} `{column}` to a declared database column; use its physical column name with matching SQL quoting"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    };
+    check(source_columns, "local key", false)?;
+    if let Some(condition) = &metadata.relation_source_condition {
+        check(
+            std::slice::from_ref(&condition.member),
+            "source condition column",
+            false,
+        )?;
+    }
+    if metadata
+        .relation_target
+        .as_deref()
+        .is_some_and(|target| entity == target || target == "Self")
+    {
+        check(target_columns, "self-target key", true)?;
+        if let Some(condition) = &metadata.relation_target_condition {
+            check(
+                std::slice::from_ref(&condition.member),
+                "self-target condition column",
+                true,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Emit independent, cross-crate proofs for every physical target column read
+/// by a public relation. Missing metadata and unknown columns fail closed.
+pub(crate) fn graphql_relation_target_checks(
+    backend: BackendKind,
+    entity: &syn::Ident,
+    field: &Field,
+    metadata: &FieldMetadata,
+    target_columns: &[String],
+) -> syn::Result<proc_macro2::TokenStream> {
+    if !metadata.graphql_readable() {
+        return Ok(quote! {});
+    }
+    let target_name = metadata.relation_target.as_deref().unwrap_or("Unknown");
+    let entity_name = entity.to_string();
+    let target: syn::Type = syn::parse_str(if target_name == "Self" {
+        &entity_name
+    } else {
+        target_name
+    })?;
+    let relation = field.ident.as_ref().unwrap().to_string();
+    let case_sensitive = backend == BackendKind::Postgres;
+    let columns = target_columns.iter().map(|column| (column, "key")).chain(
+        metadata
+            .relation_target_condition
+            .iter()
+            .map(|condition| (&condition.member, "condition")),
+    );
+    let assertions = columns.map(|(column, role)| {
+        let identity = relation_column_identity(backend, column, true);
+        let message = format!(
+            "readable relation `{entity}.{relation}` uses unreadable or unresolved target {role} `{target_name}.{column}`; make the relation unreadable too with #[graphql_orm(read = false)], or make the target column GraphQL-readable (remove private/input_only and set read = true); target metadata must declare the physical column"
+        );
+        quote! {
+            const _: () = assert!(
+                ::graphql_orm::graphql::orm::generated_relation_column_is_readable(
+                    <#target as ::graphql_orm::graphql::orm::GeneratedRelationReadability>::COLUMNS,
+                    #identity,
+                    #case_sensitive,
+                ),
+                concat!(#message),
+            );
+        }
+    });
+    Ok(quote! { #(#assertions)* })
+}
+
 pub(crate) fn has_graphql_complex(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("graphql") {
@@ -2624,6 +2805,12 @@ pub(crate) struct TimestampBehavior {
 }
 
 impl FieldMetadata {
+    /// Eligibility for automatic GraphQL reads, independent of explicit scalar
+    /// filter/sort capabilities and additional surface-specific restrictions.
+    pub(crate) fn graphql_readable(&self) -> bool {
+        self.read && !self.is_private && !self.input_only
+    }
+
     pub(crate) fn timestamp_behavior(&self, rust_name: &str) -> TimestampBehavior {
         TimestampBehavior {
             exclude_input: !self.host_managed_timestamp
@@ -3271,6 +3458,21 @@ fn generate_entity_impl(
         })
         .unwrap_or_else(|| quote! { None });
     let legacy_graphql_complex = has_graphql_complex(&input.attrs);
+    // Rustc removes derive lists before invoking derives. Valid externally owned
+    // objects opt into complex or schema_only, so check those ownership modes.
+    // Pure GraphQLSchemaEntity metadata does not own a GraphQL read contract.
+    let externally_owned_object = legacy_graphql_complex || entity_meta.schema_only;
+    if !schema_only_override && externally_owned_object {
+        for field in fields {
+            let meta = parse_field_metadata(field)?;
+            if !meta.graphql_readable() && !has_graphql_object_skip(field) {
+                return Err(syn::Error::new_spanned(
+                    field,
+                    "unreadable SimpleObject field: private, read = false, and input_only require #[graphql(skip)]; add #[graphql(skip)] to this field or place #[graphql_orm::graphql_policy_object] before the derives with #[graphql(complex)]",
+                ));
+            }
+        }
+    }
     let raw_table_name = entity_meta.table_name.as_deref().unwrap_or("unknown");
     let table_name = backend_quote_identifier_path(backend, raw_table_name);
     let rls_impl = rls_impl_tokens(
@@ -3493,6 +3695,25 @@ fn generate_entity_impl(
     let mut aggregate_field_variants = Vec::new();
     let mut aggregate_field_match_arms = Vec::new();
     let parsed_fields = collect_parsed_fields(fields.iter())?;
+    let relation_readability_columns = parsed_fields
+        .iter()
+        .filter(|parsed| !parsed.meta.is_relation && !parsed.meta.skip_db)
+        .map(|parsed| {
+            let rust_name = parsed.field.ident.as_ref().unwrap().to_string();
+            let column = relation_column_identity(
+                backend,
+                parsed.meta.db_column.as_deref().unwrap_or(&rust_name),
+                false,
+            );
+            let readable = parsed.meta.graphql_readable();
+            quote! { (#column, #readable) }
+        });
+    let relation_readability_impl = quote! {
+        impl ::graphql_orm::graphql::orm::GeneratedRelationReadability for #struct_name {
+            const COLUMNS: &'static [(&'static str, bool)] = &[#(#relation_readability_columns),*];
+        }
+    };
+    let mut relation_target_checks = Vec::new();
     let aggregate_field_name = syn::Ident::new(
         &format!("{}AggregateField", struct_name),
         struct_name.span(),
@@ -3530,9 +3751,7 @@ fn generate_entity_impl(
             serde_rename_all,
         );
         let subscription_allowed = !has_repository_entity_attribute(&input.attrs)
-            && field_meta.read
-            && !field_meta.is_private
-            && !field_meta.input_only
+            && field_meta.graphql_readable()
             && (!field_meta.graphql_skip || field_meta.is_relation)
             && field_meta.subscribe
             && !field_meta.subscription_custom_resolver;
@@ -3555,9 +3774,7 @@ fn generate_entity_impl(
             ));
         }
         if field_meta.managed_version
-            && field_meta.read
-            && !field_meta.is_private
-            && !field_meta.input_only
+            && field_meta.graphql_readable()
             && !field_meta.graphql_skip
             && !has_repository_entity_attribute(&input.attrs)
         {
@@ -3594,7 +3811,7 @@ fn generate_entity_impl(
                     .relation_target
                     .clone()
                     .unwrap_or_else(|| "Unknown".to_string());
-                if field_meta.read && !field_meta.is_private {
+                if field_meta.graphql_readable() {
                     let description = field_meta
                         .description
                         .as_deref()
@@ -3729,6 +3946,24 @@ fn generate_entity_impl(
                         ));
                     }
                 }
+                if !schema_only_override && !has_repository_entity_attribute(&input.attrs) {
+                    validate_graphql_relation_keys(
+                        backend,
+                        struct_name,
+                        field,
+                        &field_meta,
+                        &parsed_fields,
+                        &source_columns,
+                        &target_columns,
+                    )?;
+                    relation_target_checks.push(graphql_relation_target_checks(
+                        backend,
+                        struct_name,
+                        field,
+                        &field_meta,
+                        &target_columns,
+                    )?);
+                }
                 let source_column = source_columns
                     .first()
                     .cloned()
@@ -3752,6 +3987,12 @@ fn generate_entity_impl(
                 let search_fields_tokens = if let Some(search_relation) =
                     &field_meta.search_relation
                 {
+                    if !field_meta.graphql_readable() {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "search_relation requires a GraphQL-readable relation",
+                        ));
+                    }
                     let search_weight =
                         search_weight_tokens(&search_relation.weight, field.span())?;
                     let search_fields = search_relation
@@ -3803,9 +4044,7 @@ fn generate_entity_impl(
 
                 if field_meta.relation_filter {
                     if !is_multiple
-                        || field_meta.input_only
-                        || !field_meta.read
-                        || field_meta.is_private
+                        || !field_meta.graphql_readable()
                         || field_meta.read_policy.is_some()
                         || field_meta.relation_source_condition.is_some()
                         || field_meta.relation_target_condition.is_some()
@@ -3873,7 +4112,7 @@ fn generate_entity_impl(
                             "relation order_aggregate is not supported on conditional relations",
                         ));
                     }
-                    if !field_meta.read || field_meta.is_private {
+                    if !field_meta.graphql_readable() {
                         return Err(syn::Error::new_spanned(
                             field,
                             "relation order_aggregate requires a readable public relation",
@@ -3967,7 +4206,7 @@ fn generate_entity_impl(
             graphql_rename_fields,
             serde_rename_all,
         );
-        if field_meta.read && !field_meta.is_private {
+        if field_meta.graphql_readable() {
             let description = field_meta
                 .description
                 .as_deref()
@@ -4131,7 +4370,7 @@ fn generate_entity_impl(
                     sensitive: #sensitive,
                 }
             });
-            if field_meta.read && !field_meta.is_private {
+            if field_meta.graphql_readable() {
                 let variant = syn::Ident::new(&rust_name.to_case(Case::Pascal), field.span());
                 let column_name = field_meta
                     .db_column
@@ -4525,10 +4764,10 @@ fn generate_entity_impl(
                     "graphql_orm(searchable(...)) is only supported on String or Option<String> fields",
                 ));
             }
-            if !field_meta.read {
+            if !field_meta.graphql_readable() {
                 return Err(syn::Error::new(
                     field.span(),
-                    "private fields cannot be full-text searchable",
+                    "unreadable fields cannot be full-text searchable",
                 ));
             }
             if field_meta.read_policy.is_some() && search.policy.is_none() {
@@ -4586,10 +4825,10 @@ fn generate_entity_impl(
                     "graphql_orm(search_json(...)) requires a field marked #[graphql_orm(json)]",
                 ));
             }
-            if field_meta.is_private {
+            if !field_meta.graphql_readable() {
                 return Err(syn::Error::new(
                     field.span(),
-                    "private fields cannot use full-text search_json paths",
+                    "unreadable fields cannot use full-text search_json paths",
                 ));
             }
             for search_json in &field_meta.search_json {
@@ -4770,7 +5009,7 @@ fn generate_entity_impl(
             });
         }
 
-        if field_meta.read && !field_meta.input_only {
+        if field_meta.graphql_readable() {
             let getter_name = field_name;
             let description = field_meta
                 .description
@@ -5183,6 +5422,8 @@ fn generate_entity_impl(
 
     if schema_only {
         return Ok(quote! {
+            #relation_readability_impl
+            #(#relation_target_checks)*
             #rls_impl
             #search_schema_impl
             #searchable_entity_impl
@@ -5326,6 +5567,8 @@ fn generate_entity_impl(
         quote! { self.__gom_related.clear(); }
     };
     Ok(quote! {
+        #relation_readability_impl
+        #(#relation_target_checks)*
         #rls_impl
         #search_schema_impl
         #searchable_entity_impl
@@ -7720,5 +7963,200 @@ mod generated_identifier_tests {
         let bounded = bounded_generated_identifier(full);
         assert!(bounded.len() <= 63);
         assert!(bounded.is_char_boundary(bounded.len() - 17));
+    }
+}
+
+#[cfg(test)]
+mod object_visibility_tests {
+    use super::*;
+    use syn::parse::Parser;
+
+    #[test]
+    fn unreadable_relation_keys_and_changed_keys_are_rejected_on_every_backend() {
+        for backend in crate::backend::enabled_backends() {
+            let backend = backend.name();
+            for attribute in [
+                "#[graphql_orm(private)]",
+                "#[graphql_orm(read = false)]",
+                "#[input_only]",
+            ] {
+                let input: DeriveInput = syn::parse_str(&format!(r#"
+                    #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                    struct Record {{
+                        #[primary_key] id: String,
+                        {attribute} hidden_key: String,
+                        #[relation(target = "Record", from = "hidden_key", to = "id", emit_fk = false)]
+                        related: Vec<Record>,
+                    }}
+                "#)).unwrap();
+                let error = generate_entity_impl(&input, false, false).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("unreadable local key `hidden_key`")
+                );
+                // Hiding the relation is a supported repair on every backend.
+                let mut repaired = input.clone();
+                let syn::Data::Struct(data) = &mut repaired.data else {
+                    unreachable!()
+                };
+                data.fields
+                    .iter_mut()
+                    .next_back()
+                    .unwrap()
+                    .attrs
+                    .push(syn::parse_quote!(#[graphql_orm(read = false)]));
+                generate_entity_impl(&repaired, false, false).unwrap();
+
+                let input: DeriveInput = syn::parse_str(&format!(
+                    r#"
+                    #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                    struct Record {{
+                        #[primary_key] {attribute} id: String,
+                        label: String,
+                    }}
+                "#
+                ))
+                .unwrap();
+                let error = crate::operations::generate_graphql_operations(&input).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("generated Changed events disclose primary keys")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn condition_columns_require_readability_on_every_backend() {
+        for backend in crate::backend::enabled_backends() {
+            for attribute in [
+                "#[graphql_orm(private)]",
+                "#[graphql_orm(read = false)]",
+                "#[input_only]",
+            ] {
+                for (condition, message) in [
+                    (
+                        "source_condition(field = \"tier\", equals = 7)",
+                        "unreadable source condition column `tier`",
+                    ),
+                    (
+                        "target_condition(column = \"tier_code\", equals = 7)",
+                        "unreadable self-target condition column `tier_code`",
+                    ),
+                ] {
+                    let input: DeriveInput = syn::parse_str(&format!(r#"
+                        #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                        struct Record {{
+                            #[primary_key] id: i32,
+                            {attribute} #[graphql_orm(db_column = "tier_code")] tier: i32,
+                            #[relation(target = "Record", from = "id", to = "id", {condition}, multiple, emit_fk = false)]
+                            related: Vec<Record>,
+                        }}
+                    "#, backend = backend.name())).unwrap();
+                    assert!(
+                        generate_entity_impl(&input, false, false)
+                            .unwrap_err()
+                            .to_string()
+                            .contains(message)
+                    );
+                    let mut hidden = input.clone();
+                    let syn::Data::Struct(data) = &mut hidden.data else {
+                        unreachable!()
+                    };
+                    data.fields
+                        .iter_mut()
+                        .next_back()
+                        .unwrap()
+                        .attrs
+                        .push(syn::parse_quote!(#[graphql_orm(read = false)]));
+                    generate_entity_impl(&hidden, false, false).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn self_relation_keys_resolve_physical_names_and_sql_quoting() {
+        for backend in crate::backend::enabled_backends() {
+            for target in ["SecretKey", "secretkey", "\"SecretKey\""] {
+                let public_column = if backend == BackendKind::Postgres && target == "secretkey" {
+                    "#[graphql_orm(db_column = \"secretkey\")] public_key: String,"
+                } else {
+                    ""
+                };
+                let input: DeriveInput = syn::parse_str(&format!(r##"
+                    #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                    struct Record {{
+                        #[primary_key] id: String,
+                        #[graphql_orm(private, db_column = "SecretKey")]
+                        hidden_key: String,
+                        {public_column}
+                        #[relation(target = "Record", from = "id", to = {target:?}, emit_fk = false)]
+                        related: Vec<Record>,
+                    }}
+                "##, backend=backend.name())).unwrap();
+                let result = generate_entity_impl(&input, false, false);
+                if backend == BackendKind::Postgres && target == "secretkey" {
+                    result.unwrap();
+                } else {
+                    assert!(result.unwrap_err().to_string().contains("self-target key"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn only_effective_object_skips_satisfy_visibility() {
+        for (attribute, skipped) in [
+            ("#[graphql(skip)]", true),
+            ("#[graphql(skip = true)]", true),
+            ("#[graphql(skip = false)]", false),
+            ("#[graphql(visible = false, skip)]", true),
+            ("#[graphql(visible = false)]", false),
+        ] {
+            let field: syn::Field = syn::Field::parse_named
+                .parse_str(&format!("{attribute} hidden: String"))
+                .unwrap();
+            assert_eq!(has_graphql_object_skip(&field), skipped);
+        }
+    }
+
+    #[test]
+    fn unreadable_simple_object_fields_require_skips() {
+        for backend in crate::backend::enabled_backends() {
+            let backend = backend.name();
+            for (object_attrs, mode) in [
+                ("#[graphql(complex)]", ""),
+                ("", ", schema_only = true"),
+                ("#[graphql(complex)]", ", schema_only = true"),
+            ] {
+                for attribute in [
+                    "#[graphql_orm(private)]",
+                    "#[graphql_orm(read = false)]",
+                    "#[input_only]",
+                ] {
+                    let input: DeriveInput = syn::parse_str(&format!(
+                    r#"
+                    {object_attrs}
+                    #[graphql_entity(backend = "{backend}", table = "records", plural = "Records" {mode})]
+                    struct Record {{
+                        #[primary_key]
+                        #[filterable(type = "string")]
+                        #[sortable]
+                        id: String,
+                        label: String,
+                        {attribute}
+                        hidden: String,
+                    }}
+                "#
+                ))
+                .unwrap();
+                    let error = generate_entity_impl(&input, false, false).unwrap_err();
+                    assert!(error.to_string().contains("unreadable SimpleObject field"));
+                }
+            }
+        }
     }
 }

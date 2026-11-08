@@ -439,3 +439,74 @@ async fn generated_decode_failure_keeps_column_and_type_details_private()
     owner.cleanup()?;
     Ok(())
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn internal_sqlx_adapter_redacts_real_database_failure() {
+    use graphql_orm::graphql::orm::OrmResultError;
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    let raw = sqlx::query("SELECT * FROM sanitizer_private_missing")
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(raw.to_string().contains("sanitizer_private_missing"));
+    let public = <async_graphql::Error as OrmResultError>::from_sqlx_error(raw);
+    assert_eq!(public.message, "internal error");
+    assert_eq!(
+        public.extensions.unwrap().get("code"),
+        Some(&async_graphql::Value::String("INTERNAL_ERROR".into()))
+    );
+}
+
+#[tokio::test]
+async fn generated_descriptions_are_expanded_and_singular() {
+    let schema = Schema::build(
+        QueryRoot::default(),
+        MutationRoot::default(),
+        SubscriptionRoot::default(),
+    )
+    .finish();
+    let sdl = schema.sdl();
+    assert!(!sdl.contains('#'), "template residue in SDL: {sdl}");
+    assert!(sdl.contains("Delete one SanitizerNode record\n"));
+    assert!(!sdl.contains("one SanitizerNode records"));
+}
+
+#[cfg(all(feature = "sqlite", feature = "change-journal"))]
+#[tokio::test]
+async fn journal_write_failure_is_redacted_and_rolls_back() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (db, _) = fixture().await?;
+    let db = db.with_change_journal();
+    execute(&db, "CREATE TABLE sanitizer_private_nodes (id TEXT PRIMARY KEY, label TEXT NOT NULL UNIQUE, parent_id TEXT)").await?;
+    db.ensure_change_journal_table().await?;
+    execute(&db, "DROP TABLE __graphql_orm_change_log").await?;
+    let schema = schema_builder(db.clone()).finish();
+    let response = schema.execute(request("mutation { createSanitizerNode(input: {id: \"a\", label: \"synthetic-secret\"}) { success error } }")).await;
+    assert_code(&response, "INTERNAL_ERROR", "internal error");
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sanitizer_private_nodes")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(count, 0, "journal refusal must roll back the write");
+    Ok(())
+}
+
+#[test]
+fn internal_sqlx_adapter_preserves_safe_categories() {
+    use graphql_orm::graphql::orm::OrmResultError;
+    for (raw, code, message) in [
+        (
+            sqlx::Error::PoolClosed,
+            "SERVICE_UNAVAILABLE",
+            "service unavailable",
+        ),
+        (sqlx::Error::RowNotFound, "NOT_FOUND", "not found"),
+    ] {
+        let public = <async_graphql::Error as OrmResultError>::from_sqlx_error(raw);
+        assert_eq!(public.message, message);
+        assert_eq!(
+            public.extensions.unwrap().get("code"),
+            Some(&async_graphql::Value::String(code.into()))
+        );
+    }
+}

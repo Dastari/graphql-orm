@@ -1,0 +1,11 @@
+error: readable relation uses unreadable source condition column `tier`; make the relation unreadable too with #[graphql_orm(read = false)], or remove private/input_only and set read = true on the key
+  --> tests/ui/recheck386/source_condition_input_only.rs:17:5
+   |
+17 | /     #[relation(
+18 | |         target = "Target",
+19 | |         from = "id",
+20 | |         to = "id",
+...  |
+23 | |     )]
+24 | |     vip: Option<Target>,
+   | |_______________________^

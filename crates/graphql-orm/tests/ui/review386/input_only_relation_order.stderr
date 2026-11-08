@@ -1,0 +1,7 @@
+error: relation order_aggregate requires a readable public relation
+  --> tests/ui/review386/input_only_relation_order.rs:10:5
+   |
+10 | /     #[input_only]
+11 | |     #[relation(target = "Record", from = "owner_id", to = "id", emit_fk = false, multiple, order_aggregate(name = "OwnerCount", ag...
+12 | |     owner: Vec<Record>,
+   | |______________________^

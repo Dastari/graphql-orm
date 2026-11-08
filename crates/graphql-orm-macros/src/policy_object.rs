@@ -1,5 +1,7 @@
 use crate::backend::{backend_marker_tokens, resolve_backend};
-use crate::entity::{has_graphql_complex, parse_entity_metadata, parse_field_metadata};
+use crate::entity::{
+    has_graphql_complex, has_graphql_object_skip, parse_entity_metadata, parse_field_metadata,
+};
 use quote::quote;
 use syn::{Attribute, Expr, ItemStruct, Lit, Meta, Token, punctuated::Punctuated};
 
@@ -116,11 +118,14 @@ pub(crate) fn expand(mut input: ItemStruct) -> syn::Result<proc_macro2::TokenStr
     install_guard(&mut input.attrs, combine(object_guard, &generated))?;
     for field in input.fields.iter_mut() {
         let metadata = parse_field_metadata(field)?;
-        if metadata.is_relation || metadata.graphql_skip {
+        if metadata.graphql_skip || has_graphql_object_skip(field) {
             continue;
         }
-        if !metadata.read || metadata.is_private || metadata.input_only {
+        if !metadata.graphql_readable() {
             field.attrs.push(syn::parse_quote!(#[graphql(skip)]));
+            continue;
+        }
+        if metadata.is_relation {
             continue;
         }
         if let Some(existing) = guard(&field.attrs)? {
@@ -156,6 +161,38 @@ mod tests {
         assert!(expanded.contains("GuardExt :: and (FieldGuard"));
         assert!(expanded.contains("PascalCase"));
         assert!(expanded.contains("graphql (skip)"));
+    }
+
+    #[test]
+    fn hidden_relations_receive_object_skips() {
+        for attribute in [
+            "#[graphql_orm(private)]",
+            "#[graphql_orm(read = false)]",
+            "#[input_only]",
+        ] {
+            let input: ItemStruct = syn::parse_str(&format!(
+                r#"
+                #[derive(GraphQLEntity, SimpleObject, GraphQLRelations)]
+                #[graphql(complex)]
+                #[graphql_entity(backend = "sqlite", table = "records", plural = "Records")]
+                struct Record {{
+                    #[primary_key]
+                    id: String,
+                    {attribute}
+                    #[relation(target = "Target", from = "id", to = "id", emit_fk = false)]
+                    hidden: Option<Target>,
+                }}
+            "#
+            ))
+            .unwrap();
+            let expanded: ItemStruct = syn::parse2(expand(input).unwrap()).unwrap();
+            let hidden = expanded
+                .fields
+                .iter()
+                .find(|field| field.ident.as_ref().is_some_and(|name| name == "hidden"))
+                .unwrap();
+            assert!(parse_field_metadata(hidden).unwrap().graphql_skip);
+        }
     }
 
     #[test]

@@ -26,7 +26,7 @@ struct BinaryKeyRecord {
     #[primary_key]
     #[filterable(type = "bytes")]
     #[sortable]
-    #[graphql_orm(private, auto_generated = false, min_length = 32, max_length = 32)]
+    #[graphql_orm(skip_input, auto_generated = false, min_length = 32, max_length = 32)]
     digest: Vec<u8>,
     #[sortable]
     payload: String,
@@ -217,7 +217,7 @@ async fn binary_keys_remain_bytes_across_repository_transaction_cas_and_keysets(
     feature = "postgres",
     ignore = "requires test-owned PostgreSQL container"
 )]
-async fn private_binary_key_and_unsafe_graphql_upsert_are_not_exposed() {
+async fn host_managed_binary_key_input_and_unsafe_graphql_upsert_are_not_exposed() {
     let schema = schema_builder(Database::new(
         #[cfg(feature = "sqlite")]
         graphql_orm::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),

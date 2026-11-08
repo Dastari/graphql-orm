@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
+unreadable-target-key = ["cross-crate-target-models/unreadable-target-key"]
 default = ["sqlite"]
 sqlite = ["graphql-orm/sqlite", "cross-crate-target-models/sqlite"]
 postgres = ["graphql-orm/postgres", "cross-crate-target-models/postgres"]
