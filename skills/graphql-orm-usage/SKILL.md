@@ -490,8 +490,9 @@ for the snapshot scope and validation contract.
   cause continuity loss before a revoked subscriber's timer fires. The frame omits keys,
   payloads and counts, but its occurrence/timing remains observable (Related to
   [#387](https://github.com/Dastari/graphql-orm/issues/387)).
-  Closure/continuity signals keep their existing timing; CacheSync is unchanged (Related to
-  [#384](https://github.com/Dastari/graphql-orm/issues/384)).
+  Closure/continuity signals keep their existing timing. ORM/macros 0.100.0 also
+  apply independent authority checks to CacheSync; see the
+  [cache invalidation contract](../../docs/reference/graphql-orm/cache-sync.md).
   Select exactly one root occurrence per operation, counting aliases, fragments and skipped fields;
   split multi-root operations or expect `subscription_root_limit_exceeded` before sources open.
   Generated builders install admission. Hand-built schemas must install
