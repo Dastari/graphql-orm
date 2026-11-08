@@ -22,6 +22,8 @@ ORM runtime/macros **0.99.0**.
 
 ORM runtime/macros **0.100.0**.
 
+- **Fixed:** the shared CacheSync/generated Changed authority timer recognizes locked agql-auth service/store failures (`AUTH_SERVICE_UNAVAILABLE`) and host configuration failures (`INVALID_CONFIGURATION`) as sanitized `SUBSCRIPTION_CONTINUITY_LOST`, including source-free extended errors. Unknown codes remain fail-closed denials. No data migration.
+
 - **Security/breaking:** CacheSync rechecks partition authority on the Database's independent, bounded jittered subscription timer. Event failures silently suppress initial/committed/gap signals; only timer failures emit sanitized `FORBIDDEN` for definite denial or `SUBSCRIPTION_CONTINUITY_LOST` for infrastructure failures. `changes_with_authority` separates subscriber checks from event filtering; existing `changes` uses its callback for both. Denied reconciliation stays pending until a later authorized signal. No data migration; macros stay version-aligned. Fixes #384.
 
 ORM runtime/macros **0.98.0**, operation catalog **0.7.2**.

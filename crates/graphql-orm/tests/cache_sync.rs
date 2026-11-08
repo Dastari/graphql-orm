@@ -852,3 +852,42 @@ async fn native_graphql_stream_delivers_authorized_initial_and_committed_signals
             .is_err()
     );
 }
+
+#[cfg(feature = "auth-agql")]
+#[tokio::test]
+async fn cache_timer_classifies_real_agql_service_and_store_failures_as_continuity_loss() {
+    use agql_auth::AuthError;
+    use async_graphql::ErrorExtensions;
+    let db = fixture()
+        .await
+        .with_subscription_authority_recheck_interval(Duration::from_secs(1));
+    let sync = CacheSync::new(db, Arc::new(Store));
+    tokio::time::pause();
+    for failure in [
+        AuthError::AuthServiceUnavailable,
+        AuthError::Store("private authority store diagnostic".into()),
+    ] {
+        let mut stream = Box::pin(sync.changes_with_authority(
+            key("tenant-a"),
+            move |partition| {
+                assert_eq!(partition, key("tenant-a"));
+                futures::future::ready(Err(failure.extend()))
+            },
+            |_| async { Ok(()) },
+        ));
+        assert!(stream.next().await.unwrap().unwrap().refetch_required);
+        let started = tokio::time::Instant::now();
+        let error = stream.next().await.unwrap().unwrap_err();
+        // Allow millisecond rounding by Tokio's timer driver.
+        assert!(
+            (Duration::from_secs(1)..=Duration::from_millis(1101)).contains(&started.elapsed())
+        );
+        assert_eq!(
+            error.extensions.as_ref().unwrap().get("code"),
+            Some(&async_graphql::Value::from("SUBSCRIPTION_CONTINUITY_LOST"))
+        );
+        assert!(error.source.is_none());
+        assert!(!format!("{error:?}").contains("private"));
+        assert!(stream.next().await.is_none());
+    }
+}
