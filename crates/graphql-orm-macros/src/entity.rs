@@ -4913,6 +4913,7 @@ fn generate_entity_impl(
             }
             None => quote! { None },
         };
+        let is_readable = field_meta.graphql_readable();
         let is_filterable = field_meta.filter && field_meta.filterable.is_some();
         let is_sortable = field_meta.sortable && field_meta.order;
         let is_date_time = field_meta.is_date_field;
@@ -4931,6 +4932,7 @@ fn generate_entity_impl(
                 is_primary_key: #is_pk,
                 is_unique: #is_unique,
                 is_generated: #is_generated,
+                is_readable: #is_readable,
                 is_filterable: #is_filterable,
                 is_sortable: #is_sortable,
                 is_date_time: #is_date_time,

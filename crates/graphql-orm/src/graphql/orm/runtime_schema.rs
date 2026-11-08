@@ -2838,7 +2838,7 @@ impl RuntimeSchema {
     /// [`ValidatedRuntimeSchema::structural_fingerprint`].
     ///
     /// Static declarations using capabilities the IR does not represent yet (spatial, search,
-    /// partial/GiST indexes, check constraints) are reported as diagnostics rather than dropped.
+    /// partial/GiST indexes, check constraints, statically unreadable fields) are reported as diagnostics rather than dropped.
     /// Legacy epoch-second defaults on DateTime fields are rejected with `UnsupportedDefault`;
     /// integer epoch-second defaults remain supported. Static declarations/storage are unchanged.
     pub fn from_static_entities(
@@ -2914,6 +2914,22 @@ impl RuntimeSchema {
                         continue;
                     }
                 };
+                // The runtime IR currently has no structural output-eligibility flag.
+                // Refuse the entire conversion: dropping the field could also change
+                // relation keys, filters, or aggregates, while copying it would let
+                // a host grant reopen a statically hidden field.
+                if !field.is_readable {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        format!(
+                            "column `{}` is statically unreadable; structural field readability is not represented in the runtime IR",
+                            field.name
+                        ),
+                        &cid,
+                        Some(field.name),
+                    ));
+                    continue;
+                }
                 // A searchable column's search metadata is represented by the
                 // collection's `search`, mapped from the entity's search index.
                 if field.spatial.is_some() {
