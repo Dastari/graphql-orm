@@ -218,3 +218,66 @@ fn scalar_metadata_respects_the_object_owner() {
     );
     assert_refused(RepositoryScalar::metadata(), &["value"]);
 }
+
+// GraphQLRelations supplies this getter; SimpleObject must skip the storage slot.
+#[derive(
+    GraphQLEntity,
+    graphql_orm_macros::GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "owned_relations",
+    plural = "OwnedRelations"
+)]
+struct OwnedRelation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    scalar_id: i64,
+    #[graphql(skip)]
+    #[relation(target = "OwnedScalar", from = "scalar_id", to = "id")]
+    scalar: Option<OwnedScalar>,
+}
+
+struct RelationQuery;
+#[Object]
+impl RelationQuery {
+    async fn holder(&self) -> OwnedRelation {
+        OwnedRelation {
+            id: 1,
+            scalar_id: 2,
+            scalar: None,
+        }
+    }
+}
+
+#[test]
+fn generated_relation_implementation_skip_remains_readable() {
+    let metadata = OwnedRelation::metadata();
+    assert!(metadata.relations[0].is_readable);
+    let api =
+        async_graphql::Schema::build(RelationQuery, EmptyMutation, EmptySubscription).finish();
+    assert!(api.sdl().contains("scalar: OwnedScalar"));
+    let schema = RuntimeSchema::from_static_entities(&[metadata, OwnedScalar::metadata()]).unwrap();
+    assert!(!schema.repository_only);
+    assert_eq!(schema.collections[0].relations.len(), 1);
+}
+
+impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::SqliteBackend> for OwnedScalar {
+    fn batch_column() -> &'static str {
+        "id"
+    }
+    fn batch_key_from_row(
+        row: &graphql_orm::sqlx::sqlite::SqliteRow,
+    ) -> graphql_orm::Result<String> {
+        use graphql_orm::sqlx::Row;
+        Ok(row.try_get::<i64, _>("id")?.to_string())
+    }
+}

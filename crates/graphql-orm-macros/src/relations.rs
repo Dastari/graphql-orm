@@ -479,8 +479,10 @@ pub(crate) fn generate_graphql_relations(
             let emit_foreign_key = r.emit_foreign_key;
             let on_delete = &r.on_delete;
             let propagate_change = &r.propagate_change;
+            let is_readable = r.read_policy.is_none();
             quote! {
                 ::graphql_orm::graphql::orm::RelationMetadata {
+                    is_readable: #is_readable,
                     field_name: #graphql_name,
                     target_type: #target_type,
                     source_column: #source_column,

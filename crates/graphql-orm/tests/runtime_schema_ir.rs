@@ -66,11 +66,9 @@ pub struct Customer {
     #[graphql_orm(default = false)]
     pub created_at: String,
 
-    #[graphql(skip)]
     #[relation(target = "ContactDetail", from = "id", to = "customer_id", multiple)]
     pub contact_details: Vec<ContactDetail>,
 
-    #[graphql(skip)]
     #[relation(target = "CustomerNote", from = "id", to = "customer_id", multiple)]
     pub notes: Vec<CustomerNote>,
 }
@@ -95,7 +93,6 @@ pub struct ContactDetail {
 
     pub value: String,
 
-    #[graphql(skip)]
     #[relation(
         target = "Customer",
         from = "customer_id",
@@ -122,7 +119,6 @@ pub struct CustomerNote {
 
     pub body: String,
 
-    #[graphql(skip)]
     #[relation(
         target = "Customer",
         from = "customer_id",
@@ -131,7 +127,6 @@ pub struct CustomerNote {
     )]
     pub customer: Option<Customer>,
 
-    #[graphql(skip)]
     #[relation(
         target = "NoteAttachment",
         from = ["customer_id", "seq"],
@@ -158,7 +153,6 @@ pub struct NoteAttachment {
 
     pub file_name: String,
 
-    #[graphql(skip)]
     #[relation(
         target = "CustomerNote",
         from = ["customer_id", "note_seq"],

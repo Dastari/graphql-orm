@@ -3563,6 +3563,8 @@ pub enum RelationChangePropagation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationMetadata {
+    /// Effective static output eligibility. Host authority cannot reopen hidden relations.
+    pub is_readable: bool,
     pub field_name: &'static str,
     pub target_type: &'static str,
     pub source_column: &'static str,

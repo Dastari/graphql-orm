@@ -752,6 +752,7 @@ fn build_system_metadata() -> EntityMetadata {
     let mut metadata = HostJournal::metadata().clone();
     // Static system metadata can bind directly to stable runtime physical names.
     metadata.relations = vec![RelationMetadata {
+        is_readable: true,
         field_name: "note",
         target_type: "owned_notes",
         source_column: "note_id",
@@ -1274,6 +1275,7 @@ struct FkSource {
 fn fk_target() -> OwnedSchemaModel {
     let mut metadata = FkSource::metadata().clone();
     metadata.relations = vec![RelationMetadata {
+        is_readable: true,
         field_name: "parent",
         target_type: "owned_notes",
         source_column: "parent_id",

@@ -4088,8 +4088,17 @@ fn generate_entity_impl(
                     quote! { None }
                 };
 
+                // Generated relation resolvers own their output even on complex
+                // objects; their SimpleObject skips are implementation details.
+                let is_readable = scalar_output_is_readable(
+                    field,
+                    &field_meta,
+                    !schema_only && !has_repository_entity_attribute(&input.attrs),
+                    &input.attrs,
+                );
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
+                        is_readable: #is_readable,
                         field_name: #graphql_name,
                         target_type: #target_type,
                         source_column: #source_column,
@@ -8199,6 +8208,51 @@ mod object_visibility_tests {
                     result.unwrap();
                 } else {
                     assert!(result.unwrap_err().to_string().contains("self-target key"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relation_output_metadata_distinguishes_owned_implementation_skips() {
+        for backend in crate::backend::enabled_backends() {
+            for (attribute, delegated) in [
+                ("", true),
+                ("#[graphql(skip)]", false),
+                ("#[graphql(skip = true)]", false),
+                ("#[graphql(skip = false)]", true),
+                ("#[graphql(skip_output)]", false),
+                ("#[graphql(skip_output = false)]", true),
+                ("#[graphql(visible = false)]", false),
+                ("#[graphql(guard = \"Guard\")]", false),
+                ("#[graphql_orm(private)]", false),
+                ("#[graphql_orm(read = false)]", false),
+                ("#[input_only]", false),
+                ("#[graphql_orm(read_policy = \"owner\")]", false),
+            ] {
+                for metadata_only in [false, true] {
+                    let input: DeriveInput = syn::parse_str(&format!(r#"
+                        #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                        struct Record {{
+                            #[primary_key] id: i64,
+                            {attribute}
+                            #[relation(target = "Record", from = "id", to = "id", emit_fk = false)]
+                            related: Option<Box<Record>>,
+                        }}
+                    "#, backend = backend.name())).unwrap();
+                    let tokens = generate_entity_impl(&input, metadata_only, false)
+                        .unwrap()
+                        .to_string();
+                    let relation = tokens.split("RelationMetadata {").nth(1).unwrap();
+                    let expected = if metadata_only {
+                        delegated
+                    } else {
+                        !attribute.contains("graphql_orm") && !attribute.contains("input_only")
+                    };
+                    assert!(
+                        relation.starts_with(&format!(" is_readable : {expected} ,")),
+                        "{attribute}, metadata_only={metadata_only}: {relation}"
+                    );
                 }
             }
         }

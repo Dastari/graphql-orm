@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.105.0 extends static readability protection to relation declarations.
+Hand-built `RelationMetadata` literals require `is_readable`; derives set it.
+Default runtime conversion refuses hidden relations, while trusted repository
+conversion retains them behind the non-served marker. See the root migration guide.
+
 Version 0.104.0 reports a macro-owned diagnostic for empty GraphQL order inputs. Add `#[sortable]` to a persisted field (for example the primary key); generated query and incoming relation contracts then remain consistent. See the [migration guide](../../MIGRATION.md#01030-to-01040-empty-order-input-diagnostic).
 
 Version 0.103.0 retains static field readability in column metadata and refuses static-to-runtime conversion of unreadable columns. Rebuild derives together; hand-built metadata literals need `is_readable`. Runtime schema literals also need `repository_only: false`; the explicit trusted repository conversion sets this marker to true and runtime GraphQL refuses marked schemas. See the root migration guide. No data migration is needed.

@@ -417,8 +417,9 @@ deterministically from physical names (`<table>`, `<table>.<column>`, `<table>.<
 compare converted schemas by `structural_fingerprint()`, not `fingerprint()`.
 
 To make conversion faithful, static metadata records the following facts, emitted by the
-derives and available on `ColumnDef`/`FieldMetadata`:
+derives and available on `ColumnDef`/`FieldMetadata` and `RelationMetadata`:
 
+- `RelationMetadata::is_readable` — effective relation output eligibility; default conversion refuses hidden declarations even with public keys and targets. Generated relation implementation skips remain readable.
 - `is_readable` — scalar output eligibility under the owning object; default conversion
   refuses unreadable columns. Delegated and metadata-only output honors effective
   `skip`, `skip_output`, flattening and unrepresented visibility/guards.
@@ -431,7 +432,7 @@ derives and available on `ColumnDef`/`FieldMetadata`:
   and existing schema hashes are unaffected.
 
 Trusted server-authored repository queries may use
-`RuntimeSchema::from_static_entities_for_repository` to retain unreadable columns.
+`RuntimeSchema::from_static_entities_for_repository` to retain unreadable columns and relation declarations.
 This marks the entire schema `repository_only: true`. Runtime GraphQL module
 compilation rejects marked schemas with `repository_only_schema` before consulting any host authority.
 Serialization, revalidation, and both fingerprints retain the marker; do not

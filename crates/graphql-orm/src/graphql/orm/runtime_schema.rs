@@ -2862,8 +2862,8 @@ impl RuntimeSchema {
 
     /// Converts static metadata for trusted, server-authored repository queries only.
     ///
-    /// Retains unreadable columns for internal identity, filtering, ordering and
-    /// projection. The returned schema is marked `repository_only`; runtime GraphQL
+    /// Retains unreadable columns and relations for internal identity, filtering,
+    /// ordering and projection. The returned schema is marked `repository_only`; runtime GraphQL
     /// module compilation refuses it, including after serialization or revalidation.
     /// This does not authorize any query or make private values safe for disclosure.
     /// Hosts must keep this marker and must not serve copies of its collections.
@@ -3058,6 +3058,18 @@ impl RuntimeSchema {
 
             let mut relations = Vec::new();
             for relation in entity.relations.iter() {
+                if !repository_only && !relation.is_readable {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        format!(
+                            "relation `{}` is statically unreadable; structural relation readability is not represented in the runtime IR",
+                            relation.field_name
+                        ),
+                        &cid,
+                        Some(relation.field_name),
+                    ));
+                    continue;
+                }
                 let id =
                     match RelationId::new(format!("{}.{}", entity.table_name, relation.field_name))
                     {
