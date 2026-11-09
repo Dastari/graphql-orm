@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.121.0 makes schema stage application refuse destructive steps
+unless `allow_destructive` is set, matching planned migrations. Upgrade
+ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01210-schema-stages-refuse-destructive-steps-by-default).
+
 Version 0.120.0 fails closed when a GraphQL request reaches a PostgreSQL RLS
 entity without `DbAuthContext`, reports runtime roles that bypass RLS, and
 extends RLS to search documents and the change journal (GHSA-hr7v-hr83-2jj4,

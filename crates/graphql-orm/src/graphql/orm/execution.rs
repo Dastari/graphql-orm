@@ -1,11 +1,15 @@
 use super::core::{
-    AppliedMigrationRecord, DbAuthContext, MigrationApplicationMetadata, PlannedSchemaStage,
-    SchemaPolicy, SchemaStage, SqlValue, record_executed_query,
+    AppliedMigrationRecord, AppliedMigrationReport, ApplyOptions, DbAuthContext,
+    MigrationApplicationMetadata, PlannedSchemaStage, SchemaPolicy, SchemaStage, SqlValue,
+    record_executed_query,
 };
-use super::migrations::{build_migration_plan, validate_migration_step_capabilities};
+use super::migrations::{
+    build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
+};
 use super::owned_schema::StepRef;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use super::runtime_migration::{OwnedPlannedMigration, RuntimeMigrationError};
+use super::schema_manager::reject_migration_risks;
 use super::{MigrationBackend, OrmBackend, SqlxBackend, WriteBackend};
 use std::collections::HashSet;
 
@@ -45,14 +49,53 @@ pub trait MigrationRunner {
     async fn apply_migrations(&self, migrations: &[Migration]) -> crate::Result<()>;
 }
 
+/// Plan and apply ordered [`SchemaStage`]s recorded in
+/// `__graphql_orm_migrations`.
+///
+/// Stage application runs the same step-risk gate as
+/// [`SchemaManager::apply_migration`](super::SchemaManager::apply_migration):
+/// every pending stage is classified and checked against [`ApplyOptions`]
+/// before any stage SQL runs.
 #[allow(async_fn_in_trait)]
 pub trait SchemaStageRunner {
+    /// Plan every stage that is not yet recorded, without changing the
+    /// database. Inspect [`PlannedSchemaStage::steps`] or
+    /// [`PlannedSchemaStage::highest_risk`] before applying.
     async fn plan_schema_stages(
         &self,
         stages: &[SchemaStage],
     ) -> crate::Result<Vec<PlannedSchemaStage>>;
 
-    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> crate::Result<()>;
+    /// Apply pending stages with [`ApplyOptions::default`].
+    ///
+    /// The default options refuse any destructive step, such as dropping a
+    /// table or column that is live in the database but absent from a stage
+    /// target. Use
+    /// [`apply_schema_stages_with_options`](Self::apply_schema_stages_with_options)
+    /// with `allow_destructive: true` after reviewing the plan.
+    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> crate::Result<()> {
+        self.apply_schema_stages_with_options(stages, ApplyOptions::default())
+            .await
+            .map(|_| ())
+    }
+
+    /// Apply pending stages according to [`ApplyOptions`].
+    ///
+    /// All pending stages are planned and admitted before any stage SQL runs:
+    /// a stage containing a destructive step is refused unless
+    /// `allow_destructive` is set, and `additive_only` refuses any step that is
+    /// not additive. `dry_run` plans and admits the stages and returns reports
+    /// without executing SQL. `expected_current_schema_hash`, when set, must
+    /// equal the stable hash of the introspected live schema. Stages always
+    /// record history, so `record_history: false` is refused.
+    /// `require_clean_schema` applies to ABI upgrades only and is not used here.
+    ///
+    /// Returns one report per pending stage, in stage order.
+    async fn apply_schema_stages_with_options(
+        &self,
+        stages: &[SchemaStage],
+        options: ApplyOptions,
+    ) -> crate::Result<Vec<AppliedMigrationReport>>;
 }
 
 impl<B> MigrationRunner for crate::db::Database<B>
@@ -90,60 +133,122 @@ where
         &self,
         stages: &[SchemaStage],
     ) -> crate::Result<Vec<PlannedSchemaStage>> {
-        ensure_planning_policy(self.schema_policy(), "plan schema stages")?;
-        B::prepare_migration_runtime(self.pool()).await?;
-        validate_schema_stages(stages)?;
-
-        let applied_versions = applied_version_set::<B>(self.pool()).await?;
-        ensure_applied_stages_form_prefix(stages, &applied_versions)?;
-
-        let mut current_schema = B::introspect_schema(self.pool()).await?;
-        let mut planned = Vec::new();
-
-        for stage in stages {
-            if applied_versions.contains(&stage.version) {
-                current_schema = stage.target_schema.clone();
-                continue;
-            }
-
-            let plan = build_migration_plan(B::DIALECT, &current_schema, &stage.target_schema);
-            validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
-            planned.push(PlannedSchemaStage {
-                version: stage.version.clone(),
-                description: stage.description.clone(),
-                target_schema_hash: stage.target_schema_hash.clone(),
-                plan,
-            });
-            current_schema = stage.target_schema.clone();
-        }
-
-        Ok(planned)
+        plan_pending_schema_stages::<B>(self.pool(), self.schema_policy(), stages)
+            .await
+            .map(|(_, planned)| planned)
     }
 
-    async fn apply_schema_stages(&self, stages: &[SchemaStage]) -> crate::Result<()> {
+    async fn apply_schema_stages_with_options(
+        &self,
+        stages: &[SchemaStage],
+        options: ApplyOptions,
+    ) -> crate::Result<Vec<AppliedMigrationReport>> {
         ensure_managed_policy(self.schema_policy(), "apply schema stages")?;
-        let planned = self.plan_schema_stages(stages).await?;
-        for stage in planned {
-            let metadata = MigrationApplicationMetadata {
-                backend: B::DIALECT.name(),
-                graphql_orm_version: env!("CARGO_PKG_VERSION"),
-                source_schema_hash: None,
-                target_schema_hash: stage.target_schema_hash.clone(),
-                plan_hash: stage.plan.stable_hash(),
-                policy: self.schema_policy(),
-            };
-            B::apply_migration_statements_transactionally(
-                self.pool(),
-                &stage.version,
-                &stage.description,
-                &stage.plan.statements,
-                Some(&metadata),
-                true,
-            )
-            .await?;
+        if !options.record_history {
+            return Err(sqlx::Error::Protocol(
+                "Schema stages are tracked in migration history; record_history must stay enabled"
+                    .to_string(),
+            ));
         }
-        Ok(())
+        let (live_schema_hash, planned) =
+            plan_pending_schema_stages::<B>(self.pool(), self.schema_policy(), stages).await?;
+        if let Some(expected) = &options.expected_current_schema_hash {
+            if *expected != live_schema_hash {
+                return Err(sqlx::Error::Protocol(format!(
+                    "Schema stage baseline hash mismatch: expected {expected}, current {live_schema_hash}"
+                )));
+            }
+        }
+        // Admit every pending stage before any stage SQL runs, so a later
+        // refused stage cannot leave earlier stages applied.
+        for stage in &planned {
+            admit_schema_stage(stage, &options)?;
+        }
+
+        let mut reports = Vec::with_capacity(planned.len());
+        for stage in planned {
+            if !options.dry_run {
+                let metadata = MigrationApplicationMetadata {
+                    backend: B::DIALECT.name(),
+                    graphql_orm_version: env!("CARGO_PKG_VERSION"),
+                    source_schema_hash: None,
+                    target_schema_hash: stage.target_schema_hash.clone(),
+                    plan_hash: stage.plan.stable_hash(),
+                    policy: self.schema_policy(),
+                };
+                B::apply_migration_statements_transactionally(
+                    self.pool(),
+                    &stage.version,
+                    &stage.description,
+                    &stage.plan.statements,
+                    Some(&metadata),
+                    true,
+                )
+                .await?;
+            }
+            reports.push(AppliedMigrationReport {
+                statements_applied: if options.dry_run {
+                    0
+                } else {
+                    stage.plan.statements.len()
+                },
+                version: stage.version,
+                dry_run: options.dry_run,
+                already_applied: false,
+            });
+        }
+        Ok(reports)
     }
+}
+
+/// Plan the stages not yet recorded, returning the stable hash of the live
+/// schema the plans start from.
+async fn plan_pending_schema_stages<B: MigrationBackend>(
+    pool: &B::Pool,
+    policy: SchemaPolicy,
+    stages: &[SchemaStage],
+) -> crate::Result<(String, Vec<PlannedSchemaStage>)> {
+    ensure_planning_policy(policy, "plan schema stages")?;
+    B::prepare_migration_runtime(pool).await?;
+    validate_schema_stages(stages)?;
+
+    let applied_versions = applied_version_set::<B>(pool).await?;
+    ensure_applied_stages_form_prefix(stages, &applied_versions)?;
+
+    let mut current_schema = B::introspect_schema(pool).await?;
+    let live_schema_hash = current_schema.stable_hash();
+    let mut planned = Vec::new();
+
+    for stage in stages {
+        if applied_versions.contains(&stage.version) {
+            current_schema = stage.target_schema.clone();
+            continue;
+        }
+
+        let plan = build_migration_plan(B::DIALECT, &current_schema, &stage.target_schema);
+        validate_migration_step_capabilities(B::DIALECT, plan.steps.iter().map(StepRef::from))?;
+        planned.push(PlannedSchemaStage {
+            version: stage.version.clone(),
+            description: stage.description.clone(),
+            target_schema_hash: stage.target_schema_hash.clone(),
+            plan,
+        });
+        current_schema = stage.target_schema.clone();
+    }
+
+    Ok((live_schema_hash, planned))
+}
+
+/// Run the shared migration risk gate over one planned stage.
+fn admit_schema_stage(stage: &PlannedSchemaStage, options: &ApplyOptions) -> crate::Result<()> {
+    let steps = classify_migration_steps(&stage.plan.steps);
+    reject_migration_risks(
+        &stage.version,
+        steps
+            .iter()
+            .map(|step| (step.risk, StepRef::from(&step.step))),
+        options,
+    )
 }
 
 pub(crate) fn ensure_managed_policy(policy: SchemaPolicy, action: &str) -> crate::Result<()> {

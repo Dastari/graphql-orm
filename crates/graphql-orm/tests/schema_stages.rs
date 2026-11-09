@@ -411,3 +411,523 @@ async fn sqlite_schema_stage_rebuilds_related_tables_in_one_stage()
 
     Ok(())
 }
+
+// Issue #442: staged application runs the same step-risk gate as planned
+// migrations, before any stage SQL runs.
+
+#[cfg(feature = "sqlite")]
+type GatePool = sqlx::SqlitePool;
+#[cfg(feature = "postgres")]
+type GatePool = sqlx::PgPool;
+
+fn gate_column(
+    name: &str,
+    primary_key: bool,
+    nullable: bool,
+) -> graphql_orm::graphql::orm::ColumnModel {
+    graphql_orm::graphql::orm::ColumnModel {
+        name: name.to_string(),
+        sql_type: "TEXT".to_string(),
+        spatial: None,
+        nullable,
+        is_primary_key: primary_key,
+        is_unique: false,
+        default: None,
+    }
+}
+
+fn gate_table(table_name: &str, columns: &[(&str, bool)]) -> graphql_orm::graphql::orm::TableModel {
+    let mut all = vec![gate_column("id", true, false)];
+    all.extend(
+        columns
+            .iter()
+            .map(|(name, nullable)| gate_column(name, false, *nullable)),
+    );
+    graphql_orm::graphql::orm::TableModel {
+        entity_name: table_name.to_string(),
+        table_name: table_name.to_string(),
+        primary_key: "id".to_string(),
+        primary_keys: vec!["id".to_string()],
+        default_sort: "id ASC".to_string(),
+        columns: all,
+        indexes: vec![],
+        composite_unique_indexes: vec![],
+        foreign_keys: vec![],
+        search_indexes: vec![],
+        append_only: false,
+        retention_purge: false,
+        check_constraints: vec![],
+    }
+}
+
+fn gate_stage(
+    version: &str,
+    tables: Vec<graphql_orm::graphql::orm::TableModel>,
+) -> graphql_orm::graphql::orm::SchemaStage {
+    graphql_orm::graphql::orm::SchemaStage::from_schema_model(
+        version.to_string(),
+        format!("stage {version}"),
+        graphql_orm::graphql::orm::SchemaModel {
+            extensions: Vec::new(),
+            tables,
+        },
+    )
+}
+
+fn gate_prefix(label: &str) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(format!(
+        "20261109_{label}_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ))
+}
+
+async fn gate_table_names(pool: &GatePool) -> Result<Vec<String>, sqlx::Error> {
+    Ok(graphql_orm::graphql::orm::introspect_schema(pool)
+        .await?
+        .tables
+        .into_iter()
+        .map(|table| table.table_name)
+        .collect())
+}
+
+async fn gate_column_names(pool: &GatePool, table: &str) -> Result<Vec<String>, sqlx::Error> {
+    Ok(graphql_orm::graphql::orm::introspect_schema(pool)
+        .await?
+        .tables
+        .into_iter()
+        .find(|candidate| candidate.table_name == table)
+        .map(|table| {
+            table
+                .columns
+                .into_iter()
+                .map(|column| column.name)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+async fn gate_row_count(pool: &GatePool, table: &str) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query(&format!("SELECT COUNT(*) AS count FROM {table}"))
+        .fetch_one(pool)
+        .await?;
+    sqlx::Row::try_get::<i64, _>(&row, "count")
+}
+
+fn assert_refused(error: sqlx::Error, kind: &str, version: &str) {
+    assert!(
+        matches!(
+            &error,
+            sqlx::Error::Protocol(message)
+                if message.starts_with(&format!("Migration {version} contains {kind} step"))
+        ),
+        "expected {kind} refusal for {version}, got {error:?}"
+    );
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn destructive_stage_is_refused_by_default_and_applies_only_with_opt_in()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{ApplyOptions, MigrationRisk, SchemaStageRunner};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let prefix = gate_prefix("destructive_gate")?;
+    let v1 = format!("{prefix}_01");
+    let v2 = format!("{prefix}_02");
+    let stages = vec![
+        gate_stage(
+            &v1,
+            vec![
+                gate_table("gate_users", &[("name", false), ("legacy", true)]),
+                gate_table("gate_notes", &[("body", false)]),
+            ],
+        ),
+        // Drops both a table and a column that hold data.
+        gate_stage(&v2, vec![gate_table("gate_users", &[("name", false)])]),
+    ];
+
+    database.apply_schema_stages(&stages[..1]).await?;
+    sqlx::query("INSERT INTO gate_users (id, name, legacy) VALUES ('u1', 'ada', 'kept')")
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO gate_notes (id, body) VALUES ('n1', 'kept')")
+        .execute(&pool)
+        .await?;
+
+    let planned = database.plan_schema_stages(&stages).await?;
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0].highest_risk(), Some(MigrationRisk::Destructive));
+    assert!(
+        planned[0]
+            .steps()
+            .iter()
+            .filter(|step| step.risk == MigrationRisk::Destructive)
+            .count()
+            >= 2
+    );
+
+    assert_refused(
+        database.apply_schema_stages(&stages).await.unwrap_err(),
+        "destructive",
+        &v2,
+    );
+    assert_refused(
+        database
+            .apply_schema_stages_with_options(&stages, ApplyOptions::default())
+            .await
+            .unwrap_err(),
+        "destructive",
+        &v2,
+    );
+    assert_refused(
+        database
+            .apply_schema_stages_with_options(
+                &stages,
+                ApplyOptions {
+                    dry_run: true,
+                    ..ApplyOptions::default()
+                },
+            )
+            .await
+            .unwrap_err(),
+        "destructive",
+        &v2,
+    );
+    assert!(
+        gate_table_names(&pool)
+            .await?
+            .contains(&"gate_notes".to_string())
+    );
+    assert!(
+        gate_column_names(&pool, "gate_users")
+            .await?
+            .contains(&"legacy".to_string())
+    );
+    assert_eq!(gate_row_count(&pool, "gate_notes").await?, 1);
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 1);
+
+    let reports = database
+        .apply_schema_stages_with_options(
+            &stages,
+            ApplyOptions {
+                allow_destructive: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await?;
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].version, v2);
+    assert!(!reports[0].dry_run);
+    assert!(reports[0].statements_applied > 0);
+    assert!(
+        !gate_table_names(&pool)
+            .await?
+            .contains(&"gate_notes".to_string())
+    );
+    assert!(
+        !gate_column_names(&pool, "gate_users")
+            .await?
+            .contains(&"legacy".to_string())
+    );
+    assert_eq!(gate_row_count(&pool, "gate_users").await?, 1);
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 2);
+    assert!(database.plan_schema_stages(&stages).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn refused_later_stage_leaves_earlier_pending_stages_unapplied()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{ApplyOptions, SchemaAbi, SchemaStageRunner};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let prefix = gate_prefix("atomic_gate")?;
+    sqlx::query("CREATE TABLE gate_host (id TEXT PRIMARY KEY NOT NULL)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO gate_host (id) VALUES ('h1')")
+        .execute(&pool)
+        .await?;
+    let v1 = format!("{prefix}_01");
+    let v2 = format!("{prefix}_02");
+    let host = gate_table("gate_host", &[]);
+    let stages = vec![
+        // Additive on its own: keeps the host table and adds a new one.
+        gate_stage(
+            &v1,
+            vec![host.clone(), gate_table("gate_added", &[("body", true)])],
+        ),
+        // Destructive: drops the host table.
+        gate_stage(&v2, vec![gate_table("gate_added", &[("body", true)])]),
+    ];
+
+    assert_refused(
+        database.apply_schema_stages(&stages).await.unwrap_err(),
+        "destructive",
+        &v2,
+    );
+    assert!(
+        !gate_table_names(&pool)
+            .await?
+            .contains(&"gate_added".to_string())
+    );
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 0);
+
+    // The ABI upgrade path admits every stage before applying any as well.
+    let abi = SchemaAbi::new(stages)?;
+    assert_refused(
+        database
+            .schema()
+            .apply_upgrade(&abi, &v2, ApplyOptions::default())
+            .await
+            .unwrap_err(),
+        "destructive",
+        &v2,
+    );
+    assert!(
+        !gate_table_names(&pool)
+            .await?
+            .contains(&"gate_added".to_string())
+    );
+    assert_eq!(gate_row_count(&pool, "gate_host").await?, 1);
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn additive_only_refuses_non_additive_stage_steps() -> Result<(), Box<dyn std::error::Error>>
+{
+    use graphql_orm::graphql::orm::{ApplyOptions, SchemaStageRunner};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let prefix = gate_prefix("additive_gate")?;
+    let v1 = format!("{prefix}_01");
+    let v2 = format!("{prefix}_02");
+    let v3 = format!("{prefix}_03");
+    let additive_only = ApplyOptions {
+        additive_only: true,
+        ..ApplyOptions::default()
+    };
+    let stages = vec![
+        gate_stage(&v1, vec![gate_table("gate_items", &[("name", false)])]),
+        // Adds a nullable column: additive.
+        gate_stage(
+            &v2,
+            vec![gate_table("gate_items", &[("name", false), ("note", true)])],
+        ),
+        // Adds a required column without a default: risky, not destructive.
+        gate_stage(
+            &v3,
+            vec![gate_table(
+                "gate_items",
+                &[("name", false), ("note", true), ("code", false)],
+            )],
+        ),
+    ];
+
+    let reports = database
+        .apply_schema_stages_with_options(&stages[..2], additive_only.clone())
+        .await?;
+    assert_eq!(reports.len(), 2);
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 2);
+
+    let error = database
+        .apply_schema_stages_with_options(&stages, additive_only.clone())
+        .await
+        .unwrap_err();
+    assert_refused(error, "non-additive", &v3);
+    assert!(
+        !gate_column_names(&pool, "gate_items")
+            .await?
+            .contains(&"code".to_string())
+    );
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 2);
+
+    // additive_only also refuses destructive steps even with allow_destructive.
+    let drop = vec![
+        stages[0].clone(),
+        stages[1].clone(),
+        gate_stage(&v3, vec![gate_table("gate_items", &[("name", false)])]),
+    ];
+    let error = database
+        .apply_schema_stages_with_options(
+            &drop,
+            ApplyOptions {
+                allow_destructive: true,
+                ..additive_only
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_refused(error, "non-additive", &v3);
+    assert!(
+        gate_column_names(&pool, "gate_items")
+            .await?
+            .contains(&"note".to_string())
+    );
+
+    // The risky step is allowed by default options because it is not destructive.
+    database.apply_schema_stages(&stages).await?;
+    assert!(
+        gate_column_names(&pool, "gate_items")
+            .await?
+            .contains(&"code".to_string())
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn older_binary_stage_against_newer_database_is_refused()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::SchemaStageRunner;
+
+    let pool = setup_pool().await?;
+    let prefix = gate_prefix("rollback_gate")?;
+    let newer = vec![gate_stage(
+        &format!("{prefix}_app_2"),
+        vec![
+            gate_table("gate_accounts", &[("name", false), ("added_in_2", true)]),
+            gate_table("gate_invoices", &[("total", false)]),
+        ],
+    )];
+    let older = vec![gate_stage(
+        &format!("{prefix}_app_1"),
+        vec![gate_table("gate_accounts", &[("name", false)])],
+    )];
+
+    let newer_binary = graphql_orm::db::Database::new(pool.clone());
+    newer_binary.apply_schema_stages(&newer).await?;
+    sqlx::query("INSERT INTO gate_accounts (id, name, added_in_2) VALUES ('a1', 'acme', 'new')")
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO gate_invoices (id, total) VALUES ('i1', '10')")
+        .execute(&pool)
+        .await?;
+
+    // Rolling back to the older binary must not drop the newer schema.
+    let older_binary = graphql_orm::db::Database::new(pool.clone());
+    assert_refused(
+        older_binary.apply_schema_stages(&older).await.unwrap_err(),
+        "destructive",
+        &format!("{prefix}_app_1"),
+    );
+    assert_eq!(gate_row_count(&pool, "gate_invoices").await?, 1);
+    assert!(
+        gate_column_names(&pool, "gate_accounts")
+            .await?
+            .contains(&"added_in_2".to_string())
+    );
+    assert_eq!(
+        applied_stage_count(&pool, &format!("{prefix}_app_1")).await?,
+        0
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn stage_apply_options_dry_run_history_and_baseline() -> Result<(), Box<dyn std::error::Error>>
+{
+    use graphql_orm::graphql::orm::{ApplyOptions, SchemaStageRunner, introspect_schema};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let prefix = gate_prefix("options_gate")?;
+    let stages = vec![gate_stage(
+        &format!("{prefix}_01"),
+        vec![gate_table("gate_options", &[("name", false)])],
+    )];
+
+    let reports = database
+        .apply_schema_stages_with_options(
+            &stages,
+            ApplyOptions {
+                dry_run: true,
+                ..ApplyOptions::default()
+            },
+        )
+        .await?;
+    assert_eq!(reports.len(), 1);
+    assert!(reports[0].dry_run);
+    assert_eq!(reports[0].statements_applied, 0);
+    assert!(
+        !gate_table_names(&pool)
+            .await?
+            .contains(&"gate_options".to_string())
+    );
+
+    let error = database
+        .apply_schema_stages_with_options(
+            &stages,
+            ApplyOptions {
+                record_history: false,
+                ..ApplyOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, sqlx::Error::Protocol(message) if message.contains("record_history")),
+        "{error:?}"
+    );
+
+    let error = database
+        .apply_schema_stages_with_options(
+            &stages,
+            ApplyOptions {
+                expected_current_schema_hash: Some("not-the-live-hash".to_string()),
+                ..ApplyOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, sqlx::Error::Protocol(message) if message.contains("baseline hash mismatch")),
+        "{error:?}"
+    );
+    assert!(
+        !gate_table_names(&pool)
+            .await?
+            .contains(&"gate_options".to_string())
+    );
+
+    let live_hash = introspect_schema(&pool).await?.stable_hash();
+    database
+        .apply_schema_stages_with_options(
+            &stages,
+            ApplyOptions {
+                expected_current_schema_hash: Some(live_hash),
+                ..ApplyOptions::default()
+            },
+        )
+        .await?;
+    assert!(
+        gate_table_names(&pool)
+            .await?
+            .contains(&"gate_options".to_string())
+    );
+    Ok(())
+}

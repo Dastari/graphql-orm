@@ -503,6 +503,11 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             self.validate_current_baseline(abi).await?;
         }
         let planned = self.plan_upgrade(abi, target_version).await?;
+        // Admit every stage before applying any, so a refused later stage
+        // cannot leave earlier stages applied.
+        for plan in &planned.stages {
+            reject_disallowed_risks(B::DIALECT, plan, &options)?;
+        }
         let mut applied = Vec::new();
         for plan in &planned.stages {
             applied.push(self.apply_migration(plan, options.clone()).await?);
@@ -900,6 +905,13 @@ fn reject_disallowed_risks(
         options,
     )
 }
+/// The shared step-risk gate for every ORM-planned apply path: planned
+/// migrations, schema targets, ABI upgrades, schema stages, and owned runtime
+/// migrations.
+///
+/// `additive_only` refuses any step that is not additive; otherwise a
+/// destructive step is refused unless `allow_destructive` is set. Call it
+/// before any statement of the plan runs.
 pub(super) fn reject_migration_risks<'a>(
     version: &str,
     mut steps: impl Iterator<Item = (MigrationRisk, StepRef<'a>)> + Clone,

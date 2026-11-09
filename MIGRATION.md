@@ -10,6 +10,57 @@ supersedes: []
 
 # Migration Guide
 
+## 0.121.0: schema stages refuse destructive steps by default
+
+**Behaviour change: stage applies that used to drop tables or columns are now refused.**
+
+`SchemaStageRunner::apply_schema_stages` previously applied every planned step,
+including `DropTable` and `DropColumn` for anything live in the database but
+absent from a stage target. It now applies with `ApplyOptions::default()`, like
+`SchemaManager::apply_migration`. A pending stage with a destructive step fails
+with `Migration <stage version> contains destructive step ...; set
+allow_destructive to apply it` before any stage SQL runs, and earlier pending
+stages in the same call are not applied either. `apply_upgrade` now also admits
+every stage before applying any.
+
+If your stages intentionally remove tables or columns, review the plan and opt in:
+
+```rust
+use graphql_orm::graphql::orm::{ApplyOptions, SchemaStageRunner};
+
+let planned = database.plan_schema_stages(&stages).await?;
+for stage in &planned {
+    println!("{} {:?}", stage.version, stage.highest_risk());
+}
+database
+    .apply_schema_stages_with_options(
+        &stages,
+        ApplyOptions {
+            allow_destructive: true,
+            ..ApplyOptions::default()
+        },
+    )
+    .await?;
+```
+
+Startup paths that must only create missing structures can pass
+`additive_only: true`, which refuses any step that is not additive.
+`expected_current_schema_hash` compares against the live introspected schema;
+`record_history: false` is refused because stage progress is tracked in history;
+`require_clean_schema` applies to ABI upgrades only.
+
+If a refusal is unexpected, the database likely holds tables or columns that
+the stage target does not describe: a newer release's schema after a rollback,
+or unmanaged host tables. Do not opt in for those; add them to the stage target
+or keep them out of the staged database. Choosing which tables a destructive
+plan may drop is tracked separately in
+[#441](https://github.com/Dastari/graphql-orm/issues/441).
+
+Custom `SchemaStageRunner` implementations must add
+`apply_schema_stages_with_options`; `apply_schema_stages` now has a default body
+that calls it with `ApplyOptions::default()`. Upgrade runtime and macros
+together. No data conversion is required.
+
 ## 0.120.0: PostgreSQL RLS enforcement and ORM-managed table coverage
 
 Upgrade runtime and macros together. These changes fix GHSA-hr7v-hr83-2jj4 and

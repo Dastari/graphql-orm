@@ -16,6 +16,14 @@ for historical context.
 
 ## Unreleased
 
+## 0.121.0
+
+ORM runtime/macros **0.121.0**.
+
+- **Data safety/breaking:** schema stage application now runs the same step-risk gate as planned migrations. `apply_schema_stages` applies with `ApplyOptions::default()`, so a pending stage containing a destructive step, such as `DropTable` or `DropColumn` for a live table or column absent from the stage target, is refused before any stage SQL runs. The error names the stage version and the step. Previously these steps were applied without any opt-in, so starting an older binary against a newer database, or staging alongside unmanaged host tables, could drop tables, columns and rows. Fixes #442.
+- **API:** `SchemaStageRunner::apply_schema_stages_with_options(stages, ApplyOptions)` applies stages with `allow_destructive`, `additive_only`, `dry_run` and `expected_current_schema_hash`, returning one `AppliedMigrationReport` per pending stage. `record_history: false` is refused for stages. `PlannedSchemaStage::steps()` and `highest_risk()` expose the classified steps, and `MigrationRisk` now implements `Ord` from `Additive` to `Destructive`. Custom `SchemaStageRunner` implementations must add the new method.
+- **Fix:** `SchemaManager::apply_upgrade` and stage application admit every pending stage before applying any, so a refused later stage no longer leaves earlier stages applied.
+
 ## 0.120.0
 
 ORM runtime/macros **0.120.0**.
