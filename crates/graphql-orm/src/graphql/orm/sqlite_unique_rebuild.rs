@@ -357,7 +357,26 @@ fn column_names(sql: &str) -> Result<BTreeSet<String>, sqlx::Error> {
     }
     Ok(names)
 }
-fn rewrite_table(sql: &str, temporary: &str, old: &str, new: &str) -> Result<String, sqlx::Error> {
+fn primary_clauses(sql: &str) -> Result<BTreeSet<Vec<String>>, sqlx::Error> {
+    clauses(sql)?
+        .0
+        .iter()
+        .map(|part| signature(part))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|parts| {
+            parts
+                .into_iter()
+                .filter(|ts| ts.iter().any(|t| t == "primary"))
+                .collect()
+        })
+}
+fn rewrite_table(
+    sql: &str,
+    temporary: &str,
+    old: &str,
+    new: &str,
+    empty_primary_change: bool,
+) -> Result<String, sqlx::Error> {
     // First validate the live CREATE shape/tail using the established parser.
     rewrite(sql, temporary, &vec![], &vec![])?;
     let (mut live, tail) = clauses(sql)?;
@@ -380,10 +399,9 @@ fn rewrite_table(sql: &str, temporary: &str, old: &str, new: &str) -> Result<Str
     let mut replaced = BTreeSet::new();
     for removed in old.iter().filter(|s| !new_signatures.contains(s)) {
         // Changing primary keys could change SQLite's rowid alias contract.
-        if primary_members.contains(&removed[0])
-            || removed
-                .iter()
-                .any(|s| s == "primary" || s == "autoincrement")
+        if (!empty_primary_change
+            && (primary_members.contains(&removed[0]) || removed.iter().any(|s| s == "primary")))
+            || removed.iter().any(|s| s == "autoincrement")
         {
             return Err(unsupported());
         }
@@ -419,7 +437,9 @@ fn rewrite_table(sql: &str, temporary: &str, old: &str, new: &str) -> Result<Str
     }
     for (i, (part, sig)) in new.iter().zip(&new_signatures).enumerate() {
         if !old.contains(sig) && !replaced.contains(&i) {
-            if sig.iter().any(|s| s == "primary" || s == "autoincrement") {
+            if (!empty_primary_change && sig.iter().any(|s| s == "primary"))
+                || sig.iter().any(|s| s == "autoincrement")
+            {
                 return Err(unsupported());
             }
             let column =
@@ -570,7 +590,25 @@ pub(crate) async fn prepare(
     let create = if let Some((old, new)) = &ddl {
         before = physical_keys(conn, &table).await?.into_iter().collect();
         after = before.clone();
-        rewrite_table(&sql, &temporary, old, new)?
+        let primary_change = primary_clauses(old)? != primary_clauses(new)?;
+        if primary_change {
+            // Empty is evidence about live data, never an inference from the
+            // model or a reserved name. Recheck inside the apply transaction.
+            let populated: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS(SELECT 1 FROM main.{})",
+                DatabaseBackend::Sqlite.quote_identifier(&table)
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            let incoming: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM main.sqlite_master m JOIN pragma_foreign_key_list(m.name, 'main') f WHERE m.type='table' AND f."table"=? COLLATE NOCASE"#).bind(&table).fetch_one(&mut *conn).await?;
+            if populated
+                || incoming != 0
+                || tokens(&sql)?.iter().any(|t| t.keyword("autoincrement"))
+            {
+                return Err(unsupported());
+            }
+        }
+        rewrite_table(&sql, &temporary, old, new, primary_change)?
     } else {
         rewrite(&sql, &temporary, &before, &after)?
     };
@@ -803,7 +841,8 @@ mod recovery_tests {
                 "CREATE TABLE probe(id INTEGER, PRIMARY KEY(id))",
                 "temporary",
                 "CREATE TABLE probe(id INTEGER, PRIMARY KEY(id))",
-                "CREATE TABLE probe(id TEXT, PRIMARY KEY(id))"
+                "CREATE TABLE probe(id TEXT, PRIMARY KEY(id))",
+                false
             )
             .is_err()
         );

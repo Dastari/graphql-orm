@@ -473,3 +473,209 @@ async fn storage_class_changes_abort_without_replacing_the_original() -> graphql
     }
     Ok(())
 }
+
+#[derive(
+    GraphQLEntity, GraphQLOperations, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+)]
+#[graphql_entity(
+    table = "graphql_orm_ai_provider_webhook_receipts",
+    plural = "LegacyGraphqlOrmAiProviderWebhookReceipts",
+    default_sort = "received_at DESC"
+)]
+struct LegacyWebhookReceiptRecord {
+    #[primary_key]
+    #[filterable(type = "uuid")]
+    id: graphql_orm::uuid::Uuid,
+    #[filterable(type = "string")]
+    provider_kind: String,
+    #[filterable(type = "string")]
+    provider_event_id: String,
+    provider_response_id: Option<String>,
+    run_id: Option<graphql_orm::uuid::Uuid>,
+    attempt_id: Option<graphql_orm::uuid::Uuid>,
+    signature_verified: bool,
+    state: String,
+    safe_error_code: Option<String>,
+    #[sortable]
+    received_at: i64,
+    processed_at: Option<i64>,
+    #[graphql_orm(version, default = "0")]
+    row_version: i64,
+}
+
+#[tokio::test]
+async fn legacy_webhook_primary_key_upgrade_requires_live_empty_evidence() -> graphql_orm::Result<()>
+{
+    for populated in [false, true] {
+        let db = setup(&[]).await?;
+        let legacy = SchemaModel::from_entities(&[LegacyWebhookReceiptRecord::metadata()]);
+        let create = build_migration_plan(
+            DatabaseBackend::Sqlite,
+            &SchemaModel {
+                extensions: vec![],
+                tables: vec![],
+            },
+            &legacy,
+        );
+        for sql in create.statements {
+            sqlx::query(&sql).execute(db.pool()).await?;
+        }
+        let ddl: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE name='graphql_orm_ai_provider_webhook_receipts'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert!(ddl.contains("id TEXT NOT NULL PRIMARY KEY"), "{ddl}");
+        if populated {
+            sqlx::query("INSERT INTO graphql_orm_ai_provider_webhook_receipts(rowid,id,provider_kind,provider_event_id,signature_verified,state,received_at) VALUES (99,'one','openai','event',1,'received',0)").execute(db.pool()).await?;
+        }
+        let current = introspect_sqlite_schema(db.pool()).await?;
+        let mut target = current.clone();
+        let table = &mut target.tables[0];
+        table.primary_keys = vec!["id".into(), "provider_kind".into()];
+        table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "provider_kind")
+            .unwrap()
+            .is_primary_key = true;
+        for (name, template) in [
+            ("receipt_key", "provider_event_id"),
+            ("provider_profile_id", "provider_event_id"),
+            ("provider_event_kind", "provider_event_id"),
+            ("provider_created_at", "received_at"),
+        ] {
+            let mut column = table
+                .columns
+                .iter()
+                .find(|c| c.name == template)
+                .unwrap()
+                .clone();
+            column.name = name.into();
+            table.columns.push(column);
+        }
+        table.indexes.push(IndexDef {
+            name: "receipt_lookup",
+            columns: &[
+                "provider_kind",
+                "provider_profile_id",
+                "provider_response_id",
+                "state",
+            ],
+            column_directions: &[],
+            is_unique: false,
+            method: IndexMethod::Default,
+            is_spatial: false,
+            predicate: None,
+        });
+        let plan = db.schema().plan_migration(
+            "upgrade-placeholder",
+            "composite receipt identity",
+            &current,
+            &target,
+        )?;
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(db.pool())
+        .await?;
+        let result = db
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await;
+        if populated {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("UnsupportedCapability"));
+            let after: Vec<(String, String)> = sqlx::query_as(
+                "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+            )
+            .fetch_all(db.pool())
+            .await?;
+            assert_eq!(before, after);
+            let row: (i64, String) =
+                sqlx::query_as("SELECT rowid,id FROM graphql_orm_ai_provider_webhook_receipts")
+                    .fetch_one(db.pool())
+                    .await?;
+            assert_eq!(row, (99, "one".into()));
+            clean(&db, &current).await?;
+        } else {
+            result?;
+            clean(&db, &target).await?;
+            for (rowid, kind) in [(99, "openai"), (101, "other")] {
+                sqlx::query("INSERT INTO graphql_orm_ai_provider_webhook_receipts(rowid,id,provider_kind,provider_event_id,signature_verified,state,received_at,receipt_key,provider_profile_id,provider_event_kind,provider_created_at) VALUES (?,'one',?,'event',1,'received',0,'receipt','profile','completed',0)").bind(rowid).bind(kind).execute(db.pool()).await?;
+            }
+            assert!(sqlx::query("UPDATE graphql_orm_ai_provider_webhook_receipts SET provider_kind='openai' WHERE rowid=101").execute(db.pool()).await.is_err());
+            clean(&db, &target).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_primary_changes_still_refuse_incoming_fks_and_sequence_history()
+-> graphql_orm::Result<()> {
+    for ddl in [
+        "CREATE TABLE probe(id TEXT NOT NULL PRIMARY KEY,a TEXT NOT NULL)",
+        "CREATE TABLE probe(id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,a TEXT NOT NULL)",
+        "CREATE TABLE probe(id TEXT COLLATE NOCASE NOT NULL PRIMARY KEY,a TEXT NOT NULL)",
+    ] {
+        let db = setup(&[ddl]).await?;
+        if ddl.contains("AUTOINCREMENT") {
+            sqlx::query("INSERT INTO probe VALUES (999,'kept')")
+                .execute(db.pool())
+                .await?;
+            sqlx::query("DELETE FROM probe").execute(db.pool()).await?;
+        } else if !ddl.contains("COLLATE") {
+            sqlx::query("CREATE TABLE child(p TEXT REFERENCES probe(id))")
+                .execute(db.pool())
+                .await?;
+        }
+        let current = introspect_sqlite_schema(db.pool()).await?;
+        let mut target = current.clone();
+        let table = target
+            .tables
+            .iter_mut()
+            .find(|t| t.table_name == "probe")
+            .unwrap();
+        table.primary_keys = vec!["id".into(), "a".into()];
+        table
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "a")
+            .unwrap()
+            .is_primary_key = true;
+        let plan = db.schema().plan_migration(
+            "refuse-primary",
+            "keep physical contract",
+            &current,
+            &target,
+        )?;
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(db.pool())
+        .await?;
+        assert!(
+            db.schema()
+                .apply_migration(&plan, ApplyOptions::default())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("UnsupportedCapability")
+        );
+        let after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(db.pool())
+        .await?;
+        assert_eq!(before, after);
+        if ddl.contains("AUTOINCREMENT") {
+            let seq: i64 = sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='probe'")
+                .fetch_one(db.pool())
+                .await?;
+            assert_eq!(seq, 999);
+        }
+        clean(&db, &current).await?;
+    }
+    Ok(())
+}
