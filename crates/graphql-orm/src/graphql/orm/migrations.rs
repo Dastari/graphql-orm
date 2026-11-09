@@ -1485,7 +1485,13 @@ pub(super) fn diff_schema_views_with(
                 .composite_unique_indexes
                 .iter()
                 .map(|key| canonical_unique_key(backend, key, table.columns))
-                .filter(|key| backend != DatabaseBackend::Sqlite || *key != primary)
+                // SQLite and PostgreSQL coalesce a CREATE TABLE UNIQUE
+                // identical to its ordered PRIMARY KEY into the PK index.
+                // SQL Server retains a distinct UNIQUE constraint.
+                .filter(|key| {
+                    !matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Postgres)
+                        || *key != primary
+                })
                 .collect::<std::collections::BTreeSet<_>>()
         };
         let before = unique_set(table);
@@ -3668,7 +3674,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
               AND tc.table_schema = kcu.table_schema
              WHERE tc.table_schema = $2
                AND tc.table_name = $1
-               AND tc.constraint_type = 'PRIMARY KEY'",
+               AND tc.constraint_type = 'PRIMARY KEY'
+             ORDER BY kcu.ordinal_position",
         )
         .bind(&table_name)
         .bind(&schema_name)

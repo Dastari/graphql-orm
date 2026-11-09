@@ -69,6 +69,44 @@ fn every_backend_renders_composite_unique_deltas() {
     }
 }
 
+#[test]
+fn primary_key_unique_normalization_is_backend_specific_and_ordered() {
+    let mut target = SchemaModel::from_entities(&[Record::metadata()]);
+    target.tables[0].primary_keys = vec!["owner_id".into(), "name".into()];
+    target.tables[0].primary_key = "owner_id".into();
+    for column in &mut target.tables[0].columns {
+        column.is_primary_key = column.name != "id";
+    }
+    let mut physical = target.clone();
+    physical.tables[0].composite_unique_indexes.clear();
+    for backend in [DatabaseBackend::Sqlite, DatabaseBackend::Postgres] {
+        assert!(
+            diff_schema_models_for_backend(backend, &physical, &target)
+                .steps
+                .is_empty()
+        );
+        assert!(
+            diff_schema_models_for_backend(backend, &target, &physical)
+                .steps
+                .is_empty()
+        );
+        let mut reversed = target.clone();
+        reversed.tables[0].composite_unique_indexes[0].reverse();
+        assert!(matches!(
+            diff_schema_models_for_backend(backend, &physical, &reversed)
+                .steps
+                .as_slice(),
+            [MigrationStep::SetCompositeUniques { .. }]
+        ));
+    }
+    assert!(matches!(
+        diff_schema_models_for_backend(DatabaseBackend::Mssql, &physical, &target)
+            .steps
+            .as_slice(),
+        [MigrationStep::SetCompositeUniques { .. }]
+    ));
+}
+
 #[cfg(feature = "postgres")]
 #[path = "support/owned_postgres.rs"]
 mod owned_postgres;
@@ -276,6 +314,41 @@ async fn mssql_composite_constraint_ddl_and_introspection() -> Result<(), Box<dy
     owned_mssql::execute_batch(&server.connection_string,
         "CREATE TABLE dbo.unique_delta (id nvarchar(100) NOT NULL PRIMARY KEY, owner_id nvarchar(100) NOT NULL, name nvarchar(100) NOT NULL, UNIQUE(owner_id,name)); INSERT INTO dbo.unique_delta VALUES ('one','o','n'),('two','other','n');"
     ).await?;
+    // Unlike PostgreSQL/SQLite, SQL Server keeps a redundant UNIQUE over
+    // the PK. Its introspection must round-trip and removal must stay visible.
+    owned_mssql::execute_batch(&server.connection_string,
+        "CREATE TABLE dbo.primary_unique (partition nvarchar(100) NOT NULL, name nvarchar(100) NOT NULL, created_at bigint, PRIMARY KEY(partition,name), UNIQUE(partition,name));"
+    ).await?;
+    let physical = introspect_mssql_schema(db.pool()).await?;
+    let mut target = physical.clone();
+    let table = target
+        .tables
+        .iter_mut()
+        .find(|t| t.table_name.contains("primary_unique"))
+        .unwrap();
+    assert_eq!(
+        table.composite_unique_indexes,
+        vec![vec!["[partition]", "[name]"]]
+    );
+    table.composite_unique_indexes = vec![vec!["partition".into(), "name".into()]];
+    assert!(
+        diff_schema_models_for_backend(DatabaseBackend::Mssql, &physical, &target)
+            .steps
+            .is_empty()
+    );
+    target
+        .tables
+        .iter_mut()
+        .find(|t| t.table_name.contains("primary_unique"))
+        .unwrap()
+        .composite_unique_indexes
+        .clear();
+    assert!(matches!(
+        diff_schema_models_for_backend(DatabaseBackend::Mssql, &physical, &target)
+            .steps
+            .as_slice(),
+        [MigrationStep::SetCompositeUniques { .. }]
+    ));
     let mut current = introspect_mssql_schema(db.pool()).await?;
     let index = current
         .tables

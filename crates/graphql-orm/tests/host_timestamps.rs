@@ -645,19 +645,7 @@ async fn mixed_legacy_timestamps_and_annotation_only_migration_noop()
         let differences = plan
             .steps
             .iter()
-            .map(|step| match &step.step {
-                MigrationStep::AlterColumn {
-                    table_name, after, ..
-                } => ("alter_column", table_name.as_str(), after.name.as_str()),
-                MigrationStep::CreateIndex { table_name, index } => {
-                    ("create_index", table_name.as_str(), index.name)
-                }
-                MigrationStep::DropIndex {
-                    table_name,
-                    index_name,
-                } => ("drop_index", table_name.as_str(), index_name.as_str()),
-                _ => ("other", "", ""),
-            })
+            .map(|step| format!("{:?}", step.step))
             .collect::<Vec<_>>();
         assert!(
             differences.is_empty(),
@@ -673,19 +661,7 @@ async fn mixed_legacy_timestamps_and_annotation_only_migration_noop()
         let differences = plan
             .steps
             .iter()
-            .map(|step| match &step.step {
-                MigrationStep::AlterColumn {
-                    table_name, after, ..
-                } => ("alter_column", table_name.as_str(), after.name.as_str()),
-                MigrationStep::CreateIndex { table_name, index } => {
-                    ("create_index", table_name.as_str(), index.name)
-                }
-                MigrationStep::DropIndex {
-                    table_name,
-                    index_name,
-                } => ("drop_index", table_name.as_str(), index_name.as_str()),
-                _ => ("other", "", ""),
-            })
+            .map(|step| format!("{:?}", step.step))
             .collect::<Vec<_>>();
         assert!(
             differences.is_empty(),
