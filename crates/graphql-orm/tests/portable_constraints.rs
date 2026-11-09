@@ -124,7 +124,7 @@ async fn portable_constraints_render_enforce_hash_and_reopen_without_drift()
         weakening
             .statements
             .iter()
-            .any(|sql| sql.contains("__graphql_orm_constrained_records_new"))
+            .any(|sql| sql.starts_with("SELECT graphql_orm_rebuild_table('"))
     );
     let restart = reopened
         .schema()

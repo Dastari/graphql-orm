@@ -1054,7 +1054,7 @@ impl OwnedPlannedMigration {
             self.statements.iter().any(|sql| {
                 sql.starts_with(&format!("CREATE TABLE {temporary} "))
                     || super::migrations::sqlite_unique_rebuild::directive(sql)
-                        .is_some_and(|input| input.is_ok_and(|input| input.0 == *table))
+                        .is_some_and(|input| input.is_ok_and(|input| input.table == *table))
             })
         })
     }

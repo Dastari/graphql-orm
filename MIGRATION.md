@@ -10,6 +10,35 @@ supersedes: []
 
 # Migration Guide
 
+## 0.111.0: SQLite column/check/FK rebuild preservation
+
+Upgrade runtime and macros together. These rebuilds now emit an executor-only
+`graphql_orm_rebuild_table` directive. Execute plans through the ORM, rather than
+passing the directive to an external SQLite client. The executor patches changed
+clauses in the original main-schema CREATE TABLE, preserving unrelated live DDL,
+explicit rowids, sequence history and original indexes/triggers. It verifies
+retained values and storage classes before replacing the original table.
+
+This deliberately changes previously successful lossy migrations into refusals.
+The #410 physical-schema restrictions also apply here: WITHOUT ROWID,
+virtual/shadow tables, views/TEMP triggers, fully shadowed rowid aliases,
+ambiguous catalog identifiers and main/TEMP reserved-name collisions refuse.
+Names never prove ownership and no colliding objects are deleted. Foreign-key
+pragma state is restored on success/failure; cancelled transactions roll back.
+
+Changed clauses must match the modeled original exactly after token normalization;
+for example changing a column that also has an unmodeled COLLATE or inline FK,
+or replacing an FK with unmodeled ON UPDATE/deferrability, refuses rather than
+silently losing those properties. Primary-key changes refuse unless the live table is transactionally proven empty,
+has no incoming foreign keys and has no AUTOINCREMENT declaration. This permits
+empty legacy placeholders to adopt a composite key without rewriting existing
+identities; targeted live clauses must still match exactly. Column removals
+with indexes/triggers, incoming FKs or references in retained clauses refuse.
+Separate search-index/append-only changes from rebuilds. For refused
+shapes, use an explicitly reviewed custom migration preserving their full DDL.
+After applying, introspect and replan against the target; no further work should
+remain. Earlier release notes describe the contracts at those releases.
+
 ## 0.109.0 to 0.110.0: MSSQL composite-key regression coverage
 
 Upgrade ORM/macros together. This release corrects a formatting-sensitive test

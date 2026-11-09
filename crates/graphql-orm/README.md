@@ -10,7 +10,9 @@ supersedes: []
 
 # `graphql-orm`
 
-Version 0.110.0 corrects the MSSQL composite-key SDL regression assertion and adds CI execution coverage. Generated code and runtime behavior are unchanged; upgrade ORM/macros together. No data migration is needed.
+SQLite column/check/FK rebuilds preserve live DDL and row identity or refuse safely.
+
+Version 0.111.0 corrects the MSSQL composite-key SDL regression assertion and adds CI execution coverage. Generated code and runtime behavior are unchanged; upgrade ORM/macros together. No data migration is needed.
 
 Version 0.109.0 refreshes standalone fixture lockfiles for router 0.8.3.
 Runtime and macro behavior are unchanged; no data migration is needed.

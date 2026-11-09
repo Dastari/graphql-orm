@@ -644,8 +644,8 @@ async fn compound_fk_rebuild_failure_rolls_back_schema_data_and_history() -> gra
         .schema()
         .apply_migration(&plan, ApplyOptions::default())
         .await
-        .expect_err("foreign_key_check must reject the orphaned rebuild");
-    assert!(error.to_string().contains("foreign_key_check failed"));
+        .expect_err("unsafe legacy rebuild must refuse");
+    assert!(error.to_string().contains("UnsupportedCapability"));
 
     let orphan_count: i64 = graphql_orm::sqlx::query_scalar(
         "SELECT COUNT(*) FROM decommish_snapshot_outbox WHERE provider = 'orphan'",
@@ -660,12 +660,22 @@ async fn compound_fk_rebuild_failure_rolls_back_schema_data_and_history() -> gra
         .find(|table| table.table_name == "decommish_snapshot_outbox")
         .expect("original outbox table remains");
     assert!(outbox.foreign_keys.is_empty());
-    let history_count: i64 = graphql_orm::sqlx::query_scalar(
-        "SELECT COUNT(*) FROM __graphql_orm_migrations WHERE version = ?",
+    // A preflight refusal may precede creation of migration history itself.
+    let history_exists: bool = graphql_orm::sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='__graphql_orm_migrations')",
     )
-    .bind("snapshot-failing-rebuild")
     .fetch_one(database.pool())
     .await?;
+    let history_count: i64 = if history_exists {
+        graphql_orm::sqlx::query_scalar(
+            "SELECT COUNT(*) FROM __graphql_orm_migrations WHERE version = ?",
+        )
+        .bind("snapshot-failing-rebuild")
+        .fetch_one(database.pool())
+        .await?
+    } else {
+        0
+    };
     assert_eq!(history_count, 0);
     Ok(())
 }
