@@ -1,9 +1,3 @@
-error: GraphQLEntity `UpsertNonUniqueExample` has no orderable fields, but generated query and relation APIs require `UpsertNonUniqueExampleOrderByInput`; add #[sortable] to a persisted field (for example the primary key)
- --> tests/ui/upsert_non_unique_target.rs:9:8
-  |
-9 | struct UpsertNonUniqueExample {
-  |        ^^^^^^^^^^^^^^^^^^^^^^
-
 error: graphql_entity upsert target 'slug' must match a unique field, primary key, unique_index, or unique_composite declaration
  --> tests/ui/upsert_non_unique_target.rs:9:8
   |
