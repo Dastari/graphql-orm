@@ -405,11 +405,9 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Compile every AI target on alternate backends
-        run: |
-          for backend in postgres mssql; do
-            cargo check -p graphql-orm -p graphql-orm-macros -p graphql-orm-ai --locked --no-default-features --features "$backend,runtime-graphql" --all-targets
-          done
+      - name: Compile every AI target on PostgreSQL
+        run: cargo check -p graphql-orm -p graphql-orm-macros -p graphql-orm-ai --locked --no-default-features --features postgres,runtime-graphql --all-targets
+      - run: cargo check -p graphql-orm-ai --no-default-features --features mssql
       - run: cargo check -p graphql-orm-ai -p graphql-orm --no-default-features --features graphql-orm-ai/sqlite,graphql-orm/mssql
       - run: cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres
       - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure

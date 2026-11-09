@@ -12,7 +12,7 @@ supersedes: []
 
 ## Unreleased - 0.126.0
 
-- **Tests:** gate SQLite-only unit fixtures on `sqlite` and compile all AI targets in the PostgreSQL and MSSQL CI lanes. Default SQLite coverage is unchanged. Fixes #413. No runtime, schema, or data migration change.
+- **Tests:** gate SQLite-only unit fixtures on `sqlite` and compile all AI targets in the PostgreSQL CI lane. Default SQLite coverage is unchanged. Fixes #413. No runtime, schema, or data migration change.
 
 ## Unreleased - 0.125.0
 
