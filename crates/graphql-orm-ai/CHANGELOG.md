@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.127.0
+
+- **Tests:** align private helper and test feature gates with their backend/provider consumers; compile and lint every AI target on PostgreSQL and MSSQL in CI. Default SQLite coverage is unchanged. Fixes #420 and #421. No public API, runtime, schema, or data migration change.
+
 ## Unreleased - 0.126.0
 
 - **Tests:** gate SQLite-only unit fixtures on `sqlite` and compile all AI targets in the PostgreSQL CI lane. Default SQLite coverage is unchanged. Fixes #413. No runtime, schema, or data migration change.

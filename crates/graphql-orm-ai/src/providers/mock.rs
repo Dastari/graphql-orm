@@ -122,7 +122,7 @@ impl MockProvider {
         self.request_count.load(Ordering::Acquire)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_event_batches(
         mut self,
         batches: impl IntoIterator<Item = Vec<ProviderEvent>>,
@@ -136,7 +136,7 @@ impl MockProvider {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_stream_failure(
         mut self,
         category: crate::AiProviderFailureCategory,
@@ -145,13 +145,13 @@ impl MockProvider {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_stateless_native_item_rejection(mut self) -> Self {
         self.stateless_native_item_rejected = true;
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_prepare_failure(
         mut self,
         category: crate::AiProviderFailureCategory,
@@ -160,7 +160,7 @@ impl MockProvider {
         self
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_provider_session_cursor(
         mut self,
         cursor: crate::AiProviderSessionCursor,
@@ -169,7 +169,7 @@ impl MockProvider {
         self
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn provider_session_activations(&self) -> Vec<crate::AiProviderSessionActivation> {
         self.provider_session_activations
             .lock()
@@ -177,7 +177,7 @@ impl MockProvider {
             .clone()
     }
 
-    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn discarded_provider_session_count(&self) -> u64 {
         self.discarded_provider_sessions.load(Ordering::Acquire)
     }

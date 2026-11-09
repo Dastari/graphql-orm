@@ -10,7 +10,7 @@ supersedes: []
 
 # graphql-orm-ai
 
-Version `0.126.0` gates SQLite-only unit fixtures and adds alternate-backend all-target CI checks. Default SQLite test coverage and runtime behavior are unchanged; no data migration is needed.
+Version `0.127.0` aligns private helper and test feature gates and adds PostgreSQL/MSSQL all-target compile and warnings-denied Clippy CI checks. Default SQLite test coverage and runtime behavior are unchanged; no data migration is needed.
 
 Version `0.125.0` restores bounded session activity with private keys using ORM 0.103.0 repository-only schemas, which cannot be served as runtime GraphQL. No data migration or consumer action is needed.
 

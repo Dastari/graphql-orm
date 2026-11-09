@@ -290,6 +290,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn exact_binding_rejects_nil_or_nonpositive_fence_members() {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();
@@ -310,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn attempt_and_generation_participate_in_identity() {
         let session_id = AiSessionId::new();
         let run_id = AiRunId::new();

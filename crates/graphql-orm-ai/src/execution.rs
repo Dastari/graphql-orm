@@ -1,5 +1,7 @@
 //! Authenticated application GraphQL execution contracts.
 
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+use crate::AiError;
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -9,9 +11,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AiApprovalRule, AiError, AiRunId, AiScope, AiToolAuthorizationDecision,
-    AiToolAuthorizationPolicy, AiToolCallId, AiToolDescriptor, AiToolId, AiToolOperationKind,
-    GraphqlExecutionTargetId, GraphqlOperationContract, ToolExecutionError,
+    AiApprovalRule, AiRunId, AiScope, AiToolAuthorizationDecision, AiToolAuthorizationPolicy,
+    AiToolCallId, AiToolDescriptor, AiToolId, AiToolOperationKind, GraphqlExecutionTargetId,
+    GraphqlOperationContract, ToolExecutionError,
 };
 
 /// Deployment trust/routing class for authenticated GraphQL execution.
@@ -293,6 +295,7 @@ impl AiToolExecutionProvenance {
         self.provider_cursor_fingerprint.as_deref()
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn with_provider_cursor_fingerprint(
         mut self,
         fingerprint: String,
@@ -441,6 +444,7 @@ impl AiToolExecutionProvenance {
         self
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn original_invocation(&self) -> Self {
         let mut original = self.clone();
         original.approval_id = None;

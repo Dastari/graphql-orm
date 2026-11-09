@@ -355,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn default_admission_is_the_unprojected_reference() {
         let principal = user("tenant");
         assert_eq!(

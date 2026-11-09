@@ -1598,15 +1598,19 @@ fn is_supervised_one_shot_mutation(descriptor: &AiToolDescriptor) -> bool {
 #[cfg(test)]
 mod mutation_binding_tests {
     use serde_json::json;
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     use time::{Duration, OffsetDateTime};
     use uuid::Uuid;
 
     use super::*;
     use crate::{
-        AiApprovalGrant, AiApprovalId, AiApprovalState, AiDisclosureRule, AiDisclosureSchema,
-        AiDisclosureShape, AiRunId, AiScope, AiSessionId, AiToolCallId, AiToolRisk,
-        DataClassification, GraphqlExecutionTargetId, GraphqlOperationContract,
+        AiDisclosureRule, AiDisclosureSchema, AiDisclosureShape, AiRunId, AiScope, AiSessionId,
+        AiToolCallId, AiToolRisk, DataClassification, GraphqlExecutionTargetId,
+        GraphqlOperationContract,
     };
+
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
+    use crate::{AiApprovalGrant, AiApprovalId, AiApprovalState};
 
     const CAPABILITY_FINGERPRINT: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
@@ -1693,6 +1697,7 @@ mod mutation_binding_tests {
         }
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn consumed(binding: &AiApprovalBinding) -> ConsumedAiApproval {
         let now = OffsetDateTime::now_utc();
         let grant = AiApprovalGrant {
@@ -1748,6 +1753,7 @@ mod mutation_binding_tests {
     }
 
     #[test]
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     fn dynamic_approval_binds_capability_and_compiled_operation_independently() {
         let compiled_operation = operation("UpdateInventory");
         let prepared = prepared(compiled_operation.clone());
