@@ -2851,7 +2851,7 @@ impl RuntimeSchema {
     /// [`ValidatedRuntimeSchema::structural_fingerprint`].
     ///
     /// Static declarations using capabilities the IR does not represent yet (spatial, search,
-    /// partial/GiST indexes, check constraints, statically unreadable fields) are reported as diagnostics rather than dropped.
+    /// partial/GiST indexes, check constraints, conditional relations, statically unreadable fields) are reported as diagnostics rather than dropped.
     /// Legacy epoch-second defaults on DateTime fields are rejected with `UnsupportedDefault`;
     /// integer epoch-second defaults remain supported. Static declarations/storage are unchanged.
     pub fn from_static_entities(
@@ -2871,7 +2871,8 @@ impl RuntimeSchema {
     /// # Errors
     ///
     /// Returns the same unsupported-capability and conversion diagnostics as
-    /// [`Self::from_static_entities`], except static column unreadability is allowed.
+    /// [`Self::from_static_entities`], except static column and relation unreadability is allowed.
+    /// Conditional relations are refused here too: repository queries must retain their semantics.
     pub fn from_static_entities_for_repository(
         entities: &[&EntityMetadata],
     ) -> Result<Self, RuntimeSchemaDiagnostics> {
@@ -3058,6 +3059,20 @@ impl RuntimeSchema {
 
             let mut relations = Vec::new();
             for relation in entity.relations.iter() {
+                // This check also applies to trusted repository conversion: a repository-only
+                // marker prevents GraphQL disclosure, but cannot restore lost query semantics.
+                if relation.has_source_condition || relation.has_target_condition {
+                    diagnostics.push(RuntimeSchemaDiagnostic::scoped(
+                        RuntimeSchemaDiagnosticCode::UnsupportedCapability,
+                        format!(
+                            "relation `{}` has source_condition or target_condition predicates not represented in the runtime IR",
+                            relation.field_name
+                        ),
+                        &cid,
+                        Some(relation.field_name),
+                    ));
+                    continue;
+                }
                 if !repository_only && !relation.is_readable {
                     diagnostics.push(RuntimeSchemaDiagnostic::scoped(
                         RuntimeSchemaDiagnosticCode::UnsupportedCapability,

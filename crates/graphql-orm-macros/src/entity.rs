@@ -4095,8 +4095,12 @@ fn generate_entity_impl(
                         && (schema_only || legacy_graphql_complex);
                 let generated_readable =
                     scalar_output_is_readable(field, &field_meta, true, &input.attrs);
+                let has_source_condition = field_meta.relation_source_condition.is_some();
+                let has_target_condition = field_meta.relation_target_condition.is_some();
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
+                        has_source_condition: #has_source_condition,
+                        has_target_condition: #has_target_condition,
                         is_readable: #delegated_readable || (#generated_readable && _generated_output.contains(&#graphql_name)),
                         field_name: #graphql_name,
                         target_type: #target_type,

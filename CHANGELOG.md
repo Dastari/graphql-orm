@@ -16,6 +16,10 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.107.0**.
+
+- **Breaking/security:** add required `has_source_condition` and `has_target_condition` flags to `RelationMetadata`. Both static-to-runtime conversion entry points refuse conditional relations with field-scoped `UnsupportedCapability` diagnostics: the runtime relation IR cannot represent their guards/filters exactly. Ordinary unconditional relations retain their behavior. Fixes #427.
+
 ORM runtime/macros **0.106.0**.
 
 - **Data safety:** SQLite migration preparation no longer drops tables based on a wildcard name guess. Literal reserved-name candidates without ownership evidence are preserved with a diagnostic; unrelated migrations continue, while a conflicting rebuild refuses. Interrupted transactional rebuilds still roll back atomically. Fixes #414.

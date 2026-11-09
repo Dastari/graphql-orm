@@ -449,3 +449,68 @@ fn delegated_complex_scalars_already_honor_output_skips_without_relation_derive(
     );
     assert_refused(ComplexSecret::metadata(), &["password"]);
 }
+
+#[derive(
+    GraphQLEntity,
+    graphql_orm_macros::GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "conditional_relations",
+    plural = "ConditionalRelations"
+)]
+struct ConditionalRelation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    scalar_id: i64,
+    kind: i64,
+    #[graphql(skip)]
+    #[relation(
+        target = "OwnedScalar",
+        from = "scalar_id",
+        to = "id",
+        source_condition(field = "kind", equals = 0),
+        target_condition(column = "public_value", equals = "allowed"),
+        emit_fk = false
+    )]
+    scalar: Option<OwnedScalar>,
+}
+
+#[test]
+fn generated_conditional_getter_skip_does_not_hide_predicate_metadata() {
+    for relations in [
+        ConditionalRelation::metadata().relations.as_ref(),
+        ConditionalRelation::relation_metadata(),
+    ] {
+        let relation = &relations[0];
+        assert!(relation.is_readable);
+        assert!(relation.has_source_condition);
+        assert!(relation.has_target_condition);
+    }
+    for convert in [
+        RuntimeSchema::from_static_entities,
+        RuntimeSchema::from_static_entities_for_repository,
+    ] {
+        let diagnostics =
+            convert(&[ConditionalRelation::metadata(), OwnedScalar::metadata()]).unwrap_err();
+        assert_eq!(diagnostics.diagnostics().len(), 1);
+        let diagnostic = &diagnostics.diagnostics()[0];
+        assert_eq!(
+            diagnostic.code,
+            RuntimeSchemaDiagnosticCode::UnsupportedCapability
+        );
+        assert_eq!(diagnostic.subject.as_deref(), Some("scalar"));
+        assert_eq!(
+            diagnostic.collection.as_ref().unwrap().as_str(),
+            "conditional_relations"
+        );
+    }
+}
