@@ -2,12 +2,23 @@
 
 Only generated resolution/provenance files are omitted. Authored manifests are
 compared verbatim, with Cargo's effective manifest also covering inheritance.
+Only inherited workspace-sibling requirement drift is exempt pending #435.
 """
 from contextlib import ExitStack
 import json
 from pathlib import Path
 import subprocess
 import tempfile
+
+
+# Option B pending the maintainer's decision in https://github.com/Dastari/graphql-orm/issues/435.
+# Set to "strict" for option A; all other manifest fields remain strict either way.
+WORKSPACE_SIBLING_REQUIREMENT_DRIFT = "exempt"
+WORKSPACE_SIBLINGS = frozenset({
+    'graphql-orm', 'graphql-orm-macros', 'graphql-orm-operation-catalog',
+    'graphql-orm-storage', 'graphql-orm-backup', 'graphql-orm-ai-tool-profiles',
+    'graphql-orm-ai', 'graphql-orm-router-protocol', 'graphql-orm-router',
+})
 
 
 def command(root, *args):
@@ -23,6 +34,7 @@ class PublishedSources:
         self.stack = ExitStack()
         self.checkouts = {}
         self.snapshots = {}
+        self.members = {}
 
     def __enter__(self):
         return self
@@ -38,6 +50,25 @@ class PublishedSources:
             self.stack.callback(command, self.root, 'git', 'worktree', 'remove', '--force', str(directory))
             self.checkouts[commit] = directory
         return self.checkouts[commit]
+
+    def normalize_sibling_requirements(self, root, package):
+        if WORKSPACE_SIBLING_REQUIREMENT_DRIFT == "strict":
+            return
+        if WORKSPACE_SIBLING_REQUIREMENT_DRIFT != "exempt":
+            raise ValueError("WORKSPACE_SIBLING_REQUIREMENT_DRIFT must be exempt or strict")
+        if root not in self.members:
+            metadata = json.loads(command(root, 'cargo', 'metadata', '--no-deps', '--format-version', '1'))
+            ids = set(metadata['workspace_members'])
+            self.members[root] = {
+                (member['name'], str(Path(member['manifest_path']).parent))
+                for member in metadata['packages'] if member['id'] in ids
+            }
+        for dependency in package['dependencies']:
+            # A matching name alone must not exempt an external registry/Git
+            # dependency. Match the actual workspace member's path as well.
+            if (dependency['name'] in WORKSPACE_SIBLINGS
+                    and (dependency['name'], dependency.get('path')) in self.members[root]):
+                dependency['req'] = '@workspace-sibling-requirement'
 
     def snapshot(self, ref, manifest):
         root = self.checkout(ref)
@@ -66,6 +97,7 @@ class PublishedSources:
             target for target in package['targets']
             if Path(target['src_path']).relative_to(path.parent).as_posix() in files
         ]
+        self.normalize_sibling_requirements(root, package)
         # read-manifest resolves workspace inheritance without dependency fetching.
         # Paths/IDs vary with the temporary checkout; normalize only that prefix.
         effective = json.dumps(package, sort_keys=True).replace(str(root), '$WORKSPACE')

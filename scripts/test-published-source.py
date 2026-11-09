@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import published_source
 from published_source import PublishedSources
 
 SCRIPTS = Path(__file__).parent
@@ -102,6 +103,53 @@ class PublishedSourceTests(unittest.TestCase):
 
     def test_inherited_manifest_change(self):
         self.check_change('Cargo.toml', True, (self.root / 'Cargo.toml').read_text().replace('license="MIT"', 'license="Apache-2.0"'))
+
+    def inherited_dependency(self, requirement='0.1.0', extra='', name='graphql-orm-macros'):
+        root_manifest = self.root / 'Cargo.toml'
+        root_manifest.write_text(root_manifest.read_text() +
+            f'\n[workspace.dependencies]\n{name} = {{ version="{requirement}"{extra} }}\n')
+        manifest = self.root / self.manifest
+        manifest.write_text(manifest.read_text() + f'\n[dependencies]\n{name}.workspace=true\n')
+        self.commit()
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.git('tag', '-f', self.tag)
+
+    def test_sibling_requirement_drift_passes(self):
+        self.inherited_dependency(extra=', path="crates/graphql-orm-macros"')
+        self.check_change('Cargo.toml', False,
+            (self.root / 'Cargo.toml').read_text().replace('version="0.1.0"', 'version="0.1.1"'))
+
+    def test_strict_switch_rejects_sibling_requirement_drift(self):
+        self.inherited_dependency(extra=', path="crates/graphql-orm-macros"')
+        manifest = self.root / 'Cargo.toml'
+        manifest.write_text(manifest.read_text().replace('version="0.1.0"', 'version="0.1.1"'))
+        self.commit()
+        with patch.object(published_source, 'WORKSPACE_SIBLING_REQUIREMENT_DRIFT', 'strict'):
+            with PublishedSources(self.root) as sources:
+                self.assertTrue(sources.changed(self.base, 'HEAD', self.manifest))
+
+    def test_external_requirement_change_fails(self):
+        self.inherited_dependency(name='serde', requirement='1.0.0')
+        self.check_change('Cargo.toml', True,
+            (self.root / 'Cargo.toml').read_text().replace('version="1.0.0"', 'version="1.0.1"'))
+
+    def test_external_dependency_with_sibling_name_stays_strict(self):
+        self.inherited_dependency()
+        self.check_change('Cargo.toml', True,
+            (self.root / 'Cargo.toml').read_text().replace('version="0.1.0"', 'version="0.1.1"'))
+
+    def test_sibling_feature_change_fails(self):
+        sibling = self.root / 'crates/graphql-orm-macros/Cargo.toml'
+        sibling.write_text(sibling.read_text() + '\n[features]\nextra=[]\n')
+        self.inherited_dependency(extra=', path="crates/graphql-orm-macros"')
+        self.check_change('Cargo.toml', True,
+            (self.root / 'Cargo.toml').read_text().replace('path="crates/graphql-orm-macros"',
+                'path="crates/graphql-orm-macros", features=["extra"]'))
+
+    def test_sibling_optional_change_fails(self):
+        self.inherited_dependency(extra=', path="crates/graphql-orm-macros"')
+        self.check_change(self.manifest, True,
+            (self.root / self.manifest).read_text().replace('graphql-orm-macros.workspace=true', 'graphql-orm-macros={workspace=true, optional=true}'))
 
     def test_tests_that_cargo_publishes_remain_strict(self):
         path = self.root / self.manifest

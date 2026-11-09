@@ -49,7 +49,12 @@ under that package's release rules. A workspace release does not require a new
 version for an unchanged package. The package boundary is Cargo's publishable
 source, as defined in the [published-source reference](../../reference/published-source.md).
 Published README, license, build script, data, and manifest changes also require
-a version change; file extensions do not limit the gate.
+a version change; file extensions do not limit the gate. Pending the maintainer's
+[#435 decision](https://github.com/Dastari/graphql-orm/issues/435), option B exempts
+only workspace-sibling version requirement drift in the effective inherited
+manifest. All other dependency fields and external requirements remain strict;
+authored manifests still compare verbatim. The reference documents the one-line
+switch to strict option A.
 
 `graphql-orm-ai` additionally versions its persistent schema module. Router,
 semantic-catalogue, tool-manifest, and operation-assurance protocols keep their
@@ -173,7 +178,7 @@ python3 scripts/generate-release-manifest.py \
 ```
 
 `--verify-tags` permits an existing package tag only when that tag's package
-publishable source is byte-identical to the selected commit, using Cargo's file
+publishable source is byte-identical under the comparison policy above, using Cargo's file
 list independently at both refs. The PR policy uses the same comparison. Tests,
 fixtures, and fixture lockfiles excluded by Cargo do not require a bump; tests
 that Cargo includes do. Generated resolution/provenance files are handled

@@ -33,7 +33,14 @@ file handling and the additional storage vendor gate.
 Excluded tests and fixture lockfiles need no bump. Included README, license,
 build script, source, and tests do. A workspace dependency requirement change can
 alter an inheriting package's effective manifest even if its local manifest did
-not change. Resolve a real published-source difference with an owner-reviewed
+not change. Under option B, inherited workspace-sibling version requirement
+changes alone are exempt while all other sibling fields and external requirements
+remain strict. See [#435](https://github.com/Dastari/graphql-orm/issues/435) for the
+pending maintainer decision. `WORKSPACE_SIBLING_REQUIREMENT_DRIFT` can be changed
+from `"exempt"` to `"strict"` in `scripts/published_source.py` to select option A;
+then reconcile existing drift before attempting release.
+
+Resolve a real published-source difference with an owner-reviewed
 version and release documentation update. Escalate unexpected Cargo selection
 or inherited dependency changes to the package owner; do not move existing tags.
 

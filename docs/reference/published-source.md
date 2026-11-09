@@ -21,6 +21,20 @@ changes, and changes outside `src/*.rs` cannot escape the gate.
 Authored `Cargo.toml` is compared verbatim. `cargo read-manifest` additionally
 compares effective workspace inheritance, including dependency requirements;
 checkout paths are normalized and targets absent from the package are omitted.
+Pending the maintainer decision in [#435](https://github.com/Dastari/graphql-orm/issues/435),
+option B exempts only the effective version requirement (`req`) of a dependency
+whose name and path identify an actual workspace member among the nine workspace
+packages. Registry/Git dependencies with the same name are not exempt. Sibling
+names, features, optional/default-feature flags, dependency kind, target, paths,
+and all other fields remain strict, as do all external dependency requirements.
+Authored manifest bytes remain strict, preserving the existing local manifest
+gate; this exemption applies only to the additional effective-manifest comparison.
+
+`WORKSPACE_SIBLING_REQUIREMENT_DRIFT = "exempt"` in `scripts/published_source.py`
+is the one-line option B switch. Changing its value to `"strict"` selects option A
+and requires reconciling existing inherited sibling requirement drift before
+release. Option B treats that requirement drift as release-bundle metadata and
+allows current main to release without catch-up package bumps.
 This does not resolve or build dependencies. Published README, license, build
 scripts, and data are ordinary source files and require version changes.
 
