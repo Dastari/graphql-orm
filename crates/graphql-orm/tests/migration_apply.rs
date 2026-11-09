@@ -940,3 +940,91 @@ async fn sqlite_migration_runner_rebuilds_self_referential_table()
 
     Ok(())
 }
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_literal_internal_prefix_preserves_populated_lookalikes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    let names = [
+        "sqliteXcustomer",
+        "sqlite-customer",
+        "SQLITExaccount",
+        "SqLiTe-account",
+    ];
+    for name in names {
+        sqlx::query(&format!(
+            "CREATE TABLE \"{name}\" (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)"
+        ))
+        .execute(&pool)
+        .await?;
+        sqlx::query(&format!(
+            "INSERT INTO \"{name}\" (name) VALUES ('retained')"
+        ))
+        .execute(&pool)
+        .await?;
+    }
+    // Exercise SQLite's actual reserved-name rule, including mixed ASCII case.
+    for name in ["sqlite_customer", "SQLITE_customer", "SqLiTe_customer"] {
+        assert!(
+            sqlx::query(&format!("CREATE TABLE \"{name}\" (id INTEGER)"))
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+    }
+    sqlx::query("ANALYZE").execute(&pool).await?;
+    for name in ["sqlite_sequence", "sqlite_stat1"] {
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?)"
+            )
+            .bind(name)
+            .fetch_one(&pool)
+            .await?
+        );
+    }
+    let current = introspect_schema(&pool).await?;
+    assert_eq!(current.tables.len(), names.len());
+    let mut target = current.clone();
+    for name in names {
+        let table = target
+            .tables
+            .iter_mut()
+            .find(|table| table.table_name == name)
+            .expect("populated lookalike must be introspected");
+        table.columns.push(ColumnModel {
+            name: "active".into(),
+            sql_type: "INTEGER".into(),
+            is_primary_key: false,
+            nullable: false,
+            is_unique: false,
+            default: Some("1".into()),
+            spatial: None,
+        });
+    }
+    let plan = build_migration_plan(DatabaseBackend::Sqlite, &current, &target);
+    assert_eq!(plan.statements.len(), names.len());
+    let database = graphql_orm::db::Database::new(pool.clone());
+    database
+        .apply_migrations(&[leak_migration(&plan, "2026110901", "sqlite_literal_prefix")])
+        .await?;
+    for name in names {
+        let row: (i64, String, i64) =
+            sqlx::query_as(&format!("SELECT id, name, active FROM \"{name}\""))
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(row, (1, "retained".into(), 1));
+    }
+    let after = introspect_schema(&pool).await?;
+    assert_eq!(after.tables.len(), names.len());
+    assert!(
+        build_migration_plan(DatabaseBackend::Sqlite, &after, &target)
+            .statements
+            .is_empty()
+    );
+    Ok(())
+}

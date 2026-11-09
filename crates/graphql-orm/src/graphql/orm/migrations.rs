@@ -3170,8 +3170,10 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
     include_internal: bool,
 ) -> crate::Result<OwnedSchemaModel> {
     let retention_context_valid = sqlite_retention_context_is_valid(&mut *connection).await?;
+    // SQLite reserves the literal sqlite_ prefix case-insensitively; LIKE would
+    // also hide user tables whose seventh character is not an underscore.
     let table_rows = sqlx::query(
-        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND substr(name, 1, 7) <> 'sqlite_' COLLATE NOCASE ORDER BY name",
     )
     .fetch_all(&mut *connection)
     .await?;

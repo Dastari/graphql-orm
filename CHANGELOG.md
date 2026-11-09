@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+## 0.113.0
+
+ORM runtime/macros **0.113.0**.
+
+- **Fix:** SQLite introspection matches the reserved `sqlite_` prefix literally and case-insensitively. Populated lookalikes such as `sqliteXcustomer` and `sqlite-customer` remain visible to migration planning; SQLite internal tables remain excluded. Fixes #416.
+
 ## 0.112.0
 
 ORM runtime/macros **0.112.0**.

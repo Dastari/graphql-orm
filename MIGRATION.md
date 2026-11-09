@@ -10,6 +10,14 @@ supersedes: []
 
 # Migration Guide
 
+## 0.113.0: SQLite internal-name introspection
+
+Upgrade runtime and macros together. SQLite host tables whose names resemble
+`sqlite_` but differ at the underscore position now participate in introspection
+and migration planning, including ASCII case variants. Review newly visible
+tables in generated plans before applying migrations. The literal reserved
+prefix remains excluded case-insensitively. No data conversion is required.
+
 ## 0.111.0 to 0.112.0: isolated consumer fixture builds
 
 Upgrade ORM/macros together. No API or data migration is needed. Consumer
