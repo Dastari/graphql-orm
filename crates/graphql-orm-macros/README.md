@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+ORM/macros 0.106.0 fixes SQLite migration preparation data loss: unproven
+reserved rebuild tables are preserved with a diagnostic, and interrupted
+transactional rebuilds recover through SQLite rollback. Upgrade both together.
+
 Version 0.105.0 extends static readability protection to relation declarations.
 Hand-built `RelationMetadata` literals require `is_readable`; derives set it.
 Default runtime conversion refuses hidden relations, while trusted repository

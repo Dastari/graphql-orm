@@ -230,7 +230,7 @@ pub(crate) async fn applied_version_set<B: MigrationBackend>(
 impl MigrationBackend for super::SqliteBackend {
     async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()> {
         ensure_sqlite_migration_history_table(pool).await?;
-        cleanup_stale_sqlite_rewrite_tables(pool).await?;
+        diagnose_unowned_sqlite_rewrite_tables(pool).await?;
         Ok(())
     }
 
@@ -724,23 +724,23 @@ async fn load_postgres_applied_migrations(
 }
 
 #[cfg(feature = "sqlite")]
-async fn cleanup_stale_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> crate::Result<()> {
-    let rows = sqlx::query(
-        "SELECT name
-         FROM sqlite_master
-         WHERE type = 'table'
-           AND name LIKE '__graphql_orm\\_%\\_new' ESCAPE '\\'
-         ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    for row in rows {
-        let table_name: String = sqlx::Row::try_get(&row, "name")?;
-        let escaped = table_name.replace('"', "\"\"");
-        sqlx::query(&format!("DROP TABLE IF EXISTS \"{}\"", escaped))
-            .execute(pool)
+async fn diagnose_unowned_sqlite_rewrite_tables(pool: &sqlx::SqlitePool) -> crate::Result<()> {
+    // Rebuild DDL and history are committed in one transaction. SQLite rolls back
+    // interrupted rebuilds; no released bookkeeping proves ownership of a table
+    // left outside that transaction. A name (even with an identical target schema
+    // and an existing original) is not permission to delete host data.
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .fetch_all(pool)
             .await?;
+
+    for name in names {
+        if name.starts_with("__graphql_orm_") && name.ends_with("_new") {
+            // Debug formatting escapes control characters in host-controlled names.
+            eprintln!(
+                "graphql-orm: preserving SQLite table {name:?}: no rebuild ownership evidence; inspect manually before retrying a conflicting rebuild"
+            );
+        }
     }
 
     Ok(())
