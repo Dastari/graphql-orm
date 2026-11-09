@@ -204,7 +204,7 @@ async fn sqlite_migration_runner_applies_rebuild_plan() -> Result<(), Box<dyn st
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_migration_runner_recovers_from_stale_rewrite_table()
+async fn sqlite_migration_runner_preserves_unproven_reserved_table()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
     sqlx::query("PRAGMA foreign_keys = ON")
@@ -219,6 +219,13 @@ async fn sqlite_migration_runner_recovers_from_stale_rewrite_table()
     .execute(&pool)
     .await?;
 
+    sqlx::query("INSERT INTO users VALUES ('original', 'Original')")
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO __graphql_orm_users_new (id, name) VALUES ('host', 'Host data')")
+        .execute(&pool)
+        .await?;
+
     let plan = build_migration_plan(
         DatabaseBackend::Sqlite,
         &SchemaModel {
@@ -231,22 +238,127 @@ async fn sqlite_migration_runner_recovers_from_stale_rewrite_table()
         },
     );
     let database = graphql_orm::db::Database::new(pool.clone());
+    // Preparation and unrelated migrations must remain usable.
+    database.apply_migrations(&[]).await?;
     database
+        .apply_migrations(&[Migration {
+            version: "2026032503",
+            description: "unrelated",
+            statements: &["CREATE TABLE unrelated (id INTEGER)"],
+        }])
+        .await?;
+    let error = database
         .apply_migrations(&[leak_migration(
             &plan,
             "2026032504",
-            "sqlite_recover_stale_rewrite_table",
+            "sqlite_unproven_rewrite_table",
         )])
+        .await
+        .expect_err("a rebuild must refuse the host table collision");
+    assert!(error.to_string().contains("already exists"), "{error}");
+    let host_name: String =
+        sqlx::query_scalar("SELECT name FROM __graphql_orm_users_new WHERE id = 'host'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(host_name, "Host data");
+    let original: String = sqlx::query_scalar("SELECT name FROM users WHERE id = 'original'")
+        .fetch_one(&pool)
         .await?;
-
-    let row = sqlx::query(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '__graphql_orm_users_new'",
-    )
-    .fetch_optional(&pool)
-    .await?;
-    assert!(row.is_none());
+    assert_eq!(original, "Original");
     assert_eq!(sqlite_history_count(&pool).await?, 1);
 
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_preparation_preserves_populated_wildcard_lookalikes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await?;
+    let names = [
+        "abgraphqlXorm_customer_new",
+        "a_graphql_orm_customer_new",
+        "_bgraphql_orm_customer_new",
+        "__graphqlXorm_customer_new",
+        "__GRAPHQL_ORM_customer_new",
+    ];
+    for name in names {
+        sqlx::query(&format!("CREATE TABLE \"{name}\" (value TEXT)"))
+            .execute(&pool)
+            .await?;
+        sqlx::query(&format!("INSERT INTO \"{name}\" VALUES ('keep')"))
+            .execute(&pool)
+            .await?;
+    }
+    let database = graphql_orm::db::Database::new(pool.clone());
+    database.apply_migrations(&[]).await?;
+    database
+        .apply_migrations(&[Migration {
+            version: "lookalikes",
+            description: "unrelated",
+            statements: &["CREATE TABLE unrelated (id INTEGER)"],
+        }])
+        .await?;
+    for name in names {
+        let value: String = sqlx::query_scalar(&format!("SELECT value FROM \"{name}\""))
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(value, "keep");
+    }
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn sqlite_interrupted_rebuild_recovers_before_retry() -> Result<(), Box<dyn std::error::Error>>
+{
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await?;
+    sqlx::query("CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("INSERT INTO users VALUES ('1', 'Keep')")
+        .execute(&pool)
+        .await?;
+    let mut tx = pool.begin().await?;
+    sqlx::query("CREATE TABLE __graphql_orm_users_new (id TEXT PRIMARY KEY, name TEXT NOT NULL)")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO __graphql_orm_users_new SELECT * FROM users")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DROP TABLE users").execute(&mut *tx).await?;
+    // Dropping the in-flight migration future drops its transaction too.
+    drop(tx);
+    let database = graphql_orm::db::Database::new(pool.clone());
+    database.apply_migrations(&[]).await?;
+    let leftovers: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM sqlite_master WHERE name = '__graphql_orm_users_new'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(leftovers, 0);
+    let plan = build_migration_plan(
+        DatabaseBackend::Sqlite,
+        &SchemaModel {
+            extensions: vec![],
+            tables: vec![users_v1_like()],
+        },
+        &SchemaModel {
+            extensions: vec![],
+            tables: vec![users_v2_like()],
+        },
+    );
+    database
+        .apply_migrations(&[leak_migration(&plan, "retry", "retry interrupted rebuild")])
+        .await?;
+    let name: String = sqlx::query_scalar("SELECT name FROM users WHERE id = '1'")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(name, "Keep");
+    assert_eq!(sqlite_history_count(&pool).await?, 1);
     Ok(())
 }
 

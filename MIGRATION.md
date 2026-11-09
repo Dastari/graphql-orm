@@ -10,6 +10,19 @@ supersedes: []
 
 # Migration Guide
 
+## 0.105.0 to 0.106.0: SQLite rebuild cleanup data safety
+
+Upgrade ORM/macros together; no data migration is required. Preparation no longer
+removes tables based on the `__graphql_orm_` prefix and `_new` suffix. These names
+are now matched literally and are only diagnostic candidates, never ownership
+proof. Existing migration history records contain no per-rebuild ownership
+marker; even a matching schema and an existing original table cannot authorize
+deletion. Unproven tables are preserved with a stderr diagnostic. Inspect their
+provenance and recover any data manually before resolving a name collision.
+Unrelated migrations continue; a rebuild using an occupied name refuses and
+rolls back. Genuine interrupted ORM rebuilds recover through SQLite's transaction
+rollback, which covers rebuild DDL, copied rows and history together.
+
 ## 0.104.0 to 0.105.0: static relation readability
 
 Breaking/security: public `RelationMetadata` literals now require
