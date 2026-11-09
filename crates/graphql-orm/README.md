@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.102.0 enforces append-only create field-write policies and shares committed-output entity/row read checks with ordinary creates. Missing declared providers fail closed; denied output does not undo a committed write. See the root migration guide for client and provider changes.
+
+Version 0.102.0 fixes append-only composite-key creates and complete-key Changed events; no data migration is needed. See the root migration guide.
+
 Version 0.99.0 revalidates the complete dependent-delete catalogue after hooks, before each prepared write and before commit. Catalogue drift refuses atomically; upgrade ORM/macros together. No data migration is needed.
 
 Version 0.100.0 moves CacheSync authority termination to an independent jittered timer and adds separate subscriber/event callbacks. Event denials are silent; typed host failures end with continuity loss. Macros remain version-aligned with the runtime. See the root migration guide; no data migration is needed.

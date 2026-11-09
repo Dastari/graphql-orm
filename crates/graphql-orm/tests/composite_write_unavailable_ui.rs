@@ -11,5 +11,6 @@ fn composite_key_write_helpers_are_not_generated() {
     let t = ui::test_cases();
     t.compile_fail("tests/ui/composite_mutation_nullable_key.rs");
     t.compile_fail("tests/ui/composite_mutation_generated_key.rs");
+    t.compile_fail("tests/ui/append_only_composite_*.rs");
     t.pass("tests/ui/composite_mutations_sqlx_free.rs");
 }
