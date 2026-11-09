@@ -405,6 +405,8 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: dtolnay/rust-toolchain@cf201f30d2291af293e25b32e435b13c42d51aaf # 1.97.1
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Compile and lint every AI target on alternate backends
         run: |
