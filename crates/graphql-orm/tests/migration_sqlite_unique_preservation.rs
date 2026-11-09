@@ -669,3 +669,44 @@ async fn case_variant_temp_rebuild_names_cannot_shadow_main_data() -> graphql_or
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn diagnostic_preparation_preserves_host_tables_and_live_rebuild_refuses_collision()
+-> graphql_orm::Result<()> {
+    for reserved in ["__graphql_orm_probe_new", "__GRAPHQL_ORM_PROBE_NEW"] {
+        let db = setup(&[
+            "CREATE TABLE probe(id TEXT PRIMARY KEY NOT NULL,a TEXT NOT NULL,b TEXT NOT NULL,UNIQUE(a,b))",
+            "INSERT INTO probe VALUES ('one','a','b')",
+            "CREATE TABLE abgraphqlXorm_probe_new(host_data TEXT)",
+            "INSERT INTO abgraphqlXorm_probe_new VALUES ('lookalike')",
+        ]).await?;
+        sqlx::query(&format!("CREATE TABLE {reserved}(host_data TEXT)"))
+            .execute(db.pool())
+            .await?;
+        sqlx::query(&format!(
+            "INSERT INTO {reserved} VALUES ('unproven host data')"
+        ))
+        .execute(db.pool())
+        .await?;
+        // #417 preparation diagnoses literal candidates and never deletes them.
+        db.apply_migrations(&[]).await?;
+        let error = remove(&db).await.unwrap_err();
+        assert!(
+            error.to_string().contains("UnsupportedCapability"),
+            "{error}"
+        );
+        let host: String = sqlx::query_scalar(&format!("SELECT host_data FROM {reserved}"))
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(host, "unproven host data");
+        let lookalike: String = sqlx::query_scalar("SELECT host_data FROM abgraphqlXorm_probe_new")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(lookalike, "lookalike");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM probe WHERE id='one'")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(count, 1);
+    }
+    Ok(())
+}

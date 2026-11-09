@@ -16,6 +16,14 @@ for historical context.
 
 ## Unreleased
 
+## 0.108.0
+
+ORM runtime/macros **0.108.0**.
+
+- **Fixed:** normalize PostgreSQL composite UNIQUE declarations subsumed by the same ordered primary key, so annotation-only changes remain migration no-ops. SQL Server retains its separate constraint; reversed key order remains a real difference.
+
+- **Breaking/API:** add `SetCompositeUniques` to migration steps. Managed migrations now add, remove and change composite uniques; SQLite composite-unique-only rebuilds rewrite the live table DDL and preserve rowids, generated values, collations, AUTOINCREMENT history, indexes, triggers and FK actions; unsupported shapes and mixed changes refuse. Reserved-name collisions refuse without cleanup or unproven drops, retaining the diagnostic-only preparation from #417. Other pre-existing rebuild operations are tracked in #412. Duplicate data refuses the change atomically with a sanitized error. Fixes #393.
+
 ORM runtime/macros **0.107.0**.
 
 - **Breaking/security:** add required `has_source_condition` and `has_target_condition` flags to `RelationMetadata`. Both static-to-runtime conversion entry points refuse conditional relations with field-scoped `UnsupportedCapability` diagnostics: the runtime relation IR cannot represent their guards/filters exactly. Ordinary unconditional relations retain their behavior. Fixes #427.
