@@ -20,6 +20,7 @@ mod metrics;
 mod network;
 mod node_lookup;
 mod server;
+mod subscription_continuity;
 mod subscriptions;
 
 pub use config::{

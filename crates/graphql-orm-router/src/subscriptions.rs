@@ -33,6 +33,7 @@ const MAX_AUTHORIZATION_VARIABLE_VALUE_BYTES: usize = 1024;
 pub(crate) struct InternalSubscriptionEndpoint {
     pub(crate) path: String,
     secret: String,
+    pub(crate) continuity: crate::subscription_continuity::Continuity,
 }
 
 impl InternalSubscriptionEndpoint {
@@ -51,6 +52,7 @@ impl InternalSubscriptionEndpoint {
         Ok(Self {
             path: format!("/_graphql-orm-router/{}/websocket", &secret[..32]),
             secret,
+            continuity: Default::default(),
         })
     }
 
@@ -229,9 +231,17 @@ struct ConnectionState {
     gateway: Arc<SubscriptionGateway>,
     phase: ConnectionPhase,
     internal_sink: Option<ws::WsSink>,
-    operations: BTreeMap<String, String>,
+    operations: BTreeMap<String, Operation>,
     next_operation: u64,
+    local_loss: hive_router::tokio::sync::watch::Sender<u64>,
     permit: Option<ConnectionPermit>,
+}
+
+struct Operation {
+    internal_id: String,
+    epoch: u64,
+    subscription: bool,
+    lost: bool,
 }
 
 struct ConnectionTermination {
@@ -240,6 +250,23 @@ struct ConnectionTermination {
 }
 
 impl ConnectionState {
+    fn operation_lost(&self, operation: &Operation) -> bool {
+        operation.subscription
+            && (operation.lost || operation.epoch != self.gateway.internal.continuity.epoch())
+    }
+
+    fn lose_connection_subscriptions(&mut self) {
+        for operation in self
+            .operations
+            .values_mut()
+            .filter(|operation| operation.subscription)
+        {
+            operation.lost = true;
+        }
+        self.local_loss
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+
     fn remove_operation(&mut self, id: &str) {
         if self.operations.remove(id).is_some() {
             self.gateway.remove_operations(1);
@@ -344,8 +371,15 @@ async fn create_connection_service(
         internal_sink: None,
         operations: BTreeMap::new(),
         next_operation: 0,
+        local_loss: hive_router::tokio::sync::watch::channel(0).0,
         permit: Some(permit),
     }));
+
+    spawn_continuity_watch(
+        Rc::downgrade(&state),
+        sink.clone(),
+        gateway.internal.continuity.subscribe(),
+    );
 
     if accepted_subprotocol {
         spawn_connection_init_timeout(
@@ -579,6 +613,62 @@ fn connection_init_authorization(message: &Value) -> Option<&str> {
     values.next().is_none().then_some(value)
 }
 
+// Select using the executable AST, never textual prefixes: operationName may
+// select a query from a document that also contains a subscription or fragments.
+fn selected_subscription(message: &Value) -> Option<bool> {
+    let payload = message.get("payload")?;
+    let document = cynic_parser::parse_executable_document(payload.get("query")?.as_str()?).ok()?;
+    let name = match payload.get("operationName") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(value.as_str()?),
+    };
+    let mut operations = document
+        .operations()
+        .filter(|operation| name.is_none_or(|name| operation.name() == Some(name)));
+    let operation = operations.next()?;
+    if operations.next().is_some() {
+        return None;
+    }
+    Some(operation.operation_type() == cynic_parser::common::OperationType::Subscription)
+}
+
+fn enqueue_subscription_frame(
+    tx: &hive_router::tokio::sync::mpsc::Sender<
+        Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
+    >,
+    frame: ws::Frame,
+    state: &SharedConnectionState,
+) -> Option<ws::Frame> {
+    let id = match &frame {
+        ws::Frame::Text(bytes) => serde_json::from_slice::<Value>(bytes)
+            .ok()
+            .and_then(|message| message.get("id").and_then(Value::as_str).map(str::to_owned)),
+        _ => None,
+    };
+    let mut state = state.borrow_mut();
+    let Some(operation) = id.as_ref().and_then(|id| {
+        state
+            .operations
+            .values_mut()
+            .find(|operation| operation.internal_id == *id && operation.subscription)
+    }) else {
+        return Some(frame);
+    };
+    if operation.lost {
+        return None;
+    }
+    if matches!(
+        tx.try_send(Ok(frame)),
+        Err(hive_router::tokio::sync::mpsc::error::TrySendError::Full(_))
+    ) {
+        operation.lost = true;
+        state
+            .local_loss
+            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
+    }
+    None
+}
+
 async fn connect_internal(
     gateway: &Arc<SubscriptionGateway>,
     token: &str,
@@ -599,7 +689,49 @@ async fn connect_internal(
     let client = builder.build(SharedCfg::default()).await.map_err(|_| ())?;
     let connection = client.connect().await.map_err(|_| ())?;
     let internal_sink = connection.sink();
-    let receiver = connection.seal().receiver();
+    // ntex's receiver() uses an unbounded queue. Keep the bridge bounded and
+    // attribute a full queue to the subscription named by the dropped frame.
+    let (tx, receiver) = hive_router::tokio::sync::mpsc::channel(32);
+    let bridge_state = state.clone();
+    let bridge_external = external_sink.clone();
+    rt::spawn(async move {
+        let _ = connection
+            .seal()
+            .start(fn_service(move |frame| {
+                let state = bridge_state.clone();
+                let sink = bridge_external.clone();
+                let queued = enqueue_subscription_frame(&tx, frame, &state);
+                async move {
+                    // One-shot results and connection controls never enter the
+                    // lossy subscription queue, even when it is saturated.
+                    match queued {
+                        Some(ws::Frame::Text(bytes)) => {
+                            if let Some(text) = public_server_message(&bytes, &state)
+                                && sink.send(ws::Message::Text(text.into())).await.is_err()
+                            {
+                                state.borrow_mut().terminate_and_close_internal();
+                            }
+                        }
+                        Some(ws::Frame::Ping(bytes)) => {
+                            return Ok::<_, ()>(Some(ws::Message::Pong(bytes)));
+                        }
+                        Some(ws::Frame::Close(reason)) => {
+                            state.borrow_mut().terminate_and_close_internal();
+                            let _ = sink.send(ws::Message::Close(reason)).await;
+                        }
+                        Some(ws::Frame::Binary(_) | ws::Frame::Continuation(_)) => {
+                            state.borrow_mut().terminate_and_close_internal();
+                            let _ = sink
+                                .send(close_message(1011, "Subscription transport unavailable"))
+                                .await;
+                        }
+                        _ => {}
+                    }
+                    Ok::<_, ()>(None)
+                }
+            }))
+            .await;
+    });
     state.borrow_mut().internal_sink = Some(internal_sink.clone());
     let init = json!({
         "type": "connection_init",
@@ -622,7 +754,7 @@ async fn connect_internal(
 }
 
 async fn forward_internal_messages(
-    receiver: hive_router::ntex::channel::mpsc::Receiver<
+    mut receiver: hive_router::tokio::sync::mpsc::Receiver<
         Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
     >,
     internal_sink: ws::WsSink,
@@ -642,6 +774,9 @@ async fn forward_internal_messages(
         };
         match frame {
             ws::Frame::Text(bytes) => {
+                if external_sink.io().is_wr_backpressure() {
+                    state.borrow_mut().lose_connection_subscriptions();
+                }
                 let Some(text) = public_server_message(&bytes, &state) else {
                     continue;
                 };
@@ -706,8 +841,20 @@ fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<
             let id = state
                 .operations
                 .iter()
-                .find(|(_, internal)| internal.as_str() == internal_id)
+                .find(|(_, operation)| operation.internal_id == internal_id)
                 .map(|(id, _)| id.clone())?;
+            if state.operation_lost(&state.operations[&id]) {
+                if let Some(internal) = state.internal_sink.clone() {
+                    let complete = json!({"id": internal_id, "type": "complete"});
+                    rt::spawn(async move {
+                        let _ = internal
+                            .send(ws::Message::Text(complete.to_string().into()))
+                            .await;
+                    });
+                }
+                state.remove_operation(&id);
+                return Some(continuity_error(&id).to_string());
+            }
             if kind != "next" {
                 state.remove_operation(&id);
             }
@@ -740,19 +887,47 @@ async fn forward_subscribe(
     }
     {
         let mut state = state.borrow_mut();
+        // Duplicate IDs are connection errors, regardless of the new payload.
+        // No operation-scoped terminal error may leave the old generation live.
         if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
+        let Some(subscription) = selected_subscription(&message) else {
+            return Some(ws::Message::Text(
+                json!({"id": id, "type": "error", "payload": [{
+                    "message": "An explicit, unambiguous GraphQL operation is required",
+                    "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"}
+                }]})
+                .to_string()
+                .into(),
+            ));
+        };
         if state.operations.len() >= state.gateway.config.max_operations_per_connection {
             return Some(operation_limit_error(&id));
         }
+        let epoch = if subscription {
+            let Some(epoch) = state.gateway.internal.continuity.subscription_epoch() else {
+                return Some(ws::Message::Text(continuity_error(&id).to_string().into()));
+            };
+            epoch
+        } else {
+            0
+        };
         let Some(next) = state.next_operation.checked_add(1) else {
             return state.terminate_with_public_close(1011, "Operation sequence exhausted");
         };
         state.next_operation = next;
         let internal_id = next.to_string();
         message["id"] = Value::String(internal_id.clone());
-        state.operations.insert(id.clone(), internal_id);
+        state.operations.insert(
+            id.clone(),
+            Operation {
+                internal_id,
+                epoch,
+                subscription,
+                lost: false,
+            },
+        );
         state.gateway.add_operation();
     }
     let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
@@ -854,7 +1029,11 @@ async fn forward_complete(
             .borrow_mut()
             .terminate_with_public_close(4400, "Subscription ID is required");
     };
-    let internal_id = state.borrow().operations.get(id).cloned();
+    let internal_id = state
+        .borrow()
+        .operations
+        .get(id)
+        .map(|operation| operation.internal_id.clone());
     state.borrow_mut().remove_operation(id);
     let internal_id = internal_id?;
     message["id"] = Value::String(internal_id);
@@ -894,6 +1073,71 @@ fn close_message(code: u16, description: &str) -> ws::Message {
     }))
 }
 
+fn continuity_error(id: &str) -> Value {
+    json!({"id": id, "type": "error", "payload": [{
+        "message": "Subscription continuity lost; resubscribe and refetch",
+        "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}
+    }]})
+}
+
+fn spawn_continuity_watch(
+    state: Weak<RefCell<ConnectionState>>,
+    sink: ws::WsSink,
+    mut receiver: hive_router::tokio::sync::watch::Receiver<u64>,
+) {
+    let Some(initial) = state.upgrade() else {
+        return;
+    };
+    let mut local = initial.borrow().local_loss.subscribe();
+    drop(initial);
+    rt::spawn(async move {
+        loop {
+            hive_router::tokio::select! {
+                result = local.changed() => if result.is_err() { break; },
+                result = receiver.changed() => if result.is_err() { break; },
+                _ = sink.on_disconnect() => break,
+            }
+            let Some(state) = state.upgrade() else {
+                break;
+            };
+            receiver.borrow_and_update();
+            local.borrow_and_update();
+            let (ids, internal) = {
+                let mut state = state.borrow_mut();
+                if state.phase == ConnectionPhase::Closed {
+                    break;
+                }
+                let ids = state
+                    .operations
+                    .iter()
+                    .filter(|(_, operation)| state.operation_lost(operation))
+                    .map(|(id, operation)| (id.clone(), operation.internal_id.clone()))
+                    .collect::<Vec<_>>();
+                for (id, _) in &ids {
+                    state.remove_operation(id);
+                }
+                (ids, state.internal_sink.clone())
+            };
+            for (id, internal_id) in ids {
+                if sink
+                    .send(ws::Message::Text(continuity_error(&id).to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    state.borrow_mut().terminate_and_close_internal();
+                    return;
+                }
+                if let Some(internal) = &internal {
+                    let complete = json!({"id": internal_id, "type": "complete"});
+                    let _ = internal
+                        .send(ws::Message::Text(complete.to_string().into()))
+                        .await;
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,8 +1154,226 @@ mod tests {
         }
     }
 
+    fn operation_test_state(gateway: Arc<SubscriptionGateway>) -> SharedConnectionState {
+        let mut operations = BTreeMap::new();
+        for (id, query) in [
+            ("sub", "subscription { changed }"),
+            ("sibling", "subscription { other }"),
+            ("query", "query { value }"),
+            ("mutation", "mutation { update }"),
+        ] {
+            gateway.add_operation();
+            operations.insert(
+                id.into(),
+                Operation {
+                    internal_id: id.into(),
+                    epoch: gateway.internal.continuity.epoch(),
+                    subscription: selected_subscription(&json!({"payload": {"query": query}}))
+                        .unwrap(),
+                    lost: false,
+                },
+            );
+        }
+        Rc::new(RefCell::new(ConnectionState {
+            gateway,
+            phase: ConnectionPhase::Ready,
+            internal_sink: None,
+            operations,
+            next_operation: 0,
+            permit: None,
+            local_loss: hive_router::tokio::sync::watch::channel(0).0,
+        }))
+    }
+
+    fn test_gateway() -> Arc<SubscriptionGateway> {
+        SubscriptionGateway::new(
+            SubscriptionConfig::default(),
+            Arc::new(UnusedAuthentication),
+            InternalSubscriptionEndpoint::generate().unwrap(),
+            "127.0.0.1:12345".parse().unwrap(),
+            Arc::new(RouterMetrics::default()),
+        )
+    }
+
+    fn next_message(id: &str, state: &SharedConnectionState) -> Value {
+        serde_json::from_str(
+            &public_server_message(
+                json!({"id": id, "type": "next", "payload": {"data": {"value": 1}}})
+                    .to_string()
+                    .as_bytes(),
+                state,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn duplicate_id_closes_before_validation_or_other_operation_errors() {
+        for (query, at_capacity, cooling_down, exhausted) in [
+            (Some("subscription {"), false, false, false),
+            (
+                Some("query A { value } subscription B { changed }"),
+                false,
+                false,
+                false,
+            ),
+            (None, false, false, false),
+            (Some("subscription { changed }"), true, false, false),
+            (Some("subscription { changed }"), false, true, false),
+            (Some("subscription { changed }"), false, false, true),
+        ] {
+            let mut gateway = test_gateway();
+            if at_capacity {
+                Arc::get_mut(&mut gateway)
+                    .unwrap()
+                    .config
+                    .max_operations_per_connection = 4;
+            }
+            let state = operation_test_state(gateway.clone());
+            // Reproduce a live subscription before sending the duplicate.
+            assert_eq!(next_message("sub", &state)["type"], "next");
+            if cooling_down {
+                gateway.internal.continuity.lost();
+            }
+            if exhausted {
+                state.borrow_mut().next_operation = u64::MAX;
+            }
+            let mut duplicate = json!({"type": "subscribe", "id": "sub", "payload": {}});
+            if let Some(query) = query {
+                duplicate["payload"]["query"] = json!(query);
+            }
+            let result =
+                futures::executor::block_on(forward_subscribe(duplicate, "", state.clone()));
+            let Some(ws::Message::Close(Some(reason))) = result else {
+                panic!("duplicate must close with 4409, even for {query:?}: {result:?}");
+            };
+            assert_eq!(u16::from(reason.code), 4409);
+            assert_eq!(
+                reason.description.as_deref(),
+                Some("Subscriber already exists")
+            );
+            assert_eq!(state.borrow().phase, ConnectionPhase::Closed);
+            assert!(state.borrow().operations.is_empty());
+            assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
+            for kind in ["next", "error", "complete"] {
+                let late = json!({"id": "sub", "type": kind});
+                assert!(
+                    public_server_message(late.to_string().as_bytes(), &state).is_none(),
+                    "late {kind} after duplicate close"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_queue_overflow_only_retires_the_losing_subscription() {
+        let gateway = test_gateway();
+        let state = operation_test_state(gateway.clone());
+        let other = operation_test_state(gateway.clone());
+        let (tx, mut rx) = hive_router::tokio::sync::mpsc::channel(1);
+        for _ in 0..2 {
+            let frame = ws::Frame::Text(json!({"id": "sub", "type": "next"}).to_string().into());
+            assert!(enqueue_subscription_frame(&tx, frame, &state).is_none());
+        }
+        assert!(state.borrow().operations["sub"].lost);
+        assert_eq!(
+            gateway.internal.continuity.epoch(),
+            0,
+            "local overflow must not publish runtime loss"
+        );
+        assert_eq!(next_message("sub", &state), continuity_error("sub"));
+        for id in ["sibling", "query", "mutation"] {
+            assert_eq!(next_message(id, &state)["type"], "next");
+        }
+        for id in ["sub", "sibling", "query", "mutation"] {
+            assert_eq!(next_message(id, &other)["type"], "next");
+        }
+        for id in ["query", "mutation"] {
+            let frame = ws::Frame::Text(json!({"id": id, "type": "next"}).to_string().into());
+            assert!(
+                enqueue_subscription_frame(&tx, frame, &state).is_some(),
+                "one-shot results bypass a full subscription queue"
+            );
+        }
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn connection_pressure_spares_one_shots_and_other_connections() {
+        let gateway = test_gateway();
+        let state = operation_test_state(gateway.clone());
+        let other = operation_test_state(gateway.clone());
+        state.borrow_mut().lose_connection_subscriptions();
+        for id in ["sub", "sibling"] {
+            assert_eq!(next_message(id, &state), continuity_error(id));
+        }
+        for id in ["query", "mutation"] {
+            assert_eq!(next_message(id, &state)["type"], "next");
+        }
+        for id in ["sub", "sibling", "query", "mutation"] {
+            assert_eq!(next_message(id, &other)["type"], "next");
+        }
+        assert_eq!(gateway.internal.continuity.epoch(), 0);
+    }
+
+    #[test]
+    fn hive_fallback_only_retires_subscriptions_on_each_connection() {
+        let gateway = test_gateway();
+        let states = [
+            operation_test_state(gateway.clone()),
+            operation_test_state(gateway.clone()),
+        ];
+        gateway.internal.continuity.lost();
+        for state in states {
+            for id in ["sub", "sibling"] {
+                assert_eq!(next_message(id, &state), continuity_error(id));
+            }
+            for id in ["query", "mutation"] {
+                assert_eq!(next_message(id, &state)["type"], "next");
+                let complete: Value = serde_json::from_str(
+                    &public_server_message(
+                        json!({"id": id, "type": "complete"}).to_string().as_bytes(),
+                        &state,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(complete["type"], "complete");
+            }
+        }
+    }
+
+    #[test]
+    fn operation_selection_uses_ast_and_operation_name() {
+        let query = "fragment S on Query { value } subscription Watch { changed } query Read { ...S } mutation Write { update }";
+        for (name, expected) in [("Watch", true), ("Read", false), ("Write", false)] {
+            assert_eq!(
+                selected_subscription(&json!({"payload": {"query": query, "operationName": name}})),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            selected_subscription(&json!({"payload": {"query": query}})),
+            None
+        );
+        assert_eq!(
+            selected_subscription(&json!({"payload": {"query": "{ value }"}})),
+            Some(false)
+        );
+    }
+
     #[test]
     fn terminal_error_releases_state_and_drops_late_frames_after_id_reuse() {
+        assert_terminal_error(false);
+    }
+
+    #[test]
+    fn continuity_loss_replaces_complete_and_drops_late_frames_after_id_reuse() {
+        assert_terminal_error(true);
+    }
+
+    fn assert_terminal_error(continuity_lost: bool) {
         let gateway = SubscriptionGateway::new(
             SubscriptionConfig::default(),
             Arc::new(UnusedAuthentication),
@@ -923,24 +1385,50 @@ mod tests {
             gateway: gateway.clone(),
             phase: ConnectionPhase::Ready,
             internal_sink: None,
-            operations: BTreeMap::from([("client".into(), "1".into())]),
+            operations: BTreeMap::from([(
+                "client".into(),
+                Operation {
+                    internal_id: "1".into(),
+                    epoch: 0,
+                    subscription: true,
+                    lost: false,
+                },
+            )]),
             next_operation: 1,
+            local_loss: hive_router::tokio::sync::watch::channel(0).0,
             permit: None,
         }));
         gateway.add_operation();
-        let error = json!({"id": "1", "type": "error", "payload": []});
+        if continuity_lost {
+            gateway.internal.continuity.lost();
+        }
+        let error = if continuity_lost {
+            json!({"id": "1", "type": "complete"})
+        } else {
+            json!({"id": "1", "type": "error", "payload": []})
+        };
         let forwarded: Value = serde_json::from_str(
             &public_server_message(error.to_string().as_bytes(), &state).unwrap(),
         )
         .unwrap();
         assert_eq!(forwarded["id"], "client");
+        if continuity_lost {
+            assert_eq!(forwarded, continuity_error("client"));
+        } else {
+            assert_eq!(forwarded["type"], "error");
+        }
         assert!(state.borrow().operations.is_empty());
         assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
 
-        state
-            .borrow_mut()
-            .operations
-            .insert("client".into(), "2".into());
+        state.borrow_mut().operations.insert(
+            "client".into(),
+            Operation {
+                internal_id: "2".into(),
+                epoch: gateway.internal.continuity.epoch(),
+                subscription: true,
+                lost: false,
+            },
+        );
         gateway.add_operation();
         for kind in ["next", "error", "complete"] {
             let late = json!({"id": "1", "type": kind});
@@ -948,7 +1436,11 @@ mod tests {
         }
         assert_eq!(gateway.active_operations.load(Ordering::Acquire), 1);
         let complete = json!({"id": "2", "type": "complete"});
-        assert!(public_server_message(complete.to_string().as_bytes(), &state).is_some());
+        let forwarded: Value = serde_json::from_str(
+            &public_server_message(complete.to_string().as_bytes(), &state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(forwarded["type"], "complete");
         assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
     }
 

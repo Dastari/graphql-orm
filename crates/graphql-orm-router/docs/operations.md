@@ -87,8 +87,13 @@ is not supported; requests without the supported subprotocol close with 4406.
 - `4401`: obtain a valid token and open a new connection.
 - `4408`: send `connection_init` within the configured deadline and reconnect.
 - `4406`: request the `graphql-transport-ws` subprotocol.
+- `4409`: do not reuse an active operation ID. Duplicate-ID detection precedes
+  payload validation; the connection closes and all its operations are retired.
 - HTTP `429`: honor `Retry-After`, add jitter, and increase exponential
   backoff. Do not immediately reconnect.
+- `SUBSCRIPTION_CONTINUITY_LOST`: frames were dropped or skipped. The sanitized
+  `error` is terminal: resubscribe and refetch authoritative state; no replay or
+  trailing `complete` is provided. The connection remains usable.
 - `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; the `error` frame is
   terminal. Open a fresh connection and resubscribe without waiting for `complete`.
 - `SERVICE_UNAVAILABLE` or `1011`: back off, query authoritative state, and
@@ -105,6 +110,50 @@ the public socket or unrelated sibling operations. Loss of the private graph
 bridge is connection-scoped and closes the public socket with 1011. The first
 terminal cause wins, so a client frame/protocol failure is not replaced by a
 secondary bridge close.
+
+Router-owned loss is local. The bounded 32-frame bridge queues subscription
+frames only: an overflow retires the operation identified by that frame.
+One-shot query/mutation results and connection controls bypass this queue.
+Public socket write backpressure retires only that connection's subscriptions.
+Neither path publishes a runtime loss signal or terminates sibling one-shot work.
+Operation classification uses the executable AST and `operationName`; requests
+without an explicit, unambiguous operation fail before execution.
+
+Hive 0.2.19's synchronous dropped/lagged metric calls are observed directly,
+independently of exporters, sampling, or polling intervals. Exported metrics are
+preserved. The pinned counters expose only transport, with no operation, field,
+subgraph, or upstream-buffer identity. HTTP-client broadcast lag is excluded
+because it cannot skip frames for WebSocket receivers. Otherwise an unattributed
+Hive loss conservatively invalidates active **subscriptions** on the runtime.
+Queries and mutations are never terminated by continuity loss.
+
+The fallback coalesces loss reports until the counters have been quiet for one
+second. During this interval new subscriptions receive terminal
+`SUBSCRIPTION_CONTINUITY_LOST` without starting upstream work; queries and
+mutations continue normally. Closing admission prevents suppressed notifications
+from hiding losses in newly started streams. Clients should use jittered backoff,
+then resubscribe and refetch. Quiet active streams are notified without waiting
+for a later source frame. Operation generations suppress all frames after error.
+
+Residual denial-of-service consideration: one subscriber's lag or one upstream
+burst can still end other subscribers' streams through the unattributed Hive
+fallback. A sustained source can keep subscription admission paused. Debouncing
+limits termination waves but cannot remove this shared availability risk.
+Enforce connection/operation limits, rate-limit subscription starts at ingress,
+use jittered reconnect backoff, alert on dropped/lagged counters, and isolate
+untrusted subscription workloads in separate router instances where necessary.
+An upstream operation/subscriber-scoped loss hook is required to eliminate this
+cross-subscriber effect; see [#437](https://github.com/Dastari/graphql-orm/issues/437).
+
+Hive's executor and fan-out buffers remain bounded and configurable. Raising
+capacities can absorb bursts but is not a continuity guarantee. Keep alerting on
+both counters and tune budgets from observed traffic. The adapter is tested
+against the pinned counters; revalidate those hooks before upgrading Hive.
+This terminal-error contract covers the public `graphql-transport-ws` gateway.
+Hive-native HTTP SSE/multipart subscription streams bypass that gateway and do
+not yet provide the same guarantee; use WebSockets when continuity is required.
+That separate transport defect and the upstream operation-scoped hook are tracked
+in [#437](https://github.com/Dastari/graphql-orm/issues/437).
 
 A successful one-shot query or mutation over WebSocket emits `next` and then
 `complete` with the original ID. Retire that ID on `complete`. If the socket is
