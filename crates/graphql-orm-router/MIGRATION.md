@@ -10,6 +10,15 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.8.2 to 0.8.3: terminal WebSocket errors
+
+Treat an operation `error` as terminal immediately; do not wait for `complete`.
+For `SUBSCRIPTION_SCHEMA_RELOAD`, open a fresh connection and resubscribe.
+A client ID may be reused after `error`, although retired connections still
+reject new operations with `SERVICE_UNAVAILABLE`. GraphQL errors inside `next`
+remain execution results and can be followed by `complete`. No data migration
+or public Rust API change is needed.
+
 ## 0.8.1 to 0.8.2: owned wire-test listener addresses
 
 No caller changes or data migration are needed. Wire-test children bind port zero

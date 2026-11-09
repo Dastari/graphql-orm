@@ -10,6 +10,14 @@ supersedes: []
 
 # Changelog
 
+## 0.8.3 (unreleased)
+
+- Fix #339: `graphql-transport-ws` operation `error` is terminal, including
+  `SUBSCRIPTION_SCHEMA_RELOAD`. Suppress subsequent bridge frames and release
+  operation accounting immediately. Unique bridge IDs protect reused client IDs
+  from late frames. Normal `next` error payloads still end with `complete`.
+  This is a protocol compliance bug fix; no public API or data migration.
+
 ## 0.8.2 (unreleased)
 
 - Extend the executable subscription wire test to pin sanitized `FORBIDDEN`

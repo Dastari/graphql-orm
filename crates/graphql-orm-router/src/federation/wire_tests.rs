@@ -330,12 +330,21 @@ async fn run_wire_app() {
     )
     .await
     .unwrap();
+    let internal = crate::subscriptions::InternalSubscriptionEndpoint::generate().unwrap();
     let paths = hive_router::RouterPaths::new(
         config.graphql_path().to_owned(),
-        config.websocket_path().map(str::to_owned),
+        Some(internal.path.clone()),
         None,
     );
     let listener = bind_test_listener("127.0.0.1:0".parse().unwrap(), "public").unwrap();
+    let gateway = crate::subscriptions::SubscriptionGateway::new(
+        SubscriptionConfig::default(),
+        Arc::new(TestAuthenticationProvider),
+        internal,
+        listener.local_addr().unwrap(),
+        Arc::new(crate::metrics::RouterMetrics::default()),
+    );
+    let public_path = config.websocket_path().unwrap().to_owned();
     web::HttpServer::new(async move || {
         web::App::new()
             .middleware(hive_router::plugins::plugins_service::PluginService::new(
@@ -347,7 +356,22 @@ async fn run_wire_app() {
             .state(state.clone())
             .state(state.telemetry_context.clone())
             .state(schema.callback_subscriptions.clone())
-            .configure(|routes| hive_router::configure_ntex_app(routes, &paths, None))
+            .configure(|routes| {
+                let gateway = gateway.clone();
+                routes.service(
+                    web::resource(public_path.as_str())
+                        .guard(web::guard::fn_guard(|head| {
+                            head.headers()
+                                .get(hive_router::ntex::http::header::UPGRADE)
+                                .and_then(|value| value.to_str().ok())
+                                .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+                        }))
+                        .route(web::get().to(move |request| {
+                            crate::subscriptions::websocket_index(request, gateway.clone())
+                        })),
+                );
+                hive_router::configure_ntex_app(routes, &paths, None);
+            })
     })
     .workers(1)
     .listen(listener)
@@ -1844,6 +1868,15 @@ fn authenticated_polling_reloads_graph_and_policy_as_one_subscription_snapshot()
         "websocket"
     );
 
+    products.quiet.enabled.store(true, Ordering::Release);
+    selected_v1.subscribe(
+        "quiet-reload",
+        "subscription { productChanged(id: \"failure\") { id } }",
+    );
+    wait_until("quiet upstream registered before reload", || {
+        products.quiet.active.load(Ordering::Acquire) == 1
+    });
+
     products_sdl.set(PRODUCTS_V2, "products-sdl-v2", 200);
     // Publish the matching policy descriptor separately. A poll that observes
     // only one side is an incomplete candidate and must retain v1.
@@ -1870,15 +1903,23 @@ fn authenticated_polling_reloads_graph_and_policy_as_one_subscription_snapshot()
     assert!(products_protocol.fetches() >= 2);
     assert!(products_protocol.conditional_fetches() > 0);
 
-    let reload = selected_v1.wait_for_operation_message("v1", "error");
-    assert_eq!(
-        reload["payload"][0]["extensions"]["code"],
-        "SUBSCRIPTION_SCHEMA_RELOAD"
+    let mut retired = std::collections::BTreeSet::new();
+    for _ in 0..2 {
+        let reload = selected_v1.next_message();
+        assert_eq!(reload["type"], "error", "{reload}");
+        assert_eq!(
+            reload["payload"][0]["extensions"]["code"],
+            "SUBSCRIPTION_SCHEMA_RELOAD"
+        );
+        retired.insert(reload["id"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(retired, ["quiet-reload".to_owned(), "v1".to_owned()].into());
+    wait_until(
+        "reload releases quiet upstream without client complete",
+        || products.quiet.active.load(Ordering::Acquire) == 0,
     );
-    assert_eq!(
-        selected_v1.wait_for_operation_message("v1", "complete")["id"],
-        "v1"
-    );
+    products.quiet.enabled.store(false, Ordering::Release);
+    selected_v1.assert_terminal_error_and_reuse("v1");
     selected_v1.subscribe(
         "stale",
         "subscription { productChanged(id: \"p1\") { id } }",
@@ -2107,10 +2148,9 @@ fn hive_websocket_subscription_retires_and_reconnects_on_graph_replacement() {
     let reload = first_connection.wait_for_operation_message("v1", "error");
     assert_eq!(
         reload["payload"][0]["extensions"]["code"], "SUBSCRIPTION_SCHEMA_RELOAD",
-        "a retained graph must announce replacement before completing the operation"
+        "a retained graph must terminate the operation with a reload error"
     );
-    let complete = first_connection.wait_for_operation_message("v1", "complete");
-    assert_eq!(complete["id"], "v1");
+    first_connection.assert_terminal_error_and_reuse("v1");
 
     first_connection.subscribe(
         "stale",
@@ -2192,9 +2232,7 @@ impl TestWebSocket {
     }
 
     fn connection_init(&mut self) {
-        self.send_json(&json!({"type": "connection_init"}));
-        let ack = self.next_message();
-        assert_eq!(ack["type"], "connection_ack");
+        self.connection_init_bearer("product-events");
     }
 
     fn connection_init_bearer(&mut self, token: &str) {
@@ -2255,6 +2293,25 @@ impl TestWebSocket {
             if message["id"] == id && message["type"] == message_type {
                 return message;
             }
+        }
+    }
+
+    // A second subscribe traverses the same ordered bridge after the reload.
+    // Read the very next frame: a trailing complete must fail, not be skipped by
+    // wait_for_operation_message. Reusing the ID also proves error cleanup.
+    fn assert_terminal_error_and_reuse(&mut self, id: &str) {
+        for _ in 0..2 {
+            self.subscribe(id, "subscription { productChanged(id: \"p1\") { id } }");
+            let message = self.next_message();
+            assert_eq!(message["id"], id, "{message}");
+            assert_eq!(
+                message["type"], "error",
+                "no complete may follow error: {message}"
+            );
+            assert_eq!(
+                message["payload"][0]["extensions"]["code"],
+                "SERVICE_UNAVAILABLE"
+            );
         }
     }
 

@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::BTreeSet,
+    collections::BTreeMap,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     rc::{Rc, Weak},
@@ -229,7 +229,8 @@ struct ConnectionState {
     gateway: Arc<SubscriptionGateway>,
     phase: ConnectionPhase,
     internal_sink: Option<ws::WsSink>,
-    operations: BTreeSet<String>,
+    operations: BTreeMap<String, String>,
+    next_operation: u64,
     permit: Option<ConnectionPermit>,
 }
 
@@ -240,7 +241,7 @@ struct ConnectionTermination {
 
 impl ConnectionState {
     fn remove_operation(&mut self, id: &str) {
-        if self.operations.remove(id) {
+        if self.operations.remove(id).is_some() {
             self.gateway.remove_operations(1);
         }
     }
@@ -341,7 +342,8 @@ async fn create_connection_service(
         gateway: gateway.clone(),
         phase: ConnectionPhase::WaitingForInit,
         internal_sink: None,
-        operations: BTreeSet::new(),
+        operations: BTreeMap::new(),
+        next_operation: 0,
         permit: Some(permit),
     }));
 
@@ -640,9 +642,8 @@ async fn forward_internal_messages(
         };
         match frame {
             ws::Frame::Text(bytes) => {
-                observe_server_message(&bytes, &state);
-                let Ok(text) = String::from_utf8(bytes.to_vec()) else {
-                    break;
+                let Some(text) = public_server_message(&bytes, &state) else {
+                    continue;
                 };
                 if external_sink
                     .send(ws::Message::Text(text.into()))
@@ -689,24 +690,32 @@ async fn forward_internal_messages(
     }
 }
 
-fn observe_server_message(bytes: &[u8], state: &SharedConnectionState) {
-    let Ok(message) = serde_json::from_slice::<Value>(bytes) else {
-        return;
-    };
+// Hive can emit complete after an error. Translate each bridge generation back to
+// its public ID only while active: error is terminal, even if that ID is reused.
+fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<String> {
+    let mut message = serde_json::from_slice::<Value>(bytes).ok()?;
+    let mut state = state.borrow_mut();
     match message.get("type").and_then(Value::as_str) {
         Some("connection_ack") => {
-            let mut state = state.borrow_mut();
             if state.phase == ConnectionPhase::Connecting {
                 state.phase = ConnectionPhase::Ready;
             }
         }
-        Some("error" | "complete") => {
-            if let Some(id) = message.get("id").and_then(Value::as_str) {
-                state.borrow_mut().remove_operation(id);
+        Some(kind @ ("next" | "error" | "complete")) => {
+            let internal_id = message.get("id")?.as_str()?;
+            let id = state
+                .operations
+                .iter()
+                .find(|(_, internal)| internal.as_str() == internal_id)
+                .map(|(id, _)| id.clone())?;
+            if kind != "next" {
+                state.remove_operation(&id);
             }
+            message["id"] = Value::String(id);
         }
         _ => {}
     }
+    Some(message.to_string())
 }
 
 async fn forward_subscribe(
@@ -731,13 +740,19 @@ async fn forward_subscribe(
     }
     {
         let mut state = state.borrow_mut();
-        if state.operations.contains(&id) {
+        if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
         if state.operations.len() >= state.gateway.config.max_operations_per_connection {
             return Some(operation_limit_error(&id));
         }
-        state.operations.insert(id.clone());
+        let Some(next) = state.next_operation.checked_add(1) else {
+            return state.terminate_with_public_close(1011, "Operation sequence exhausted");
+        };
+        state.next_operation = next;
+        let internal_id = next.to_string();
+        message["id"] = Value::String(internal_id.clone());
+        state.operations.insert(id.clone(), internal_id);
         state.gateway.add_operation();
     }
     let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
@@ -825,8 +840,8 @@ fn inject_operation_variables(message: &mut Value, internal_max_bytes: usize) {
 }
 
 async fn forward_complete(
-    message: Value,
-    raw: &str,
+    mut message: Value,
+    _raw: &str,
     state: SharedConnectionState,
 ) -> Option<ws::Message> {
     if state.borrow().phase != ConnectionPhase::Ready {
@@ -839,11 +854,14 @@ async fn forward_complete(
             .borrow_mut()
             .terminate_with_public_close(4400, "Subscription ID is required");
     };
+    let internal_id = state.borrow().operations.get(id).cloned();
     state.borrow_mut().remove_operation(id);
+    let internal_id = internal_id?;
+    message["id"] = Value::String(internal_id);
     let internal = state.borrow().internal_sink.clone();
     if let Some(internal) = internal
         && internal
-            .send(ws::Message::Text(raw.to_owned().into()))
+            .send(ws::Message::Text(message.to_string().into()))
             .await
             .is_ok()
     {
@@ -879,6 +897,60 @@ fn close_message(code: u16, description: &str) -> ws::Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct UnusedAuthentication;
+
+    impl AuthenticationProvider for UnusedAuthentication {
+        fn authenticate_bearer(
+            &self,
+            _: &str,
+        ) -> Result<crate::AuthenticatedPrincipal, crate::AuthenticationError> {
+            unreachable!("frame translation does not authenticate")
+        }
+    }
+
+    #[test]
+    fn terminal_error_releases_state_and_drops_late_frames_after_id_reuse() {
+        let gateway = SubscriptionGateway::new(
+            SubscriptionConfig::default(),
+            Arc::new(UnusedAuthentication),
+            InternalSubscriptionEndpoint::generate().unwrap(),
+            "127.0.0.1:12345".parse().unwrap(),
+            Arc::new(RouterMetrics::default()),
+        );
+        let state = Rc::new(RefCell::new(ConnectionState {
+            gateway: gateway.clone(),
+            phase: ConnectionPhase::Ready,
+            internal_sink: None,
+            operations: BTreeMap::from([("client".into(), "1".into())]),
+            next_operation: 1,
+            permit: None,
+        }));
+        gateway.add_operation();
+        let error = json!({"id": "1", "type": "error", "payload": []});
+        let forwarded: Value = serde_json::from_str(
+            &public_server_message(error.to_string().as_bytes(), &state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(forwarded["id"], "client");
+        assert!(state.borrow().operations.is_empty());
+        assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
+
+        state
+            .borrow_mut()
+            .operations
+            .insert("client".into(), "2".into());
+        gateway.add_operation();
+        for kind in ["next", "error", "complete"] {
+            let late = json!({"id": "1", "type": kind});
+            assert!(public_server_message(late.to_string().as_bytes(), &state).is_none());
+        }
+        assert_eq!(gateway.active_operations.load(Ordering::Acquire), 1);
+        let complete = json!({"id": "2", "type": "complete"});
+        assert!(public_server_message(complete.to_string().as_bytes(), &state).is_some());
+        assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn connection_init_accepts_only_one_string_bearer_location() {
