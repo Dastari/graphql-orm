@@ -1,4 +1,4 @@
-error: A GraphQL Input Object type must define one or more input fields.
+error: GraphQLEntity `UpsertNonUniqueExample` has no orderable fields, but generated query and relation APIs require `UpsertNonUniqueExampleOrderByInput`; add #[sortable] to a persisted field (for example the primary key)
  --> tests/ui/upsert_non_unique_target.rs:9:8
   |
 9 | struct UpsertNonUniqueExample {
