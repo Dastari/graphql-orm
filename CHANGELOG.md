@@ -22,6 +22,8 @@ ORM runtime/macros **0.113.0**.
 
 - **Fix:** SQLite introspection matches the reserved `sqlite_` prefix literally and case-insensitively. Populated lookalikes such as `sqliteXcustomer` and `sqlite-customer` remain visible to migration planning; SQLite internal tables remain excluded. Fixes #416.
 
+- **Upgrade warning:** newly visible lookalikes such as `sqliteXcustomer` are treated like other unmanaged tables: default strict plans propose `DROP TABLE` when they are absent from target entities. Default apply refuses, but `allow_destructive: true` deletes the tables and rows. Use `managed_tables_only()` or rename those tables before upgrading, and review plans for renamed unmanaged tables too. The general ownership safeguard is tracked in [#441](https://github.com/Dastari/graphql-orm/issues/441) and is not implemented here. See the 0.113.0 migration guide.
+
 ## 0.112.0
 
 ORM runtime/macros **0.112.0**.
