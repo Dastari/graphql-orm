@@ -10,6 +10,27 @@ supersedes: []
 
 # Migration Guide
 
+## 0.113.0: SQLite internal-name introspection
+
+**Upgrade warning: newly visible unmanaged tables can be dropped by strict plans.**
+
+SQLite tables whose names only looked like internal `sqlite_` tables, such as
+`sqliteXcustomer` and `sqlite-customer` (including ASCII case variants), are now
+visible to introspection. Like any other unmanaged table, a table absent from
+the target entity metadata is proposed for `DROP TABLE` by default strict
+`PlanOptions`. Default apply refuses that destructive plan, but applying with
+`allow_destructive: true` **drops the table and its rows**.
+
+Use `PlanOptions::managed_tables_only()` or rename these tables before upgrading.
+Renaming removes the accidental introspection exemption too: keep renamed
+unmanaged tables out of destructive strict plans. Review generated plans before
+applying them. The general unmanaged-table ownership safeguard is tracked in
+[#441](https://github.com/Dastari/graphql-orm/issues/441); this release does not
+implement that safeguard.
+
+Upgrade runtime and macros together. The literal reserved `sqlite_` prefix
+remains excluded case-insensitively. No data conversion is required.
+
 ## 0.111.0 to 0.112.0: isolated consumer fixture builds
 
 Upgrade ORM/macros together. No API or data migration is needed. Consumer

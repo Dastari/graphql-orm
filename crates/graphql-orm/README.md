@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.113.0 fixes SQLite internal-prefix introspection so user table
+lookalikes remain visible to migrations. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01130-sqlite-internal-name-introspection).
+
 SQLite column/check/FK rebuilds preserve live DDL and row identity or refuse safely.
 
 Version 0.112.0 keeps consumer fixture builds inside the caller’s `CARGO_TARGET_DIR/fixtures`, retaining workspace `target/fixtures` when unset. Upgrade ORM/macros together; no API or data migration is needed.
