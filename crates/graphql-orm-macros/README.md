@@ -12,6 +12,8 @@ supersedes: []
 
 SQLite column/check/FK rebuilds preserve live DDL and row identity or refuse safely.
 
+Version 0.112.0 keeps consumer fixture builds inside the caller’s `CARGO_TARGET_DIR/fixtures`, retaining workspace `target/fixtures` when unset. Upgrade ORM/macros together; no API or data migration is needed.
+
 Version 0.111.0 corrects the MSSQL composite-key SDL regression assertion and adds CI execution coverage. Generated code and runtime behavior are unchanged; upgrade ORM/macros together. No data migration is needed.
 
 Version 0.109.0 refreshes standalone fixture lockfiles for router 0.8.3.

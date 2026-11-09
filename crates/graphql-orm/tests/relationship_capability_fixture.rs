@@ -1,5 +1,8 @@
 #![cfg(feature = "sqlite")]
 
+#[path = "support/fixture_target.rs"]
+mod fixture_target;
+
 #[test]
 fn pascal_relationship_semantics_compile_as_a_complete_query_capability() {
     let manifest = concat!(
@@ -7,13 +10,7 @@ fn pascal_relationship_semantics_compile_as_a_complete_query_capability() {
         "/../graphql-orm-macros/fixtures/relationship-capability/Cargo.toml"
     );
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    // Every fixture workspace builds into one shared directory, so dependency
-    // builds they have in common are compiled once.
-    let target_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("runtime crate must be inside the workspace")
-        .join("target/fixtures");
+    let target_dir = fixture_target::target_dir();
     let status = std::process::Command::new(cargo)
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
