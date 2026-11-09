@@ -33,6 +33,7 @@ const MAX_AUTHORIZATION_VARIABLE_VALUE_BYTES: usize = 1024;
 pub(crate) struct InternalSubscriptionEndpoint {
     pub(crate) path: String,
     secret: String,
+    pub(crate) continuity: crate::subscription_continuity::Continuity,
 }
 
 impl InternalSubscriptionEndpoint {
@@ -51,6 +52,7 @@ impl InternalSubscriptionEndpoint {
         Ok(Self {
             path: format!("/_graphql-orm-router/{}/websocket", &secret[..32]),
             secret,
+            continuity: Default::default(),
         })
     }
 
@@ -229,9 +231,14 @@ struct ConnectionState {
     gateway: Arc<SubscriptionGateway>,
     phase: ConnectionPhase,
     internal_sink: Option<ws::WsSink>,
-    operations: BTreeMap<String, String>,
+    operations: BTreeMap<String, Operation>,
     next_operation: u64,
     permit: Option<ConnectionPermit>,
+}
+
+struct Operation {
+    internal_id: String,
+    epoch: u64,
 }
 
 struct ConnectionTermination {
@@ -346,6 +353,12 @@ async fn create_connection_service(
         next_operation: 0,
         permit: Some(permit),
     }));
+
+    spawn_continuity_watch(
+        Rc::downgrade(&state),
+        sink.clone(),
+        gateway.internal.continuity.subscribe(),
+    );
 
     if accepted_subprotocol {
         spawn_connection_init_timeout(
@@ -599,7 +612,25 @@ async fn connect_internal(
     let client = builder.build(SharedCfg::default()).await.map_err(|_| ())?;
     let connection = client.connect().await.map_err(|_| ())?;
     let internal_sink = connection.sink();
-    let receiver = connection.seal().receiver();
+    // ntex's receiver() uses an unbounded queue. Keep the bridge bounded and
+    // make a full queue observable through the same loss epoch as Hive.
+    let (tx, receiver) = hive_router::tokio::sync::mpsc::channel(32);
+    let continuity = gateway.internal.continuity.clone();
+    rt::spawn(async move {
+        let _ = connection
+            .seal()
+            .start(fn_service(move |frame| {
+                let result = tx.try_send(Ok(frame));
+                if matches!(
+                    result,
+                    Err(hive_router::tokio::sync::mpsc::error::TrySendError::Full(_))
+                ) {
+                    continuity.lost();
+                }
+                async { Ok::<_, ()>(None) }
+            }))
+            .await;
+    });
     state.borrow_mut().internal_sink = Some(internal_sink.clone());
     let init = json!({
         "type": "connection_init",
@@ -622,7 +653,7 @@ async fn connect_internal(
 }
 
 async fn forward_internal_messages(
-    receiver: hive_router::ntex::channel::mpsc::Receiver<
+    mut receiver: hive_router::tokio::sync::mpsc::Receiver<
         Result<ws::Frame, hive_router::ntex::ws::error::WsError<()>>,
     >,
     internal_sink: ws::WsSink,
@@ -642,6 +673,9 @@ async fn forward_internal_messages(
         };
         match frame {
             ws::Frame::Text(bytes) => {
+                if external_sink.io().is_wr_backpressure() {
+                    state.borrow().gateway.internal.continuity.lost();
+                }
                 let Some(text) = public_server_message(&bytes, &state) else {
                     continue;
                 };
@@ -706,8 +740,20 @@ fn public_server_message(bytes: &[u8], state: &SharedConnectionState) -> Option<
             let id = state
                 .operations
                 .iter()
-                .find(|(_, internal)| internal.as_str() == internal_id)
+                .find(|(_, operation)| operation.internal_id == internal_id)
                 .map(|(id, _)| id.clone())?;
+            if state.operations[&id].epoch != state.gateway.internal.continuity.epoch() {
+                if let Some(internal) = state.internal_sink.clone() {
+                    let complete = json!({"id": internal_id, "type": "complete"});
+                    rt::spawn(async move {
+                        let _ = internal
+                            .send(ws::Message::Text(complete.to_string().into()))
+                            .await;
+                    });
+                }
+                state.remove_operation(&id);
+                return Some(continuity_error(&id).to_string());
+            }
             if kind != "next" {
                 state.remove_operation(&id);
             }
@@ -752,7 +798,10 @@ async fn forward_subscribe(
         state.next_operation = next;
         let internal_id = next.to_string();
         message["id"] = Value::String(internal_id.clone());
-        state.operations.insert(id.clone(), internal_id);
+        let epoch = state.gateway.internal.continuity.epoch();
+        state
+            .operations
+            .insert(id.clone(), Operation { internal_id, epoch });
         state.gateway.add_operation();
     }
     let internal_max_bytes = state.borrow().gateway.config.max_client_message_bytes;
@@ -854,7 +903,11 @@ async fn forward_complete(
             .borrow_mut()
             .terminate_with_public_close(4400, "Subscription ID is required");
     };
-    let internal_id = state.borrow().operations.get(id).cloned();
+    let internal_id = state
+        .borrow()
+        .operations
+        .get(id)
+        .map(|operation| operation.internal_id.clone());
     state.borrow_mut().remove_operation(id);
     let internal_id = internal_id?;
     message["id"] = Value::String(internal_id);
@@ -894,6 +947,64 @@ fn close_message(code: u16, description: &str) -> ws::Message {
     }))
 }
 
+fn continuity_error(id: &str) -> Value {
+    json!({"id": id, "type": "error", "payload": [{
+        "message": "Subscription continuity lost; resubscribe and refetch",
+        "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}
+    }]})
+}
+
+fn spawn_continuity_watch(
+    state: Weak<RefCell<ConnectionState>>,
+    sink: ws::WsSink,
+    mut receiver: hive_router::tokio::sync::watch::Receiver<u64>,
+) {
+    rt::spawn(async move {
+        loop {
+            hive_router::tokio::select! {
+                result = receiver.changed() => if result.is_err() { break; },
+                _ = sink.on_disconnect() => break,
+            }
+            let Some(state) = state.upgrade() else {
+                break;
+            };
+            let epoch = *receiver.borrow_and_update();
+            let (ids, internal) = {
+                let mut state = state.borrow_mut();
+                if state.phase == ConnectionPhase::Closed {
+                    break;
+                }
+                let ids = state
+                    .operations
+                    .iter()
+                    .filter(|(_, operation)| operation.epoch != epoch)
+                    .map(|(id, operation)| (id.clone(), operation.internal_id.clone()))
+                    .collect::<Vec<_>>();
+                for (id, _) in &ids {
+                    state.remove_operation(id);
+                }
+                (ids, state.internal_sink.clone())
+            };
+            for (id, internal_id) in ids {
+                if sink
+                    .send(ws::Message::Text(continuity_error(&id).to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    state.borrow_mut().terminate_and_close_internal();
+                    return;
+                }
+                if let Some(internal) = &internal {
+                    let complete = json!({"id": internal_id, "type": "complete"});
+                    let _ = internal
+                        .send(ws::Message::Text(complete.to_string().into()))
+                        .await;
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -912,6 +1023,15 @@ mod tests {
 
     #[test]
     fn terminal_error_releases_state_and_drops_late_frames_after_id_reuse() {
+        assert_terminal_error(false);
+    }
+
+    #[test]
+    fn continuity_loss_replaces_complete_and_drops_late_frames_after_id_reuse() {
+        assert_terminal_error(true);
+    }
+
+    fn assert_terminal_error(continuity_lost: bool) {
         let gateway = SubscriptionGateway::new(
             SubscriptionConfig::default(),
             Arc::new(UnusedAuthentication),
@@ -923,24 +1043,45 @@ mod tests {
             gateway: gateway.clone(),
             phase: ConnectionPhase::Ready,
             internal_sink: None,
-            operations: BTreeMap::from([("client".into(), "1".into())]),
+            operations: BTreeMap::from([(
+                "client".into(),
+                Operation {
+                    internal_id: "1".into(),
+                    epoch: 0,
+                },
+            )]),
             next_operation: 1,
             permit: None,
         }));
         gateway.add_operation();
-        let error = json!({"id": "1", "type": "error", "payload": []});
+        if continuity_lost {
+            gateway.internal.continuity.lost();
+        }
+        let error = if continuity_lost {
+            json!({"id": "1", "type": "complete"})
+        } else {
+            json!({"id": "1", "type": "error", "payload": []})
+        };
         let forwarded: Value = serde_json::from_str(
             &public_server_message(error.to_string().as_bytes(), &state).unwrap(),
         )
         .unwrap();
         assert_eq!(forwarded["id"], "client");
+        if continuity_lost {
+            assert_eq!(forwarded, continuity_error("client"));
+        } else {
+            assert_eq!(forwarded["type"], "error");
+        }
         assert!(state.borrow().operations.is_empty());
         assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
 
-        state
-            .borrow_mut()
-            .operations
-            .insert("client".into(), "2".into());
+        state.borrow_mut().operations.insert(
+            "client".into(),
+            Operation {
+                internal_id: "2".into(),
+                epoch: gateway.internal.continuity.epoch(),
+            },
+        );
         gateway.add_operation();
         for kind in ["next", "error", "complete"] {
             let late = json!({"id": "1", "type": kind});
@@ -948,7 +1089,11 @@ mod tests {
         }
         assert_eq!(gateway.active_operations.load(Ordering::Acquire), 1);
         let complete = json!({"id": "2", "type": "complete"});
-        assert!(public_server_message(complete.to_string().as_bytes(), &state).is_some());
+        let forwarded: Value = serde_json::from_str(
+            &public_server_message(complete.to_string().as_bytes(), &state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(forwarded["type"], "complete");
         assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
     }
 

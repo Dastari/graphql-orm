@@ -355,7 +355,7 @@ impl PreparedRouter {
                 }
             };
         let hive_config = hive_config.into_static();
-        let telemetry =
+        let mut telemetry =
             hive_router::telemetry::Telemetry::init_global(hive_config).map_err(|error| {
                 remove_plugin_runtime(runtime_id);
                 RouterError::new(
@@ -363,6 +363,9 @@ impl PreparedRouter {
                     format!("failed to initialize router telemetry: {error}"),
                 )
             })?;
+        if let Some(internal) = &internal_subscription {
+            internal.continuity.install(&mut telemetry.context);
+        }
         let mut background_tasks = background_tasks::BackgroundTasksManager::new();
         let configured = hive_router::configure_app_from_config(
             hive_config,

@@ -320,7 +320,9 @@ async fn run_wire_app() {
     let config = load_config(env::var("ROUTER_CONFIG_FILE_PATH").ok())
         .unwrap()
         .into_static();
-    let telemetry = hive_router::telemetry::Telemetry::init_global(config).unwrap();
+    let mut telemetry = hive_router::telemetry::Telemetry::init_global(config).unwrap();
+    let internal = crate::subscriptions::InternalSubscriptionEndpoint::generate().unwrap();
+    internal.continuity.install(&mut telemetry.context);
     let mut tasks = background_tasks::BackgroundTasksManager::new();
     let (state, schema) = hive_router::configure_app_from_config(
         config,
@@ -330,7 +332,6 @@ async fn run_wire_app() {
     )
     .await
     .unwrap();
-    let internal = crate::subscriptions::InternalSubscriptionEndpoint::generate().unwrap();
     let paths = hive_router::RouterPaths::new(
         config.graphql_path().to_owned(),
         Some(internal.path.clone()),
@@ -2120,6 +2121,111 @@ fn authenticated_preparation_rejects_stale_policy_metadata_without_binding() {
 }
 
 #[test]
+fn burst_subscription_is_complete_or_terminally_reports_continuity_loss() {
+    assert_burst_continuity(false);
+}
+
+#[test]
+fn burst_loss_notifies_a_quiet_tail_without_waiting_for_another_source_frame() {
+    assert_burst_continuity(true);
+}
+
+fn assert_burst_continuity(quiet_tail: bool) {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    products.quiet.burst.store(true, Ordering::Release);
+    products
+        .quiet
+        .burst_quiet_tail
+        .store(quiet_tail, Ordering::Release);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    let products_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "products",
+        products.endpoint(),
+        products_sdl.endpoint(),
+        authenticated_product_operations(false),
+    ));
+    let reviews_protocol = LoopbackProtocol::start(protocol_descriptor(
+        "reviews",
+        reviews.endpoint(),
+        reviews_sdl.endpoint(),
+        Vec::new(),
+    ));
+    let mut router = TestRouter::spawn_authenticated_subscriptions(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+        products_protocol.endpoint(),
+        reviews_protocol.endpoint(),
+    );
+    router.wait_until_ready();
+    let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
+    socket.connection_init();
+    socket.subscribe(
+        "burst",
+        "subscription { productChanged(id: \"p1\") { id name } }",
+    );
+    let mut received = Vec::new();
+    loop {
+        let message = socket.next_message();
+        assert_eq!(message["id"], "burst", "{message}");
+        match message["type"].as_str().unwrap() {
+            "next" => received.push(
+                message["payload"]["data"]["productChanged"]["name"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap(),
+            ),
+            "complete" => {
+                assert!(!quiet_tail, "a quiet source cannot complete");
+                assert_eq!(received, (0..1000).collect::<Vec<_>>(), "silent loss");
+                break;
+            }
+            "error" => {
+                assert_eq!(
+                    message["payload"],
+                    json!([{
+                        "message": "Subscription continuity lost; resubscribe and refetch",
+                        "extensions": {"code": "SUBSCRIPTION_CONTINUITY_LOST"}
+                    }])
+                );
+                break;
+            }
+            _ => panic!("unexpected frame: {message}"),
+        }
+    }
+    // The ordered bridge must suppress every late next/complete. A one-shot
+    // sibling supplies a positive barrier and proves the socket stays usable.
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    loop {
+        socket.subscribe("barrier", "query { product(id: \"p1\") { id } }");
+        let barrier = socket.next_message();
+        assert_eq!(barrier["id"], "barrier", "late burst frame: {barrier}");
+        if barrier["type"] == "next" {
+            let complete = socket.next_message();
+            assert_eq!(complete["id"], "barrier", "{complete}");
+            assert_eq!(complete["type"], "complete", "{complete}");
+            break;
+        }
+        // Draining already queued source frames can report further loss while
+        // cancellation travels upstream. These must also be terminal, and the
+        // same public ID must become usable once that pressure subsides.
+        assert_eq!(barrier["type"], "error", "{barrier}");
+        assert_eq!(
+            barrier["payload"][0]["extensions"]["code"], "SUBSCRIPTION_CONTINUITY_LOST",
+            "{barrier}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "burst cancellation did not settle"
+        );
+    }
+}
+
+#[test]
 fn hive_websocket_subscription_retires_and_reconnects_on_graph_replacement() {
     let products = LoopbackSubgraph::start(SubgraphKind::Products);
     let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
@@ -2868,6 +2974,8 @@ enum SubgraphKind {
 
 #[derive(Default)]
 struct QuietSubscriptions {
+    burst: AtomicBool,
+    burst_quiet_tail: AtomicBool,
     enabled: AtomicBool,
     active: AtomicUsize,
     started: AtomicUsize,
@@ -3495,6 +3603,33 @@ fn handle_subgraph(stream: TcpStream, kind: SubgraphKind, state: SubgraphHandler
         } else {
             ("productChanged", "v1")
         };
+        if state.quiet.burst.load(Ordering::Acquire) {
+            let mut stream = request.stream;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+            for sequence in 0..1000 {
+                let event = json!({"data": {field: {"id": "p1", "name": sequence.to_string()}}});
+                if writeln!(stream, "event: next\ndata: {event}\n").is_err() {
+                    break;
+                }
+            }
+            if state.quiet.burst_quiet_tail.load(Ordering::Acquire) {
+                let _ = stream.flush();
+                while !state.stopping.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(25));
+                    if stream
+                        .write_all(b": heartbeat\n\n")
+                        .and_then(|_| stream.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                return;
+            }
+            let _ = stream.write_all(b"event: complete\ndata: {}\n\n");
+            let _ = stream.flush();
+            return;
+        }
         let event = json!({"data": {field: {"id": "p1", "name": name}}});
         let _ = write_sse_subscription(request.stream, &event, &state.stopping);
         return;
@@ -3617,6 +3752,24 @@ fn handle_subgraph_websocket(
                 } else {
                     "productChanged"
                 };
+                if state.quiet.burst.load(Ordering::Acquire) {
+                    for sequence in 0..1000 {
+                        write_server_websocket_json(
+                            &mut request.stream,
+                            &json!({
+                                "type": "next", "id": id,
+                                "payload": {"data": {field: {"id": "p1", "name": sequence.to_string()}}}
+                            }),
+                        )?;
+                    }
+                    if !state.quiet.burst_quiet_tail.load(Ordering::Acquire) {
+                        write_server_websocket_json(
+                            &mut request.stream,
+                            &json!({"type": "complete", "id": id}),
+                        )?;
+                    }
+                    continue;
+                }
                 let event = json!({
                     "type": "next",
                     "id": id,

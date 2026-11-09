@@ -10,6 +10,10 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.8.3 to 0.9.0: subscription continuity
+
+Handle terminal `SUBSCRIPTION_CONTINUITY_LOST` by resubscribing and refetching authoritative state. Do not wait for `complete`. Hive 0.2.19 reports loss without operation identity, so all active WebSocket operations on the runtime may receive this error, including unaffected siblings. Query operations may be retried; treat an interrupted mutation as uncertain and use your application idempotency contract. The public connection stays usable. No protocol crate change is required.
+
 ## 0.8.2 to 0.8.3: terminal WebSocket errors
 
 Treat an operation `error` as terminal immediately; do not wait for `complete`.

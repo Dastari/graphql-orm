@@ -89,6 +89,9 @@ is not supported; requests without the supported subprotocol close with 4406.
 - `4406`: request the `graphql-transport-ws` subprotocol.
 - HTTP `429`: honor `Retry-After`, add jitter, and increase exponential
   backoff. Do not immediately reconnect.
+- `SUBSCRIPTION_CONTINUITY_LOST`: frames were dropped or skipped. The sanitized
+  `error` is terminal: resubscribe and refetch authoritative state; no replay or
+  trailing `complete` is provided. The connection remains usable.
 - `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; the `error` frame is
   terminal. Open a fresh connection and resubscribe without waiting for `complete`.
 - `SERVICE_UNAVAILABLE` or `1011`: back off, query authoritative state, and
@@ -105,6 +108,28 @@ the public socket or unrelated sibling operations. Loss of the private graph
 bridge is connection-scoped and closes the public socket with 1011. The first
 terminal cause wins, so a client frame/protocol failure is not replaced by a
 secondary bridge close.
+
+Hive 0.2.19's synchronous dropped/lagged metric calls are observed directly,
+independently of exporters, sampling, or polling intervals. The adapter preserves
+normal exported subscription metrics. These counters have no operation identity:
+any executor overflow or broadcast lag conservatively invalidates **all active
+WebSocket operations on that router runtime**, including unaffected siblings and
+one-shot operations. An interrupted mutation has an uncertain outcome; use an
+application idempotency contract before retrying it. Fresh operations capture the
+new loss epoch and can proceed once pressure subsides. The private bridge has a bounded 32-frame queue;
+a full queue uses the same continuity signal. Watch notifications coalesce loss
+epochs with constant memory. Quiet operations are notified even if no later event
+arrives, and late frames for retired operation generations are discarded.
+
+Hive's executor and fan-out buffers remain bounded and configurable. Raising
+capacities can absorb bursts but is not a continuity guarantee. Keep alerting on
+both counters and tune budgets from observed traffic. The adapter is tested
+against the pinned counters; revalidate those hooks before upgrading Hive.
+This terminal-error contract covers the public `graphql-transport-ws` gateway.
+Hive-native HTTP SSE/multipart subscription streams bypass that gateway and do
+not yet provide the same guarantee; use WebSockets when continuity is required.
+That separate transport defect and the upstream operation-scoped hook are tracked
+in [#437](https://github.com/Dastari/graphql-orm/issues/437).
 
 A successful one-shot query or mutation over WebSocket emits `next` and then
 `complete` with the original ID. Retire that ID on `complete`. If the socket is

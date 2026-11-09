@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## 0.9.0 (unreleased)
+
+- Signal executor overflow, subscriber lag, and bounded gateway overflow with terminal, sanitized `SUBSCRIPTION_CONTINUITY_LOST` errors. Loss detection works without telemetry export; pinned Hive counters lack operation identity, so active WebSocket operations on that runtime are conservatively invalidated. Fixes #359.
+
 ## 0.8.3 (unreleased)
 
 - Fix #339: `graphql-transport-ws` operation `error` is terminal, including

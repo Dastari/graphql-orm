@@ -1,6 +1,6 @@
 [package]
 name = "graphql-orm-router"
-version = "0.8.3"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.90"
 description = "Federated GraphQL router for graphql-orm and project-neutral subgraphs"
@@ -29,6 +29,7 @@ graphql-composition = { workspace = true }
 graphql-orm-router-protocol = { workspace = true }
 hive-router = { workspace = true }
 jsonwebtoken = { workspace = true }
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["metrics"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
