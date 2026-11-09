@@ -98,6 +98,10 @@ async fn populated_column_rebuild_preserves_physical_contract() -> graphql_orm::
             sqlx::query("DELETE FROM probe WHERE id=999")
                 .execute(db.pool())
                 .await?;
+            sqlx::query("CREATE TABLE child(id TEXT PRIMARY KEY NOT NULL,p REFERENCES probe(id) ON UPDATE CASCADE ON DELETE CASCADE)").execute(db.pool()).await?;
+            sqlx::query("INSERT INTO child SELECT 'child',id FROM probe")
+                .execute(db.pool())
+                .await?;
             sqlx::query("CREATE INDEX host_idx ON probe(a)")
                 .execute(db.pool())
                 .await?;
@@ -110,6 +114,11 @@ async fn populated_column_rebuild_preserves_physical_contract() -> graphql_orm::
                 .fetch_one(db.pool())
                 .await?;
             assert_eq!(row, (99, "name".into()));
+            let children: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM child JOIN probe ON child.p=probe.id")
+                    .fetch_one(db.pool())
+                    .await?;
+            assert_eq!(children, 1);
             let live: String =
                 sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='probe'")
                     .fetch_one(db.pool())
