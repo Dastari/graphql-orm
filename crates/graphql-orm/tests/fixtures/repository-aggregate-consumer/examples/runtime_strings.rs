@@ -95,6 +95,7 @@ mod supported {
         .await?;
         let collection_id = CollectionId::new("history")?;
         let schema = RuntimeSchema {
+            repository_only: false,
             format_version: 1,
             collections: vec![RuntimeCollection {
             node_identity: None,

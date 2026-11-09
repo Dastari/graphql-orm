@@ -1332,6 +1332,68 @@ pub(crate) fn has_graphql_object_skip(field: &Field) -> bool {
     })
 }
 
+/// Persisted scalar conversion must follow the owner of the output getter.
+/// ORM-owned getters ignore SimpleObject output flags; delegated and metadata-only
+/// objects must preserve them. Custom visibility/guards cannot be copied to the IR.
+fn scalar_output_is_readable(
+    field: &Field,
+    metadata: &FieldMetadata,
+    owns_output: bool,
+    object_attrs: &[syn::Attribute],
+) -> bool {
+    if !metadata.graphql_readable() || metadata.read_policy.is_some() {
+        return false;
+    }
+    if owns_output {
+        return true;
+    }
+    let restricted = |attrs: &[syn::Attribute], scalar: bool| {
+        attrs
+            .iter()
+            .filter(|attr| attr.path().is_ident("graphql"))
+            .any(|attr| {
+                attr.parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .map_or(true, |options| {
+                    options.iter().any(|option| {
+                        let path = option.path();
+                        // Dynamic visibility or guards are not runtime authority grants.
+                        // Refuse rather than silently stripping those static constraints.
+                        if path.is_ident("guard") {
+                            return true;
+                        }
+                        let boolean_constraint = path.is_ident("visible")
+                            || (scalar
+                                && ["skip", "skip_output", "flatten", "inaccessible"]
+                                    .iter()
+                                    .any(|name| path.is_ident(name)));
+                        if !boolean_constraint {
+                            return false;
+                        }
+                        let boolean = match option {
+                            syn::Meta::Path(_) => Some(true),
+                            syn::Meta::NameValue(value) => match &value.value {
+                                syn::Expr::Lit(literal) => match &literal.lit {
+                                    syn::Lit::Bool(value) => Some(value.value),
+                                    _ => None,
+                                },
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if path.is_ident("visible") {
+                            boolean != Some(true)
+                        } else {
+                            boolean != Some(false)
+                        }
+                    })
+                })
+            })
+    };
+    !restricted(&field.attrs, true) && !restricted(object_attrs, false)
+}
+
 // Resolve target references as generated SQL does. Metadata column names are
 // physical names; PostgreSQL folds only unquoted SQL references.
 fn relation_column_identity(backend: BackendKind, name: &str, reference: bool) -> String {
@@ -4913,6 +4975,14 @@ fn generate_entity_impl(
             }
             None => quote! { None },
         };
+        let is_readable = scalar_output_is_readable(
+            field,
+            &field_meta,
+            !schema_only
+                && !legacy_graphql_complex
+                && !has_repository_entity_attribute(&input.attrs),
+            &input.attrs,
+        );
         let is_filterable = field_meta.filter && field_meta.filterable.is_some();
         let is_sortable = field_meta.sortable && field_meta.order;
         let is_date_time = field_meta.is_date_field;
@@ -4931,6 +5001,7 @@ fn generate_entity_impl(
                 is_primary_key: #is_pk,
                 is_unique: #is_unique,
                 is_generated: #is_generated,
+                is_readable: #is_readable,
                 is_filterable: #is_filterable,
                 is_sortable: #is_sortable,
                 is_date_time: #is_date_time,
@@ -8103,6 +8174,83 @@ mod object_visibility_tests {
                 } else {
                     assert!(result.unwrap_err().to_string().contains("self-target key"));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn scalar_output_metadata_follows_ownership_and_effective_flags() {
+        for (attribute, delegated_readable) in [
+            ("", true),
+            ("#[graphql(skip)]", false),
+            ("#[graphql(skip = true)]", false),
+            ("#[graphql(skip = false)]", true),
+            ("#[graphql(skip_output)]", false),
+            ("#[graphql(skip_output = true)]", false),
+            ("#[graphql(skip_output = false)]", true),
+            ("#[graphql(flatten)]", false),
+            ("#[graphql(flatten = false)]", true),
+            ("#[graphql(visible = false)]", false),
+            ("#[graphql(visible = true)]", true),
+            ("#[graphql(visible = \"visible_to_reader\")]", false),
+            ("#[graphql(guard = \"Guard\")]", false),
+            ("#[graphql(inaccessible)]", false),
+            ("#[graphql(inaccessible = false)]", true),
+            (
+                "#[graphql(derived(name = \"alias\", into = \"String\"))]",
+                true,
+            ),
+            (
+                "#[graphql(skip, derived(name = \"alias\", into = \"String\"))]",
+                false,
+            ),
+            ("#[serde(skip_serializing)]", true),
+            ("#[graphql(skip_input, secret)]", true),
+        ] {
+            let field = syn::Field::parse_named
+                .parse_str(&format!("{attribute} value: String"))
+                .unwrap();
+            let metadata = parse_field_metadata(&field).unwrap();
+            assert_eq!(
+                scalar_output_is_readable(&field, &metadata, false, &[]),
+                delegated_readable,
+                "{attribute}"
+            );
+            assert!(
+                scalar_output_is_readable(&field, &metadata, true, &[]),
+                "{attribute}"
+            );
+            // This shared predicate also describes relation implementation fields.
+            assert!(metadata.graphql_readable(), "{attribute}");
+        }
+        let field: syn::Field = syn::parse_quote!(value: String);
+        let metadata = parse_field_metadata(&field).unwrap();
+        for object in [
+            syn::parse_quote!(#[graphql(visible = false)]),
+            syn::parse_quote!(#[graphql(visible = "visible_to_reader")]),
+            syn::parse_quote!(#[graphql(guard = "Guard")]),
+        ] {
+            assert!(!scalar_output_is_readable(
+                &field,
+                &metadata,
+                false,
+                &[object]
+            ));
+        }
+        for field in [
+            syn::parse_quote!(#[graphql_orm(private)] value: String),
+            syn::parse_quote!(#[graphql_orm(read = false)] value: String),
+            syn::parse_quote!(#[input_only] value: String),
+            syn::parse_quote!(#[graphql_orm(read_policy = "policy")] value: String),
+        ] {
+            let metadata = parse_field_metadata(&field).unwrap();
+            for owns_output in [false, true] {
+                assert!(!scalar_output_is_readable(
+                    &field,
+                    &metadata,
+                    owns_output,
+                    &[]
+                ));
             }
         }
     }

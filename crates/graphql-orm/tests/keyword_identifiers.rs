@@ -386,6 +386,7 @@ fn runtime_definition(extra: bool, required: bool) -> RuntimeSchema {
         fields.push(field("where", RuntimeValueKind::String, true));
     }
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

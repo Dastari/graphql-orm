@@ -14,8 +14,8 @@
 //! fingerprint.
 
 use graphql_orm::graphql::orm::{
-    CollectionId, DeletePolicy, Entity, FieldId, IndexId, RelationCardinality, RelationId,
-    RelationKeyPair, RuntimeCollection, RuntimeDefault, RuntimeField, RuntimeIndex,
+    CollectionId, DatabaseSchema, DeletePolicy, Entity, FieldId, IndexId, RelationCardinality,
+    RelationId, RelationKeyPair, RuntimeCollection, RuntimeDefault, RuntimeField, RuntimeIndex,
     RuntimeOrderDirection, RuntimeOrderTerm, RuntimeRelation, RuntimeSchema,
     RuntimeSchemaDiagnosticCode, RuntimeValueKind,
 };
@@ -557,6 +557,7 @@ fn fixture_runtime_schema() -> RuntimeSchema {
     };
 
     RuntimeSchema {
+        repository_only: false,
         format_version: graphql_orm::graphql::orm::RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![customers, contact_details, customer_notes, note_attachments],
     }
@@ -1169,4 +1170,107 @@ fn representable_static_graph_converts_to_equivalent_physical_target() {
         .unwrap();
     let static_target = SchemaModel::from_entities(&metadata);
     assert_eq!(target.stable_hash(), static_target.stable_hash());
+}
+
+#[derive(GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+#[graphql_entity(table = "hidden_values", plural = "HiddenValues", aggregate = true)]
+pub struct HiddenValues {
+    #[primary_key]
+    pub id: i64,
+    pub public_value: i64,
+    #[graphql_orm(private)]
+    pub private_value: i64,
+    #[graphql_orm(read = false)]
+    pub nonread_value: i64,
+    #[input_only]
+    pub input_value: i64,
+}
+
+#[test]
+fn static_conversion_retains_readability_and_refuses_each_hidden_column() {
+    use graphql_orm::graphql::orm::{ColumnDef, FieldMetadata};
+
+    let metadata = HiddenValues::metadata();
+    for (name, readable) in [
+        ("id", true),
+        ("public_value", true),
+        ("private_value", false),
+        ("nonread_value", false),
+        ("input_value", false),
+    ] {
+        let field = metadata.fields.iter().find(|f| f.name == name).unwrap();
+        assert_eq!(field.is_readable, readable, "{name}");
+        let column = HiddenValues::columns()
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap();
+        assert_eq!(column.is_readable, readable, "{name}");
+    }
+    let diagnostics = RuntimeSchema::from_static_entities(&[metadata]).unwrap_err();
+    assert_eq!(diagnostics.diagnostics().len(), 3);
+    for diagnostic in diagnostics.diagnostics() {
+        assert_eq!(
+            diagnostic.code,
+            RuntimeSchemaDiagnosticCode::UnsupportedCapability
+        );
+        assert!(diagnostic.message.contains("statically unreadable"));
+    }
+    assert!(ColumnDef::text("public").is_readable);
+    let hidden = ColumnDef::integer("hidden").readable(false);
+    assert!(!FieldMetadata::from(&hidden).is_readable);
+
+    // A hidden column anywhere in a related graph refuses the entire graph.
+    // Even if it is not a relation key, there must be no partially converted
+    // schema available to expose it through related objects or aggregates.
+    for name in ["name", "email", "loyalty_points"] {
+        let mut customer = Customer::metadata().clone();
+        customer
+            .fields
+            .iter_mut()
+            .find(|f| f.name == name)
+            .unwrap()
+            .is_readable = false;
+        let mut graph = static_metadata();
+        graph[0] = &customer;
+        let diagnostics = RuntimeSchema::from_static_entities(&graph).unwrap_err();
+        assert!(diagnostics.diagnostics().iter().any(|d| d.code
+            == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+            && d.message.contains("statically unreadable")));
+    }
+}
+
+#[test]
+fn repository_conversion_is_distinct_and_preserves_other_fail_closed_diagnostics() {
+    let normal = RuntimeSchema::from_static_entities(&static_metadata())
+        .unwrap()
+        .validate()
+        .unwrap();
+    let repository =
+        RuntimeSchema::from_static_entities_for_repository(&static_metadata()).unwrap();
+    assert!(repository.repository_only);
+    let repository = repository.validate().unwrap();
+    assert_ne!(normal.fingerprint(), repository.fingerprint());
+    assert_ne!(
+        normal.structural_fingerprint(),
+        repository.structural_fingerprint()
+    );
+    assert!(
+        !serde_json::to_string(normal.schema())
+            .unwrap()
+            .contains("repository_only")
+    );
+    let legacy: RuntimeSchema =
+        serde_json::from_str(&serde_json::to_string(normal.schema()).unwrap()).unwrap();
+    assert!(!legacy.repository_only);
+    assert_eq!(
+        normal.fingerprint(),
+        legacy.validate().unwrap().fingerprint()
+    );
+
+    let mut entity = HiddenValues::metadata().clone();
+    entity.read_policy = Some("owner_only");
+    let diagnostics = RuntimeSchema::from_static_entities_for_repository(&[&entity]).unwrap_err();
+    assert!(diagnostics.diagnostics().iter().any(|d| d.code
+        == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+        && d.message.contains("policy hooks")));
 }

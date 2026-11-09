@@ -180,9 +180,10 @@ and hand-written targets without this metadata fail compilation; rebuild with
 current macros or explicitly implement the trait for a hand-written target.
 Its `COLUMNS` lists physical column names and their actual readability; omitted
 columns fail closed. This metadata does not replace runtime authorization.
-`RuntimeSchema::from_static_entities` still lacks structural readability in its
-runtime field IR; that separate limitation is tracked in
-[issue #390](https://github.com/Dastari/graphql-orm/issues/390).
+`RuntimeSchema::from_static_entities` refuses unreadable columns with
+`UnsupportedCapability`. Trusted internal queries can use the explicit
+repository-only conversion, whose schemas runtime GraphQL refuses to serve; see
+[static conversion](runtime-schema-ir.md#static-conversion).
 
 `GraphQLOperations` generates Changed events carrying the primary key, so every
 primary-key component must be GraphQL-readable. An unreadable primary key is a

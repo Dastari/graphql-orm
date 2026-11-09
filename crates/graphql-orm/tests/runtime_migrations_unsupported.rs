@@ -35,6 +35,7 @@ async fn mssql_owned_migrations_reject_before_pool_acquisition() {
             .unwrap_err(),
     );
     let schema = RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![],
     }

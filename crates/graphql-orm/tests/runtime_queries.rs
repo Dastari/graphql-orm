@@ -40,6 +40,7 @@ fn field(id: &str, kind: RuntimeValueKind, nullable: bool) -> RuntimeField {
 fn schema() -> graphql_orm::graphql::orm::ValidatedRuntimeSchema {
     let id = field("id", RuntimeValueKind::Integer, false);
     RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![RuntimeCollection {
             node_identity: None,

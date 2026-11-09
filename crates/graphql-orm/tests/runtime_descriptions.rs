@@ -135,6 +135,7 @@ fn schema(described: bool) -> RuntimeSchema {
         lines.relations[0].description = Some("Invoice owning the line".into());
     }
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![invoices, lines],
     }

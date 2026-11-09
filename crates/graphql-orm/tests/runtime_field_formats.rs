@@ -55,6 +55,7 @@ fn schema(avatar: Option<RuntimeFieldFormat>) -> RuntimeSchema {
     let mut avatar_field = field("avatar", RuntimeValueKind::Uuid, true);
     avatar_field.format = avatar;
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.125.0
+
+- **Fixed:** bounded session activity uses the explicitly repository-only static conversion, retaining private durable keys for server-authored queries after ORM 0.103.0 made ordinary conversion fail closed. Repository-only schemas cannot compile into runtime GraphQL. No public AI API, persistent schema or data migration change. Related to #390.
+
 ## Unreleased - 0.124.0
 
 - **Added:** optional, typed and bounded Codex read-marker tolerance; default wire bytes and strict admission are unchanged. Unknown effect-capable methods remain refused. See the migration guide for opt-in, method-only tracing and counters, and version readiness (related to #333). No data migration. Fixes #369.

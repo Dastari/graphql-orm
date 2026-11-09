@@ -240,6 +240,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
     });
     Arc::new(
         RuntimeSchema {
+            repository_only: false,
             format_version: 1,
             collections: vec![parent, child],
         }
@@ -1192,4 +1193,127 @@ async fn protected_cursor_is_bound_to_the_callers_filter() {
     assert!(empty.errors.is_empty(), "{:?}", empty.errors);
     #[cfg(feature = "postgres")]
     owned.cleanup().unwrap();
+}
+
+#[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+#[tokio::test]
+async fn static_hidden_columns_refuse_reads_before_permissive_authority() {
+    use graphql_orm_macros::GraphQLSchemaEntity;
+
+    #[derive(
+        GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    )]
+    #[graphql_entity(
+        table = "secrets",
+        plural = "Secrets",
+        aggregate = true,
+        backend = "sqlite"
+    )]
+    struct Secret {
+        #[primary_key]
+        id: i64,
+        public_value: i64,
+        #[graphql_orm(private)]
+        private_value: i64,
+        #[graphql_orm(read = false)]
+        nonread_value: i64,
+        #[input_only]
+        input_value: i64,
+    }
+
+    #[derive(
+        GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    )]
+    #[graphql_entity(table = "holders", plural = "Holders", backend = "sqlite")]
+    struct Holder {
+        #[primary_key]
+        id: i64,
+        secret_id: i64,
+        #[relation(target = "Secret", from = "secret_id", to = "id")]
+        secret: Option<Secret>,
+    }
+
+    struct Permissive(AtomicUsize);
+    impl RuntimeReadAuthority for Permissive {
+        fn authorize<'a>(
+            &'a self,
+            _: RuntimeReadCheck<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(RuntimeReadGrant::new(None)) })
+        }
+    }
+    let database = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+    let authority = Arc::new(Permissive(AtomicUsize::new(0)));
+    for field in ["privateValue", "nonreadValue", "inputValue"] {
+        for query in [
+            format!("{{secrets{{edges{{node{{{field}}}}}}}}}"),
+            format!("{{holders{{edges{{node{{secret{{{field}}}}}}}}}}}"),
+            format!("{{secretsAggregate{{sum{{{field}}}}}}}"),
+        ] {
+            // Model the host's complete conversion-to-execution path. Conversion
+            // must refuse before compiling any schema or calling the authority.
+            let attempt = async {
+                let schema =
+                    RuntimeSchema::from_static_entities(&[Holder::metadata(), Secret::metadata()])?;
+                let schema = Arc::new(schema.validate().unwrap());
+                let module =
+                    RuntimeGraphqlModule::compile(schema.clone(), Default::default()).unwrap();
+                let api =
+                    RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+                        .unwrap()
+                        .cursor_protection(
+                            Arc::new(TestAead),
+                            RuntimeCursorAudience::new("static-hidden-tests").unwrap(),
+                            Default::default(),
+                        )
+                        .unwrap()
+                        .install(module)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                Ok::<_, RuntimeSchemaDiagnostics>(
+                    api.execute(request(
+                        &schema,
+                        authority.clone(),
+                        &query,
+                        serde_json::json!({}),
+                    ))
+                    .await,
+                )
+            }
+            .await;
+            let diagnostics = attempt.expect_err("hidden values must never reach execution");
+            assert_eq!(diagnostics.diagnostics().len(), 3, "{query}");
+            assert!(diagnostics.diagnostics().iter().all(|d| d.code
+                == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+                && d.message.contains("statically unreadable")));
+        }
+    }
+    let repository = RuntimeSchema::from_static_entities_for_repository(&[
+        Holder::metadata(),
+        Secret::metadata(),
+    ])
+    .unwrap();
+    assert!(repository.repository_only);
+    // The marker survives every ordinary round trip; a permissive authority
+    // cannot admit any GraphQL module containing these internal columns.
+    let wire = serde_json::to_vec(&repository).unwrap();
+    let decoded: RuntimeSchema = serde_json::from_slice(&wire).unwrap();
+    let validated = repository.validate().unwrap();
+    assert!(decoded.repository_only);
+    assert_eq!(
+        validated.fingerprint(),
+        decoded.clone().validate().unwrap().fingerprint()
+    );
+    for definition in [decoded, validated.into_schema()] {
+        let error = RuntimeGraphqlModule::compile(
+            Arc::new(definition.validate().unwrap()),
+            Default::default(),
+        )
+        .err()
+        .expect("repository schemas must not be served");
+        assert_eq!(error.0[0].code(), "repository_only_schema");
+    }
+    assert_eq!(authority.0.load(Ordering::SeqCst), 0);
 }

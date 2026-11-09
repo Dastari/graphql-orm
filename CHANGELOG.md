@@ -16,6 +16,10 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.103.0**.
+
+- **Breaking/security:** add `is_readable` to `ColumnDef` and `FieldMetadata`; derives retain `private`, `read = false`, and `input_only` restrictions plus effective persisted scalar output eligibility. Delegated SimpleObject/complex output honors effective `skip`, `skip_output`, flattening and unrepresented guards/visibility; ORM-owned getters retain their actual behavior. Metadata-only repository declarations retain ordinary readable columns and conservatively honor explicit output restrictions. Static-to-runtime conversion rejects unreadable columns with scoped `UnsupportedCapability` diagnostics, before a host authority can expose direct, related, or aggregate reads. Ordinary readable schemas are unchanged. An explicit `from_static_entities_for_repository` conversion retains internal columns behind a serialized, fingerprinted `repository_only` marker that runtime GraphQL compilation always refuses. Runtime schema literals require that new marker. AI 0.125.0 adopts this path for bounded session activity with private keys. Fixes #390.
+
 ORM runtime/macros **0.102.0**.
 
 - **Security/parity:** ordinary, single-key append-only and composite-key append-only GraphQL creates now emit the same resolver pipeline. `before_create` runs once with GraphQL request context before field-write authorization of transformed inputs; mutation hooks also receive the request context. Transaction failures use ordinary structured GraphQL error mapping. Configured create notifications run after commit and output authorization, with no notification on rollback. Fixes #408.

@@ -2420,6 +2420,7 @@ mod tests {
     fn schema() -> ValidatedRuntimeSchema {
         let id = field("id", RuntimeValueKind::Integer, false);
         RuntimeSchema {
+            repository_only: false,
             format_version: 1,
             collections: vec![RuntimeCollection {
                 node_identity: None,

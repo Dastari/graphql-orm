@@ -10,6 +10,17 @@ supersedes: []
 
 # Migration Guide
 
+## 0.124.0 to 0.125.0: private-key session activity
+
+Session activity now uses ORM 0.103.0's explicit repository-only conversion for
+its bounded, server-authored metadata queries. Ordinary static-to-runtime
+conversion still refuses unreadable columns, and runtime GraphQL refuses
+repository-only schemas before host authority can authorize a read.
+
+No consumer action or data migration is needed. Persistent entities, indexes,
+AI_SCHEMA_MODULE_VERSION, GraphQL SDL, authorization and disclosure boundaries
+are unchanged.
+
 ## 0.123.0 to 0.124.0: runtime catalog contract fixtures
 
 No data migration, public AI API or persistent AI schema change. This patch gives

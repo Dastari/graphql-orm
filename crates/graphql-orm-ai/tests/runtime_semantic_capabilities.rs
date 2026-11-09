@@ -124,6 +124,7 @@ fn schema() -> Arc<ValidatedRuntimeSchema> {
     lines.relations[0].description = Some("Invoice owning the line".into());
     Arc::new(
         RuntimeSchema {
+            repository_only: false,
             format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
             collections: vec![invoices, lines],
         }

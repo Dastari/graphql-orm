@@ -125,6 +125,7 @@ fn definition() -> RuntimeSchema {
         ("node.id", "to_id"),
     ));
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![post, tag, node],
     }
@@ -1210,6 +1211,7 @@ fn keyed_definition() -> RuntimeSchema {
         ("doc.id", "doc_id"),
     ));
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![doc, word],
     }

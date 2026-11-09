@@ -17,6 +17,7 @@ fn field_id(value: &str) -> FieldId {
 }
 fn schema() -> ValidatedRuntimeSchema {
     RuntimeSchema {
+        repository_only: false,
         format_version: 1,
         collections: vec![RuntimeCollection {
             node_identity: None,

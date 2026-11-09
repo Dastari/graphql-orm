@@ -10,6 +10,51 @@ supersedes: []
 
 # Migration Guide
 
+## 0.102.0 to 0.103.0: static-to-runtime readability
+
+Breaking: `ColumnDef` and `FieldMetadata` literals now require `is_readable`.
+Set it to the actual static output eligibility: false for `private`,
+`read = false`, or `input_only` columns. Delegated SimpleObject/complex output
+also records effective `graphql(skip)` / `skip = true`, `skip_output` and
+flattening. False boolean flags do not hide a field. Custom visibility/guards,
+inaccessible output and field read policies cannot be preserved by conversion,
+so their scalar columns fail closed too. Metadata-only and repository derives
+conservatively honor output attributes while retaining ordinary readable
+columns; ORM-owned getters retain their generated
+read behavior, where SimpleObject skip attributes only excluded inputs.
+Relation implementation skips do not change the shared relation predicate. Rebuild entities with matching
+0.103.0 ORM/macros; derives populate the flag automatically.
+`ColumnDef::new` and the typed constructors retain their readable default;
+use `.readable(false)` for hidden hand-built columns.
+
+`RuntimeSchema::from_static_entities` now refuses the entire conversion with
+field-scoped `UnsupportedCapability` diagnostics if any persisted column is
+unreadable. The runtime IR cannot yet represent this structural restriction.
+Handle this diagnostic and continue serving the static schema, or defer served runtime
+conversion until structural readability is supported. Do not remove restrictions
+or discard diagnostics to enable conversion. A permissive host authority cannot
+override this refusal, including for relations and aggregates. Ordinary readable
+conversions, persisted data, and runtime wire metadata are unchanged; no data
+migration is needed.
+
+Trusted, server-authored repository queries can instead use the explicitly named
+`RuntimeSchema::from_static_entities_for_repository`. It retains private columns
+and marks the whole schema `repository_only: true`. Runtime GraphQL module
+compilation always refuses marked schemas, even if an authority grants every
+field. The marker survives serde and participates in both fingerprints. Do not
+clear it or copy internal collections into a served schema. This API grants no
+authorization and does not make returned repository values safe to disclose.
+
+Regenerate previously converted stored runtime catalogs from current static
+metadata before serving them. Old runtime documents contain no static output
+eligibility provenance: deserialization cannot reconstruct hidden or skipped
+columns. If regeneration refuses conversion, serve the static schema instead
+of falling back to the previous converted catalog.
+
+Rust `RuntimeSchema` literals now require `repository_only: false` for ordinary
+schemas. Older serialized schemas default to false and keep their existing
+bytes/fingerprints. No runtime field wire contract or database schema changes.
+
 ## 0.100.0 to 0.102.0: create authorization and append-only composite keys
 
 Breaking/security: append-only GraphQL creates now enforce field-write policies like ordinary creates. Install a field-policy provider for declared write policies: strict mode returns `AUTHORIZATION_MISCONFIGURED` before inserting when it is absent, and denied required or optional writes fail with `FORBIDDEN` by default. The existing explicit legacy field-omission option is preserved.

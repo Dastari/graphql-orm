@@ -2938,6 +2938,10 @@ pub struct ColumnDef {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_generated: bool,
+    /// Scalar output eligibility under the static object owner, independent of
+    /// host authorization. False also marks output restrictions the runtime IR
+    /// cannot preserve (such as delegated visibility or field policy hooks).
+    pub is_readable: bool,
     pub is_filterable: bool,
     /// The derive generated an order-input term for this column.
     pub is_sortable: bool,
@@ -2977,6 +2981,7 @@ impl ColumnDef {
             is_primary_key: false,
             is_unique: false,
             is_generated: false,
+            is_readable: true,
             is_filterable: false,
             is_sortable: false,
             is_date_time: false,
@@ -3004,6 +3009,12 @@ impl ColumnDef {
 
     pub const fn generated(mut self) -> Self {
         self.is_generated = true;
+        self
+    }
+
+    /// Sets structural GraphQL output eligibility for hand-built metadata.
+    pub const fn readable(mut self, readable: bool) -> Self {
+        self.is_readable = readable;
         self
     }
 
@@ -3086,6 +3097,10 @@ pub struct FieldMetadata {
     pub is_primary_key: bool,
     pub is_unique: bool,
     pub is_generated: bool,
+    /// Scalar output eligibility under the static object owner, independent of
+    /// host authorization. False also marks output restrictions the runtime IR
+    /// cannot preserve (such as delegated visibility or field policy hooks).
+    pub is_readable: bool,
     pub is_filterable: bool,
     /// The derive generated an order-input term for this column.
     pub is_sortable: bool,
@@ -3113,6 +3128,7 @@ impl From<&ColumnDef> for FieldMetadata {
             is_primary_key: value.is_primary_key,
             is_unique: value.is_unique,
             is_generated: value.is_generated,
+            is_readable: value.is_readable,
             is_filterable: value.is_filterable,
             is_sortable: value.is_sortable,
             is_date_time: value.is_date_time,

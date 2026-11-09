@@ -10,6 +10,8 @@ supersedes: []
 
 # graphql-orm-ai
 
+Version `0.125.0` restores bounded session activity with private keys using ORM 0.103.0 repository-only schemas, which cannot be served as runtime GraphQL. No data migration or consumer action is needed.
+
 Version `0.124.0` adopts ORM 0.95.0 runtime collection declarations in its contract fixtures and verifies NodeId/live catalogs in the AI compiler. No AI runtime or persistent schema change; no data migration.
 Version `0.124.0` also isolates media test fixtures sharing the decoder pool. Runtime behavior and schema are unchanged; no consumer action or data migration is needed.
 Version `0.124.0` adds optional Codex read-marker tolerance and adopts ORM/macros 0.95.0. No data migration.

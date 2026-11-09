@@ -52,6 +52,7 @@ fn with_search(enabled: bool, language: Option<&str>) -> RuntimeSchema {
         json_path: json_path.map(str::to_string),
     };
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,

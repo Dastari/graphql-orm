@@ -132,6 +132,7 @@ fn ordered(reversed: bool) -> ValidatedRuntimeSchema {
         collections.reverse();
     }
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections,
     }

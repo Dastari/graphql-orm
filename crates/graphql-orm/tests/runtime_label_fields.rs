@@ -37,6 +37,7 @@ fn schema(labels: &[&str]) -> RuntimeSchema {
     let mut hidden = field("internal", RuntimeValueKind::String);
     hidden.export = Some(GraphqlSemanticExport::NeverExport);
     RuntimeSchema {
+        repository_only: false,
         format_version: RUNTIME_SCHEMA_FORMAT_VERSION,
         collections: vec![RuntimeCollection {
             node_identity: None,
