@@ -98,7 +98,12 @@ async fn populated_column_rebuild_preserves_physical_contract() -> graphql_orm::
             sqlx::query("DELETE FROM probe WHERE id=999")
                 .execute(db.pool())
                 .await?;
-            sqlx::query("CREATE TABLE child(id TEXT PRIMARY KEY NOT NULL,p REFERENCES probe(id) ON UPDATE CASCADE ON DELETE CASCADE)").execute(db.pool()).await?;
+            let id_type = if ddl.contains("AUTOINCREMENT") {
+                "INTEGER"
+            } else {
+                "TEXT"
+            };
+            sqlx::query(&format!("CREATE TABLE child(id TEXT PRIMARY KEY NOT NULL,p {id_type} REFERENCES probe(id) ON UPDATE CASCADE ON DELETE CASCADE)")).execute(db.pool()).await?;
             sqlx::query("INSERT INTO child SELECT 'child',id FROM probe")
                 .execute(db.pool())
                 .await?;
@@ -405,7 +410,13 @@ async fn dropping_a_declared_rowid_alias_preserves_the_physical_rowid() -> graph
         .schema()
         .plan_migration("drop-alias", "preserve identity", &current, &target)?;
     db.schema()
-        .apply_migration(&plan, ApplyOptions::default())
+        .apply_migration(
+            &plan,
+            ApplyOptions {
+                allow_destructive: true,
+                ..Default::default()
+            },
+        )
         .await?;
     let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM probe")
         .fetch_one(db.pool())
