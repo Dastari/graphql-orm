@@ -29,8 +29,14 @@ use serde_json::{Value, json};
 use sha1::{Digest, Sha1};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
-const SDL: &str =
-    "type Query { hello: String! } type Subscription { tick: String! ended: String! }";
+const SDL: &str = r#"
+    type Query { hello: String! slot(site: String!, name: String!, key: SlotKeyInput): Slot }
+    type Slot @key(fields: "site name") { site: String! name: String! }
+    input SlotKeyInput { site: String! name: String! }
+    enum SlotOrder { SITE NAME }
+    interface SlotIdentity { site: String! name: String! }
+    type Subscription { tick: String! ended: String! }
+"#;
 const RSA_PRIVATE_KEY: &str = include_str!("fixtures/test-rsa-private.pem");
 const TOKEN_ISSUER: &str = "https://binary-smoke.test";
 const TOKEN_AUDIENCE: &str = "graphql-router";
@@ -136,6 +142,46 @@ fn executable_routes_http_and_websocket_then_handles_sigterm() {
     let body: serde_json::Value = serde_json::from_slice(&response.1)
         .unwrap_or_else(|error| panic!("invalid router JSON {error}: {:?}", response.1));
     assert_eq!(body["data"]["hello"], "world", "{body}");
+
+    // Composite key order must survive the complete SDL-fetch, composition,
+    // runtime-schema and HTTP introspection path. graphql-orm-client also pins
+    // this contract in conformance/orm.mjs.
+    let response = http(
+        router_address,
+        "POST",
+        "/graphql",
+        &[("authorization", authorization.as_str())],
+        &serde_json::to_vec(&json!({"query": r#"{
+            key: __type(name: "SlotKeyInput") { inputFields { name } }
+            slot: __type(name: "Slot") { fields { name } }
+            identity: __type(name: "SlotIdentity") { fields { name } }
+            order: __type(name: "SlotOrder") { enumValues { name } }
+            root: __type(name: "Query") { fields { name args { name } } }
+        }"#}))
+        .unwrap(),
+    )
+    .expect("introspection response");
+    assert_eq!(response.0, 200);
+    let body: Value = serde_json::from_slice(&response.1).unwrap();
+    assert!(body.get("errors").is_none(), "{body}");
+    let names = |members: &Value| -> Vec<String> {
+        members
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| member["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(names(&body["data"]["key"]["inputFields"]), ["site", "name"]);
+    assert_eq!(names(&body["data"]["slot"]["fields"]), ["site", "name"]);
+    assert_eq!(names(&body["data"]["identity"]["fields"]), ["site", "name"]);
+    assert_eq!(
+        names(&body["data"]["order"]["enumValues"]),
+        ["SITE", "NAME"]
+    );
+    let fields = &body["data"]["root"]["fields"];
+    assert_eq!(names(fields), ["hello", "slot"]);
+    assert_eq!(names(&fields[1]["args"]), ["site", "name", "key"]);
 
     let mut websocket = TestWebSocket::connect(router_address);
     websocket.send_json(&json!({
@@ -381,6 +427,23 @@ fn descriptor_document(address: SocketAddr) -> Vec<u8> {
                 root_type: RootOperationType::Query,
                 field_name: "hello".to_owned(),
                 arguments: Vec::<ArgumentDescriptor>::new(),
+                authorization: AuthorizationRequirement::Public,
+            },
+            OperationDescriptor {
+                root_type: RootOperationType::Query,
+                field_name: "slot".to_owned(),
+                arguments: [
+                    ("site", "String!", true),
+                    ("name", "String!", true),
+                    ("key", "SlotKeyInput", false),
+                ]
+                .into_iter()
+                .map(|(name, graphql_type, required)| ArgumentDescriptor {
+                    name: name.to_owned(),
+                    graphql_type: graphql_type.to_owned(),
+                    required,
+                })
+                .collect(),
                 authorization: AuthorizationRequirement::Public,
             },
             OperationDescriptor {
