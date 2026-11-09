@@ -1,3 +1,5 @@
+mod declaration_order;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -256,6 +258,7 @@ fn compose_candidate(inputs: &[CandidateSubgraph]) -> Result<ComposedCandidate, 
         }
     }
 
+    let mut declaration_order = declaration_order::DeclarationOrder::default();
     let mut root_participation = BTreeMap::new();
     let mut subgraphs = Subgraphs::default();
     for input in &inputs {
@@ -276,7 +279,19 @@ fn compose_candidate(inputs: &[CandidateSubgraph]) -> Result<ComposedCandidate, 
     let sdl = render_federated_sdl(&graph).map_err(|error| FederationError::Render {
         details: error.to_string(),
     })?;
-    let document = adapt_composed_supergraph(&sdl, &root_participation)?;
+    // Inputs are already sorted by subgraph name. For shared declarations,
+    // the first occurrence wins and later subgraphs append unseen members.
+    for input in &inputs {
+        let source = cynic_parser::parse_type_system_document(&input.sdl).map_err(|error| {
+            FederationError::SourceSdl {
+                subgraph: input.name.clone(),
+                details: error.to_string(),
+            }
+        })?;
+        declaration_order.record(&source);
+    }
+    let mut document = adapt_composed_supergraph(&sdl, &root_participation)?;
+    declaration_order.restore(&mut document);
     let normalized_sdl: Arc<str> = Arc::from(document.to_string());
 
     Ok(ComposedCandidate {

@@ -16,6 +16,10 @@ that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
 
+Version 0.9.1 preserves subgraph declaration order through introspection,
+including composite-key input fields. Shared declarations follow deterministic
+subgraph-name order; see [MIGRATION.md](MIGRATION.md).
+
 Version 0.9.0 reports subscription frame loss with terminal
 `SUBSCRIPTION_CONTINUITY_LOST`. Resubscribe and refetch; see the
 [operations runbook](docs/operations.md#websocket-reconnect-behavior) for local loss attribution,

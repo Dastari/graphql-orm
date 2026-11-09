@@ -10,6 +10,13 @@ supersedes: []
 
 # Changelog
 
+## 0.9.1 (unreleased)
+
+- Preserve subgraph declaration order for input fields (including composite keys),
+  object/interface fields, enum values, and arguments through composition and
+  introspection. Shared declarations use subgraph-name order, keeping the first
+  occurrence of each member. Fixes #356. No data migration is needed.
+
 ## 0.9.0 (unreleased)
 
 - Check active WebSocket IDs before payload validation and other admission

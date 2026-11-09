@@ -10,6 +10,15 @@ supersedes: []
 
 # graphql-orm-router migration guide
 
+## 0.9.1: introspection declaration order
+
+Introspection now preserves source order for input fields, object/interface
+fields, enum values, and field/directive arguments. Composite-key clients can
+read the declared key input order directly. For declarations shared across
+subgraphs, the first occurrence in lexicographic subgraph-name order determines
+member order; later subgraphs append unseen members. Composition still decides
+which members survive. No data migration is needed.
+
 ## 0.8.3 to 0.9.0: subscription continuity
 
 Handle terminal `SUBSCRIPTION_CONTINUITY_LOST` by backing off with jitter,
