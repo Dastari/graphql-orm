@@ -8267,7 +8267,11 @@ mod object_visibility_tests {
                     let relation = tokens.split("RelationMetadata {").nth(1).unwrap();
                     let expected = metadata_only && delegated;
                     assert!(
-                        relation.starts_with(&format!(" is_readable : {expected} ||")),
+                        relation
+                            .split("is_readable : ")
+                            .nth(1)
+                            .unwrap()
+                            .starts_with(&format!("{expected} ||")),
                         "{attribute}, metadata_only={metadata_only}: {relation}"
                     );
                 }
