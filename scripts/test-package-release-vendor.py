@@ -18,13 +18,16 @@ class VendorReleasePolicy(unittest.TestCase):
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'user.name', 'Fixture')
         for package in ['graphql-orm', 'graphql-orm-macros', 'graphql-orm-storage']:
-            self.write(f'crates/{package}/Cargo.toml', '[package]\nversion = "0.1.0"\n')
+            self.write(f'crates/{package}/Cargo.toml', f'[package]\nname = "{package}"\nversion = "0.1.0"\n')
+            self.write(f'crates/{package}/src/lib.rs', '// baseline\n')
         for path in ['scripts/check-router-release-policy.sh', 'crates/graphql-orm-ai/scripts/check-release-policy.sh']:
             self.write(path, '#!/usr/bin/env bash\nexit 0\n')
             (self.root / path).chmod(0o755)
         self.write('scripts/check-package-release-policy.sh', SCRIPT.read_text())
+        self.write('scripts/published_source.py', SCRIPT.with_name('published_source.py').read_text())
+        self.write('Cargo.toml', '[workspace]\nmembers = ["crates/graphql-orm", "crates/graphql-orm-macros", "crates/graphql-orm-storage"]\nexclude = ["crates/graphql-orm-storage/vendor/smb"]\n')
         self.write('crates/graphql-orm-storage/vendor/smb/src/resource/directory.rs', '// baseline\n')
-        self.write('crates/graphql-orm-storage/vendor/smb/Cargo.toml', '[package]\nversion="0.10.2"\n')
+        self.write('crates/graphql-orm-storage/vendor/smb/Cargo.toml', '[package]\nname="smb"\nversion="0.10.2"\n')
         self.commit()
         self.base = self.git('rev-parse', 'HEAD').strip()
 
@@ -51,7 +54,7 @@ class VendorReleasePolicy(unittest.TestCase):
         self.assertIn('require crates/graphql-orm-storage/README.md', result.stderr)
 
     def test_manifest_edit_requires_owner_documentation(self):
-        self.write('crates/graphql-orm-storage/vendor/smb/Cargo.toml', '[package]\nversion="0.10.2"\npublish=false\n')
+        self.write('crates/graphql-orm-storage/vendor/smb/Cargo.toml', '[package]\nname="smb"\nversion="0.10.2"\npublish=false\n')
         result = self.policy()
         self.assertEqual(result.returncode, 1)
         self.assertIn('require crates/graphql-orm-storage/README.md', result.stderr)
@@ -65,7 +68,7 @@ class VendorReleasePolicy(unittest.TestCase):
         self.write('crates/graphql-orm-storage/vendor/smb/src/resource/directory.rs', '// changed\n')
         for name in ['README.md', 'CHANGELOG.md', 'MIGRATION.md']:
             self.write('crates/graphql-orm-storage/' + name, 'Release fixture\n')
-        self.write('crates/graphql-orm-storage/Cargo.toml', '[package]\nversion = "0.1.1"\n')
+        self.write('crates/graphql-orm-storage/Cargo.toml', '[package]\nname = "graphql-orm-storage"\nversion = "0.1.1"\n')
         result = self.policy()
         self.assertEqual(result.returncode, 0, result.stderr)
 

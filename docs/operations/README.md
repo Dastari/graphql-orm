@@ -17,3 +17,5 @@ supersedes: []
 
 Runbooks contain repeatable commands, prerequisites, validation, rollback, and
 escalation. Durable design rationale belongs in architecture or ADRs.
+
+- [Release tag check runbook](runbooks/release-tag-check.md)
