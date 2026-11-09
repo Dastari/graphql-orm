@@ -3,7 +3,7 @@ title: graphql-orm-router
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-09
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -15,6 +15,11 @@ The current workspace selects published Auth `v0.24.0`, peeled to
 that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
+
+Version 0.10.0 serves subscriptions only through the public
+`graphql-transport-ws` gateway. HTTP SSE and multipart subscription requests
+get a `SUBSCRIPTIONS_NOT_SUPPORTED` error before any stream opens
+(GHSA-3qf7-j9r6-6qv3); see [MIGRATION.md](MIGRATION.md).
 
 Version 0.9.1 preserves subgraph declaration order through introspection,
 including composite-key input fields. Shared declarations follow deterministic

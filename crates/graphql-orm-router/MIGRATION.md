@@ -3,12 +3,27 @@ title: graphql-orm-router migration guide
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-09
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # graphql-orm-router migration guide
+
+## 0.9.1 to 0.10.0: subscriptions are WebSocket-only
+
+Public HTTP subscription requests are refused. This covers SSE
+(`text/event-stream`), incremental-delivery and Apollo multipart
+(`multipart/mixed`), and GET. The response is HTTP 400 with a
+`SUBSCRIPTIONS_NOT_SUPPORTED` GraphQL error, sent as plain JSON before any
+stream opens. Move subscription clients to `graphql-transport-ws` on the public
+GraphQL path, with the bearer in `connection_init`. HTTP gave no mandatory
+bearer, expiry teardown, attempt limit or continuity contract, so it has no
+supported equivalent. Send one operation per document, or name a query or
+mutation with `operationName`: a document is refused when any operation it
+could select is a subscription. Queries and mutations over HTTP are unchanged,
+including with a streaming-capable `Accept` header. No data migration or public
+Rust API change is needed.
 
 ## 0.9.1: introspection declaration order
 

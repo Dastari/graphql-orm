@@ -3,12 +3,30 @@ title: graphql-orm-router changelog
 kind: reference
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-09
 review_by: 2027-02-07
 supersedes: []
 ---
 
 # Changelog
+
+## 0.10.0 (unreleased)
+
+- Security (GHSA-3qf7-j9r6-6qv3): refuse GraphQL subscriptions on the public
+  HTTP path. Hive negotiated `text/event-stream` and `multipart/mixed` streams
+  (including Apollo multipart and GET) whenever `subscriptions` was configured.
+  Those streams skipped the WebSocket gateway's mandatory bearer, expiry
+  teardown, connection-attempt limiter and continuity signalling. They also
+  skipped execute-time authorization, so a scope template whose argument was
+  passed as a variable was not enforced. Every subscription that does not
+  arrive through the gateway's authenticated private endpoint now gets HTTP
+  400 with a plain JSON `SUBSCRIPTIONS_NOT_SUPPORTED` error naming the
+  WebSocket endpoint. The refusal comes after parsing and before validation,
+  planning or any upstream work, whatever the `Accept` header, method or
+  credentials. A document is refused when any operation it could select is a
+  subscription. Queries and mutations over HTTP, and all WebSocket traffic,
+  are unchanged. This also removes the HTTP continuity-loss exposure in #437.
+  Fixes #437.
 
 ## 0.9.1 (unreleased)
 
