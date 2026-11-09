@@ -381,3 +381,26 @@ async fn migration_restores_an_initially_disabled_fk_pragma() -> graphql_orm::Re
     assert_eq!(enabled, 0);
     clean(&db, &target).await
 }
+
+#[tokio::test]
+async fn dropping_a_declared_rowid_alias_preserves_the_physical_rowid() -> graphql_orm::Result<()> {
+    let db = setup(&[
+        "CREATE TABLE probe(id TEXT PRIMARY KEY NOT NULL,rowid TEXT,a TEXT NOT NULL)",
+        "INSERT INTO probe(_rowid_,id,rowid,a) VALUES (99,'one','7','kept')",
+    ])
+    .await?;
+    let current = introspect_sqlite_schema(db.pool()).await?;
+    let mut target = current.clone();
+    target.tables[0].columns.retain(|c| c.name != "rowid");
+    let plan = db
+        .schema()
+        .plan_migration("drop-alias", "preserve identity", &current, &target)?;
+    db.schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await?;
+    let rowid: i64 = sqlx::query_scalar("SELECT rowid FROM probe")
+        .fetch_one(db.pool())
+        .await?;
+    assert_eq!(rowid, 99);
+    clean(&db, &target).await
+}
