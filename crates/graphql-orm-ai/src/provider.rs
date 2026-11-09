@@ -2561,7 +2561,7 @@ impl std::fmt::Debug for ProviderDynamicToolCall {
 
 impl ProviderDynamicToolCall {
     #[cfg(any(
-        test,
+        all(test, feature = "sqlite"),
         feature = "provider-codex-app-server",
         feature = "provider-grok-acp"
     ))]
@@ -2655,7 +2655,7 @@ impl std::fmt::Debug for ProviderInvalidDynamicToolCall {
 
 impl ProviderInvalidDynamicToolCall {
     #[cfg(any(
-        test,
+        all(test, feature = "sqlite"),
         feature = "provider-codex-app-server",
         feature = "provider-grok-acp"
     ))]

@@ -1828,7 +1828,7 @@ impl AiProviderCallPlan {
         self.request.continuation.is_some()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_plan(lease: &AiRunLease, scope: crate::AiScope, continuation: bool) -> Self {
         let model = "coordinator-test-model".to_owned();
         Self {
@@ -1903,7 +1903,7 @@ impl AiProviderCallPlan {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_chat_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
         let model = "coordinator-test-model".to_owned();
         let request = ModelRequest {
@@ -1970,7 +1970,7 @@ impl AiProviderCallPlan {
         .expect("coordinator chat test plan should validate")
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_builtin_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
         let mut plan = Self::test_chat_plan(lease, scope);
         plan.request.builtin_tools = vec![ModelBuiltinTool::CodeInterpreter];
@@ -1978,7 +1978,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_dynamic_builtin_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
         let mut plan = Self::test_plan(lease, scope, false);
         plan.request.builtin_tools = vec![ModelBuiltinTool::WebSearch {
@@ -1989,7 +1989,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_chat_continuation_plan(lease: &AiRunLease, scope: crate::AiScope) -> Self {
         let mut plan = Self::test_chat_plan(lease, scope);
         plan.request.input = vec![ModelInputBlock::ToolResult {
@@ -2003,7 +2003,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_supervised_plan(
         lease: &AiRunLease,
         scope: crate::AiScope,
@@ -2031,7 +2031,7 @@ impl AiProviderCallPlan {
         plan
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_automatic_mutation_plan(
         lease: &AiRunLease,
         scope: crate::AiScope,
@@ -2134,7 +2134,7 @@ pub struct AiProviderBuiltinUsage {
 }
 
 impl AiProviderBuiltinUsage {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) const fn test_usage(
         web_search_calls: u64,
         file_search_calls: u64,
@@ -2229,7 +2229,7 @@ impl AiProviderUsageObservation {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn test_observation(
         scope: AiScope,
@@ -3305,7 +3305,7 @@ impl AiProviderCallResult {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_result(
         lease: &AiRunLease,
         previous_response_id: Option<String>,
@@ -3392,7 +3392,7 @@ impl AiProviderCallResult {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_with_interactive_tool_results(
         mut self,
         results: Vec<AiPersistedApplicationToolCall>,
@@ -3401,7 +3401,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
     pub(crate) fn test_with_provider_session_claim(
         mut self,
         claim: crate::AiProviderSessionClaim,
@@ -3410,7 +3410,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_with_tool_binding(
         mut self,
         tool_index: usize,
@@ -3426,7 +3426,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_with_budget_reservation(
         mut self,
         reservation_id: AiBudgetReservationId,
@@ -3435,7 +3435,7 @@ impl AiProviderCallResult {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_ui_intent_result(
         lease: &AiRunLease,
         budget_reservation_id: AiBudgetReservationId,
@@ -3501,7 +3501,7 @@ impl AiProviderCallResult {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn test_context_compaction_result(
         lease: &AiRunLease,
         provider_kind: ProviderKind,
@@ -3557,7 +3557,7 @@ impl AiProviderCallResult {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
 fn test_model_inference_manifest(lease: &AiRunLease, model: &str) -> AiEgressManifest {
     AiEgressManifest {
         provider_profile_id: "test-profile".to_owned(),

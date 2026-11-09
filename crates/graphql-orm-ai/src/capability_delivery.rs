@@ -134,6 +134,7 @@ impl AiCapabilityDeliveryDecision {
 pub struct AiCapabilityDeliverySurface {
     mode: AiCapabilityDeliveryMode,
     tools: Vec<ModelToolDefinition>,
+    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     offering: Option<AiCapabilityOfferingSnapshot>,
 }
 
@@ -145,6 +146,7 @@ struct AiCapabilityOfferingState {
     frozen_plans: usize,
 }
 
+#[cfg(any(test, feature = "sqlite", feature = "postgres"))]
 #[derive(Clone, Debug)]
 struct AiCapabilityOfferingSnapshot {
     state: Arc<Mutex<AiCapabilityOfferingState>>,
@@ -199,6 +201,7 @@ impl AiCapabilityDeliverySurface {
         &self.tools
     }
 
+    #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
     pub(crate) fn freeze_offering(&self) -> Result<Option<AiCapabilityOfferingPlanGuard>, AiError> {
         let Some(snapshot) = &self.offering else {
             return Ok(None);
@@ -286,6 +289,7 @@ pub fn prepare_capability_delivery_surface(
     Ok(AiCapabilityDeliverySurface {
         mode: decision.mode,
         tools,
+        #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
         offering: None,
     })
 }
@@ -2228,6 +2232,7 @@ impl AiCapabilityDeliveryTurn {
         AiCapabilityDeliverySurface {
             mode: self.mode,
             tools: state.tools.clone(),
+            #[cfg(any(test, feature = "sqlite", feature = "postgres"))]
             offering: Some(AiCapabilityOfferingSnapshot {
                 state: self.tools.clone(),
                 generation: state.generation,
@@ -2235,6 +2240,7 @@ impl AiCapabilityDeliveryTurn {
         }
     }
 
+    #[cfg(any(feature = "sqlite", feature = "postgres"))]
     pub(crate) fn require_unfrozen_static_offering(&self) -> Result<(), AiError> {
         let state = self.tools.lock().unwrap_or_else(PoisonError::into_inner);
         if state.frozen_plans != 0 {

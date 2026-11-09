@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.126.0 to 0.127.0: alternate-backend test hygiene
+
+No consumer action or data migration is needed. Private helpers and tests now
+match their backend/provider consumers, allowing PostgreSQL and MSSQL all-target
+checks and warnings-denied Clippy. Default SQLite coverage, public APIs, runtime
+behavior and `AI_SCHEMA_MODULE_VERSION` are unchanged.
+
 ## 0.124.0 to 0.126.0: alternate-backend test compilation
 
 No consumer action or data migration is needed. SQLite-only unit fixtures now

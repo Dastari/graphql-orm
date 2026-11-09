@@ -1302,7 +1302,7 @@ fn nonnegative(value: Option<i64>) -> Result<Option<u64>, AiError> {
         .transpose()
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "sqlite", feature = "postgres")))]
 mod tests {
     use super::*;
 

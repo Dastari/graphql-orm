@@ -895,7 +895,7 @@ impl OrmAiApplicationToolCallService {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     pub(crate) fn with_automatic_mutation_fault(
         mut self,
         fault: AutomaticMutationTestFault,
