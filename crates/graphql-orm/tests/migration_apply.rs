@@ -255,7 +255,10 @@ async fn sqlite_migration_runner_preserves_unproven_reserved_table()
         )])
         .await
         .expect_err("a rebuild must refuse the host table collision");
-    assert!(error.to_string().contains("already exists"), "{error}");
+    assert!(
+        error.to_string().contains("UnsupportedCapability"),
+        "{error}"
+    );
     let host_name: String =
         sqlx::query_scalar("SELECT name FROM __graphql_orm_users_new WHERE id = 'host'")
             .fetch_one(&pool)
