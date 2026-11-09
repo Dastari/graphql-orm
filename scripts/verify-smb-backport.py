@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify this one SMB backport against its immutable registry archive, offline."""
+"""Verify the SMB backport and local patches against the immutable registry archive, offline."""
 import argparse
 import hashlib
 import json
@@ -11,6 +11,11 @@ import tempfile
 
 ARCHIVE = 'f1315ec423faffdc9715f518c5cab5660b26484df42adaa87a3325f70c73417b'
 PATCH = '5614aa2e0d3090d1051cae66858014c17432c959a817bfd0a628b778f3ad78ba'
+# Owner-local patches, applied in order after the backport.
+LOCAL_PATCHES = (
+    ('GHSA-439h-2cx8-xwgx', 'PATCHES/ghsa-439h-2cx8-xwgx.patch',
+     '47a00717822a1f7faf76cc5a7d77225cbeae260e1fbafc39ab0c070fe05dd889'),
+)
 LICENSE = '59889992272e339d6af995962dca57cb4565c364255f9a453b0f6f20b0365816'
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +38,13 @@ def verify(archive):
     require(provenance['backport']['commit'] == 'f4524d032c8951cc288e1c8231ad68588583abda', 'invalid SMB backport provenance')
     patch = vendor / 'PATCHES/f4524d0.patch'
     require(digest(patch.read_bytes()) == PATCH, 'reviewed patch checksum')
+    recorded = [(row['id'], row['patch_file'], row['patch_sha256']) for row in provenance['local_patches']]
+    require(recorded == list(LOCAL_PATCHES), 'invalid SMB local patch provenance')
+    local_patches = []
+    for _, name, expected in LOCAL_PATCHES:
+        local = vendor / name
+        require(digest(local.read_bytes()) == expected, f'reviewed local patch checksum: {name}')
+        local_patches.append(local)
     require(digest((vendor / 'LICENSE').read_bytes()) == LICENSE, 'upstream MIT checksum')
     with tarfile.open(archive) as source:
         originals = {}
@@ -47,11 +59,14 @@ def verify(archive):
             originals[relative] = source.extractfile(member).read()
     expected = {('Cargo.lock.upstream' if p == 'Cargo.lock' else p) for p in originals}
     expected |= {'LICENSE', 'PATCHES/f4524d0.patch', 'PROVENANCE.json'}
+    expected |= {name for _, name, _ in LOCAL_PATCHES}
     actual = {str(p.relative_to(vendor)) for p in vendor.rglob('*') if p.is_file()}
     require(actual == expected, f'exact vendor file set: {actual ^ expected}')
     with tempfile.TemporaryDirectory(prefix='smb-backport-verify-') as folder:
         restored = Path(folder) / 'smb'
         shutil.copytree(vendor, restored)
+        for local in reversed(local_patches):
+            subprocess.run(['git', 'apply', '--reverse', str(local)], cwd=restored, check=True)
         subprocess.run(['git', 'apply', '--reverse', str(patch)], cwd=restored, check=True)
         manifest = restored / 'Cargo.toml'
         data = manifest.read_bytes()

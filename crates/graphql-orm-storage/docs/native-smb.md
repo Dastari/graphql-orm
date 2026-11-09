@@ -3,7 +3,7 @@ title: "Native SMB2/SMB3 Blob Storage"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-09
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -22,12 +22,22 @@ Only the directory-stream runtime hunks from upstream commit
 `f4524d032c8951cc288e1c8231ad68588583abda` are backported: retained notification
 permits avoid a lost wake, and an idle producer observes receiver closure.
 An already in-flight request is not promised immediate cancellation.
+
+Storage 0.8.1 adds one owner-local security patch for
+[GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx),
+recorded as `PATCHES/ghsa-439h-2cx8-xwgx.patch`. It is not an upstream
+backport: upstream smb-rs has the same ordering. See
+[response verification](#response-verification).
 The protocol/authentication companions, cryptographic versions and feature
 selection remain pinned to the existing 0.10.2 family; this is not an adoption
 of the newer SDK's crypto graph.
 
 [Provenance](../vendor/smb/PROVENANCE.json) records the registry archive checksum,
-original file hashes, immutable patch and MIT-license source. The exact upstream
+original file hashes, the immutable backport and local patches, and the
+MIT-license source. `python3 scripts/verify-smb-backport.py --archive <smb-0.10.2.crate>`
+reverses both patches offline and compares the result with the archive.
+`scripts/test-smb-vendor.sh` runs the vendored unit tests, including the
+regression tests for the local patch, on a temporary copy. The exact upstream
 license is retained as [LICENSE](../vendor/smb/LICENSE). The archive's original
 `Cargo.lock` is preserved as `Cargo.lock.upstream` for provenance only; the
 workspace lockfile governs builds. The six original upstream Markdown files
@@ -98,6 +108,32 @@ paths, UNC paths, or SMB URLs.
 Passwords use `SecretString`, are redacted from `Debug`, and never enter errors
 or probe results. Hosts own encrypted persistence, rotation, authorization, and
 audit; this crate does not serialize credentials.
+
+## Response verification
+
+The vendored client verifies a session response's signature or encryption
+before it evaluates the response status. A message that is not signed when
+signing is required, or not encrypted when encryption is required, fails with a
+`SecurityNegotiation` error and its status is never acted on. Before 0.8.1, the
+status was checked first, so an on-path party without credentials could answer
+a pending request with an unsigned error such as `STATUS_OBJECT_NAME_NOT_FOUND`,
+even with `require_encryption = true`.
+
+Only the MS-SMB2 3.2.5.1.3 exemptions remain, and only for a status the caller
+does not accept, so an unsigned response can only fail a request: an interim
+`STATUS_PENDING`, and a `SESSION_SETUP` response before session setup completes.
+A rejected response leaves its request's outcome unknown, so the error is not
+retryable; verify the affected key before relying on it.
+
+Because guest and anonymous sessions are refused, a not-found status is
+authenticated. `blob_exists` returning `false`, `head_blob` returning `None`,
+and deletion of an absent key returning `Ok` therefore reflect the server.
+
+Listing fails closed. Only a missing configured root lists as empty. If a
+directory reported by enumeration is not found, or does not open as a
+directory, the listing fails with a non-retryable `Protocol` error instead of
+silently omitting its subtree. This backend never removes directories, so this
+indicates outside modification of the share.
 
 ## Atomicity and streaming
 

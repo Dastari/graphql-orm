@@ -3,12 +3,16 @@ title: "graphql-orm-backup"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-10-27
+last_reviewed: 2026-11-09
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # graphql-orm-backup
+
+Version 0.12.1 makes `prune` and `delete_snapshot` refuse to delete objects
+when the snapshot listing is incomplete ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)). Use it with storage 0.8.1;
+see [MIGRATION.md](MIGRATION.md).
 
 Version 0.12.0 aligns the optional ORM adapter's public types with ORM 0.80.0
 and catalog 0.6.0. Select one reviewed workspace revision; see
@@ -36,7 +40,7 @@ restore before replacing a production pin.
 
 ```toml
 [dependencies]
-graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.0" }
+graphql-orm-backup = { git = "https://github.com/Dastari/graphql-orm.git", rev = "<reviewed-full-40-character-commit-sha>", version = "0.12.1" }
 ```
 
 The default `local` feature provides `LocalBackupRepository`. To supply only a

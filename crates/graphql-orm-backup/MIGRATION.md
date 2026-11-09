@@ -3,12 +3,21 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-10-27
+last_reviewed: 2026-11-09
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.12.0 to 0.12.1: fail-closed pruning (GHSA-439h-2cx8-xwgx)
+
+Update backup to 0.12.1 and storage to 0.8.1 from one reviewed workspace
+revision, then refresh the consumer lockfile. No API, manifest or data
+migration is required. `prune` and `delete_snapshot` may now return
+`InvalidManifestChain` with "snapshot listing is incomplete" instead of
+deleting objects. Nothing is deleted from the object store in that case; find
+out why the listing was incomplete before retrying, and do not work around it.
 
 ## 0.11.1 to 0.12.0: optional ORM public type identity
 

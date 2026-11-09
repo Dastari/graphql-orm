@@ -95,19 +95,33 @@ impl ChannelMessageHandler {
     /// This is trustworthy only since we trust the [`Transformer`][crate::connection::transformer::Transformer] implementation
     /// to provide the correct IDs and verify signatures and encryption.
     ///
+    /// This must run before the status of a response is evaluated: a status
+    /// taken from an unverified message must never be acted on
+    /// (GHSA-439h-2cx8-xwgx).
+    ///
     /// # Arguments
     /// * `incoming` - The incoming message to verify.
+    /// * `expected_status` - For a response to a request, the statuses the caller
+    ///   accepts. `None` (notifications) permits no unsigned exemption.
     /// # Returns
     /// An empty [`crate::Result`] if the message is valid, or an error if the message is invalid.
     #[maybe_async]
-    async fn _verify_incoming(&self, incoming: &IncomingMessage) -> crate::Result<()> {
+    async fn _verify_incoming(
+        &self,
+        incoming: &IncomingMessage,
+        expected_status: Option<&[Status]>,
+    ) -> crate::Result<()> {
         // allow unsigned messages only if the session is anonymous or guest.
         // this is enforced against configuration when setting up the session.
-        let (unsigned_allowed, encryption_required) = {
+        let (unsigned_allowed, encryption_required, session_ready) = {
             let session = self.session_state.read().await?;
             let session = session.session.read().await?;
             let encryption_required = session.is_ready() && session.should_encrypt()?;
-            (session.allow_unsigned()?, encryption_required)
+            (
+                session.allow_unsigned()?,
+                encryption_required,
+                session.is_ready(),
+            )
         };
 
         // Make sure that it's our session.
@@ -128,7 +142,12 @@ impl ChannelMessageHandler {
             ));
         }
         // and signed, unless allowed not to.
-        if !incoming.form.signed_or_encrypted() && !unsigned_allowed {
+        if !incoming.form.signed_or_encrypted()
+            && !unsigned_allowed
+            && !expected_status.is_some_and(|expected| {
+                Self::unsigned_response_permitted(incoming, session_ready, expected)
+            })
+        {
             return Err(Error::InvalidMessage(
                 "Message not signed or encrypted, but signing is required for the session!"
                     .to_string(),
@@ -136,6 +155,31 @@ impl ChannelMessageHandler {
         }
 
         Ok(())
+    }
+
+    /// (Internal)
+    ///
+    /// The MS-SMB2 3.2.5.1.3 exemptions for an unsigned response while signing
+    /// is required. Each one is permitted only for a status the caller does not
+    /// accept, so the response can only ever fail the request; an unsigned
+    /// status is never accepted as a result.
+    /// * `STATUS_PENDING`: an interim response, which servers do not sign.
+    /// * A `SESSION_SETUP` response before session setup completes, which can
+    ///   only abort the setup.
+    ///
+    /// Responses with message ID `0xFFFFFFFFFFFFFFFF` are notifications, which
+    /// are verified strictly in [`MessageHandler::notify`].
+    fn unsigned_response_permitted(
+        incoming: &IncomingMessage,
+        session_ready: bool,
+        expected_status: &[Status],
+    ) -> bool {
+        let header = &incoming.message.header;
+        if expected_status.iter().any(|s| header.status == *s as u32) {
+            return false;
+        }
+        header.status == Status::Pending as u32
+            || (!session_ready && header.command == smb_msg::Command::SessionSetup)
     }
 
     /// **Insecure! Insecure! Insecure!**
@@ -153,10 +197,12 @@ impl ChannelMessageHandler {
         options: ReceiveOptions<'_>,
         skip_security_validation: bool,
     ) -> crate::Result<IncomingMessage> {
-        let incoming = self.upstream.recvo(options).await?;
+        let expected_status = options.status;
+        let incoming = self.upstream.recvo_before_status(options).await?;
 
         if !skip_security_validation {
-            self._verify_incoming(&incoming).await?;
+            self._verify_incoming(&incoming, Some(expected_status))
+                .await?;
         } else {
             // Note: this is performed here for extra security,
             // while we could have just checked the session state, let's require
@@ -169,7 +215,7 @@ impl ChannelMessageHandler {
             );
         }
 
-        Ok(incoming)
+        ConnectionMessageHandler::check_expected_status(incoming, expected_status)
     }
 
     /// (Internal)
@@ -232,15 +278,18 @@ impl MessageHandler for ChannelMessageHandler {
     }
 
     async fn recvo(&self, options: ReceiveOptions<'_>) -> crate::Result<IncomingMessage> {
-        let incoming = self.upstream.recvo(options).await?;
+        // Verify the signature or encryption before evaluating the status.
+        let expected_status = options.status;
+        let incoming = self.upstream.recvo_before_status(options).await?;
 
-        self._verify_incoming(&incoming).await?;
+        self._verify_incoming(&incoming, Some(expected_status))
+            .await?;
 
-        Ok(incoming)
+        ConnectionMessageHandler::check_expected_status(incoming, expected_status)
     }
 
     async fn notify(&self, msg: IncomingMessage) -> crate::Result<()> {
-        self._verify_incoming(&msg).await?;
+        self._verify_incoming(&msg, None).await?;
 
         match &msg.message.content {
             ResponseContent::ServerToClientNotification(s2c_notification) => {
@@ -257,5 +306,304 @@ impl MessageHandler for ChannelMessageHandler {
                 Ok(())
             }
         }
+    }
+}
+
+/// Regression tests for GHSA-439h-2cx8-xwgx: an unauthenticated on-path party
+/// must not be able to complete a pending request with an unsigned or
+/// unencrypted error status once signing or encryption is required.
+#[cfg(all(test, feature = "async"))]
+mod tests {
+    use super::*;
+    use crate::connection::config::{ConnectionConfig, EncryptionMode};
+    use crate::connection::connection_info::{ConnectionInfo, NegotiatedProperties};
+    use crate::dialects::DialectImpl;
+    use binrw::BinWrite;
+    use futures_core::future::BoxFuture;
+    use futures_util::FutureExt;
+    use smb_dtyp::Guid;
+    use smb_msg::{
+        Command, Dialect, ErrorResponse, GlobalCapabilities, Header, HeaderFlags, SessionFlags,
+    };
+    use smb_transport::{SmbTransport, SmbTransportRead, SmbTransportWrite, TransportError};
+    use std::io::Cursor;
+    use std::net::SocketAddr;
+
+    const SESSION_ID: u64 = 0x0000_4000_0000_0011;
+    const MESSAGE_ID: u64 = 7;
+    const SESSION_KEY: [u8; 16] = [0x5a; 16];
+
+    /// Serves scripted server messages, then never yields again.
+    struct ScriptedTransport {
+        incoming: Vec<u8>,
+        position: usize,
+    }
+
+    struct DiscardWrite;
+
+    impl SmbTransport for ScriptedTransport {
+        fn connect<'a>(
+            &'a mut self,
+            _server_name: &'a str,
+            _address: SocketAddr,
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+
+        fn default_port(&self) -> u16 {
+            445
+        }
+
+        fn split(
+            self: Box<Self>,
+        ) -> smb_transport::error::Result<(Box<dyn SmbTransportRead>, Box<dyn SmbTransportWrite>)>
+        {
+            Ok((self, Box::new(DiscardWrite)))
+        }
+
+        fn remote_address(&self) -> smb_transport::error::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 445)))
+        }
+    }
+
+    impl SmbTransportRead for ScriptedTransport {
+        fn receive_exact<'a>(
+            &'a mut self,
+            out_buf: &'a mut [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async move {
+                let end = self.position + out_buf.len();
+                if end > self.incoming.len() {
+                    // Script exhausted: behave like an idle peer.
+                    std::future::pending::<()>().await;
+                    return Err(TransportError::NotConnected);
+                }
+                out_buf.copy_from_slice(&self.incoming[self.position..end]);
+                self.position = end;
+                Ok(())
+            }
+            .boxed()
+        }
+    }
+
+    impl SmbTransportWrite for DiscardWrite {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    impl SmbTransportWrite for ScriptedTransport {
+        fn send_raw<'a>(
+            &'a mut self,
+            _buf: &'a [u8],
+        ) -> BoxFuture<'a, smb_transport::error::Result<()>> {
+            async { Ok(()) }.boxed()
+        }
+    }
+
+    /// An unsigned, unencrypted plain response as an on-path party would forge it.
+    fn forged_response(command: Command, status: Status) -> Vec<u8> {
+        let header = Header {
+            credit_charge: 1,
+            status: status as u32,
+            command,
+            credit_request: 1,
+            flags: HeaderFlags::new().with_server_to_redir(true),
+            next_command: 0,
+            message_id: MESSAGE_ID,
+            tree_id: Some(1),
+            async_id: None,
+            session_id: SESSION_ID,
+            signature: 0,
+        };
+        let mut message = Cursor::new(Vec::new());
+        header.write_le(&mut message).unwrap();
+        ErrorResponse { error_data: vec![] }
+            .write_le(&mut message)
+            .unwrap();
+        // ErrorData is one byte when ByteCount is zero.
+        message.get_mut().push(0);
+        let message = message.into_inner();
+
+        let mut framed = Vec::with_capacity(message.len() + 4);
+        framed.extend_from_slice(&(message.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&message);
+        framed
+    }
+
+    fn connection_info(dialect: Dialect, encryption_mode: EncryptionMode) -> ConnectionInfo {
+        ConnectionInfo {
+            server_name: "server".to_string(),
+            server_address: SocketAddr::from(([127, 0, 0, 1], 445)),
+            negotiation: NegotiatedProperties {
+                server_guid: Guid::generate(),
+                caps: GlobalCapabilities::new(),
+                max_transact_size: 65536,
+                max_read_size: 65536,
+                max_write_size: 65536,
+                auth_buffer: vec![],
+                signing_algo: None,
+                encryption_cipher: None,
+                compression: None,
+                dialect_rev: dialect,
+            },
+            dialect: DialectImpl::new(dialect),
+            config: ConnectionConfig {
+                encryption_mode,
+                allow_unsigned_guest_access: false,
+                ..ConnectionConfig::default()
+            },
+            preauth_hash: crate::connection::preauth_hash::PreauthHashState::Unsupported,
+            client_guid: Guid::generate(),
+        }
+    }
+
+    enum Stage {
+        SettingUp,
+        Ready,
+    }
+
+    async fn channel_for(
+        incoming: Vec<u8>,
+        dialect: Dialect,
+        encryption_mode: EncryptionMode,
+        stage: Stage,
+    ) -> HandlerReference<ChannelMessageHandler> {
+        let info = connection_info(dialect, encryption_mode);
+        let mut session = SessionInfo::new(SESSION_ID);
+        session.setup(&SESSION_KEY, &None, &info).unwrap();
+        if matches!(stage, Stage::Ready) {
+            session.ready(SessionFlags::new(), &info).unwrap();
+        }
+        let state = Arc::new(RwLock::new(SessionAndChannel::new(
+            SESSION_ID,
+            Arc::new(RwLock::new(session)),
+        )));
+        let upstream = ConnectionMessageHandler::with_test_transport(Box::new(ScriptedTransport {
+            incoming,
+            position: 0,
+        }))
+        .await
+        .unwrap();
+        ChannelMessageHandler::new(SESSION_ID, 1, &upstream, &state)
+    }
+
+    fn expect_success(msg_id: u64) -> ReceiveOptions<'static> {
+        ReceiveOptions::new()
+            .with_status(&[Status::Success])
+            .with_msg_id_filter(msg_id)
+    }
+
+    fn assert_rejected_before_status(result: crate::Result<IncomingMessage>) {
+        match result {
+            Err(Error::InvalidMessage(reason)) => {
+                assert!(
+                    reason.contains("not signed") || reason.contains("not encrypted"),
+                    "unexpected rejection: {reason}"
+                );
+            }
+            Err(Error::ReceivedErrorMessage(status, _))
+            | Err(Error::UnexpectedMessageStatus(status)) => {
+                panic!("forged unsigned status {status:#x} was acted on before verification")
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unsigned_error_status_is_rejected_when_signing_is_required() {
+        let channel = channel_for(
+            forged_response(Command::Create, Status::ObjectNameNotFound),
+            Dialect::Smb021,
+            EncryptionMode::Allowed,
+            Stage::Ready,
+        )
+        .await;
+        assert_rejected_before_status(channel.recvo(expect_success(MESSAGE_ID)).await);
+    }
+
+    #[tokio::test]
+    async fn unencrypted_error_status_is_rejected_when_encryption_is_required() {
+        let channel = channel_for(
+            forged_response(Command::Create, Status::ObjectNameNotFound),
+            Dialect::Smb0302,
+            EncryptionMode::Required,
+            Stage::Ready,
+        )
+        .await;
+        assert_rejected_before_status(channel.recvo(expect_success(MESSAGE_ID)).await);
+    }
+
+    #[tokio::test]
+    async fn unsigned_success_is_rejected_when_signing_is_required() {
+        let channel = channel_for(
+            forged_response(Command::Create, Status::Success),
+            Dialect::Smb021,
+            EncryptionMode::Allowed,
+            Stage::Ready,
+        )
+        .await;
+        assert_rejected_before_status(channel.recvo(expect_success(MESSAGE_ID)).await);
+    }
+
+    #[tokio::test]
+    async fn unsigned_interim_pending_is_never_accepted_as_a_result() {
+        let channel = channel_for(
+            forged_response(Command::Create, Status::Pending),
+            Dialect::Smb021,
+            EncryptionMode::Allowed,
+            Stage::Ready,
+        )
+        .await;
+        let result = channel.recvo(expect_success(MESSAGE_ID)).await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::ReceivedErrorMessage(status, _) | Error::UnexpectedMessageStatus(status))
+                    if status == Status::Pending as u32
+            ),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsigned_session_setup_failure_is_reported_before_setup_completes() {
+        let channel = channel_for(
+            forged_response(Command::SessionSetup, Status::LogonFailure),
+            Dialect::Smb021,
+            EncryptionMode::Allowed,
+            Stage::SettingUp,
+        )
+        .await;
+        let result = channel
+            .recvo_internal(expect_success(MESSAGE_ID), false)
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(Error::ReceivedErrorMessage(status, _) | Error::UnexpectedMessageStatus(status))
+                    if status == Status::LogonFailure as u32
+            ),
+            "unexpected result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsigned_session_setup_success_is_rejected_when_signing_is_required() {
+        let channel = channel_for(
+            forged_response(Command::SessionSetup, Status::Success),
+            Dialect::Smb021,
+            EncryptionMode::Allowed,
+            Stage::SettingUp,
+        )
+        .await;
+        assert_rejected_before_status(
+            channel
+                .recvo_internal(expect_success(MESSAGE_ID), false)
+                .await,
+        );
     }
 }

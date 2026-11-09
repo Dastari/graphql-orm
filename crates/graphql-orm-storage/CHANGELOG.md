@@ -3,12 +3,31 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-09
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.8.1 (unreleased)
+
+- Security ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)):
+  the vendored SMB client evaluated a response status before verifying the
+  message's signature or encryption. An on-path party without credentials could
+  answer a pending request with an unsigned error such as
+  `STATUS_OBJECT_NAME_NOT_FOUND`, even with `require_encryption = true`, making
+  `blob_exists` return `false`, deletion report success, or a listing skip a
+  directory. A new owner-local patch, recorded in the vendor provenance,
+  verifies signing or encryption first. An unverified response now fails with a
+  non-retryable `SecurityNegotiation` error. Only the MS-SMB2 3.2.5.1.3
+  exemptions remain (interim `STATUS_PENDING`, and `SESSION_SETUP` before setup
+  completes), and only for statuses that fail the request.
+- SMB listings fail closed: a directory reported by enumeration that is not
+  found, or does not open as a directory, fails the listing with a
+  non-retryable `Protocol` error instead of being skipped. A missing configured
+  root still lists as empty.
+- No API, key, object format or persisted-data change.
 
 ## 0.8.0 (unreleased)
 
