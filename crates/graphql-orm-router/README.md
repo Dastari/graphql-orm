@@ -16,6 +16,11 @@ that same tag and refresh their locks to one source; matching the commit alone
 does not unify revision and tag selectors. See the
 [published Auth selection](../../MIGRATION.md#published-agql-auth-0240-selection).
 
+Version 0.8.3 fixes terminal WebSocket errors: `error`, including
+`SUBSCRIPTION_SCHEMA_RELOAD`, ends the operation without a following `complete`.
+Reconnect after schema reload; clients must not wait for `complete` after `error`.
+See [MIGRATION.md](MIGRATION.md).
+
 Version 0.8.2 makes wire-test children bind OS-assigned ports and report their owned addresses. Default startup is unchanged. `run_with_listener` and the Unix `--listen-stdin` option also accept an already-bound listener for race-free ownership transfer. No data migration is needed.
 
 Version `0.8.1` adds a test that a subgraph subscription ending with an error

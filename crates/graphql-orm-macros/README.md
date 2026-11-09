@@ -10,6 +10,9 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.109.0 refreshes standalone fixture lockfiles for router 0.8.3.
+Runtime and macro behavior are unchanged; no data migration is needed.
+
 Version 0.108.0 aligns runtime and macros for composite unique migration steps.
 See the [migration guide](../../MIGRATION.md#01080-composite-unique-migrations)
 for exhaustive-match updates and duplicate-data handling.

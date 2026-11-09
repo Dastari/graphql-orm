@@ -81,23 +81,26 @@ same unchanged rejected fingerprint is not recomposed repeatedly.
 
 Clients use `graphql-transport-ws` and place one bearer in
 `connection_init.payload.authorization` (or its `headers` object). There is no
-in-place token replacement.
+in-place token replacement. Legacy `subscriptions-transport-ws` (`graphql-ws`)
+is not supported; requests without the supported subprotocol close with 4406.
 
 - `4401`: obtain a valid token and open a new connection.
 - `4408`: send `connection_init` within the configured deadline and reconnect.
 - `4406`: request the `graphql-transport-ws` subprotocol.
 - HTTP `429`: honor `Retry-After`, add jitter, and increase exponential
   backoff. Do not immediately reconnect.
-- `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; wait for operation
-  completion, open a fresh connection, and resubscribe.
+- `SUBSCRIPTION_SCHEMA_RELOAD`: the selected graph retired; the `error` frame is
+  terminal. Open a fresh connection and resubscribe without waiting for `complete`.
 - `SERVICE_UNAVAILABLE` or `1011`: back off, query authoritative state, and
   reconnect. Missed events are not replayed.
 
 Use jittered exponential backoff and refetch state after any gap. A subscription
 is a notification channel, not the system of record.
 
-An operation-scoped subgraph subscription failure produces `error` (or a
-GraphQL error followed by `complete`) for that operation ID; it does not close
+An operation-scoped subgraph subscription failure produces terminal `error` (or a
+`next` frame carrying GraphQL errors followed by `complete`) for that operation ID.
+After protocol `error`, no further frames, including `complete`, follow for that
+operation. Its state is released and the client may reuse the ID. It does not close
 the public socket or unrelated sibling operations. Loss of the private graph
 bridge is connection-scoped and closes the public socket with 1011. The first
 terminal cause wins, so a client frame/protocol failure is not replaced by a

@@ -16,6 +16,13 @@ for historical context.
 
 ## Unreleased
 
+## 0.109.0
+
+ORM runtime/macros **0.109.0**.
+
+- Refresh standalone fixture lockfiles for router 0.8.3, including federation
+  and GraphQL feature checks run with `--locked`. No runtime or macro behavior changes.
+
 ## 0.108.0
 
 ORM runtime/macros **0.108.0**.

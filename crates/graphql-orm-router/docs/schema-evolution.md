@@ -33,8 +33,8 @@ composed before activation.
 
 Ordinary HTTP requests retain the graph selected at request start. Existing
 subscriptions do not migrate silently: retirement emits
-`SUBSCRIPTION_SCHEMA_RELOAD`, completes the operation, and requires a new
-connection/subscription. Rollouts must retain old resolver behavior long enough
+a terminal `error` with `SUBSCRIPTION_SCHEMA_RELOAD` and no subsequent `complete`,
+and requires a new connection/subscription. Rollouts must retain old resolver behavior long enough
 for bounded HTTP work to drain and clients to reconnect.
 
 Rollback by restoring a previously compatible SDL and matching descriptor, then
