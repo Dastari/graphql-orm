@@ -16,11 +16,11 @@ for historical context.
 
 ## Unreleased
 
-## 0.110.0
+## 0.111.0
 
-ORM runtime/macros **0.110.0**.
+ORM runtime/macros **0.111.0**.
 
-- **Data safety/breaking:** column/check/FK SQLite rebuilds now patch live DDL through the transactional preservation executor. Unchanged generated columns, collations, FK actions, indexes/triggers, rowids and AUTOINCREMENT history survive. Ambiguous targeted clauses, unsupported physical tables/dependencies and reserved-name collisions refuse with sanitized errors before mutation. Mixed object/enforcement changes require separate plans. Previously successful lossy rebuilds may now refuse. Fixes #412.
+- **Data safety/breaking:** column/check/FK SQLite rebuilds now patch live DDL through the transactional preservation executor. Unchanged generated columns, collations, FK actions, indexes/triggers, rowids and AUTOINCREMENT history survive. Ambiguous targeted clauses, unsupported physical tables/dependencies and reserved-name collisions refuse with sanitized errors before mutation. Mixed search-index/enforcement changes require separate plans. Previously successful lossy rebuilds may now refuse. Exact primary-key rewrites are permitted only for transactionally proven empty tables without incoming foreign keys or AUTOINCREMENT, retaining empty legacy placeholder migrations. Fixes #412.
 
 ## 0.110.0
 

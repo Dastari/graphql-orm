@@ -2470,16 +2470,7 @@ fn render_sqlite_table_rebuild_statements(
 ) -> Vec<String> {
     // Object/enforcement changes need their own ordering around object replay.
     // Refuse mixed plans rather than silently omit those changes.
-    if current_table
-        .indexes
-        .iter()
-        .map(|i| {
-            render_create_index_statement(DatabaseBackend::Sqlite, current_table.table_name, i)
-        })
-        .ne(target_table.indexes.iter().map(|i| {
-            render_create_index_statement(DatabaseBackend::Sqlite, target_table.table_name, i)
-        }))
-        || current_table.search_indexes != target_table.search_indexes
+    if current_table.search_indexes != target_table.search_indexes
         || current_table.append_only != target_table.append_only
         || current_table.retention_purge != target_table.retention_purge
     {
@@ -3037,6 +3028,14 @@ pub(super) fn render_owned_plan_steps(
                                     ));
                                 }
                             }
+                        }
+                        if matches!(
+                            step,
+                            OwnedMigrationStep::CreateIndex { .. }
+                                | OwnedMigrationStep::DropIndex { .. }
+                        ) {
+                            statements
+                                .extend(render_migration_step_view(backend, &StepRef::from(step)));
                         }
                         continue;
                     }

@@ -386,25 +386,9 @@ fn sqlite_plan_rebuilds_tables_for_column_alterations() {
     assert!(
         plan.statements
             .iter()
-            .any(|statement| statement == "PRAGMA foreign_keys = OFF")
+            .any(|s| s.starts_with("SELECT graphql_orm_rebuild_table('"))
     );
-    assert!(
-        plan.statements
-            .iter()
-            .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_users_new"))
-    );
-    assert!(plan.statements.iter().any(|statement| statement
-        == "INSERT INTO __graphql_orm_users_new (id, name) SELECT id, name FROM users"));
-    assert!(
-        plan.statements
-            .iter()
-            .any(|statement| statement == "DROP TABLE users")
-    );
-    assert!(
-        plan.statements
-            .iter()
-            .any(|statement| statement == "ALTER TABLE __graphql_orm_users_new RENAME TO users")
-    );
+    assert!(!plan.statements.iter().any(|s| s.starts_with("DROP TABLE")));
     assert!(
         plan.statements
             .iter()
@@ -573,13 +557,12 @@ fn sqlite_plan_rebuilds_tables_for_foreign_key_changes() {
     assert!(
         plan.statements
             .iter()
-            .any(|statement| statement.starts_with("CREATE TABLE __graphql_orm_posts_new"))
+            .any(|statement| statement.starts_with("SELECT graphql_orm_rebuild_table('"))
     );
     assert!(plan.statements.iter().any(|statement| {
         statement.contains("FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE RESTRICT")
     }));
-    assert!(plan.statements.iter().any(|statement| statement
-        == "INSERT INTO __graphql_orm_posts_new (id, author_id) SELECT id, author_id FROM posts"));
+    assert!(!plan.statements.iter().any(|s| s.starts_with("INSERT INTO")));
 }
 
 #[test]

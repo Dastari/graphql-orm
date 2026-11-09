@@ -574,6 +574,27 @@ pub(crate) async fn prepare(
     } else {
         rewrite(&sql, &temporary, &before, &after)?
     };
+    if let Some((old, new)) = &ddl {
+        let unique_clauses = |sql: &str| -> Result<BTreeSet<Vec<String>>, sqlx::Error> {
+            clauses(sql)?
+                .0
+                .iter()
+                .map(|s| signature(s))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|parts| {
+                    parts
+                        .into_iter()
+                        .filter(|ts| ts.iter().any(|t| t == "unique"))
+                        .collect()
+                })
+        };
+        if unique_clauses(old)? != unique_clauses(new)? {
+            let incoming: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM main.sqlite_master m JOIN pragma_foreign_key_list(m.name, 'main') f WHERE m.type='table' AND f."table"=? COLLATE NOCASE"#).bind(&table).fetch_one(&mut *conn).await?;
+            if incoming != 0 {
+                return Err(unsupported());
+            }
+        }
+    }
     validate_incoming_keys(conn, &table, &before, &after).await?;
     sqlx::query(&format!("EXPLAIN {create}"))
         .fetch_all(&mut *conn)
@@ -767,6 +788,23 @@ impl Prepared {
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    #[test]
+    fn double_quoted_expression_bytes_and_primary_keys_are_not_normalized_away() {
+        assert_ne!(
+            signature(r#"a TEXT DEFAULT "Secret""#).unwrap(),
+            signature(r#"a TEXT DEFAULT "secret""#).unwrap()
+        );
+        assert!(
+            rewrite_table(
+                "CREATE TABLE probe(id INTEGER, PRIMARY KEY(id))",
+                "temporary",
+                "CREATE TABLE probe(id INTEGER, PRIMARY KEY(id))",
+                "CREATE TABLE probe(id TEXT, PRIMARY KEY(id))"
+            )
+            .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn cancelled_live_column_rebuild_rolls_back_and_retries() -> Result<(), sqlx::Error> {

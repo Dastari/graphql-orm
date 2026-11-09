@@ -672,9 +672,9 @@ async fn runtime_collections_with_reserved_names_migrate_rebuild_and_serve_crud(
     let (statements, environment) = migrate(&database, runtime_definition(true, true), "v3").await;
     #[cfg(feature = "sqlite")]
     assert!(
-        statements.iter().any(|sql| sql
-            == "INSERT INTO __graphql_orm_order_new (id, \"join\", \"select\", \"where\") \
-                SELECT id, \"join\", \"select\", \"where\" FROM \"order\""),
+        statements
+            .iter()
+            .any(|sql| sql.starts_with("SELECT graphql_orm_rebuild_table('")),
         "{statements:?}"
     );
     #[cfg(feature = "postgres")]
