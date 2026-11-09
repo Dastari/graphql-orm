@@ -12,6 +12,11 @@ supersedes: []
 
 ## 0.9.0 (unreleased)
 
+- Check active WebSocket IDs before payload validation and other admission
+  errors. Duplicate IDs always close with 4409 and retire all operations, so
+  malformed or ambiguous duplicates cannot leave an older stream active after
+  a terminal error.
+
 - Signal executor overflow, subscriber lag, and bounded gateway overflow with terminal, sanitized `SUBSCRIPTION_CONTINUITY_LOST` errors. Loss detection works without telemetry export; router-owned loss is attributed locally; pinned Hive counters lack operation identity, so only active subscriptions on that runtime are conservatively invalidated, with a one-second quiet admission gate to coalesce sustained loss. Queries and mutations are preserved. Fixes #359.
 
 ## 0.8.3 (unreleased)

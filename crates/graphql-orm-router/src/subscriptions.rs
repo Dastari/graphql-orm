@@ -885,21 +885,23 @@ async fn forward_subscribe(
             .borrow_mut()
             .terminate_with_public_close(4400, "Subscription ID is required");
     }
-    let Some(subscription) = selected_subscription(&message) else {
-        return Some(ws::Message::Text(
-            json!({"id": id, "type": "error", "payload": [{
-                "message": "An explicit, unambiguous GraphQL operation is required",
-                "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"}
-            }]})
-            .to_string()
-            .into(),
-        ));
-    };
     {
         let mut state = state.borrow_mut();
+        // Duplicate IDs are connection errors, regardless of the new payload.
+        // No operation-scoped terminal error may leave the old generation live.
         if state.operations.contains_key(&id) {
             return state.terminate_with_public_close(4409, "Subscriber already exists");
         }
+        let Some(subscription) = selected_subscription(&message) else {
+            return Some(ws::Message::Text(
+                json!({"id": id, "type": "error", "payload": [{
+                    "message": "An explicit, unambiguous GraphQL operation is required",
+                    "extensions": {"code": "GRAPHQL_VALIDATION_FAILED"}
+                }]})
+                .to_string()
+                .into(),
+            ));
+        };
         if state.operations.len() >= state.gateway.config.max_operations_per_connection {
             return Some(operation_limit_error(&id));
         }
@@ -1204,6 +1206,64 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn duplicate_id_closes_before_validation_or_other_operation_errors() {
+        for (query, at_capacity, cooling_down, exhausted) in [
+            (Some("subscription {"), false, false, false),
+            (
+                Some("query A { value } subscription B { changed }"),
+                false,
+                false,
+                false,
+            ),
+            (None, false, false, false),
+            (Some("subscription { changed }"), true, false, false),
+            (Some("subscription { changed }"), false, true, false),
+            (Some("subscription { changed }"), false, false, true),
+        ] {
+            let mut gateway = test_gateway();
+            if at_capacity {
+                Arc::get_mut(&mut gateway)
+                    .unwrap()
+                    .config
+                    .max_operations_per_connection = 4;
+            }
+            let state = operation_test_state(gateway.clone());
+            // Reproduce a live subscription before sending the duplicate.
+            assert_eq!(next_message("sub", &state)["type"], "next");
+            if cooling_down {
+                gateway.internal.continuity.lost();
+            }
+            if exhausted {
+                state.borrow_mut().next_operation = u64::MAX;
+            }
+            let mut duplicate = json!({"type": "subscribe", "id": "sub", "payload": {}});
+            if let Some(query) = query {
+                duplicate["payload"]["query"] = json!(query);
+            }
+            let result =
+                futures::executor::block_on(forward_subscribe(duplicate, "", state.clone()));
+            let Some(ws::Message::Close(Some(reason))) = result else {
+                panic!("duplicate must close with 4409, even for {query:?}: {result:?}");
+            };
+            assert_eq!(u16::from(reason.code), 4409);
+            assert_eq!(
+                reason.description.as_deref(),
+                Some("Subscriber already exists")
+            );
+            assert_eq!(state.borrow().phase, ConnectionPhase::Closed);
+            assert!(state.borrow().operations.is_empty());
+            assert_eq!(gateway.active_operations.load(Ordering::Acquire), 0);
+            for kind in ["next", "error", "complete"] {
+                let late = json!({"id": "sub", "type": kind});
+                assert!(
+                    public_server_message(late.to_string().as_bytes(), &state).is_none(),
+                    "late {kind} after duplicate close"
+                );
+            }
+        }
     }
 
     #[test]

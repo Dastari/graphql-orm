@@ -87,6 +87,8 @@ is not supported; requests without the supported subprotocol close with 4406.
 - `4401`: obtain a valid token and open a new connection.
 - `4408`: send `connection_init` within the configured deadline and reconnect.
 - `4406`: request the `graphql-transport-ws` subprotocol.
+- `4409`: do not reuse an active operation ID. Duplicate-ID detection precedes
+  payload validation; the connection closes and all its operations are retired.
 - HTTP `429`: honor `Retry-After`, add jitter, and increase exponential
   backoff. Do not immediately reconnect.
 - `SUBSCRIPTION_CONTINUITY_LOST`: frames were dropped or skipped. The sanitized
