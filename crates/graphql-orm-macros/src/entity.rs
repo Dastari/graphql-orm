@@ -4088,8 +4088,16 @@ fn generate_entity_impl(
                     quote! { None }
                 };
 
+                // Sibling derives are erased by rustc. Only the relation derive's
+                // concrete output witness can prove an implementation skip is safe.
+                let delegated_readable =
+                    scalar_output_is_readable(field, &field_meta, false, &input.attrs)
+                        && (schema_only || legacy_graphql_complex);
+                let generated_readable =
+                    scalar_output_is_readable(field, &field_meta, true, &input.attrs);
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
+                        is_readable: #delegated_readable || (#generated_readable && _generated_output.contains(&#graphql_name)),
                         field_name: #graphql_name,
                         target_type: #target_type,
                         source_column: #source_column,
@@ -5544,10 +5552,19 @@ fn generate_entity_impl(
 
             impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
                 fn relation_metadata() -> &'static [::graphql_orm::graphql::orm::RelationMetadata] {
-                    static RELATIONS: &[::graphql_orm::graphql::orm::RelationMetadata] = &[
-                        #(#relation_metadata_defs),*
-                    ];
-                    RELATIONS
+                    // Inherent methods win over this local blanket fallback.
+                    // No witness means no generated getter ownership.
+                    #[allow(dead_code)]
+                    trait OutputFallback {
+                        fn __gom_exposed_relation_fields() -> &'static [&'static str] { &[] }
+                    }
+                    impl<T> OutputFallback for T {}
+                    static RELATIONS: ::std::sync::OnceLock<::std::boxed::Box<[::graphql_orm::graphql::orm::RelationMetadata]>> =
+                        ::std::sync::OnceLock::new();
+                    RELATIONS.get_or_init(|| {
+                        let _generated_output = #struct_name::__gom_exposed_relation_fields();
+                        vec![#(#relation_metadata_defs),*].into_boxed_slice()
+                    })
                 }
             }
 
@@ -6160,10 +6177,19 @@ fn generate_entity_impl(
 
         impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
             fn relation_metadata() -> &'static [::graphql_orm::graphql::orm::RelationMetadata] {
-                static RELATIONS: &[::graphql_orm::graphql::orm::RelationMetadata] = &[
-                    #(#relation_metadata_defs),*
-                ];
-                RELATIONS
+                // Inherent methods win over this local blanket fallback.
+                    // No witness means no generated getter ownership.
+                    #[allow(dead_code)]
+                    trait OutputFallback {
+                        fn __gom_exposed_relation_fields() -> &'static [&'static str] { &[] }
+                    }
+                    impl<T> OutputFallback for T {}
+                    static RELATIONS: ::std::sync::OnceLock<::std::boxed::Box<[::graphql_orm::graphql::orm::RelationMetadata]>> =
+                        ::std::sync::OnceLock::new();
+                    RELATIONS.get_or_init(|| {
+                        let _generated_output = #struct_name::__gom_exposed_relation_fields();
+                        vec![#(#relation_metadata_defs),*].into_boxed_slice()
+                    })
             }
         }
 
@@ -8199,6 +8225,47 @@ mod object_visibility_tests {
                     result.unwrap();
                 } else {
                     assert!(result.unwrap_err().to_string().contains("self-target key"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn relation_output_metadata_distinguishes_owned_implementation_skips() {
+        for backend in crate::backend::enabled_backends() {
+            for (attribute, delegated) in [
+                ("", true),
+                ("#[graphql(skip)]", false),
+                ("#[graphql(skip = true)]", false),
+                ("#[graphql(skip = false)]", true),
+                ("#[graphql(skip_output)]", false),
+                ("#[graphql(skip_output = false)]", true),
+                ("#[graphql(visible = false)]", false),
+                ("#[graphql(guard = \"Guard\")]", false),
+                ("#[graphql_orm(private)]", false),
+                ("#[graphql_orm(read = false)]", false),
+                ("#[input_only]", false),
+                ("#[graphql_orm(read_policy = \"owner\")]", false),
+            ] {
+                for metadata_only in [false, true] {
+                    let input: DeriveInput = syn::parse_str(&format!(r#"
+                        #[graphql_entity(backend = "{backend}", table = "records", plural = "Records")]
+                        struct Record {{
+                            #[primary_key] id: i64,
+                            {attribute}
+                            #[relation(target = "Record", from = "id", to = "id", emit_fk = false)]
+                            related: Option<Box<Record>>,
+                        }}
+                    "#, backend = backend.name())).unwrap();
+                    let tokens = generate_entity_impl(&input, metadata_only, false)
+                        .unwrap()
+                        .to_string();
+                    let relation = tokens.split("RelationMetadata {").nth(1).unwrap();
+                    let expected = metadata_only && delegated;
+                    assert!(
+                        relation.starts_with(&format!(" is_readable : {expected} ||")),
+                        "{attribute}, metadata_only={metadata_only}: {relation}"
+                    );
                 }
             }
         }

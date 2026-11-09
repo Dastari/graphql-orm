@@ -479,8 +479,10 @@ pub(crate) fn generate_graphql_relations(
             let emit_foreign_key = r.emit_foreign_key;
             let on_delete = &r.on_delete;
             let propagate_change = &r.propagate_change;
+            let is_readable = r.read_policy.is_none();
             quote! {
                 ::graphql_orm::graphql::orm::RelationMetadata {
+                    is_readable: #is_readable && _generated_output.contains(&#graphql_name),
                     field_name: #graphql_name,
                     target_type: #target_type,
                     source_column: #source_column,
@@ -1398,6 +1400,31 @@ pub(crate) fn generate_graphql_relations(
         quote! {}
     };
 
+    // Only exposed output can own implementation skips. A composed wrapper
+    // publishes its fields separately; graphql_complex_object proves mounting.
+    let output_witness = if !complex_object_impl.is_empty() {
+        let fields = relations.iter().map(|r| &r.graphql_name);
+        let exposed = if !entity_meta.compose_complex_object {
+            quote! {
+                #[doc(hidden)]
+                pub fn __gom_exposed_relation_fields() -> &'static [&'static str] {
+                    Self::__gom_generated_relation_fields()
+                }
+            }
+        } else {
+            quote! {}
+        };
+        quote! {
+            #[doc(hidden)]
+            pub fn __gom_generated_relation_fields() -> &'static [&'static str] {
+                &[#(#fields),*]
+            }
+            #exposed
+        }
+    } else {
+        quote! {}
+    };
+
     Ok(quote! {
         #(#relation_target_checks)*
         impl ::graphql_orm::graphql::orm::RelationLoader<#backend_marker> for #struct_name {
@@ -1439,6 +1466,7 @@ pub(crate) fn generate_graphql_relations(
 
         impl #struct_name {
             #identity_witness
+            #output_witness
 
             fn __gom_selection_contains(
                 selection: &[::graphql_orm::async_graphql::context::SelectionField<'_>],
@@ -1473,10 +1501,17 @@ pub(crate) fn generate_graphql_relations(
 
             /// Get relation metadata for look_ahead traversal
             pub fn relation_metadata() -> &'static [::graphql_orm::graphql::orm::RelationMetadata] {
-                static RELATIONS: &[::graphql_orm::graphql::orm::RelationMetadata] = &[
-                    #(#relation_metadata),*
-                ];
-                RELATIONS
+                #[allow(dead_code)]
+                trait OutputFallback {
+                    fn __gom_exposed_relation_fields() -> &'static [&'static str] { &[] }
+                }
+                impl<T> OutputFallback for T {}
+                static RELATIONS: ::std::sync::OnceLock<::std::boxed::Box<[::graphql_orm::graphql::orm::RelationMetadata]>> =
+                    ::std::sync::OnceLock::new();
+                RELATIONS.get_or_init(|| {
+                    let _generated_output = #struct_name::__gom_exposed_relation_fields();
+                    vec![#(#relation_metadata),*].into_boxed_slice()
+                })
             }
 
             /// Get entity name for relation registry

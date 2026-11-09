@@ -417,8 +417,9 @@ deterministically from physical names (`<table>`, `<table>.<column>`, `<table>.<
 compare converted schemas by `structural_fingerprint()`, not `fingerprint()`.
 
 To make conversion faithful, static metadata records the following facts, emitted by the
-derives and available on `ColumnDef`/`FieldMetadata`:
+derives and available on `ColumnDef`/`FieldMetadata` and `RelationMetadata`:
 
+- `RelationMetadata::is_readable` — effective relation output eligibility; default conversion refuses hidden declarations even with public keys and targets. Generated relation implementation skips remain readable.
 - `is_readable` — scalar output eligibility under the owning object; default conversion
   refuses unreadable columns. Delegated and metadata-only output honors effective
   `skip`, `skip_output`, flattening and unrepresented visibility/guards.
@@ -431,7 +432,7 @@ derives and available on `ColumnDef`/`FieldMetadata`:
   and existing schema hashes are unaffected.
 
 Trusted server-authored repository queries may use
-`RuntimeSchema::from_static_entities_for_repository` to retain unreadable columns.
+`RuntimeSchema::from_static_entities_for_repository` to retain unreadable columns and relation declarations.
 This marks the entire schema `repository_only: true`. Runtime GraphQL module
 compilation rejects marked schemas with `repository_only_schema` before consulting any host authority.
 Serialization, revalidation, and both fingerprints retain the marker; do not
@@ -441,6 +442,14 @@ Ordinary schemas default the marker to false and retain existing serialized
 bytes/fingerprints. Other unsupported capabilities still fail closed. Previously converted stored
 catalogs must be regenerated from current static metadata; old runtime documents
 cannot reconstruct static visibility attributes during deserialization.
+
+Relation getter ownership is proven by generated output, not by the entity
+derive alone. Skipped relations on delegated or handwritten complex objects
+without an exposed generated getter refuse conversion. Composed wrappers count
+only when `graphql_complex_object` mounts them without unrepresented output
+options; otherwise conversion fails closed. Schema-only objects with generated
+relation output retain that proven eligibility. Scalar ownership already
+delegates complex objects and continues to honor their output skips.
 
 Static decimal columns convert to `RuntimeValueKind::Decimal` with their definition, and their
 backend default SQL to the canonical literal.

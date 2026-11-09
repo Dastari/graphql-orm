@@ -218,3 +218,234 @@ fn scalar_metadata_respects_the_object_owner() {
     );
     assert_refused(RepositoryScalar::metadata(), &["value"]);
 }
+
+// GraphQLRelations supplies this getter; SimpleObject must skip the storage slot.
+#[derive(
+    GraphQLEntity,
+    graphql_orm_macros::GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "owned_relations",
+    plural = "OwnedRelations"
+)]
+struct OwnedRelation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    scalar_id: i64,
+    #[graphql(skip)]
+    #[relation(target = "OwnedScalar", from = "scalar_id", to = "id")]
+    scalar: Option<OwnedScalar>,
+}
+
+struct RelationQuery;
+#[Object]
+impl RelationQuery {
+    async fn holder(&self) -> OwnedRelation {
+        OwnedRelation {
+            id: 1,
+            scalar_id: 2,
+            scalar: None,
+        }
+    }
+}
+
+#[test]
+fn generated_relation_implementation_skip_remains_readable() {
+    let metadata = OwnedRelation::metadata();
+    assert!(metadata.relations[0].is_readable);
+    let api =
+        async_graphql::Schema::build(RelationQuery, EmptyMutation, EmptySubscription).finish();
+    assert!(api.sdl().contains("scalar: OwnedScalar"));
+    let schema = RuntimeSchema::from_static_entities(&[metadata, OwnedScalar::metadata()]).unwrap();
+    assert!(!schema.repository_only);
+    assert_eq!(schema.collections[0].relations.len(), 1);
+}
+
+impl graphql_orm::graphql::loaders::BatchLoadEntity<graphql_orm::SqliteBackend> for OwnedScalar {
+    fn batch_column() -> &'static str {
+        "id"
+    }
+    fn batch_key_from_row(
+        row: &graphql_orm::sqlx::sqlite::SqliteRow,
+    ) -> graphql_orm::Result<String> {
+        use graphql_orm::sqlx::Row;
+        Ok(row.try_get::<i64, _>("id")?.to_string())
+    }
+}
+
+#[derive(
+    GraphQLEntity,
+    graphql_orm_macros::GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "mounted_relations",
+    plural = "MountedRelations"
+)]
+struct MountedRelation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    scalar_id: i64,
+    #[graphql(skip)]
+    #[relation(target = "OwnedScalar", from = "scalar_id", to = "id")]
+    scalar: Option<OwnedScalar>,
+}
+#[graphql_orm_macros::graphql_complex_object]
+impl MountedRelation {
+    async fn extra(&self) -> &str {
+        "mounted"
+    }
+}
+
+#[derive(
+    GraphQLEntity,
+    graphql_orm_macros::GraphQLRelations,
+    SimpleObject,
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql(complex)]
+#[graphql_orm(compose_complex_object)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "unmounted_relations",
+    plural = "UnmountedRelations"
+)]
+struct UnmountedRelation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    scalar_id: i64,
+    #[graphql(skip)]
+    #[relation(target = "OwnedScalar", from = "scalar_id", to = "id")]
+    scalar: Option<OwnedScalar>,
+}
+#[async_graphql::ComplexObject]
+impl UnmountedRelation {
+    async fn extra(&self) -> &str {
+        "unmounted"
+    }
+}
+
+#[derive(
+    GraphQLEntity,
+    graphql_orm_macros::GraphQLRelations,
+    Clone,
+    Debug,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[graphql_entity(
+    backend = "sqlite",
+    table = "schema_only_relations",
+    plural = "SchemaOnlyRelations",
+    schema_only = true
+)]
+struct SchemaOnlyRelation {
+    #[primary_key]
+    #[sortable]
+    id: i64,
+    scalar_id: i64,
+    #[graphql(skip)]
+    #[relation(target = "OwnedScalar", from = "scalar_id", to = "id")]
+    scalar: Option<OwnedScalar>,
+}
+
+struct OutputOwnershipQuery;
+#[Object]
+impl OutputOwnershipQuery {
+    async fn mounted(&self) -> MountedRelation {
+        MountedRelation {
+            id: 1,
+            scalar_id: 2,
+            scalar: None,
+        }
+    }
+    async fn unmounted(&self) -> UnmountedRelation {
+        UnmountedRelation {
+            id: 1,
+            scalar_id: 2,
+            scalar: None,
+        }
+    }
+    async fn schema_only(&self) -> SchemaOnlyRelation {
+        SchemaOnlyRelation {
+            id: 1,
+            scalar_id: 2,
+            scalar: None,
+        }
+    }
+}
+
+#[test]
+fn relation_ownership_requires_exposed_output_including_composed_and_schema_only_objects() {
+    let api = async_graphql::Schema::build(OutputOwnershipQuery, EmptyMutation, EmptySubscription)
+        .finish();
+    let sdl = api.sdl();
+    for (name, exposed) in [
+        ("MountedRelation", true),
+        ("UnmountedRelation", false),
+        ("SchemaOnlyRelation", true),
+    ] {
+        let prefix = format!("type {name} ");
+        let object = sdl
+            .split(&prefix)
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap();
+        assert_eq!(
+            object.lines().any(|line| {
+                let line = line.trim_start();
+                line.starts_with("scalar:") || line.starts_with("scalar(")
+            }),
+            exposed,
+            "{name}: {object}"
+        );
+    }
+    for metadata in [MountedRelation::metadata(), SchemaOnlyRelation::metadata()] {
+        assert!(metadata.relations[0].is_readable);
+        assert!(RuntimeSchema::from_static_entities(&[metadata, OwnedScalar::metadata()]).is_ok());
+    }
+    assert!(!UnmountedRelation::relation_metadata()[0].is_readable);
+    assert!(MountedRelation::relation_metadata()[0].is_readable);
+    let metadata = UnmountedRelation::metadata();
+    assert!(!metadata.relations[0].is_readable);
+    assert!(RuntimeSchema::from_static_entities(&[metadata, OwnedScalar::metadata()]).is_err());
+}
+
+#[test]
+fn delegated_complex_scalars_already_honor_output_skips_without_relation_derive() {
+    assert!(
+        !ComplexSecret::metadata()
+            .fields
+            .iter()
+            .find(|f| f.name == "password")
+            .unwrap()
+            .is_readable
+    );
+    assert_refused(ComplexSecret::metadata(), &["password"]);
+}

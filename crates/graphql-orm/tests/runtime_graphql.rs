@@ -1317,3 +1317,473 @@ async fn static_hidden_columns_refuse_reads_before_permissive_authority() {
     }
     assert_eq!(authority.0.load(Ordering::SeqCst), 0);
 }
+
+#[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+#[tokio::test]
+async fn static_hidden_relations_refuse_reads_before_permissive_authority() {
+    use graphql_orm_macros::GraphQLSchemaEntity;
+
+    #[derive(
+        GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    )]
+    #[graphql_entity(
+        table = "relation_children",
+        plural = "RelationChildren",
+        backend = "sqlite"
+    )]
+    struct Child {
+        #[primary_key]
+        #[sortable]
+        id: i64,
+        parent_id: i64,
+        value: i64,
+    }
+
+    #[derive(
+        GraphQLSchemaEntity, serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq,
+    )]
+    #[graphql_entity(
+        table = "relation_parents",
+        plural = "RelationParents",
+        backend = "sqlite"
+    )]
+    struct Parent {
+        #[primary_key]
+        #[sortable]
+        id: i64,
+        #[graphql_orm(private)]
+        #[relation(target = "Child", from = "id", to = "parent_id", multiple)]
+        private_children: Vec<Child>,
+        #[graphql_orm(read = false)]
+        #[relation(target = "Child", from = "id", to = "parent_id", multiple)]
+        nonread_children: Vec<Child>,
+        #[input_only]
+        #[relation(target = "Child", from = "id", to = "parent_id", multiple)]
+        input_children: Vec<Child>,
+        #[graphql(skip)]
+        #[relation(target = "Child", from = "id", to = "parent_id", multiple)]
+        skipped_children: Vec<Child>,
+        #[graphql(skip_output)]
+        #[relation(target = "Child", from = "id", to = "parent_id", multiple)]
+        skipped_output_children: Vec<Child>,
+        #[graphql(skip = false)]
+        #[relation(target = "Child", from = "id", to = "parent_id", multiple)]
+        public_children: Vec<Child>,
+    }
+    assert!(Parent::metadata().fields.iter().all(|f| f.is_readable));
+    assert!(Child::metadata().fields.iter().all(|f| f.is_readable));
+    assert_eq!(
+        Parent::metadata()
+            .relations
+            .iter()
+            .map(|r| r.is_readable)
+            .collect::<Vec<_>>(),
+        vec![false, false, false, false, false, true]
+    );
+
+    struct Permissive(AtomicUsize);
+    impl RuntimeReadAuthority for Permissive {
+        fn authorize<'a>(
+            &'a self,
+            _: RuntimeReadCheck<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(RuntimeReadGrant::new(None)) })
+        }
+    }
+    let database = Database::connect_sqlite("sqlite::memory:").await.unwrap();
+    let authority = Arc::new(Permissive(AtomicUsize::new(0)));
+    for field in [
+        "privateChildren",
+        "nonreadChildren",
+        "inputChildren",
+        "skippedChildren",
+        "skippedOutputChildren",
+    ] {
+        for query in [
+            format!(
+                "{{relationParents{{edges{{node{{{field}{{edges{{node{{value}}}} totalCount}}}}}}}}}}"
+            ),
+            format!("{{relationParents{{edges{{node{{{field}{{value}}}}}}}}}}"),
+            format!(
+                "{{relationParents(where:{{{field}:{{some:{{value:{{eq:1}}}}}}}}){{edges{{node{{id}}}}}}}}"
+            ),
+            format!(
+                "{{relationParents(orderBy:[{{{field}:{{count:ASC}}}}]){{edges{{node{{id}}}}}}}}"
+            ),
+            format!(
+                "{{relationParents{{edges{{node{{{field}Aggregate{{count sum{{value}}}}}}}}}}}}"
+            ),
+            format!(
+                "{{relationParents{{edges{{node{{{field}Connection{{edges{{node{{value}}}} totalCount}}}}}}}}}}"
+            ),
+        ] {
+            // Model the host's complete conversion-to-execution path. Conversion
+            // must refuse before compiling any schema or calling the authority.
+            let attempt = async {
+                let schema =
+                    RuntimeSchema::from_static_entities(&[Parent::metadata(), Child::metadata()])?;
+                let schema = Arc::new(schema.validate().unwrap());
+                let module =
+                    RuntimeGraphqlModule::compile(schema.clone(), Default::default()).unwrap();
+                let api =
+                    RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+                        .unwrap()
+                        .cursor_protection(
+                            Arc::new(TestAead),
+                            RuntimeCursorAudience::new("static-hidden-tests").unwrap(),
+                            Default::default(),
+                        )
+                        .unwrap()
+                        .install(module)
+                        .unwrap()
+                        .finish()
+                        .unwrap();
+                Ok::<_, RuntimeSchemaDiagnostics>(
+                    api.execute(request(
+                        &schema,
+                        authority.clone(),
+                        &query,
+                        serde_json::json!({}),
+                    ))
+                    .await,
+                )
+            }
+            .await;
+            let diagnostics = attempt.expect_err("hidden values must never reach execution");
+            assert_eq!(diagnostics.diagnostics().len(), 5, "{query}");
+            assert!(
+                diagnostics
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.subject.as_deref() == Some(field)
+                        && d.collection
+                            .as_ref()
+                            .is_some_and(|c| c.as_str() == "relation_parents")),
+                "{diagnostics}"
+            );
+            assert!(diagnostics.diagnostics().iter().all(|d| d.code
+                == RuntimeSchemaDiagnosticCode::UnsupportedCapability
+                && d.subject.is_some()
+                && d.message.contains("statically unreadable")));
+        }
+    }
+    let repository = RuntimeSchema::from_static_entities_for_repository(&[
+        Parent::metadata(),
+        Child::metadata(),
+    ])
+    .unwrap();
+    assert!(repository.repository_only);
+    assert_eq!(repository.collections[0].relations.len(), 6);
+    let mut public_parent = Parent::metadata().clone();
+    public_parent.relations = public_parent
+        .relations
+        .iter()
+        .filter(|r| r.is_readable)
+        .cloned()
+        .collect();
+    let public = RuntimeSchema::from_static_entities(&[&public_parent, Child::metadata()]).unwrap();
+    assert!(!public.repository_only);
+    let public = Arc::new(public.validate().unwrap());
+    let public_module = RuntimeGraphqlModule::compile(public.clone(), Default::default()).unwrap();
+    // The marker survives every ordinary round trip; a permissive authority
+    // cannot admit any GraphQL module containing these internal columns.
+    let wire = serde_json::to_vec(&repository).unwrap();
+    let decoded: RuntimeSchema = serde_json::from_slice(&wire).unwrap();
+    let validated = repository.clone().validate().unwrap();
+    assert_eq!(
+        validated.structural_fingerprint(),
+        decoded.clone().validate().unwrap().structural_fingerprint()
+    );
+    assert!(decoded.repository_only);
+    assert_eq!(
+        validated.fingerprint(),
+        decoded.clone().validate().unwrap().fingerprint()
+    );
+    for definition in [repository, decoded, validated.into_schema()] {
+        let error = RuntimeGraphqlModule::compile(
+            Arc::new(definition.validate().unwrap()),
+            Default::default(),
+        )
+        .err()
+        .expect("repository schemas must not be served");
+        assert_eq!(error.0[0].code(), "repository_only_schema");
+    }
+    assert_eq!(authority.0.load(Ordering::SeqCst), 0);
+    for sql in [
+        "CREATE TABLE relation_parents(id BIGINT PRIMARY KEY)",
+        "CREATE TABLE relation_children(id BIGINT PRIMARY KEY,parent_id BIGINT NOT NULL,value BIGINT NOT NULL)",
+        "INSERT INTO relation_parents VALUES (1)",
+        "INSERT INTO relation_children VALUES (2,1,42)",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(database.pool())
+            .await
+            .unwrap();
+    }
+    let api = RuntimeGraphqlComposer::new(database, "Query", Default::default())
+        .unwrap()
+        .cursor_protection(
+            Arc::new(TestAead),
+            RuntimeCursorAudience::new("public-relations").unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+        .install(public_module)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let response = api
+        .execute(request(
+            &public,
+            authority.clone(),
+            "{relationParents{edges{node{publicChildren{edges{node{value}} totalCount}}}}}",
+            serde_json::json!({}),
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    let data = response.data.into_json().unwrap();
+    assert_eq!(
+        data["relationParents"]["edges"][0]["node"]["publicChildren"]["edges"][0]["node"]["value"],
+        "42"
+    );
+    assert_eq!(
+        data["relationParents"]["edges"][0]["node"]["publicChildren"]["totalCount"],
+        "1"
+    );
+    assert!(authority.0.load(Ordering::SeqCst) > 0);
+}
+
+#[cfg(all(feature = "sqlite", not(feature = "postgres")))]
+#[tokio::test]
+async fn delegated_complex_relation_skip_requires_an_exposed_generated_getter() {
+    use async_graphql::{EmptyMutation, EmptySubscription, Object, SimpleObject};
+    use graphql_orm_macros::{GraphQLEntity, GraphQLRelations};
+
+    #[derive(GraphQLEntity, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "review_children",
+        plural = "ReviewChildren"
+    )]
+    struct ReviewChild {
+        #[primary_key]
+        #[sortable]
+        id: i64,
+        public_value: String,
+    }
+    impl graphql_orm::graphql::loaders::BatchLoadEntity<SqliteBackend> for ReviewChild {
+        fn batch_column() -> &'static str {
+            "id"
+        }
+        fn batch_key_from_row(
+            row: &graphql_orm::sqlx::sqlite::SqliteRow,
+        ) -> graphql_orm::Result<String> {
+            use graphql_orm::sqlx::Row;
+            Ok(row.try_get::<i64, _>("id")?.to_string())
+        }
+    }
+
+    #[derive(
+        GraphQLEntity, SimpleObject, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize,
+    )]
+    #[graphql(complex)]
+    #[graphql_entity(backend = "sqlite", table = "review_holders", plural = "ReviewHolders")]
+    struct ReviewHolder {
+        #[primary_key]
+        #[sortable]
+        id: i64,
+        child_id: i64,
+        #[graphql(skip)]
+        #[relation(target = "ReviewChild", from = "child_id", to = "id")]
+        hidden: Option<ReviewChild>,
+    }
+    // No GraphQLRelations: this valid handwritten output does not expose hidden.
+    #[async_graphql::ComplexObject]
+    impl ReviewHolder {
+        async fn description(&self) -> &str {
+            "holder"
+        }
+    }
+
+    #[derive(
+        GraphQLEntity,
+        SimpleObject,
+        GraphQLRelations,
+        Clone,
+        Debug,
+        PartialEq,
+        serde::Serialize,
+        serde::Deserialize,
+    )]
+    #[graphql(complex)]
+    #[graphql_entity(
+        backend = "sqlite",
+        table = "generated_review_holders",
+        plural = "GeneratedReviewHolders"
+    )]
+    struct GeneratedReviewHolder {
+        #[primary_key]
+        #[sortable]
+        id: i64,
+        child_id: i64,
+        #[graphql(skip)]
+        #[relation(target = "ReviewChild", from = "child_id", to = "id")]
+        hidden: Option<ReviewChild>,
+    }
+
+    struct StaticQuery;
+    #[Object]
+    impl StaticQuery {
+        async fn holder(&self) -> ReviewHolder {
+            ReviewHolder {
+                id: 1,
+                child_id: 2,
+                hidden: None,
+            }
+        }
+        async fn generated(&self) -> GeneratedReviewHolder {
+            GeneratedReviewHolder {
+                id: 1,
+                child_id: 2,
+                hidden: None,
+            }
+        }
+    }
+    let static_api =
+        async_graphql::Schema::build(StaticQuery, EmptyMutation, EmptySubscription).finish();
+    assert!(
+        !static_api
+            .execute("{holder{hidden{publicValue}}}")
+            .await
+            .errors
+            .is_empty()
+    );
+    let sdl = static_api.sdl();
+    let delegated_object = sdl
+        .split("type ReviewHolder {")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(!delegated_object.contains("hidden"));
+    let generated_object = sdl
+        .split("type GeneratedReviewHolder {")
+        .nth(1)
+        .unwrap()
+        .split('}')
+        .next()
+        .unwrap();
+    assert!(generated_object.contains("hidden"));
+
+    struct Permissive(AtomicUsize);
+    impl RuntimeReadAuthority for Permissive {
+        fn authorize<'a>(
+            &'a self,
+            _: RuntimeReadCheck<'a>,
+        ) -> BoxFuture<'a, Result<RuntimeReadGrant, RuntimeGraphqlError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(RuntimeReadGrant::new(None)) })
+        }
+    }
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .unwrap();
+    for sql in [
+        "CREATE TABLE review_children(id BIGINT PRIMARY KEY,public_value TEXT NOT NULL)",
+        "CREATE TABLE review_holders(id BIGINT PRIMARY KEY,child_id BIGINT NOT NULL)",
+        "CREATE TABLE generated_review_holders(id BIGINT PRIMARY KEY,child_id BIGINT NOT NULL)",
+        "INSERT INTO review_children VALUES(2,'RELATED_SECRET')",
+        "INSERT INTO review_holders VALUES(1,2)",
+        "INSERT INTO generated_review_holders VALUES(1,2)",
+    ] {
+        graphql_orm::sqlx::query(sql)
+            .execute(database.pool())
+            .await
+            .unwrap();
+    }
+    let authority = Arc::new(Permissive(AtomicUsize::new(0)));
+    assert!(
+        ReviewHolder::metadata()
+            .fields
+            .iter()
+            .all(|f| f.is_readable)
+    );
+    assert!(ReviewChild::metadata().fields.iter().all(|f| f.is_readable));
+    let query = "{reviewHolders{edges{node{hidden{publicValue}}}}}";
+    let attempt = async {
+        let schema = RuntimeSchema::from_static_entities(&[
+            ReviewHolder::metadata(),
+            ReviewChild::metadata(),
+        ])?;
+        let schema = Arc::new(schema.validate().unwrap());
+        let module = RuntimeGraphqlModule::compile(schema.clone(), Default::default()).unwrap();
+        let api = RuntimeGraphqlComposer::new(database.clone(), "Query", Default::default())
+            .unwrap()
+            .cursor_protection(
+                Arc::new(TestAead),
+                RuntimeCursorAudience::new("review").unwrap(),
+                Default::default(),
+            )
+            .unwrap()
+            .install(module)
+            .unwrap()
+            .finish()
+            .unwrap();
+        Ok::<_, RuntimeSchemaDiagnostics>(
+            api.execute(request(
+                &schema,
+                authority.clone(),
+                query,
+                serde_json::json!({}),
+            ))
+            .await,
+        )
+    }
+    .await;
+    let error = attempt.expect_err("delegated hidden relation must not return RELATED_SECRET");
+    assert_eq!(error.diagnostics().len(), 1);
+    assert_eq!(
+        error.diagnostics()[0].code,
+        RuntimeSchemaDiagnosticCode::UnsupportedCapability
+    );
+    assert_eq!(error.diagnostics()[0].subject.as_deref(), Some("hidden"));
+    assert_eq!(authority.0.load(Ordering::SeqCst), 0);
+
+    let schema = RuntimeSchema::from_static_entities(&[
+        GeneratedReviewHolder::metadata(),
+        ReviewChild::metadata(),
+    ])
+    .unwrap();
+    assert!(!schema.repository_only);
+    let schema = Arc::new(schema.validate().unwrap());
+    let module = RuntimeGraphqlModule::compile(schema.clone(), Default::default()).unwrap();
+    let api = RuntimeGraphqlComposer::new(database, "Query", Default::default())
+        .unwrap()
+        .cursor_protection(
+            Arc::new(TestAead),
+            RuntimeCursorAudience::new("generated-review").unwrap(),
+            Default::default(),
+        )
+        .unwrap()
+        .install(module)
+        .unwrap()
+        .finish()
+        .unwrap();
+    let response = api
+        .execute(request(
+            &schema,
+            authority.clone(),
+            "{generatedReviewHolders{edges{node{hidden{publicValue}}}}}",
+            serde_json::json!({}),
+        ))
+        .await;
+    assert!(response.errors.is_empty(), "{:?}", response.errors);
+    assert_eq!(
+        response.data.into_json().unwrap()["generatedReviewHolders"]["edges"][0]["node"]["hidden"]
+            ["publicValue"],
+        "RELATED_SECRET"
+    );
+    assert!(authority.0.load(Ordering::SeqCst) > 0);
+}

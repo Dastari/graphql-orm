@@ -10,6 +10,39 @@ supersedes: []
 
 # Migration Guide
 
+## 0.104.0 to 0.105.0: static relation readability
+
+Breaking/security: public `RelationMetadata` literals now require
+`is_readable: bool`. There is no implicit default for Rust literals: use
+`true` only for output-eligible declarations and `false` for hidden ones.
+Matching ORM/macros derives populate it automatically. Effective `private`,
+`read = false`, `input_only`, delegated/metadata-only `skip` and
+`skip_output`, and unrepresented output restrictions fail closed. False
+boolean skip flags remain readable. Generated relation resolvers own their
+output, so their SimpleObject implementation skips do not hide those relations.
+
+The default `RuntimeSchema::from_static_entities` refuses unreadable relations
+with field-scoped `UnsupportedCapability` diagnostics, independently of public
+keys/target columns and host authority. This blocks related objects, nested
+filters/orderings, aggregates/counts and connection/edge paths before serving.
+The trusted `from_static_entities_for_repository` path retains relations behind
+the existing whole-schema `repository_only` marker; runtime GraphQL compilation
+always refuses it, including after clone, serialization and revalidation.
+Do not clear the marker or copy internal collections into served schemas.
+
+Regenerate stored converted catalogs from current static metadata. Existing
+runtime documents cannot reconstruct static relation visibility. No database
+migration or runtime wire-field change is required. Ordinary readable relations
+retain their behavior; AI needs no code or version change.
+
+Relation getter ownership is proven by generated output, not by the entity
+derive alone. Skipped relations on delegated or handwritten complex objects
+without an exposed generated getter refuse conversion. Composed wrappers count
+only when `graphql_complex_object` mounts them without unrepresented output
+options; otherwise conversion fails closed. Schema-only objects with generated
+relation output retain that proven eligibility. Scalar ownership already
+delegates complex objects and continues to honor their output skips.
+
 ## 0.103.0 to 0.104.0: empty order input diagnostic
 
 Upgrade ORM/macros together. A GraphQL entity must have at least one orderable field. If the generated order input would be empty, the macro now names the entity and asks for `#[sortable]` on a persisted field; adding it to the primary key is sufficient. Explicit order expressions and relation order aggregates also provide order fields. Repository-only and schema-only declarations remain exempt.

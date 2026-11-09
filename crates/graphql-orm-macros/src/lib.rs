@@ -571,6 +571,21 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
         }
     });
 
+    // This attribute actually mounts the generated wrapper in static output.
+    // Unrepresented ComplexObject options cannot prove unrestricted eligibility.
+    let output_witness = if args.is_empty() {
+        quote! {
+            impl #self_ty {
+                #[doc(hidden)]
+                pub fn __gom_exposed_relation_fields() -> &'static [&'static str] {
+                    Self::__gom_generated_relation_fields()
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let attribute = if args.is_empty() {
         quote::quote! { #[::graphql_orm::async_graphql::ComplexObject] }
     } else {
@@ -582,6 +597,7 @@ pub fn graphql_complex_object(args: TokenStream, input: TokenStream) -> TokenStr
 
         #attribute
         #item_impl
+        #output_witness
     }
     .into()
 }

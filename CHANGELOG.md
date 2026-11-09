@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.105.0**.
+
+- **Breaking/security:** add effective `is_readable` to `RelationMetadata`. Default static-to-runtime conversion refuses hidden relation declarations with field-scoped `UnsupportedCapability` diagnostics, independently of key/target visibility or host authority. Trusted repository conversion retains them only behind the existing non-served `repository_only` marker. Generated relation implementation skips remain distinct from user output restrictions. Rebuild matching derives and regenerate stored catalogs; no data migration. Fixes #399.
+
+- **Security:** prove relation getter ownership using witnesses from exposed generated output. Delegated/handwritten complex objects cannot reopen skipped relations without an exposed generated getter; unmounted composed wrappers fail closed. Cover the reviewer's permissive-authority reproduction, generated output controls and schema-only/composed paths. Audited scalar ownership: complex scalar output already honors delegated skips; regression coverage retains that protection.
+
 ORM runtime/macros **0.104.0**.
 
 - **Fixed:** entities with an empty generated order input now receive a macro-owned diagnostic naming the entity and recommending `#[sortable]`, instead of async-graphql empty-input and cascading trait errors. The diagnostic covers incoming relation consumers as well as operation roots. Existing sortable schemas, catalogues and primary-key keyset ordering are unchanged. Fixes #401.
