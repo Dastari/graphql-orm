@@ -151,6 +151,63 @@ class PublishedSourceTests(unittest.TestCase):
         self.check_change(self.manifest, True,
             (self.root / self.manifest).read_text().replace('graphql-orm-macros.workspace=true', 'graphql-orm-macros={workspace=true, optional=true}'))
 
+    def reset_baseline(self):
+        self.commit()
+        self.base = self.git('rev-parse', 'HEAD').strip()
+        self.git('tag', '-f', self.tag)
+
+    def test_inherited_lint_change_fails(self):
+        root_manifest = self.root / 'Cargo.toml'
+        root_manifest.write_text(root_manifest.read_text() + '\n[workspace.lints.rust]\nunsafe_code="warn"\n')
+        manifest = self.root / self.manifest
+        manifest.write_text(manifest.read_text() + '\n[lints]\nworkspace=true\n')
+        self.reset_baseline()
+        self.check_change('Cargo.toml', True,
+            root_manifest.read_text().replace('unsafe_code="warn"', 'unsafe_code="forbid"'))
+
+    def test_uninherited_lint_change_passes(self):
+        root_manifest = self.root / 'Cargo.toml'
+        root_manifest.write_text(root_manifest.read_text() + '\n[workspace.lints.rust]\nunsafe_code="warn"\n')
+        self.reset_baseline()
+        self.check_change('Cargo.toml', False,
+            root_manifest.read_text().replace('unsafe_code="warn"', 'unsafe_code="forbid"'))
+
+    def test_published_executable_mode_change_fails(self):
+        script = self.prefix + 'tool.sh'
+        self.write(script, '#!/bin/sh\necho hello\n')
+        (self.root / script).chmod(0o644)
+        self.reset_baseline()
+        (self.root / script).chmod(0o755)
+        self.check_change(script, True, '#!/bin/sh\necho hello\n')
+
+    def test_symlink_target_content_change_fails(self):
+        self.write('shared-tool.sh', '#!/bin/sh\necho baseline\n')
+        (self.root / self.prefix / 'tool.sh').symlink_to('../../shared-tool.sh')
+        self.reset_baseline()
+        self.check_change('shared-tool.sh', True, '#!/bin/sh\necho changed\n')
+
+    def test_symlink_retarget_with_same_archive_content_passes(self):
+        self.write('shared-tool.sh', '#!/bin/sh\necho baseline\n')
+        self.write('identical-tool.sh', '#!/bin/sh\necho baseline\n')
+        script = self.root / self.prefix / 'tool.sh'
+        script.symlink_to('../../shared-tool.sh')
+        self.reset_baseline()
+        script.unlink()
+        script.symlink_to('../../identical-tool.sh')
+        self.check_change('identical-tool.sh', False, '#!/bin/sh\necho baseline\n')
+
+    def test_inherited_readme_outside_package_change_fails(self):
+        (self.root / self.prefix / 'README.md').unlink()
+        self.write('README.md', 'Workspace readme\n')
+        root_manifest = self.root / 'Cargo.toml'
+        root_manifest.write_text(root_manifest.read_text().replace('license="MIT"',
+            'license="MIT"\nreadme="README.md"'))
+        manifest = self.root / self.manifest
+        manifest.write_text(manifest.read_text().replace('license.workspace=true',
+            'license.workspace=true\nreadme.workspace=true'))
+        self.reset_baseline()
+        self.check_change('README.md', True, 'Changed workspace readme\n')
+
     def test_tests_that_cargo_publishes_remain_strict(self):
         path = self.root / self.manifest
         path.write_text(path.read_text().replace('exclude=["tests/", "examples/", "benches/"]', ''))

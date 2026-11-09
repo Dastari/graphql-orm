@@ -1,7 +1,7 @@
 """Cargo-owned package file selection shared by release and PR checks.
 
-Only generated resolution/provenance files are omitted. Authored manifests are
-compared verbatim, with Cargo's effective manifest also covering inheritance.
+Compare Cargo archives, omitting only generated resolution/provenance data.
+Authored manifests are compared verbatim; generated manifests are parsed as TOML.
 Only inherited workspace-sibling requirement drift is exempt pending #435.
 """
 from contextlib import ExitStack
@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import tarfile
+import tomllib
 
 
 # Option B pending the maintainer's decision in https://github.com/Dastari/graphql-orm/issues/435.
@@ -51,7 +53,7 @@ class PublishedSources:
             self.checkouts[commit] = directory
         return self.checkouts[commit]
 
-    def normalize_sibling_requirements(self, root, package):
+    def normalize_sibling_requirements(self, root, package, manifest):
         if WORKSPACE_SIBLING_REQUIREMENT_DRIFT == "strict":
             return
         if WORKSPACE_SIBLING_REQUIREMENT_DRIFT != "exempt":
@@ -68,7 +70,16 @@ class PublishedSources:
             # dependency. Match the actual workspace member's path as well.
             if (dependency['name'] in WORKSPACE_SIBLINGS
                     and (dependency['name'], dependency.get('path')) in self.members[root]):
-                dependency['req'] = '@workspace-sibling-requirement'
+                section = {
+                    None: 'dependencies', 'dev': 'dev-dependencies',
+                    'build': 'build-dependencies',
+                }[dependency['kind']]
+                table = manifest
+                if dependency['target'] is not None:
+                    table = table.get('target', {}).get(dependency['target'], {})
+                entry = table.get(section, {}).get(dependency['rename'] or dependency['name'])
+                if entry is not None and 'version' in entry:
+                    entry['version'] = '@workspace-sibling-requirement'
 
     def snapshot(self, ref, manifest):
         root = self.checkout(ref)
@@ -79,29 +90,29 @@ class PublishedSources:
         if not path.exists():
             return None
         package = json.loads(command(root, 'cargo', 'read-manifest', '--manifest-path', str(path)))
-        listing = command(root, 'cargo', 'package', '--list', '--manifest-path', str(path),
-                          '-p', package['name'], '--allow-dirty', '--no-verify').splitlines()
+        # Excluding Cargo's synthesized lockfile avoids dependency resolution,
+        # including unpublished siblings. No verification build or network is needed.
+        output = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        command(root, 'cargo', 'package', '--manifest-path', str(path),
+                '-p', package['name'], '--allow-dirty', '--no-verify',
+                '--exclude-lockfile', '--offline', '--target-dir', str(output))
+        archive = output / 'package' / f"{package['name']}-{package['version']}.crate"
         files = {}
-        for name in listing:
-            # Cargo synthesizes these; workspace dependency resolution and Git
-            # provenance are recorded separately in the release manifest.
-            if name in {'.cargo_vcs_info.json', 'Cargo.lock', 'Cargo.toml.orig'}:
-                continue
-            source = path if name == 'Cargo.toml' else path.parent / name
-            for field in ('readme', 'license_file'):
-                configured = package.get(field)
-                if configured and Path(configured).name == name:
-                    source = path.parent / configured
-            files[name] = source.read_bytes()
-        package['targets'] = [
-            target for target in package['targets']
-            if Path(target['src_path']).relative_to(path.parent).as_posix() in files
-        ]
-        self.normalize_sibling_requirements(root, package)
-        # read-manifest resolves workspace inheritance without dependency fetching.
-        # Paths/IDs vary with the temporary checkout; normalize only that prefix.
-        effective = json.dumps(package, sort_keys=True).replace(str(root), '$WORKSPACE')
-        files['@cargo-effective-manifest'] = effective.encode()
+        with tarfile.open(archive, 'r:gz') as packaged:
+            for member in packaged:
+                name = member.name.split('/', 1)[1]
+                # These are independently bound by the workspace release manifest.
+                if name in {'.cargo_vcs_info.json', 'Cargo.lock'}:
+                    continue
+                # Cargo follows source symlinks and writes regular files. Refuse
+                # unexpected archive types rather than silently losing metadata.
+                if not member.isfile():
+                    raise RuntimeError(f"{archive}: unexpected archive entry type: {name}")
+                content = packaged.extractfile(member).read()
+                if name == 'Cargo.toml':
+                    content = tomllib.loads(content.decode('utf-8'))
+                    self.normalize_sibling_requirements(root, package, content)
+                files[name] = (member.mode, content)
         self.snapshots[key] = files
         return files
 

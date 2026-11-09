@@ -178,9 +178,10 @@ python3 scripts/generate-release-manifest.py \
 ```
 
 `--verify-tags` permits an existing package tag only when that tag's package
-publishable source is byte-identical under the comparison policy above, using Cargo's file
-list independently at both refs. The PR policy uses the same comparison. Tests,
-fixtures, and fixture lockfiles excluded by Cargo do not require a bump; tests
+publishable source is byte-identical under the comparison policy above, using Cargo's
+archive independently at both refs. Contents, executable modes, and all generated
+manifest fields (including inherited lints) are compared. The PR policy uses the
+same comparison. Tests, fixtures, and fixture lockfiles excluded by Cargo do not require a bump; tests
 that Cargo includes do. Generated resolution/provenance files are handled
 separately, as described in the [reference](../../reference/published-source.md).
 The manifest's `packageSourceTree` still records the entire Git directory for

@@ -13,20 +13,27 @@ supersedes: []
 `scripts/published_source.py` owns the comparison used by
 `generate-release-manifest.py --verify-tags` and
 `check-package-release-policy.sh`. Each ref is checked out in a temporary detached
-Git worktree, removed on success or failure. Cargo selects files with
-`cargo package --list -p <package> --allow-dirty --no-verify`. Selection and file
-contents are compared at both refs, so additions, removals, include/exclude
-changes, and changes outside `src/*.rs` cannot escape the gate.
+Git worktree, removed on success or failure. At each ref Cargo creates an archive
+with `cargo package -p <package> --allow-dirty --no-verify --exclude-lockfile --offline`.
+A temporary target directory isolates each archive. No build or dependency
+resolution is needed. Archive paths, file contents, and permission modes are
+compared, covering additions, removals, include/exclude changes, executable bits,
+and published files outside `src/*.rs`.
 
-Authored `Cargo.toml` is compared verbatim. `cargo read-manifest` additionally
-compares effective workspace inheritance, including dependency requirements;
-checkout paths are normalized and targets absent from the package are omitted.
+The archive's `Cargo.toml.orig` preserves authored manifest bytes. The generated
+`Cargo.toml` is parsed as TOML for stable semantic comparison, retaining every
+field Cargo emits, including inherited lints, package metadata, dependencies,
+features, and generated target/build settings. `cargo read-manifest` is used only
+for package identity and mapping dependencies to actual workspace members; it is
+not the effective-manifest comparison. This avoids its omissions, such as lints.
 Pending the maintainer decision in [#435](https://github.com/Dastari/graphql-orm/issues/435),
-option B exempts only the effective version requirement (`req`) of a dependency
+option B exempts only the generated version requirement (`version`) of a dependency
 whose name and path identify an actual workspace member among the nine workspace
 packages. Registry/Git dependencies with the same name are not exempt. Sibling
-names, features, optional/default-feature flags, dependency kind, target, paths,
-and all other fields remain strict, as do all external dependency requirements.
+names, features, optional/default-feature flags, dependency kind, target,
+and all other published fields remain strict, as do all external requirements.
+The exemption maps renamed and target-specific normal, build, and dev dependencies
+to the corresponding generated manifest table. Authored path changes remain strict.
 Authored manifest bytes remain strict, preserving the existing local manifest
 gate; this exemption applies only to the additional effective-manifest comparison.
 
@@ -35,15 +42,27 @@ is the one-line option B switch. Changing its value to `"strict"` selects option
 and requires reconciling existing inherited sibling requirement drift before
 release. Option B treats that requirement drift as release-bundle metadata and
 allows current main to release without catch-up package bumps.
-This does not resolve or build dependencies. Published README, license, build
-scripts, and data are ordinary source files and require version changes.
+Published README, license, build scripts, and data are ordinary archive files and
+require version changes, including README/license files copied from outside the
+package directory.
 
-Cargo synthesizes `Cargo.toml.orig`, `.cargo_vcs_info.json`, and `Cargo.lock`.
-The original manifest is already compared as `Cargo.toml`; generated Git
-provenance and dependency resolution are excluded from package source equality.
+Cargo copies the authored manifest to `Cargo.toml.orig` and generates `Cargo.toml`,
+`.cargo_vcs_info.json`, and normally `Cargo.lock`. Both manifests are compared;
+only generated Git provenance and dependency resolution are excluded from package
+source equality. `--exclude-lockfile` prevents lockfile generation.
 The workspace release manifest separately binds the full source commit, root
 lockfile hash, and external Git dependency revisions. Authored nested lockfiles
-are compared if Cargo lists them; excluded fixture lockfiles are not.
+are compared if Cargo archives them; excluded fixture lockfiles are not.
+
+Cargo follows source symlinks and archives their destination bytes as regular
+files. The snapshot compares those bytes and modes, including destinations
+outside the package directory. Retargeting to identical bytes/modes does not
+change the archive and is intentionally allowed. Unexpected non-regular archive
+entries fail closed. Cargo fixes tar owner/group and timestamps; those transport
+headers, gzip metadata, archive ordering, generated manifest comments/formatting,
+and the package-version directory prefix are not source identity. Authored
+formatting remains covered by `Cargo.toml.orig`. No other generated manifest
+fields or archived files are filtered beyond the explicit exceptions above.
 
 Current workspace manifests do not exclude all tests, examples, or benches.
 Cargo includes ordinary test files while excluding nested fixture packages.
