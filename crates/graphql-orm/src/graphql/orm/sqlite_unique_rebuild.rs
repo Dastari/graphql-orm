@@ -1,25 +1,52 @@
-//! Conservative, live-DDL composite-UNIQUE rebuilds. No model-only DDL fallback.
+//! Conservative live-DDL rebuilds. No model-only DDL fallback.
 use super::{DatabaseBackend, SQLITE_UNIQUE_REBUILD_PREFIX, SqlDialect, unique_identifier};
 use crate::sqlx::{self, Row};
 use std::collections::BTreeSet;
 use std::ops::Range;
 
 type Keys = Vec<Vec<String>>;
-type Directive = (String, Keys, Keys, bool);
+pub(crate) struct Directive {
+    pub(crate) table: String,
+    before: Keys,
+    after: Keys,
+    mixed: bool,
+    ddl: Option<(String, String)>,
+}
 pub(crate) fn unsupported() -> sqlx::Error {
-    sqlx::Error::Protocol("UnsupportedCapability: SQLite composite-unique rebuild cannot preserve this physical schema".into())
+    sqlx::Error::Protocol(
+        "UnsupportedCapability: SQLite live rebuild cannot preserve this physical schema".into(),
+    )
 }
 pub(crate) fn directive(sql: &str) -> Option<Result<Directive, sqlx::Error>> {
     let sql = sql.trim();
     let sql = sql.strip_suffix(';').unwrap_or(sql).trim_end();
+    if let Some(body) = sql.strip_prefix("SELECT graphql_orm_rebuild_table('") {
+        return Some((|| {
+            let body = body.strip_suffix("')").ok_or_else(unsupported)?;
+            let (table, before, after): (String, String, String) =
+                serde_json::from_str(&body.replace("''", "'")).map_err(|_| unsupported())?;
+            Ok(Directive {
+                table,
+                before: vec![],
+                after: vec![],
+                mixed: false,
+                ddl: Some((before, after)),
+            })
+        })());
+    }
     let body = sql.strip_prefix(SQLITE_UNIQUE_REBUILD_PREFIX)?;
-    Some(
-        body.strip_suffix("')")
-            .ok_or_else(unsupported)
-            .and_then(|body| {
-                serde_json::from_str(&body.replace("''", "'")).map_err(|_| unsupported())
-            }),
-    )
+    Some((|| {
+        let body = body.strip_suffix("')").ok_or_else(unsupported)?;
+        let (table, before, after, mixed) =
+            serde_json::from_str(&body.replace("''", "'")).map_err(|_| unsupported())?;
+        Ok(Directive {
+            table,
+            before,
+            after,
+            mixed,
+            ddl: None,
+        })
+    })())
 }
 #[derive(Clone)]
 struct Token {
@@ -263,6 +290,155 @@ fn rewrite(sql: &str, temporary: &str, before: &Keys, after: &Keys) -> Result<St
     ))
 }
 
+// Split only at top-level commas. The live clause bytes remain authoritative.
+fn clauses(sql: &str) -> Result<(Vec<String>, String), sqlx::Error> {
+    let ts = tokens(sql)?;
+    if ts.len() < 4 || !ts[0].keyword("create") || !ts[1].keyword("table") {
+        return Err(unsupported());
+    }
+    let open = ts
+        .iter()
+        .position(|t| punctuation(sql, t, "("))
+        .ok_or_else(unsupported)?;
+    let mut depth = 1;
+    let mut begin = ts[open].span.end;
+    let mut parts = Vec::new();
+    for t in &ts[open + 1..] {
+        if punctuation(sql, t, "(") {
+            depth += 1;
+        }
+        if punctuation(sql, t, ")") {
+            depth -= 1;
+        }
+        if depth == 0 || (depth == 1 && punctuation(sql, t, ",")) {
+            parts.push(sql[begin..t.span.start].to_string());
+            begin = t.span.end;
+            if depth == 0 {
+                return Ok((parts, sql[t.span.end..].to_string()));
+            }
+        }
+    }
+    Err(unsupported())
+}
+fn signature(sql: &str) -> Result<Vec<String>, sqlx::Error> {
+    Ok(tokens(sql)?
+        .iter()
+        .map(|t| {
+            // SQLite accepts double-quoted string literals in some expression
+            // contexts. Never fold their bytes as if proven identifiers.
+            if t.quoted {
+                return sql[t.span.clone()].to_string();
+            }
+            t.ident
+                .as_ref()
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_else(|| sql[t.span.clone()].to_string())
+        })
+        .collect())
+}
+fn column_names(sql: &str) -> Result<BTreeSet<String>, sqlx::Error> {
+    let (parts, _) = clauses(sql)?;
+    let mut names = BTreeSet::new();
+    for part in parts {
+        let ts = tokens(&part)?;
+        let first = ts.first().ok_or_else(unsupported)?;
+        if !["constraint", "primary", "unique", "check", "foreign"]
+            .iter()
+            .any(|s| first.keyword(s))
+        {
+            names.insert(
+                first
+                    .ident
+                    .as_ref()
+                    .ok_or_else(unsupported)?
+                    .to_ascii_lowercase(),
+            );
+        }
+    }
+    Ok(names)
+}
+fn rewrite_table(sql: &str, temporary: &str, old: &str, new: &str) -> Result<String, sqlx::Error> {
+    // First validate the live CREATE shape/tail using the established parser.
+    rewrite(sql, temporary, &vec![], &vec![])?;
+    let (mut live, tail) = clauses(sql)?;
+    let (old, _) = clauses(old)?;
+    let (new, _) = clauses(new)?;
+    let old = old
+        .iter()
+        .map(|s| signature(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let new_signatures = new
+        .iter()
+        .map(|s| signature(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let primary_members = old
+        .iter()
+        .filter(|s| s.iter().any(|t| t == "primary"))
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut replaced = BTreeSet::new();
+    for removed in old.iter().filter(|s| !new_signatures.contains(s)) {
+        // Changing primary keys could change SQLite's rowid alias contract.
+        if primary_members.contains(&removed[0])
+            || removed
+                .iter()
+                .any(|s| s == "primary" || s == "autoincrement")
+        {
+            return Err(unsupported());
+        }
+        let matches = live
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| (signature(s).ok().as_ref() == Some(removed)).then_some(i))
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(unsupported());
+        }
+        let column =
+            !["constraint", "primary", "unique", "check", "foreign"].contains(&removed[0].as_str());
+        if column {
+            if let Some(replacement) = new_signatures
+                .iter()
+                .position(|s| s.first() == removed.first())
+            {
+                live[matches[0]] = new[replacement].clone();
+                replaced.insert(replacement);
+            } else {
+                live.remove(matches[0]);
+                if live
+                    .iter()
+                    .any(|s| signature(s).map_or(true, |ts| ts.contains(&removed[0])))
+                {
+                    return Err(unsupported());
+                }
+            }
+        } else {
+            live.remove(matches[0]);
+        }
+    }
+    for (i, (part, sig)) in new.iter().zip(&new_signatures).enumerate() {
+        if !old.contains(sig) && !replaced.contains(&i) {
+            if sig.iter().any(|s| s == "primary" || s == "autoincrement") {
+                return Err(unsupported());
+            }
+            let column =
+                !["constraint", "primary", "unique", "check", "foreign"].contains(&sig[0].as_str());
+            if column {
+                live.insert(0, part.clone());
+            } else {
+                live.push(part.clone());
+            }
+        }
+    }
+    Ok(format!(
+        "CREATE TABLE main.{} ({}){}",
+        DatabaseBackend::Sqlite.quote_identifier(temporary),
+        live.join(","),
+        tail
+    ))
+}
+
 // Incoming FKs may belong to tables excluded by managed-table-only planning.
 // Removing their only referenced key cannot preserve that enforcement contract.
 async fn validate_incoming_keys(
@@ -357,7 +533,13 @@ pub(crate) async fn prepare(
     conn: &mut sqlx::SqliteConnection,
     input: Directive,
 ) -> Result<Prepared, sqlx::Error> {
-    let (table, before, after, mixed) = input;
+    let Directive {
+        table,
+        mut before,
+        mut after,
+        mixed,
+        ddl,
+    } = input;
     if mixed || unique_identifier(&table).1 {
         return Err(unsupported());
     }
@@ -385,7 +567,13 @@ pub(crate) async fn prepare(
     if collision != 0 {
         return Err(unsupported());
     }
-    let create = rewrite(&sql, &temporary, &before, &after)?;
+    let create = if let Some((old, new)) = &ddl {
+        before = physical_keys(conn, &table).await?.into_iter().collect();
+        after = before.clone();
+        rewrite_table(&sql, &temporary, old, new)?
+    } else {
+        rewrite(&sql, &temporary, &before, &after)?
+    };
     validate_incoming_keys(conn, &table, &before, &after).await?;
     sqlx::query(&format!("EXPLAIN {create}"))
         .fetch_all(&mut *conn)
@@ -412,6 +600,20 @@ pub(crate) async fn prepare(
         }
         all.push(name);
     }
+    if let Some((old, new)) = &ddl {
+        let old_columns = column_names(old)?;
+        let new_columns = column_names(new)?;
+        let removed = old_columns.difference(&new_columns).collect::<Vec<_>>();
+        if !removed.is_empty() {
+            let dependent_objects: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM main.sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL").bind(&table).fetch_one(&mut *conn).await?;
+            let incoming: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM main.sqlite_master m JOIN pragma_foreign_key_list(m.name, 'main') f WHERE m.type='table' AND f."table"=? COLLATE NOCASE"#).bind(&table).fetch_one(&mut *conn).await?;
+            if dependent_objects != 0 || incoming != 0 {
+                return Err(unsupported());
+            }
+            writable.retain(|c| !removed.contains(&&c.to_ascii_lowercase()));
+            all.retain(|c| !removed.contains(&&c.to_ascii_lowercase()));
+        }
+    }
     if after
         .iter()
         .flatten()
@@ -419,9 +621,16 @@ pub(crate) async fn prepare(
     {
         return Err(unsupported());
     }
+    let target_columns = ddl
+        .as_ref()
+        .map(|(_, new)| column_names(new))
+        .transpose()?
+        .unwrap_or_default();
     let rowid = ["rowid", "_rowid_", "oid"]
         .into_iter()
-        .find(|name| !all.iter().any(|c| c.eq_ignore_ascii_case(name)))
+        .find(|name| {
+            !all.iter().any(|c| c.eq_ignore_ascii_case(name)) && !target_columns.contains(*name)
+        })
         .ok_or_else(unsupported)?
         .to_string();
     let schema_objects = sqlx::query_scalar("SELECT sql FROM main.sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name").bind(&table).fetch_all(&mut *conn).await?;
@@ -550,6 +759,85 @@ impl Prepared {
         }
         if physical_keys(conn, &self.table).await? != self.expected.into_iter().collect() {
             return Err(unsupported());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_live_column_rebuild_rolls_back_and_retries() -> Result<(), sqlx::Error> {
+        for new in [
+            "CREATE TABLE probe(id INTEGER PRIMARY KEY AUTOINCREMENT,a TEXT,g TEXT GENERATED ALWAYS AS (a || '!') STORED)",
+            "CREATE TABLE probe(id INTEGER PRIMARY KEY AUTOINCREMENT,a TEXT NOT NULL,g TEXT GENERATED ALWAYS AS (a || '!') STORED, CHECK(a IS NOT NULL))",
+            "CREATE TABLE probe(id INTEGER PRIMARY KEY AUTOINCREMENT,a TEXT NOT NULL,g TEXT GENERATED ALWAYS AS (a || '!') STORED, FOREIGN KEY(a) REFERENCES parent(id))",
+        ] {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect("sqlite::memory:")
+                .await?;
+            sqlx::query("CREATE TABLE parent(id TEXT PRIMARY KEY)")
+                .execute(&pool)
+                .await?;
+            sqlx::query("INSERT INTO parent VALUES ('kept')")
+                .execute(&pool)
+                .await?;
+            let old = "CREATE TABLE probe(id INTEGER PRIMARY KEY AUTOINCREMENT,a TEXT NOT NULL,g TEXT GENERATED ALWAYS AS (a || '!') STORED)";
+            for sql in [
+                old,
+                "INSERT INTO probe(id,a) VALUES (99,'kept'),(999,'deleted')",
+                "DELETE FROM probe WHERE id=999",
+            ] {
+                sqlx::query(sql).execute(&pool).await?;
+            }
+            let input = move || Directive {
+                table: "probe".into(),
+                before: vec![],
+                after: vec![],
+                mixed: false,
+                ddl: Some((old.into(), new.into())),
+            };
+            let (ready, applied) = tokio::sync::oneshot::channel();
+            let task_pool = pool.clone();
+            let task = tokio::spawn(async move {
+                let mut tx = task_pool.begin().await.unwrap();
+                prepare(&mut tx, input())
+                    .await
+                    .unwrap()
+                    .apply(&mut tx)
+                    .await
+                    .unwrap();
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            applied.await.unwrap();
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let sql: String =
+                sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='probe'")
+                    .fetch_one(&pool)
+                    .await?;
+            assert_eq!(sql, old);
+            let row: (i64, String, String) = sqlx::query_as("SELECT rowid,a,g FROM probe")
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(row, (99, "kept".into(), "kept!".into()));
+            let seq: i64 = sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='probe'")
+                .fetch_one(&pool)
+                .await?;
+            assert_eq!(seq, 999);
+            let leftovers: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='__graphql_orm_probe_new'",
+            )
+            .fetch_one(&pool)
+            .await?;
+            assert_eq!(leftovers, 0);
+            let mut tx = pool.begin().await?;
+            prepare(&mut tx, input()).await?.apply(&mut tx).await?;
+            tx.commit().await?;
         }
         Ok(())
     }

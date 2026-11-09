@@ -2468,53 +2468,36 @@ fn render_sqlite_table_rebuild_statements(
     current_table: &TableRef<'_>,
     target_table: &TableRef<'_>,
 ) -> Vec<String> {
-    let temp_table_name = format!("__graphql_orm_{}_new", target_table.table_name);
-    let target_table_sql = render_create_table_statement_for_name(
-        DatabaseBackend::Sqlite,
-        target_table,
-        &temp_table_name,
-    );
-    let common_columns = target_table
-        .columns
+    // Object/enforcement changes need their own ordering around object replay.
+    // Refuse mixed plans rather than silently omit those changes.
+    if current_table
+        .indexes
         .iter()
-        .filter(|target_column| {
-            current_table
-                .columns
-                .iter()
-                .any(|current_column| current_column.name == target_column.name)
+        .map(|i| {
+            render_create_index_statement(DatabaseBackend::Sqlite, current_table.table_name, i)
         })
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
-
-    let backend = DatabaseBackend::Sqlite;
-    let temp_table = backend.render_identifier_path(&temp_table_name);
-    let current_table_name = backend.render_identifier_path(current_table.table_name);
-    let mut statements = vec![target_table_sql];
-    if !common_columns.is_empty() {
-        let columns = backend.render_identifier_list(common_columns.iter().map(String::as_str));
-        statements.push(format!(
-            "INSERT INTO {} ({}) SELECT {} FROM {}",
-            temp_table, columns, columns, current_table_name
-        ));
-    }
-    statements.push(format!("DROP TABLE {}", current_table_name));
-    statements.push(format!(
-        "ALTER TABLE {} RENAME TO {}",
-        temp_table,
-        backend.render_identifier_path(target_table.table_name)
-    ));
-    statements.extend(target_table.indexes.iter().map(|index| {
-        render_create_index_statement(DatabaseBackend::Sqlite, target_table.table_name, index)
-    }));
-    if target_table.append_only {
-        statements.extend(render_append_only_statements(
-            DatabaseBackend::Sqlite,
+        .ne(target_table.indexes.iter().map(|i| {
+            render_create_index_statement(DatabaseBackend::Sqlite, target_table.table_name, i)
+        }))
+        || current_table.search_indexes != target_table.search_indexes
+        || current_table.append_only != target_table.append_only
+        || current_table.retention_purge != target_table.retention_purge
+    {
+        return vec![sqlite_unique_rebuild_directive(
             target_table.table_name,
+            &[],
+            &[],
             true,
-            target_table.retention_purge,
-        ));
+        )];
     }
-    statements
+    let before = render_create_table_statement(DatabaseBackend::Sqlite, current_table);
+    let after = render_create_table_statement(DatabaseBackend::Sqlite, target_table);
+    let json = serde_json::to_string(&(target_table.table_name, before, after))
+        .expect("string tuple is serializable");
+    vec![format!(
+        "SELECT graphql_orm_rebuild_table('{}')",
+        json.replace('\'', "''")
+    )]
 }
 
 /// Render one step in isolation.
