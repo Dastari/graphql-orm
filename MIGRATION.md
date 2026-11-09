@@ -10,6 +10,13 @@ supersedes: []
 
 # Migration Guide
 
+## 0.109.0 to 0.110.0: MSSQL composite-key regression coverage
+
+Upgrade ORM/macros together. This release corrects a formatting-sensitive test
+assertion and executes the composite-key target in MSSQL CI. Generated SDL,
+lookup argument names, order and types, and runtime behavior are unchanged.
+No application changes or data migration are needed.
+
 ## 0.109.0: fixture lockfiles for router 0.8.3
 
 Upgrade ORM and macros together. Standalone fixture lockfiles are refreshed for

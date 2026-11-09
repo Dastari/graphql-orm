@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+## 0.110.0
+
+ORM runtime/macros **0.110.0**.
+
+- **Tests:** validate the MSSQL composite-key lookup SDL structurally, preserving ordered `legacyObjectType`, `refNo`, and `lineNum` non-null `Int` arguments and the nullable `LegacyLabourEntry` result while tolerating argument descriptions. CI now executes this test target in the MSSQL backend lane. Generated SDL and runtime behavior are unchanged. Fixes #118. No data migration.
+
 ## 0.109.0
 
 ORM runtime/macros **0.109.0**.

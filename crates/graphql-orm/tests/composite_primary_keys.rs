@@ -314,9 +314,55 @@ mod mssql_fixture {
         .finish();
         let sdl = schema.sdl();
 
-        assert!(sdl.contains(
-            "legacyLabourEntry(legacyObjectType: Int!, refNo: Int!, lineNum: Int!): LegacyLabourEntry"
-        ));
+        // Argument descriptions render this field across multiple lines. Check
+        // the SDL structure so formatting cannot hide a key/type regression.
+        use graphql_orm::async_graphql::parser::{
+            parse_schema,
+            types::{TypeKind, TypeSystemDefinition},
+        };
+        let document = parse_schema(&sdl).expect("valid generated SDL");
+        let query_name = <QueryRoot as graphql_orm::async_graphql::OutputType>::type_name();
+        let query = document
+            .definitions
+            .iter()
+            .find_map(|definition| {
+                let TypeSystemDefinition::Type(definition) = definition else {
+                    return None;
+                };
+                if definition.node.name.node.as_str() != query_name.as_ref() {
+                    return None;
+                }
+                let TypeKind::Object(object) = &definition.node.kind else {
+                    return None;
+                };
+                Some(object)
+            })
+            .expect("query root");
+        let lookup = query
+            .fields
+            .iter()
+            .find(|field| field.node.name.node == "legacyLabourEntry")
+            .expect("composite lookup field");
+        assert_eq!(lookup.node.ty.node.to_string(), "LegacyLabourEntry");
+        let arguments = lookup
+            .node
+            .arguments
+            .iter()
+            .map(|argument| {
+                (
+                    argument.node.name.node.as_str(),
+                    argument.node.ty.node.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            vec![
+                ("legacyObjectType", "Int!".to_string()),
+                ("refNo", "Int!".to_string()),
+                ("lineNum", "Int!".to_string()),
+            ]
+        );
         assert!(!sdl.contains("type Mutation"));
         assert!(!sdl.contains("type Subscription"));
     }
