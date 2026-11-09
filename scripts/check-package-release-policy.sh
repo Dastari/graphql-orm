@@ -15,6 +15,8 @@ git -C "${repository_root}" cat-file -e "${base_ref}^{commit}" 2>/dev/null || {
 base=$(git -C "${repository_root}" merge-base "${base_ref}" HEAD)
 repository_changes=$(git -C "${repository_root}" diff --name-only "${base}"...HEAD)
 
+published_changes=$(python3 "${repository_root}/scripts/published_source.py" "${base}" HEAD)
+
 packages=(
   graphql-orm
   graphql-orm-macros
@@ -43,18 +45,16 @@ for package in "${packages[@]}"; do
     continue
   fi
 
-  changed=$(git -C "${repository_root}" diff --name-only \
-    --relative="${crate_prefix}" "${base}"...HEAD -- "${crate_prefix}")
-  if [[ -z "${changed}" ]]; then
-    echo "package-release-policy: ${package} has no committed changes"
-    continue
+  # Retain the storage-owned nested vendor source gate: Cargo excludes nested
+  # packages, but this Git-distributed dependency is part of storage's contract.
+  vendor_changed=false
+  if [[ "${package}" == graphql-orm-storage ]] &&
+    git -C "${repository_root}" diff --name-only "${base}" HEAD -- "${crate_prefix}/vendor/smb" |
+      grep -Eq '/(src/.*\.rs|Cargo\.toml)$'; then
+    vendor_changed=true
   fi
-  runtime_paths='^(src/.*\.rs|Cargo\.toml)$'
-  if [[ "${package}" == graphql-orm-storage ]]; then
-    runtime_paths='^(src/.*\.rs|Cargo\.toml|vendor/smb/(src/.*\.rs|Cargo\.toml))$'
-  fi
-  if ! grep -Eq "${runtime_paths}" <<<"${changed}"; then
-    echo "package-release-policy: ${package} has no public/runtime changes"
+  if ! grep -Fxq "${package}" <<<"${published_changes}" && [[ "${vendor_changed}" == false ]]; then
+    echo "package-release-policy: ${package} has no published-source changes"
     continue
   fi
 
@@ -73,7 +73,7 @@ for package in "${packages[@]}"; do
 
   for required in "${readme}" "${changelog}" "${migration}"; do
     repository_changed "${required}" || {
-      echo "package-release-policy: ${package} public/runtime changes require ${required}" >&2
+      echo "package-release-policy: ${package} published-source changes require ${required}" >&2
       exit 1
     }
   done
@@ -87,7 +87,7 @@ for package in "${packages[@]}"; do
     exit 1
   fi
   if [[ "${current_version}" == "${baseline_version}" ]]; then
-    echo "package-release-policy: ${package} public/runtime changes require a SemVer version change" >&2
+    echo "package-release-policy: ${package} published-source changes require a SemVer version change" >&2
     exit 1
   fi
   highest=$(printf '%s\n%s\n' "${baseline_version}" "${current_version}" | sort -V | tail -n 1)

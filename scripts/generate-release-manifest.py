@@ -266,18 +266,17 @@ def external_git_dependencies(
 
 def verify_package_tags(packages: list[dict[str, Any]], commit: str) -> None:
     local_tags = set(run("git", "tag", "--list").splitlines())
-    for package in packages:
-        tag = package["tag"]
-        if tag not in local_tags:
-            continue
-        tagged_commit = exact_commit(tag)
-        package_path = str(Path(package["manifestPath"]).parent)
-        tagged_tree = source_at(tagged_commit, package_path)
-        current_tree = source_at(commit, package_path)
-        if tagged_tree != current_tree:
-            raise SystemExit(
-                f"{tag}: package source changed without a new package version"
-            )
+    from published_source import PublishedSources
+
+    with PublishedSources(ROOT) as sources:
+        for package in packages:
+            tag = package["tag"]
+            if tag not in local_tags:
+                continue
+            if sources.changed(tag, commit, package["manifestPath"]):
+                raise SystemExit(
+                    f"{tag}: published package source changed without a new package version"
+                )
 
 
 def build_manifest(release_id: str, ref: str, verify_tags: bool) -> dict[str, Any]:

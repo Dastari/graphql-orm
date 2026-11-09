@@ -8,6 +8,7 @@ fi
 
 repository_root=$(git rev-parse --show-toplevel)
 python3 "${repository_root}/scripts/test-release-manifest.py"
+python3 "${repository_root}/scripts/test-published-source.py"
 ref=${1:-HEAD}
 commit=$(git -C "${repository_root}" rev-parse "${ref}^{commit}")
 head_commit=$(git -C "${repository_root}" rev-parse "HEAD^{commit}")

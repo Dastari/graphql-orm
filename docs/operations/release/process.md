@@ -46,7 +46,15 @@ because generated code and runtime support are one compatibility boundary.
 A package version changes when its public Rust API, generated code, Cargo
 features, wire contract, runtime behavior, or documented compatibility changes
 under that package's release rules. A workspace release does not require a new
-version for an unchanged package.
+version for an unchanged package. The package boundary is Cargo's publishable
+source, as defined in the [published-source reference](../../reference/published-source.md).
+Published README, license, build script, data, and manifest changes also require
+a version change; file extensions do not limit the gate. Pending the maintainer's
+[#435 decision](https://github.com/Dastari/graphql-orm/issues/435), option B exempts
+only workspace-sibling version requirement drift in the effective inherited
+manifest. All other dependency fields and external requirements remain strict;
+authored manifests still compare verbatim. The reference documents the one-line
+switch to strict option A.
 
 `graphql-orm-ai` additionally versions its persistent schema module. Router,
 semantic-catalogue, tool-manifest, and operation-assurance protocols keep their
@@ -170,8 +178,15 @@ python3 scripts/generate-release-manifest.py \
 ```
 
 `--verify-tags` permits an existing package tag only when that tag's package
-source tree is byte-identical to the selected commit. It therefore catches a
-package change that reused an already released version.
+publishable source is byte-identical under the comparison policy above, using Cargo's
+archive independently at both refs. Contents, executable modes, and all generated
+manifest fields (including inherited lints) are compared. The PR policy uses the
+same comparison. Tests, fixtures, and fixture lockfiles excluded by Cargo do not require a bump; tests
+that Cargo includes do. Generated resolution/provenance files are handled
+separately, as described in the [reference](../../reference/published-source.md).
+The manifest's `packageSourceTree` still records the entire Git directory for
+provenance; it is not the equality gate. See the
+[release tag check runbook](../runbooks/release-tag-check.md) for diagnosis.
 
 ## Publish through GitHub Actions
 
