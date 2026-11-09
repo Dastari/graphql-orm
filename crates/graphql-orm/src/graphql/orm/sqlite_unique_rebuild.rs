@@ -621,6 +621,8 @@ pub(crate) async fn prepare(
         }
         all.push(name);
     }
+    // A dropped alias still shadows the source rowid during SELECT.
+    let source_columns = all.clone();
     if let Some((old, new)) = &ddl {
         let old_columns = column_names(old)?;
         let new_columns = column_names(new)?;
@@ -650,7 +652,8 @@ pub(crate) async fn prepare(
     let rowid = ["rowid", "_rowid_", "oid"]
         .into_iter()
         .find(|name| {
-            !all.iter().any(|c| c.eq_ignore_ascii_case(name)) && !target_columns.contains(*name)
+            !source_columns.iter().any(|c| c.eq_ignore_ascii_case(name))
+                && !target_columns.contains(*name)
         })
         .ok_or_else(unsupported)?
         .to_string();
