@@ -12,6 +12,7 @@ struct UpsertNonUniqueExample {
 
     pub slug: String,
 
+    #[sortable]
     pub title: String,
 }
 

@@ -16,6 +16,10 @@ for historical context.
 
 ## Unreleased
 
+ORM runtime/macros **0.104.0**.
+
+- **Fixed:** entities with an empty generated order input now receive a macro-owned diagnostic naming the entity and recommending `#[sortable]`, instead of async-graphql empty-input and cascading trait errors. The diagnostic covers incoming relation consumers as well as operation roots. Existing sortable schemas, catalogues and primary-key keyset ordering are unchanged. Fixes #401.
+
 ORM runtime/macros **0.103.0**.
 
 - **Breaking/security:** add `is_readable` to `ColumnDef` and `FieldMetadata`; derives retain `private`, `read = false`, and `input_only` restrictions plus effective persisted scalar output eligibility. Delegated SimpleObject/complex output honors effective `skip`, `skip_output`, flattening and unrepresented guards/visibility; ORM-owned getters retain their actual behavior. Metadata-only repository declarations retain ordinary readable columns and conservatively honor explicit output restrictions. Static-to-runtime conversion rejects unreadable columns with scoped `UnsupportedCapability` diagnostics, before a host authority can expose direct, related, or aggregate reads. Ordinary readable schemas are unchanged. An explicit `from_static_entities_for_repository` conversion retains internal columns behind a serialized, fingerprinted `repository_only` marker that runtime GraphQL compilation always refuses. Runtime schema literals require that new marker. AI 0.125.0 adopts this path for bounded session activity with private keys. Fixes #390.

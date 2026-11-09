@@ -10,6 +10,12 @@ supersedes: []
 
 # Migration Guide
 
+## 0.103.0 to 0.104.0: empty order input diagnostic
+
+Upgrade ORM/macros together. A GraphQL entity must have at least one orderable field. If the generated order input would be empty, the macro now names the entity and asks for `#[sortable]` on a persisted field; adding it to the primary key is sufficient. Explicit order expressions and relation order aggregates also provide order fields. Repository-only and schema-only declarations remain exempt.
+
+Generated query and cross-entity relation APIs require a concrete order input, so this release diagnoses unsupported empty inputs rather than omitting only some arguments and leaving SDL, catalogues and Rust signatures inconsistent. No successful schema or data migration changes. Default ordering and primary-key keyset pagination are unchanged; the non-`id` default-sort issue (#404) remains separate.
+
 ## 0.102.0 to 0.103.0: static-to-runtime readability
 
 Breaking: `ColumnDef` and `FieldMetadata` literals now require `is_readable`.

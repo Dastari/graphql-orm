@@ -1,0 +1,5 @@
+error: GraphQLEntity `Record` has no orderable fields, but generated query and relation APIs require `RecordOrderByInput`; add #[sortable] to a persisted field (for example the primary key)
+ --> tests/ui/empty_order_relation.rs:5:8
+  |
+5 | struct Record {
+  |        ^^^^^^

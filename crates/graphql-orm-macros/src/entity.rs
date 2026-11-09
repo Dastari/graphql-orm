@@ -5637,7 +5637,33 @@ fn generate_entity_impl(
     } else {
         quote! { self.__gom_related.clear(); }
     };
+    // Repository-only entities strip the GraphQL derives from these helpers.
+    // Keep their empty Rust order marker valid. GraphQL entities, however, must
+    // supply a nonempty input: operation and cross-entity relation signatures
+    // both name this type. Diagnose the owning declaration rather than letting
+    // async-graphql's empty-input error cascade through those signatures.
+    let empty_order_diagnostic = if order_by_fields.is_empty()
+        && !has_repository_entity_attribute(&input.attrs)
+    {
+        let error = syn::Error::new(
+            struct_name.span(),
+            format!(
+                "GraphQLEntity `{struct_name}` has no orderable fields, but generated query and relation APIs require `{order_by_name_str}`; add #[sortable] to a persisted field (for example the primary key)"
+            ),
+        ).to_compile_error();
+        // This recovery-only field lets dependent expansions type-check, so the
+        // macro-owned diagnostic remains the only error. Compilation always
+        // fails above; this is never a supported or observable GraphQL input.
+        order_by_fields.push(quote! {
+            #[doc(hidden)]
+            pub __gom_invalid_empty_order: Option<bool>,
+        });
+        error
+    } else {
+        quote! {}
+    };
     Ok(quote! {
+        #empty_order_diagnostic
         #relation_readability_impl
         #(#relation_target_checks)*
         #rls_impl
