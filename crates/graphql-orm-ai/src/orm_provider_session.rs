@@ -3993,7 +3993,7 @@ mod service {
         OrmPublicError::new(OrmErrorCode::InternalError)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "sqlite"))]
     mod tests {
         use super::*;
 

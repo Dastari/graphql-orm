@@ -31,7 +31,7 @@ RUSTDOCFLAGS="-D warnings -D missing_docs" \
 Compile other backends without connecting to them:
 
 ```bash
-cargo check -p graphql-orm-ai --no-default-features --features postgres
+cargo check -p graphql-orm -p graphql-orm-macros -p graphql-orm-ai --no-default-features --features postgres,runtime-graphql --all-targets
 cargo check -p graphql-orm-ai --no-default-features --features mssql
 ```
 

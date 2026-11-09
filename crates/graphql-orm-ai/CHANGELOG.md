@@ -10,6 +10,10 @@ supersedes: []
 
 # Changelog
 
+## Unreleased - 0.126.0
+
+- **Tests:** gate SQLite-only unit fixtures on `sqlite` and compile all AI targets in the PostgreSQL CI lane. Default SQLite coverage is unchanged. Fixes #413. No runtime, schema, or data migration change.
+
 ## Unreleased - 0.125.0
 
 - **Fixed:** bounded session activity uses the explicitly repository-only static conversion, retaining private durable keys for server-authored queries after ORM 0.103.0 made ordinary conversion fail closed. Repository-only schemas cannot compile into runtime GraphQL. No public AI API, persistent schema or data migration change. Related to #390.

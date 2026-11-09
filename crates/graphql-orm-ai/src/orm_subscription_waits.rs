@@ -3556,7 +3556,7 @@ fn valid_provider_snapshot(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 mod tests {
     use std::collections::{BTreeSet, VecDeque};
     use std::sync::Mutex;
