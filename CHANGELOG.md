@@ -18,6 +18,8 @@ for historical context.
 
 ORM runtime/macros **0.102.0**.
 
+- **Security/parity:** ordinary, single-key append-only and composite-key append-only GraphQL creates now emit the same resolver pipeline. `before_create` runs once with GraphQL request context before field-write authorization of transformed inputs; mutation hooks also receive the request context. Transaction failures use ordinary structured GraphQL error mapping. Configured create notifications run after commit and output authorization, with no notification on rollback. Fixes #408.
+
 - **Breaking/security:** append-only GraphQL creates enforce declared field-write policies using the ordinary create checks. Strict mode refuses missing field providers before inserting. Ordinary and append-only creates now share entity/row read authorization before disclosing committed output: missing read providers fail closed, entity denial refuses output, and row denial withholds the entity. Output errors identify the committed outcome and forbid retry. Fixes #408.
 
 - **Fixed (ORM/macros 0.102.0):** append-only composite-key entities generate one create-only mutation surface with complete-key readback and Changed event identity. Fixes #394.

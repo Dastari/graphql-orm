@@ -10,9 +10,13 @@ supersedes: []
 
 # Migration Guide
 
-## 0.99.0 to 0.102.0: create authorization and append-only composite keys
+## 0.100.0 to 0.102.0: create authorization and append-only composite keys
 
 Breaking/security: append-only GraphQL creates now enforce field-write policies like ordinary creates. Install a field-policy provider for declared write policies: strict mode returns `AUTHORIZATION_MISCONFIGURED` before inserting when it is absent, and denied required or optional writes fail with `FORBIDDEN` by default. The existing explicit legacy field-omission option is preserved.
+
+Append-only GraphQL creates now use the ordinary create resolver pipeline. `before_create` runs once with GraphQL-origin `WriteInputContext` and the request context before field-write policies check transformed values. Mutation hooks receive `Some(ctx)` in both Before and After phases; request-dependent validation and tenant shaping therefore behave like ordinary creates. Rust repository inserts retain their repository context.
+
+Append-only transaction failures now appear in GraphQL `errors` with the same public code and extensions as ordinary creates, rather than as `success: false` and a string in the result payload. Update clients to inspect structured GraphQL errors. Configured `notify_with` callbacks run after commit and output authorization, including for append-only creates. Rolled-back creates do not notify. An output-authorization refusal can prevent notification even though the write committed.
 
 Ordinary and append-only GraphQL creates now use the same output read checks. Install entity and row policy providers for declared entity read policies. Missing read providers return `AUTHORIZATION_MISCONFIGURED`; entity denial returns `FORBIDDEN`; row denial returns a successful result with a null entity. Status-only selections do not require output read providers. Denied output also discards buffered host diagnostics. Output authorization occurs after commit, so these refusals do not roll back the write. Output errors include `outcome: "committed"` and `retryable: false`; do not retry the create. Field output guards continue to apply. Review clients that assumed write access also granted read access.
 
