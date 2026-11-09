@@ -413,3 +413,52 @@ async fn dropping_a_declared_rowid_alias_preserves_the_physical_rowid() -> graph
     assert_eq!(rowid, 99);
     clean(&db, &target).await
 }
+
+#[tokio::test]
+async fn storage_class_changes_abort_without_replacing_the_original() -> graphql_orm::Result<()> {
+    for enabled in [0, 1] {
+        let db = setup(&[
+            "CREATE TABLE probe(id TEXT PRIMARY KEY NOT NULL,a TEXT NOT NULL)",
+            "INSERT INTO probe(rowid,id,a) VALUES (99,'one','001')",
+        ])
+        .await?;
+        sqlx::query(&format!("PRAGMA foreign_keys={enabled}"))
+            .execute(db.pool())
+            .await?;
+        let current = introspect_sqlite_schema(db.pool()).await?;
+        let mut target = current.clone();
+        target.tables[0]
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "a")
+            .unwrap()
+            .sql_type = "INTEGER".into();
+        let plan =
+            db.schema()
+                .plan_migration("conversion", "refuse changed values", &current, &target)?;
+        let error = db
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("UnsupportedCapability"));
+        assert!(!error.to_string().contains("001"));
+        let row: (i64, String, String) = sqlx::query_as("SELECT rowid,a,typeof(a) FROM probe")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(row, (99, "001".into(), "text".into()));
+        let state: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(db.pool())
+            .await?;
+        assert_eq!(state, enabled);
+        let leftovers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='__graphql_orm_probe_new'",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(leftovers, 0);
+        clean(&db, &current).await?;
+        remove(&db, 0).await?;
+    }
+    Ok(())
+}
