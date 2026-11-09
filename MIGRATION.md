@@ -10,6 +10,11 @@ supersedes: []
 
 # Migration Guide
 
+## 0.109.0: fixture lockfiles for router 0.8.3
+
+Upgrade ORM and macros together. Standalone fixture lockfiles are refreshed for
+router 0.8.3; no application code or data migration is required.
+
 ## 0.108.0: composite unique migrations
 
 Exhaustive matches on `MigrationStep` must handle the new

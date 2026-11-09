@@ -2585,7 +2585,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm"
-version = "0.108.0"
+version = "0.109.0"
 dependencies = [
  "agql-auth",
  "async-graphql",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-macros"
-version = "0.108.0"
+version = "0.109.0"
 dependencies = [
  "convert_case 0.7.1",
  "proc-macro2",
@@ -2687,7 +2687,7 @@ dependencies = [
 
 [[package]]
 name = "graphql-orm-router"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "agql-auth",
  "arc-swap",
