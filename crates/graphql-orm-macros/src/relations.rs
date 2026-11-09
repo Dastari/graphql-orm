@@ -480,8 +480,12 @@ pub(crate) fn generate_graphql_relations(
             let on_delete = &r.on_delete;
             let propagate_change = &r.propagate_change;
             let is_readable = r.read_policy.is_none();
+            let has_source_condition = r.source_condition.is_some();
+            let has_target_condition = r.target_condition.is_some();
             quote! {
                 ::graphql_orm::graphql::orm::RelationMetadata {
+                    has_source_condition: #has_source_condition,
+                    has_target_condition: #has_target_condition,
                     is_readable: #is_readable && _generated_output.contains(&#graphql_name),
                     field_name: #graphql_name,
                     target_type: #target_type,

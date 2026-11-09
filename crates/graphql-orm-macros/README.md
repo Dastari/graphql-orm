@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.107.0 records source/target predicate presence in static relation
+metadata. Hand-built `RelationMetadata` literals require
+`has_source_condition` and `has_target_condition`; derives populate them.
+Both runtime conversion entry points refuse conditional relations because the
+runtime IR cannot preserve their predicates. See the root migration guide.
+
 ORM/macros 0.106.0 fixes SQLite migration preparation data loss: unproven
 reserved rebuild tables are preserved with a diagnostic, and interrupted
 transactional rebuilds recover through SQLite rollback. Upgrade both together.

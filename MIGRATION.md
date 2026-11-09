@@ -10,6 +10,33 @@ supersedes: []
 
 # Migration Guide
 
+## 0.106.0 to 0.107.0: conditional relation conversion
+
+Upgrade ORM/macros together. Public `RelationMetadata` literals now require
+`has_source_condition: bool` and `has_target_condition: bool`. Matching derives
+populate both flags from the declarations, including readable generated
+relations whose SimpleObject storage slots carry implementation skips.
+For hand-built metadata, set each flag to whether that predicate exists; use
+`false` for both only for unconditional relations. These flags record presence,
+not an executable predicate or a claim that the condition is always true.
+
+The runtime relation IR represents key equality and cardinality, but cannot
+represent static source guards/discriminators or target filters. Both
+`RuntimeSchema::from_static_entities` and
+`RuntimeSchema::from_static_entities_for_repository` now refuse any such
+relation with a collection/field-scoped `UnsupportedCapability` diagnostic.
+The trusted repository marker cannot restore missing query semantics.
+Conversion fails before related objects, connections/edges, nested filters,
+orderings or counts/aggregates can be served, regardless of host authority.
+
+Regenerate stored converted catalogs from current static metadata: older
+runtime documents cannot reconstruct predicates discarded by prior conversion.
+Use static resolvers for conditional relations until the runtime IR supports
+their exact semantics; do not clear the flags to admit conversion.
+Ordinary unconditional readable relations remain supported. There is no
+runtime wire-field change or database migration. AI is unchanged.
+
+
 ## 0.105.0 to 0.106.0: SQLite rebuild cleanup data safety
 
 Upgrade ORM/macros together; no data migration is required. Preparation no longer

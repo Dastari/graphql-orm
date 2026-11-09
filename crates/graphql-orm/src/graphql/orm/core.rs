@@ -3563,6 +3563,12 @@ pub enum RelationChangePropagation {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RelationMetadata {
+    /// Whether the static resolver requires a source guard/discriminator.
+    /// Presence only: the predicate itself is not represented by runtime relations.
+    pub has_source_condition: bool,
+    /// Whether the static resolver applies an additional target filter.
+    /// Presence only: both runtime conversion entry points must refuse this relation.
+    pub has_target_condition: bool,
     /// Effective static output eligibility. Host authority cannot reopen hidden relations.
     pub is_readable: bool,
     pub field_name: &'static str,
