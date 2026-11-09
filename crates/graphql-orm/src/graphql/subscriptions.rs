@@ -908,11 +908,17 @@ fn authority_check_end(error: async_graphql::Error) -> async_graphql::Error {
         });
     // Preserve the callback authoring convention: source-free authored refusals
     // are denials. Typed host failures and infrastructure categories are not.
+    // agql-auth deliberately strips sources in ErrorExtensions::extend, so its
+    // public service/store and host-configuration codes must be recognized here.
     let denial = error.source.is_none()
         && !matches!(
             code,
             Some(
-                "INTERNAL_SERVER_ERROR" | SUBSCRIPTION_CONTINUITY_LOST | SUBSCRIPTION_SOURCE_CLOSED
+                "INTERNAL_SERVER_ERROR"
+                    | "AUTH_SERVICE_UNAVAILABLE"
+                    | "INVALID_CONFIGURATION"
+                    | SUBSCRIPTION_CONTINUITY_LOST
+                    | SUBSCRIPTION_SOURCE_CLOSED
             )
         )
         && match code.and_then(super::errors::public_code) {
@@ -954,7 +960,7 @@ where
     watch_authority_with_delay(stream, authorize, move || authority_recheck_delay(interval))
 }
 
-fn watch_authority_with_delay<S, T, A, F, D>(
+pub(crate) fn watch_authority_with_delay<S, T, A, F, D>(
     stream: S,
     authorize: A,
     mut next_delay: D,
@@ -1074,5 +1080,76 @@ mod authority_timer_tests {
             assert!(stream.next().await.is_none());
         }
         assert_eq!(checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_authority_codes_remain_definite_denials() {
+        use async_graphql::ErrorExtensions;
+        let mut stream = Box::pin(watch_subscription_authority(
+            futures::stream::pending::<async_graphql::Result<()>>(),
+            Duration::from_secs(1),
+            || async {
+                Err(
+                    async_graphql::Error::new("private refusal").extend_with(|_, ext| {
+                        ext.set("code", "UNKNOWN_HOST_CODE");
+                        ext.set("private", "must not escape");
+                    }),
+                )
+            },
+        ));
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.message, "forbidden");
+        assert!(error.source.is_none());
+        assert_eq!(
+            error.extensions.as_ref().unwrap().get("code"),
+            Some(&async_graphql::Value::from("FORBIDDEN"))
+        );
+        assert!(error.extensions.unwrap().get("private").is_none());
+        assert!(stream.next().await.is_none());
+    }
+
+    #[cfg(feature = "auth-agql")]
+    #[tokio::test(start_paused = true)]
+    async fn agql_auth_infrastructure_errors_end_changed_timer_with_continuity_loss() {
+        use agql_auth::AuthError;
+        use async_graphql::ErrorExtensions;
+        // Audit of AuthError::public_code at locked revision 1f4b4bfb:
+        // all infrastructure/store variants use AUTH_SERVICE_UNAVAILABLE;
+        // host configuration variants use INVALID_CONFIGURATION.
+        for failure in [
+            AuthError::AuthServiceUnavailable,
+            AuthError::Store("private store diagnostic".into()),
+            AuthError::OidcDiscovery("private discovery diagnostic".into()),
+            AuthError::OidcTokenExchange("private OIDC diagnostic".into()),
+            AuthError::OAuthTokenExchange("private OAuth diagnostic".into()),
+            AuthError::OAuthUserInfo("private profile diagnostic".into()),
+            AuthError::TokenCreation("private signing diagnostic".into()),
+            AuthError::PasswordHashing("private hashing diagnostic".into()),
+            AuthError::InvalidConfiguration("private configuration".into()),
+            AuthError::Config("private legacy configuration".into()),
+            AuthError::InvalidOidcAuthorizationOptions("private options".into()),
+            AuthError::JwksUnsupported,
+        ] {
+            assert!(failure.extend().source.is_none());
+            let mut stream = Box::pin(watch_subscription_authority(
+                futures::stream::pending::<async_graphql::Result<()>>(),
+                Duration::from_secs(1),
+                || futures::future::ready(Err(failure.extend())),
+            ));
+            let started = tokio::time::Instant::now();
+            let error = stream.next().await.unwrap().unwrap_err();
+            // Allow millisecond rounding by Tokio's timer driver.
+            assert!(
+                (Duration::from_secs(1)..=Duration::from_millis(1101)).contains(&started.elapsed())
+            );
+            assert_eq!(
+                error.extensions.as_ref().unwrap().get("code"),
+                Some(&async_graphql::Value::from(SUBSCRIPTION_CONTINUITY_LOST)),
+                "{failure:?}"
+            );
+            assert!(error.source.is_none());
+            assert!(!format!("{error:?}").contains("private"));
+            assert!(stream.next().await.is_none());
+        }
     }
 }

@@ -26,6 +26,29 @@ conservatively refuse. See the [comparison contract](docs/reference/graphql-orm/
 Row/depth bounds, direct dependent authority and after-commit callbacks are unchanged.
 External hook side effects cannot be rolled back; defer them until commit.
 
+## 0.99.0 to 0.100.0: CacheSync authority timing
+
+No data migration. Macros stay version-aligned without expansion changes.
+CacheSync event denials/failures now suppress signals silently. The independent
+Database subscription authority timer (default 30 seconds, clamped 1–300 seconds,
+plus independently sampled 0–10% jitter) alone terminates authority. Configure
+`with_subscription_authority_recheck_interval` before creating streams.
+Existing `changes` callbacks must be safe to call without notices and may have
+one event check and one timer check in flight. Use `changes_with_authority`
+for separate current-partition and event checks; never put event-specific
+refusals in the current-authority callback. Both checks enforce complete
+partition policy. Denied initial/gap reconciliation remains pending until a
+later authorized signal.
+
+Handle timer `FORBIDDEN` by regaining authority, and
+`SUBSCRIPTION_CONTINUITY_LOST` by recovering the host and resubscribing/refetching.
+Source-free authored refusals count as denial; preserve typed sources or known
+infrastructure codes for host failures. Private details are removed. Polling,
+scheduling, host latency and backpressure can delay checks/delivery; this is
+not a constant-time or hard wall-clock guarantee. The bounded process-local
+channel and authorized lag/refetch timing are unchanged.
+
+
 ## 0.97.0 to 0.98.0: unreadable fields, relations and safe errors
 
 Breaking: `GraphQLEntity` now rejects `private`, `read = false`, or `input_only`

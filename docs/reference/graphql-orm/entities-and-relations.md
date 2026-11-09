@@ -381,8 +381,8 @@ shared channel exceeded this receiver's capacity, although it includes no key,
 payload or skipped-event count. Hidden write volume can cause that signal, and
 a revoked subscriber can receive it before the authority timer fires. This
 residual occurrence/timing signal is unchanged; Related to
-[#387](https://github.com/Dastari/graphql-orm/issues/387). CacheSync has a separate,
-unchanged event-triggered channel; Related to [#384](https://github.com/Dastari/graphql-orm/issues/384).
+[#387](https://github.com/Dastari/graphql-orm/issues/387). CacheSync also uses the independent authority timer; see
+[cache invalidations](cache-sync.md).
 
 Operations selecting a generated Changed root must have exactly one root-field
 occurrence, counting aliases, fragments and skipped/included fields. Otherwise

@@ -128,8 +128,26 @@ Generation strings are lossless opaque decimal identities. The stream:
   concurrent commits are already queued;
 - sends one generation hint per successful promotion, queued until commit;
 - sends an explicit authorized refetch signal after receiver lag; and
-- reauthorizes initial, committed and gap signals and ends without metadata on
-  denial/error. Reconnect starts a new receiver and initial signal.
+- reauthorizes initial, committed and gap signals, silently suppressing failures.
+  Denied initial/gap reconciliation stays pending until a later authorized signal.
+  Reconnect starts a new receiver and initial signal.
+
+Authority termination uses the Database subscription authority timer, independently
+of notices: 30-second base by default, clamped to 1–300 seconds, with 0–10%
+positive jitter per period. Configure before creating streams with
+`with_subscription_authority_recheck_interval`. `changes` uses its callback for
+both current-partition checks and event checks. `changes_with_authority` accepts
+separate current-partition and event callbacks; event-specific refusals belong
+only in the event callback. The event callback must also rehydrate current
+subscriber, scope and assurance authority before every signal; the timer never
+grants delivery authority. Timer definite denials yield sanitized `FORBIDDEN`;
+typed host failures/infrastructure categories yield `SUBSCRIPTION_CONTINUITY_LOST`.
+Source-free authored errors count as denial. Neither notices nor event checks
+reset deadlines. A due timer takes priority over pending event checks; at most
+one event check and one timer check can overlap. Hosts bound callback work and
+latency. Stream polling, host latency and backpressure can delay delivery.
+This is not a hard wall-clock or constant-time guarantee. Authorized channel
+lag/refetch still reveals capacity loss; it is unchanged by this fix.
 
 The mandatory callback is a trusted host policy boundary: rehydrate current
 principal/source authority and enforce complete partition, owner, row, field,

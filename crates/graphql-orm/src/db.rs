@@ -435,13 +435,13 @@ impl<B: OrmBackend> Database<B> {
         self
     }
 
-    /// Base period for event-independent subscriber authority checks on new Changed streams.
+    /// Base period for event-independent subscriber authority checks on new Changed and CacheSync streams.
     /// Defaults to 30 seconds; each period adds independently chosen 0–10% jitter.
     pub fn subscription_authority_recheck_interval(&self) -> std::time::Duration {
         self.subscription_authority_recheck_interval
     }
 
-    /// Set the base authority-check period for new Changed streams on this handle.
+    /// Set the base authority-check period for new Changed and CacheSync streams on this handle.
     /// Values are clamped to 1–300 seconds. Existing streams retain their schedule.
     pub fn set_subscription_authority_recheck_interval(&mut self, interval: std::time::Duration) {
         self.subscription_authority_recheck_interval = interval.clamp(

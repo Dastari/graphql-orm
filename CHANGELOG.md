@@ -20,6 +20,12 @@ ORM runtime/macros **0.99.0**.
 
 - **Security:** bounded static dependent deletes repeat full physical catalogue validation after hooks before every prepared write and before commit, comparing the physical schema snapshot to the verified plan. Trigger, FK, cascading-table and other invalidating catalogue changes refuse with sanitized errors and atomic rollback, including changes between writes. Authorization, bounds and after-commit events remain intact. Fixes #391.
 
+ORM runtime/macros **0.100.0**.
+
+- **Fixed:** the shared CacheSync/generated Changed authority timer recognizes locked agql-auth service/store failures (`AUTH_SERVICE_UNAVAILABLE`) and host configuration failures (`INVALID_CONFIGURATION`) as sanitized `SUBSCRIPTION_CONTINUITY_LOST`, including source-free extended errors. Unknown codes remain fail-closed denials. No data migration.
+
+- **Security/breaking:** CacheSync rechecks partition authority on the Database's independent, bounded jittered subscription timer. Event failures silently suppress initial/committed/gap signals; only timer failures emit sanitized `FORBIDDEN` for definite denial or `SUBSCRIPTION_CONTINUITY_LOST` for infrastructure failures. `changes_with_authority` separates subscriber checks from event filtering; existing `changes` uses its callback for both. Denied reconciliation stays pending until a later authorized signal. No data migration; macros stay version-aligned. Fixes #384.
+
 ORM runtime/macros **0.98.0**, operation catalog **0.7.2**.
 
 - **Breaking:** reject `private`, `read = false`, and `input_only` fields on `GraphQLEntity` + `SimpleObject` entities unless skipped from the object; use `#[graphql(skip)]` or `graphql_policy_object`. Fixes #292.
