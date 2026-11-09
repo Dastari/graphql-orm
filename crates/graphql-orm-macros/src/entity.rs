@@ -4088,17 +4088,16 @@ fn generate_entity_impl(
                     quote! { None }
                 };
 
-                // Generated relation resolvers own their output even on complex
-                // objects; their SimpleObject skips are implementation details.
-                let is_readable = scalar_output_is_readable(
-                    field,
-                    &field_meta,
-                    !schema_only && !has_repository_entity_attribute(&input.attrs),
-                    &input.attrs,
-                );
+                // Sibling derives are erased by rustc. Only the relation derive's
+                // concrete output witness can prove an implementation skip is safe.
+                let delegated_readable =
+                    scalar_output_is_readable(field, &field_meta, false, &input.attrs)
+                        && (schema_only || legacy_graphql_complex);
+                let generated_readable =
+                    scalar_output_is_readable(field, &field_meta, true, &input.attrs);
                 relation_metadata_defs.push(quote! {
                     ::graphql_orm::graphql::orm::RelationMetadata {
-                        is_readable: #is_readable,
+                        is_readable: #delegated_readable || (#generated_readable && _generated_output.contains(&#graphql_name)),
                         field_name: #graphql_name,
                         target_type: #target_type,
                         source_column: #source_column,
@@ -5553,10 +5552,19 @@ fn generate_entity_impl(
 
             impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
                 fn relation_metadata() -> &'static [::graphql_orm::graphql::orm::RelationMetadata] {
-                    static RELATIONS: &[::graphql_orm::graphql::orm::RelationMetadata] = &[
-                        #(#relation_metadata_defs),*
-                    ];
-                    RELATIONS
+                    // Inherent methods win over this local blanket fallback.
+                    // No witness means no generated getter ownership.
+                    #[allow(dead_code)]
+                    trait OutputFallback {
+                        fn __gom_exposed_relation_fields() -> &'static [&'static str] { &[] }
+                    }
+                    impl<T> OutputFallback for T {}
+                    static RELATIONS: ::std::sync::OnceLock<::std::boxed::Box<[::graphql_orm::graphql::orm::RelationMetadata]>> =
+                        ::std::sync::OnceLock::new();
+                    RELATIONS.get_or_init(|| {
+                        let _generated_output = #struct_name::__gom_exposed_relation_fields();
+                        vec![#(#relation_metadata_defs),*].into_boxed_slice()
+                    })
                 }
             }
 
@@ -6169,10 +6177,19 @@ fn generate_entity_impl(
 
         impl ::graphql_orm::graphql::orm::EntityRelations for #struct_name {
             fn relation_metadata() -> &'static [::graphql_orm::graphql::orm::RelationMetadata] {
-                static RELATIONS: &[::graphql_orm::graphql::orm::RelationMetadata] = &[
-                    #(#relation_metadata_defs),*
-                ];
-                RELATIONS
+                // Inherent methods win over this local blanket fallback.
+                    // No witness means no generated getter ownership.
+                    #[allow(dead_code)]
+                    trait OutputFallback {
+                        fn __gom_exposed_relation_fields() -> &'static [&'static str] { &[] }
+                    }
+                    impl<T> OutputFallback for T {}
+                    static RELATIONS: ::std::sync::OnceLock<::std::boxed::Box<[::graphql_orm::graphql::orm::RelationMetadata]>> =
+                        ::std::sync::OnceLock::new();
+                    RELATIONS.get_or_init(|| {
+                        let _generated_output = #struct_name::__gom_exposed_relation_fields();
+                        vec![#(#relation_metadata_defs),*].into_boxed_slice()
+                    })
             }
         }
 
@@ -8244,13 +8261,9 @@ mod object_visibility_tests {
                         .unwrap()
                         .to_string();
                     let relation = tokens.split("RelationMetadata {").nth(1).unwrap();
-                    let expected = if metadata_only {
-                        delegated
-                    } else {
-                        !attribute.contains("graphql_orm") && !attribute.contains("input_only")
-                    };
+                    let expected = metadata_only && delegated;
                     assert!(
-                        relation.starts_with(&format!(" is_readable : {expected} ,")),
+                        relation.starts_with(&format!(" is_readable : {expected} ||")),
                         "{attribute}, metadata_only={metadata_only}: {relation}"
                     );
                 }

@@ -443,6 +443,14 @@ bytes/fingerprints. Other unsupported capabilities still fail closed. Previously
 catalogs must be regenerated from current static metadata; old runtime documents
 cannot reconstruct static visibility attributes during deserialization.
 
+Relation getter ownership is proven by generated output, not by the entity
+derive alone. Skipped relations on delegated or handwritten complex objects
+without an exposed generated getter refuse conversion. Composed wrappers count
+only when `graphql_complex_object` mounts them without unrepresented output
+options; otherwise conversion fails closed. Schema-only objects with generated
+relation output retain that proven eligibility. Scalar ownership already
+delegates complex objects and continues to honor their output skips.
+
 Static decimal columns convert to `RuntimeValueKind::Decimal` with their definition, and their
 backend default SQL to the canonical literal.
 

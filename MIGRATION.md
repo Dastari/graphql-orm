@@ -35,6 +35,14 @@ runtime documents cannot reconstruct static relation visibility. No database
 migration or runtime wire-field change is required. Ordinary readable relations
 retain their behavior; AI needs no code or version change.
 
+Relation getter ownership is proven by generated output, not by the entity
+derive alone. Skipped relations on delegated or handwritten complex objects
+without an exposed generated getter refuse conversion. Composed wrappers count
+only when `graphql_complex_object` mounts them without unrepresented output
+options; otherwise conversion fails closed. Schema-only objects with generated
+relation output retain that proven eligibility. Scalar ownership already
+delegates complex objects and continues to honor their output skips.
+
 ## 0.103.0 to 0.104.0: empty order input diagnostic
 
 Upgrade ORM/macros together. A GraphQL entity must have at least one orderable field. If the generated order input would be empty, the macro now names the entity and asks for `#[sortable]` on a persisted field; adding it to the primary key is sufficient. Explicit order expressions and relation order aggregates also provide order fields. Repository-only and schema-only declarations remain exempt.
