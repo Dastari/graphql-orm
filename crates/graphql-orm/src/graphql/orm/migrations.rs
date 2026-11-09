@@ -1177,6 +1177,44 @@ fn order_tables_by_foreign_keys<'a>(
     ordered
 }
 
+fn unique_identifier(name: &str) -> (String, bool) {
+    for (open, close) in [('"', '"'), ('`', '`'), ('[', ']')] {
+        if let Some(inner) = name.strip_prefix(open).and_then(|s| s.strip_suffix(close)) {
+            return (
+                inner.replace(&format!("{close}{close}"), &close.to_string()),
+                true,
+            );
+        }
+    }
+    (name.to_string(), false)
+}
+
+fn canonical_unique_key(
+    backend: DatabaseBackend,
+    key: &[String],
+    existing_columns: &[ColumnModel],
+) -> Vec<String> {
+    key.iter()
+        .map(|name| {
+            let (name, quoted) = unique_identifier(name);
+            match backend {
+                DatabaseBackend::Sqlite => name.to_ascii_lowercase(),
+                DatabaseBackend::Postgres
+                    if !quoted
+                        && !existing_columns
+                            .iter()
+                            .any(|c| unique_identifier(&c.name).0 == name) =>
+                {
+                    name.to_ascii_lowercase()
+                }
+                // MSSQL identifier sensitivity depends on database collation, which
+                // is not in SchemaModel. Never assume a case-insensitive collation.
+                _ => name,
+            }
+        })
+        .collect()
+}
+
 pub fn diff_schema_models(current: &SchemaModel, target: &SchemaModel) -> SchemaDiff {
     diff_schema_models_for_backend(DatabaseBackend::Postgres, current, target)
 }
@@ -1441,6 +1479,30 @@ pub(super) fn diff_schema_views_with(
                 retention_purge: target_table.retention_purge,
             });
         }
+        let unique_set = |candidate: &TableRef<'_>| {
+            let primary = canonical_unique_key(backend, candidate.primary_keys(), table.columns);
+            candidate
+                .composite_unique_indexes
+                .iter()
+                .map(|key| canonical_unique_key(backend, key, table.columns))
+                // SQLite and PostgreSQL coalesce a CREATE TABLE UNIQUE
+                // identical to its ordered PRIMARY KEY into the PK index.
+                // SQL Server retains a distinct UNIQUE constraint.
+                .filter(|key| {
+                    !matches!(backend, DatabaseBackend::Sqlite | DatabaseBackend::Postgres)
+                        || *key != primary
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let before = unique_set(table);
+        let after = unique_set(target_table);
+        if before != after {
+            steps.push(OwnedMigrationStep::SetCompositeUniques {
+                table_name: table_name.clone(),
+                before: before.into_iter().collect(),
+                after: after.into_iter().collect(),
+            });
+        }
         if !check_constraints_equivalent(table.check_constraints, target_table.check_constraints) {
             steps.push(OwnedMigrationStep::SetCheckConstraints {
                 table_name: table_name.clone(),
@@ -1490,6 +1552,7 @@ pub(super) fn migration_step_table_name<'a>(step: &StepRef<'a>) -> Option<&'a st
         StepRef::AddForeignKey { table_name, .. } => Some(table_name),
         StepRef::DropForeignKey { table_name, .. } => Some(table_name),
         StepRef::SetAppendOnly { table_name, .. } => Some(table_name),
+        StepRef::SetCompositeUniques { table_name, .. } => Some(table_name),
         StepRef::SetCheckConstraints { table_name, .. } => Some(table_name),
     }
 }
@@ -1509,6 +1572,7 @@ fn sqlite_requires_table_rebuild(step: &StepRef<'_>) -> bool {
                 | StepRef::AlterColumn { .. }
                 | StepRef::AddForeignKey { .. }
                 | StepRef::DropForeignKey { .. }
+                | StepRef::SetCompositeUniques { .. }
                 | StepRef::SetCheckConstraints { .. }
         ),
     }
@@ -1581,6 +1645,92 @@ fn render_create_index_statement(
         columns,
         predicate,
     )
+}
+
+// Existing CREATE TABLE constraints have database-assigned names. Resolve those
+// names by their ordered members rather than guessing a backend naming scheme.
+fn render_composite_unique_changes(
+    backend: DatabaseBackend,
+    table_name: &str,
+    before: &[Vec<String>],
+    after: &[Vec<String>],
+) -> Vec<String> {
+    if backend == DatabaseBackend::Sqlite {
+        return vec![sqlite_unique_rebuild_directive(
+            table_name, before, after, false,
+        )];
+    }
+    let table = backend.render_identifier_path(table_name);
+    let mut statements = Vec::new();
+    for columns in before.iter().filter(|columns| !after.contains(columns)) {
+        let statement = match backend {
+            DatabaseBackend::Postgres => {
+                let members = columns
+                    .iter()
+                    .map(|c| sql_string_literal(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let body = format!(
+                    "DECLARE r record; BEGIN FOR r IN SELECT con.conname FROM pg_constraint con \
+                     WHERE con.conrelid = {}::regclass AND con.contype = 'u' \
+                     AND (SELECT array_agg(a.attname::text ORDER BY k.ord) FROM unnest(con.conkey) \
+                     WITH ORDINALITY k(num, ord) JOIN pg_attribute a ON a.attrelid = con.conrelid \
+                     AND a.attnum = k.num) = ARRAY[{members}]::text[] LOOP \
+                     EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', {}::regclass, r.conname); \
+                     END LOOP; END",
+                    sql_string_literal(&table),
+                    sql_string_literal(&table)
+                );
+                format!("DO {}", sql_string_literal(&body))
+            }
+            DatabaseBackend::Mssql => {
+                let members = columns
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let raw = c
+                            .strip_prefix('[')
+                            .and_then(|s| s.strip_suffix(']'))
+                            .map(|s| s.replace("]]", "]"))
+                            .unwrap_or_else(|| c.clone());
+                        format!("({}, N{})", i + 1, sql_string_literal(&raw))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "DECLARE @sql nvarchar(max) = N''; \
+                     SELECT @sql = @sql + N'ALTER TABLE ' + QUOTENAME(OBJECT_SCHEMA_NAME(k.parent_object_id)) + N'.' + \
+                     QUOTENAME(OBJECT_NAME(k.parent_object_id)) + N' DROP CONSTRAINT ' + QUOTENAME(k.name) + N';' \
+                     FROM sys.key_constraints k WHERE k.parent_object_id = OBJECT_ID(N{}) AND k.type = 'UQ' \
+                     AND (SELECT COUNT(*) FROM sys.index_columns ic WHERE ic.object_id = k.parent_object_id \
+                     AND ic.index_id = k.unique_index_id AND ic.key_ordinal > 0) = {} \
+                     AND NOT EXISTS (SELECT 1 FROM (VALUES {members}) v(ord, name) WHERE NOT EXISTS \
+                     (SELECT 1 FROM sys.index_columns ic JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+                     WHERE ic.object_id = k.parent_object_id AND ic.index_id = k.unique_index_id AND ic.key_ordinal = v.ord AND c.name = v.name)); \
+                     EXEC sp_executesql @sql",
+                    sql_string_literal(&table),
+                    columns.len()
+                )
+            }
+            // MySQL is not an executable backend in this workspace.
+            DatabaseBackend::Mysql => {
+                format!("-- unsupported composite unique change on {table_name}")
+            }
+            DatabaseBackend::Sqlite => unreachable!(),
+        };
+        statements.push(statement);
+    }
+    for columns in after.iter().filter(|columns| !before.contains(columns)) {
+        statements.push(format!(
+            "ALTER TABLE {table} ADD UNIQUE ({})",
+            columns
+                .iter()
+                .map(|name| backend.quote_identifier(name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    statements
 }
 
 fn sql_string_literal(value: &str) -> String {
@@ -1810,7 +1960,7 @@ pub(super) fn parse_closed_set_index_predicate(expression: &str) -> Option<Index
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_append_only_trigger_matches(
+pub(super) fn sqlite_append_only_trigger_matches(
     sql: &str,
     expected_name: &str,
     expected_table: &str,
@@ -1848,7 +1998,7 @@ fn sqlite_append_only_trigger_matches(
 }
 
 #[cfg(feature = "sqlite")]
-fn sqlite_retention_delete_trigger_matches(
+pub(super) fn sqlite_retention_delete_trigger_matches(
     sql: &str,
     expected_name: &str,
     expected_table: &str,
@@ -2289,6 +2439,31 @@ fn attach_search_indexes(tables: &mut [OwnedTableModel], search_indexes: Vec<Sea
     }
 }
 
+// This is deliberately not executable outside the ORM migration executor.
+// A model-only CREATE TABLE cannot preserve physical SQLite DDL. The executor
+// expands this directive from sqlite_master in the migration transaction.
+pub(super) const SQLITE_UNIQUE_REBUILD_PREFIX: &str =
+    "SELECT graphql_orm_rebuild_composite_unique('";
+
+fn sqlite_unique_rebuild_directive(
+    table: &str,
+    before: &[Vec<String>],
+    after: &[Vec<String>],
+    mixed: bool,
+) -> String {
+    let json = serde_json::to_string(&(table, before, after, mixed))
+        .expect("string tuple is serializable");
+    format!(
+        "{}{}')",
+        SQLITE_UNIQUE_REBUILD_PREFIX,
+        json.replace('\'', "''")
+    )
+}
+
+#[cfg(feature = "sqlite")]
+#[path = "sqlite_unique_rebuild.rs"]
+pub(super) mod sqlite_unique_rebuild;
+
 fn render_sqlite_table_rebuild_statements(
     current_table: &TableRef<'_>,
     target_table: &TableRef<'_>,
@@ -2618,6 +2793,11 @@ pub(super) fn render_migration_step_view(
             enabled,
             retention_purge,
         } => render_append_only_statements(backend, table_name, *enabled, *retention_purge),
+        StepRef::SetCompositeUniques {
+            table_name,
+            before,
+            after,
+        } => render_composite_unique_changes(backend, table_name, before, after),
         StepRef::SetCheckConstraints {
             table_name,
             before,
@@ -2743,6 +2923,10 @@ pub(super) fn classify_migration_step_view(step: &StepRef<'_>) -> (MigrationRisk
             MigrationRisk::Risky,
             "removes append-only database enforcement",
         ),
+        StepRef::SetCompositeUniques { .. } => (
+            MigrationRisk::Risky,
+            "changes composite uniqueness and may reject existing duplicate rows",
+        ),
         StepRef::SetCheckConstraints { .. } => (
             MigrationRisk::Risky,
             "adds, removes, or changes same-row check constraints",
@@ -2842,10 +3026,33 @@ pub(super) fn render_owned_plan_steps(
                                 current_tables.get(table_name),
                                 target_tables.get(table_name),
                             ) {
-                                statements.extend(render_sqlite_table_rebuild_statements(
-                                    current_table,
-                                    target_table,
-                                ));
+                                if let Some((before, after)) =
+                                    steps.iter().find_map(|step| match step {
+                                        OwnedMigrationStep::SetCompositeUniques {
+                                            table_name: name,
+                                            before,
+                                            after,
+                                        } if name == table_name => Some((before, after)),
+                                        _ => None,
+                                    })
+                                {
+                                    let mixed = steps.iter().any(|step| {
+                                        migration_step_table_name(&StepRef::from(step))
+                                            == Some(table_name)
+                                            && !matches!(
+                                                step,
+                                                OwnedMigrationStep::SetCompositeUniques { .. }
+                                            )
+                                    });
+                                    statements.push(sqlite_unique_rebuild_directive(
+                                        table_name, before, after, mixed,
+                                    ));
+                                } else {
+                                    statements.extend(render_sqlite_table_rebuild_statements(
+                                        current_table,
+                                        target_table,
+                                    ));
+                                }
                             }
                         }
                         continue;
@@ -2996,7 +3203,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
         }
 
         let pragma_table_info = format!(
-            "PRAGMA table_info({})",
+            "PRAGMA main.table_info({})",
             DatabaseBackend::Sqlite.quote_identifier(&table_name)
         );
         let column_rows = sqlx::query(&pragma_table_info)
@@ -3045,7 +3252,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
             .unwrap_or_else(|| "id".to_string());
 
         let pragma_index_list = format!(
-            "PRAGMA index_list({})",
+            "PRAGMA main.index_list({})",
             DatabaseBackend::Sqlite.quote_identifier(&table_name)
         );
         let index_rows = sqlx::query(&pragma_index_list)
@@ -3063,7 +3270,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
                 .unwrap_or_else(|_| "c".to_string());
 
             let pragma_index_info = format!(
-                "PRAGMA index_xinfo({})",
+                "PRAGMA main.index_xinfo({})",
                 DatabaseBackend::Sqlite.quote_identifier(&index_name)
             );
             let index_info_rows = sqlx::query(&pragma_index_info)
@@ -3152,7 +3359,7 @@ pub(super) async fn introspect_owned_sqlite_connection_with_internal(
         }
 
         let pragma_fk_list = format!(
-            "PRAGMA foreign_key_list({})",
+            "PRAGMA main.foreign_key_list({})",
             DatabaseBackend::Sqlite.quote_identifier(&table_name)
         );
         let foreign_key_rows = sqlx::query(&pragma_fk_list)
@@ -3317,7 +3524,7 @@ impl IntrospectionBackend for super::SqliteBackend {
 #[cfg(feature = "sqlite")]
 impl RlsIntrospectionBackend for super::SqliteBackend {}
 
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", feature = "mssql"))]
 fn classify_postgres_unique_constraints(
     mut members: Vec<(String, String, i64)>,
 ) -> (std::collections::HashSet<String>, Vec<Vec<String>>) {
@@ -3467,7 +3674,8 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
               AND tc.table_schema = kcu.table_schema
              WHERE tc.table_schema = $2
                AND tc.table_name = $1
-               AND tc.constraint_type = 'PRIMARY KEY'",
+               AND tc.constraint_type = 'PRIMARY KEY'
+             ORDER BY kcu.ordinal_position",
         )
         .bind(&table_name)
         .bind(&schema_name)
@@ -3987,7 +4195,8 @@ pub async fn introspect_mssql_schema(
 
         let unique_rows = super::MssqlBackend::fetch_rows(
             pool,
-            "SELECT kcu.COLUMN_NAME AS column_name
+            "SELECT kcu.CONSTRAINT_NAME AS constraint_name, kcu.COLUMN_NAME AS column_name,
+                    CAST(kcu.ORDINAL_POSITION AS bigint) AS key_ordinal
              FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
              JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
                ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
@@ -3995,20 +4204,29 @@ pub async fn introspect_mssql_schema(
               AND tc.TABLE_NAME = kcu.TABLE_NAME
              WHERE tc.TABLE_SCHEMA = @P1
                AND tc.TABLE_NAME = @P2
-               AND tc.CONSTRAINT_TYPE = 'UNIQUE'",
+               AND tc.CONSTRAINT_TYPE = 'UNIQUE'
+             ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
             &[
                 SqlValue::String(schema_name.clone()),
                 SqlValue::String(raw_table_name.clone()),
             ],
         )
         .await?;
-        let unique_columns = unique_rows
+        let unique_members = unique_rows
             .into_iter()
             .map(|row| {
-                super::MssqlBackend::try_get_string(&row, "column_name")
-                    .map(|column| DatabaseBackend::Mssql.quote_identifier(&column))
+                Ok((
+                    super::MssqlBackend::try_get_string(&row, "constraint_name")?,
+                    DatabaseBackend::Mssql.quote_identifier(&super::MssqlBackend::try_get_string(
+                        &row,
+                        "column_name",
+                    )?),
+                    row.try_get::<i64, _>("key_ordinal")?,
+                ))
             })
-            .collect::<Result<std::collections::HashSet<_>, _>>()?;
+            .collect::<crate::Result<Vec<_>>>()?;
+        let (unique_columns, composite_unique_indexes) =
+            classify_postgres_unique_constraints(unique_members);
 
         let columns = column_rows
             .into_iter()
@@ -4035,7 +4253,7 @@ pub async fn introspect_mssql_schema(
             default_sort: format!("{primary_key} ASC"),
             columns,
             indexes: Vec::new(),
-            composite_unique_indexes: Vec::new(),
+            composite_unique_indexes,
             foreign_keys: Vec::new(),
             search_indexes: Vec::new(),
             append_only: false,

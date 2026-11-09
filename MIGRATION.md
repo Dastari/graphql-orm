@@ -10,6 +10,46 @@ supersedes: []
 
 # Migration Guide
 
+## 0.108.0: composite unique migrations
+
+Exhaustive matches on `MigrationStep` must handle the new
+`SetCompositeUniques` variant. The macros version stays aligned with the runtime;
+no derive syntax changes are required. Replay consumers must support the new
+`setCompositeUniques` wire step before importing plans that contain it.
+
+Changes to `unique_composite` now generate migration work. SQLite
+composite-unique-only changes use an ORM-executed live-DDL rebuild directive
+(`graphql_orm_rebuild_composite_unique`), expanded under the migration transaction.
+Do not execute that directive directly in a SQLite client: it deliberately fails
+there instead of falling back to lossy model-derived SQL. Metadata and data
+operations explicitly target the main schema. The executor copies explicit rowids and writable columns, retains generated-column definitions,
+collations and FK actions, restores AUTOINCREMENT history and replays the original
+indexes/triggers. Generated values and storage classes are checked before the
+original table is dropped. Unsupported DDL, WITHOUT ROWID, virtual/shadow tables,
+views/TEMP triggers, delimiter-shaped catalog names, fully shadowed rowid aliases,
+case-insensitive TEMP source/rebuild-name collisions, incoming FK removals
+without a retained exact ordered constraint/primary key, existing FK violations,
+and other changes to the same table in that plan refuse with a sanitized `UnsupportedCapability`
+error. Separate composite-unique changes from other table changes; the older
+non-composite rebuild path has separate preservation defects tracked in #412.
+This guarantee is specific to this new directive; it does not extend the physical
+model or claim preservation for the older rebuild operations.
+
+SQLite and PostgreSQL treat a UNIQUE declaration identical to the ordered
+primary key as already enforced, matching their CREATE TABLE behavior. SQL Server
+retains a separate UNIQUE constraint. Column order remains significant.
+
+PostgreSQL alters UNIQUE constraints. MSSQL SQL
+rendering resolves existing constraint names from the catalog; managed MSSQL
+application remains unsupported and fails closed as before. Adding a constraint
+fails atomically if existing rows conflict. Resolve duplicate rows explicitly
+before retrying; migrations never discard conflicting rows. Review newly
+non-empty plans, including removals previously treated as no-ops.
+
+SQLite runtime preparation retains #417’s diagnostic-only handling of literal
+reserved names without ownership evidence. The live-DDL rewrite checks reserved
+name collisions before mutation and never deletes a colliding table.
+
 ## 0.106.0 to 0.107.0: conditional relation conversion
 
 Upgrade ORM/macros together. Public `RelationMetadata` literals now require

@@ -4743,6 +4743,11 @@ pub enum MigrationStep {
         /// Whether enforcement admits exact ORM bounded-retention context.
         retention_purge: bool,
     },
+    SetCompositeUniques {
+        table_name: String,
+        before: Vec<Vec<String>>,
+        after: Vec<Vec<String>>,
+    },
     SetCheckConstraints {
         table_name: String,
         before: Vec<CheckConstraintModel>,

@@ -279,6 +279,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             });
         }
 
+        B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
             self.database.pool(),
@@ -351,6 +352,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             });
         }
 
+        B::preflight_migration_statements(self.database.pool(), &plan.statements).await?;
         B::prepare_migration_runtime(self.database.pool()).await?;
         if let Some(report) = resolve_recorded_version_apply::<B>(
             self.database.pool(),

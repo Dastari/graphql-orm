@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.108.0 aligns runtime and macros for composite unique migration steps.
+See the [migration guide](../../MIGRATION.md#01080-composite-unique-migrations)
+for exhaustive-match updates and duplicate-data handling.
+
 Version 0.107.0 records source/target predicate presence in static relation
 metadata. Hand-built `RelationMetadata` literals require
 `has_source_condition` and `has_target_condition`; derives populate them.

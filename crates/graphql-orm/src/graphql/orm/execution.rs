@@ -228,6 +228,15 @@ pub(crate) async fn applied_version_set<B: MigrationBackend>(
 
 #[cfg(feature = "sqlite")]
 impl MigrationBackend for super::SqliteBackend {
+    async fn preflight_migration_statements<S>(
+        pool: &Self::Pool,
+        statements: &[S],
+    ) -> crate::Result<()>
+    where
+        S: AsRef<str> + Send + Sync,
+    {
+        super::migrations::sqlite_unique_rebuild::preflight(pool, statements).await
+    }
     async fn prepare_migration_runtime(pool: &Self::Pool) -> crate::Result<()> {
         ensure_sqlite_migration_history_table(pool).await?;
         diagnose_unowned_sqlite_rewrite_tables(pool).await?;
@@ -790,19 +799,33 @@ where
 {
     use sqlx::Connection;
 
+    // Runtime preparation only diagnoses unproven rewrite tables; live-DDL
+    // preflight independently refuses reserved-name collisions without mutation.
+    let live_unique = statements
+        .iter()
+        .any(|sql| super::migrations::sqlite_unique_rebuild::directive(sql.as_ref()).is_some());
     let mut conn = SqliteMigrationConnection {
         connection: pool.acquire().await?,
         close_if_unrestored: false,
     };
     let suspend_foreign_keys = statements.iter().any(|statement| {
-        statement
-            .as_ref()
-            .trim()
-            .eq_ignore_ascii_case("PRAGMA foreign_keys = OFF")
+        super::migrations::sqlite_unique_rebuild::directive(statement.as_ref()).is_some()
+            || statement
+                .as_ref()
+                .trim()
+                .eq_ignore_ascii_case("PRAGMA foreign_keys = OFF")
     });
 
+    let restore_foreign_keys: i64 = if live_unique {
+        sqlx::query_scalar("PRAGMA foreign_keys")
+            .fetch_one(&mut *conn)
+            .await?
+    } else {
+        1
+    };
+
     if suspend_foreign_keys {
-        if owned.is_some() {
+        if owned.is_some() || live_unique {
             conn.close_if_unrestored = true;
         }
         sqlx::query("PRAGMA foreign_keys = OFF")
@@ -834,7 +857,46 @@ where
             }
         }
 
-        for statement in statements {
+        let mut unique_rebuilds = std::collections::BTreeMap::new();
+        for (index, statement) in statements.iter().enumerate() {
+            if let Some(input) = super::migrations::sqlite_unique_rebuild::directive(statement.as_ref()) {
+                unique_rebuilds.insert(index, super::migrations::sqlite_unique_rebuild::prepare(&mut tx, input?).await.map_err(|_| super::migrations::sqlite_unique_rebuild::unsupported())?);
+            }
+        }
+
+        // A legacy rebuild must retain host triggers as well as modeled indexes.
+        // Owned plans continue to reject unmodeled triggers before this point.
+        let mut preserved_triggers = Vec::new();
+        if suspend_foreign_keys {
+            let triggers: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT tbl_name, name, sql FROM sqlite_master WHERE type='trigger' AND sql IS NOT NULL",
+            ).fetch_all(&mut *tx).await?;
+            for (table, name, sql) in triggers {
+                let managed_name = super::migrations::append_only_name(&table);
+                let managed = (name == format!("{managed_name}_update")
+                    && super::migrations::sqlite_append_only_trigger_matches(&sql, &name, &table, "update"))
+                    || (name == format!("{managed_name}_delete")
+                        && (super::migrations::sqlite_append_only_trigger_matches(&sql, &name, &table, "delete")
+                            || super::migrations::sqlite_retention_delete_trigger_matches(&sql, &name, &table)));
+                // The target rebuild owns canonical ORM enforcement triggers,
+                // including intentional removal or retention-policy changes.
+                if managed { continue; }
+                let drop = format!("DROP TABLE {}", super::DatabaseBackend::Sqlite.render_identifier_path(&table));
+                if statements.iter().any(|statement| statement.as_ref().trim() == drop) {
+                    preserved_triggers.push((name, sql));
+                }
+            }
+        }
+
+        for (index, statement) in statements.iter().enumerate() {
+            if let Some(rebuild) = unique_rebuilds.remove(&index) {
+                rebuild.apply(&mut tx).await.map_err(|error| {
+                    if error.as_database_error().is_some_and(|error| error.is_unique_violation()) {
+                        sanitize_migration_constraint_error(error)
+                    } else { super::migrations::sqlite_unique_rebuild::unsupported() }
+                })?;
+                continue;
+            }
             let statement = statement.as_ref().trim();
             if statement.is_empty()
                 || statement == "PRAGMA foreign_keys = OFF"
@@ -842,7 +904,15 @@ where
             {
                 continue;
             }
-            sqlx::query(statement).execute(&mut *tx).await?;
+            sqlx::query(statement).execute(&mut *tx).await.map_err(sanitize_migration_constraint_error)?;
+        }
+
+        for (name, sql) in preserved_triggers {
+            let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?")
+                .bind(name).fetch_one(&mut *tx).await?;
+            if exists == 0 {
+                sqlx::query(&sql).execute(&mut *tx).await?;
+            }
         }
 
         if suspend_foreign_keys {
@@ -873,14 +943,14 @@ where
     };
 
     if suspend_foreign_keys {
-        sqlx::query("PRAGMA foreign_keys = ON")
+        sqlx::query(&format!("PRAGMA foreign_keys = {restore_foreign_keys}"))
             .execute(&mut *conn)
             .await?;
-        if owned.is_some() {
+        if owned.is_some() || live_unique {
             let enabled: i64 = sqlx::query_scalar("PRAGMA foreign_keys")
                 .fetch_one(&mut *conn)
                 .await?;
-            if enabled != 1 {
+            if enabled != restore_foreign_keys {
                 return Err(
                     sqlx::Error::Protocol("SQLite FK enforcement was not restored".into()).into(),
                 );
@@ -890,6 +960,18 @@ where
     }
 
     final_result
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn sanitize_migration_constraint_error(error: sqlx::Error) -> sqlx::Error {
+    if error
+        .as_database_error()
+        .is_some_and(|error| error.is_unique_violation())
+    {
+        sqlx::Error::Protocol("Migration refused: existing rows violate a unique constraint".into())
+    } else {
+        error
+    }
 }
 
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -908,6 +990,7 @@ pub(super) async fn apply_owned_sqlite_migration(
 ) -> Result<super::AppliedMigrationReport, RuntimeMigrationError> {
     let current = super::migrations::introspect_owned_sqlite_schema(pool).await?;
     plan.check_baseline(&current)?;
+    super::migrations::sqlite_unique_rebuild::preflight(pool, plan.statements()).await?;
     ensure_sqlite_migration_history_table(pool).await?;
     let metadata = plan.application_metadata();
     if let Some(report) = apply_sqlite_migration_statements_transactionally(
@@ -1041,7 +1124,10 @@ where
         if statement.is_empty() {
             continue;
         }
-        sqlx::query(statement).execute(&mut *tx).await?;
+        sqlx::query(statement)
+            .execute(&mut *tx)
+            .await
+            .map_err(sanitize_migration_constraint_error)?;
     }
 
     if record_history {

@@ -1051,9 +1051,11 @@ impl OwnedPlannedMigration {
         self.ownership.tables().filter(|table| {
             let temporary = format!("__graphql_orm_{table}_new");
             let temporary = DatabaseBackend::Sqlite.render_identifier_path(&temporary);
-            self.statements
-                .iter()
-                .any(|sql| sql.starts_with(&format!("CREATE TABLE {temporary} ")))
+            self.statements.iter().any(|sql| {
+                sql.starts_with(&format!("CREATE TABLE {temporary} "))
+                    || super::migrations::sqlite_unique_rebuild::directive(sql)
+                        .is_some_and(|input| input.is_ok_and(|input| input.0 == *table))
+            })
         })
     }
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
