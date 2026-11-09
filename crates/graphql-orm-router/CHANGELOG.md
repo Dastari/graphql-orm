@@ -12,7 +12,7 @@ supersedes: []
 
 ## 0.9.0 (unreleased)
 
-- Signal executor overflow, subscriber lag, and bounded gateway overflow with terminal, sanitized `SUBSCRIPTION_CONTINUITY_LOST` errors. Loss detection works without telemetry export; pinned Hive counters lack operation identity, so active WebSocket operations on that runtime are conservatively invalidated. Fixes #359.
+- Signal executor overflow, subscriber lag, and bounded gateway overflow with terminal, sanitized `SUBSCRIPTION_CONTINUITY_LOST` errors. Loss detection works without telemetry export; router-owned loss is attributed locally; pinned Hive counters lack operation identity, so only active subscriptions on that runtime are conservatively invalidated, with a one-second quiet admission gate to coalesce sustained loss. Queries and mutations are preserved. Fixes #359.
 
 ## 0.8.3 (unreleased)
 

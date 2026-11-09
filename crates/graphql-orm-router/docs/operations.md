@@ -109,17 +109,39 @@ bridge is connection-scoped and closes the public socket with 1011. The first
 terminal cause wins, so a client frame/protocol failure is not replaced by a
 secondary bridge close.
 
+Router-owned loss is local. The bounded 32-frame bridge queues subscription
+frames only: an overflow retires the operation identified by that frame.
+One-shot query/mutation results and connection controls bypass this queue.
+Public socket write backpressure retires only that connection's subscriptions.
+Neither path publishes a runtime loss signal or terminates sibling one-shot work.
+Operation classification uses the executable AST and `operationName`; requests
+without an explicit, unambiguous operation fail before execution.
+
 Hive 0.2.19's synchronous dropped/lagged metric calls are observed directly,
-independently of exporters, sampling, or polling intervals. The adapter preserves
-normal exported subscription metrics. These counters have no operation identity:
-any executor overflow or broadcast lag conservatively invalidates **all active
-WebSocket operations on that router runtime**, including unaffected siblings and
-one-shot operations. An interrupted mutation has an uncertain outcome; use an
-application idempotency contract before retrying it. Fresh operations capture the
-new loss epoch and can proceed once pressure subsides. The private bridge has a bounded 32-frame queue;
-a full queue uses the same continuity signal. Watch notifications coalesce loss
-epochs with constant memory. Quiet operations are notified even if no later event
-arrives, and late frames for retired operation generations are discarded.
+independently of exporters, sampling, or polling intervals. Exported metrics are
+preserved. The pinned counters expose only transport, with no operation, field,
+subgraph, or upstream-buffer identity. HTTP-client broadcast lag is excluded
+because it cannot skip frames for WebSocket receivers. Otherwise an unattributed
+Hive loss conservatively invalidates active **subscriptions** on the runtime.
+Queries and mutations are never terminated by continuity loss.
+
+The fallback coalesces loss reports until the counters have been quiet for one
+second. During this interval new subscriptions receive terminal
+`SUBSCRIPTION_CONTINUITY_LOST` without starting upstream work; queries and
+mutations continue normally. Closing admission prevents suppressed notifications
+from hiding losses in newly started streams. Clients should use jittered backoff,
+then resubscribe and refetch. Quiet active streams are notified without waiting
+for a later source frame. Operation generations suppress all frames after error.
+
+Residual denial-of-service consideration: one subscriber's lag or one upstream
+burst can still end other subscribers' streams through the unattributed Hive
+fallback. A sustained source can keep subscription admission paused. Debouncing
+limits termination waves but cannot remove this shared availability risk.
+Enforce connection/operation limits, rate-limit subscription starts at ingress,
+use jittered reconnect backoff, alert on dropped/lagged counters, and isolate
+untrusted subscription workloads in separate router instances where necessary.
+An upstream operation/subscriber-scoped loss hook is required to eliminate this
+cross-subscriber effect; see [#437](https://github.com/Dastari/graphql-orm/issues/437).
 
 Hive's executor and fan-out buffers remain bounded and configurable. Raising
 capacities can absorb bursts but is not a continuity guarantee. Keep alerting on

@@ -18,8 +18,8 @@ does not unify revision and tag selectors. See the
 
 Version 0.9.0 reports subscription frame loss with terminal
 `SUBSCRIPTION_CONTINUITY_LOST`. Resubscribe and refetch; see the
-[operations runbook](docs/operations.md#websocket-reconnect-behavior) for conservative
-runtime-wide invalidation and recovery.
+[operations runbook](docs/operations.md#websocket-reconnect-behavior) for local loss attribution,
+the subscription-only Hive fallback, and recovery.
 
 Version 0.8.3 fixes terminal WebSocket errors: `error`, including
 `SUBSCRIPTION_SCHEMA_RELOAD`, ends the operation without a following `complete`.

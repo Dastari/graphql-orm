@@ -12,7 +12,16 @@ supersedes: []
 
 ## 0.8.3 to 0.9.0: subscription continuity
 
-Handle terminal `SUBSCRIPTION_CONTINUITY_LOST` by resubscribing and refetching authoritative state. Do not wait for `complete`. Hive 0.2.19 reports loss without operation identity, so all active WebSocket operations on the runtime may receive this error, including unaffected siblings. Query operations may be retried; treat an interrupted mutation as uncertain and use your application idempotency contract. The public connection stays usable. No protocol crate change is required.
+Handle terminal `SUBSCRIPTION_CONTINUITY_LOST` by backing off with jitter,
+resubscribing and refetching authoritative state. Do not wait for `complete`.
+Router-owned overflow affects only the identified subscription; socket pressure
+affects that connection's subscriptions. Hive 0.2.19 exposes no operation identity
+in its loss counters, so its fallback may terminate unaffected subscriptions on
+the runtime. It never terminates queries or mutations. New subscriptions are
+rejected until one second of quiet after the last Hive loss to coalesce sustained
+bursts safely. The public connection stays usable. See the operations runbook for
+the residual cross-subscriber DoS risk and mitigations. No protocol change is
+required.
 
 ## 0.8.2 to 0.8.3: terminal WebSocket errors
 

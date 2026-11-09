@@ -2163,6 +2163,14 @@ fn assert_burst_continuity(quiet_tail: bool) {
     router.wait_until_ready();
     let mut socket = TestWebSocket::connect_at(router.address, "/api/graphql");
     socket.connection_init();
+    let mut other = TestWebSocket::connect_at(router.address, "/api/graphql");
+    other.connection_init();
+    socket.subscribe("query", "query { product(id: \"slow\") { id } }");
+    other.subscribe(
+        "mutation",
+        "mutation { renameProduct(id: \"slow\", name: \"updated\") { id name } }",
+    );
+    products.slow_gate.wait_for_started_count(2);
     socket.subscribe(
         "burst",
         "subscription { productChanged(id: \"p1\") { id name } }",
@@ -2197,32 +2205,25 @@ fn assert_burst_continuity(quiet_tail: bool) {
             _ => panic!("unexpected frame: {message}"),
         }
     }
-    // The ordered bridge must suppress every late next/complete. A one-shot
-    // sibling supplies a positive barrier and proves the socket stays usable.
-    let deadline = Instant::now() + TEST_TIMEOUT;
-    loop {
-        socket.subscribe("barrier", "query { product(id: \"p1\") { id } }");
-        let barrier = socket.next_message();
-        assert_eq!(barrier["id"], "barrier", "late burst frame: {barrier}");
-        if barrier["type"] == "next" {
-            let complete = socket.next_message();
-            assert_eq!(complete["id"], "barrier", "{complete}");
-            assert_eq!(complete["type"], "complete", "{complete}");
-            break;
-        }
-        // Draining already queued source frames can report further loss while
-        // cancellation travels upstream. These must also be terminal, and the
-        // same public ID must become usable once that pressure subsides.
-        assert_eq!(barrier["type"], "error", "{barrier}");
+    products.release_slow_request();
+    for (connection, id) in [(&mut socket, "query"), (&mut other, "mutation")] {
+        let result = connection.next_message();
+        assert_eq!(result["id"], id, "{result}");
         assert_eq!(
-            barrier["payload"][0]["extensions"]["code"], "SUBSCRIPTION_CONTINUITY_LOST",
-            "{barrier}"
+            result["type"], "next",
+            "unrelated one-shot was terminated: {result}"
         );
-        assert!(
-            Instant::now() < deadline,
-            "burst cancellation did not settle"
-        );
+        assert!(result["payload"].get("errors").is_none(), "{result}");
+        let complete = connection.next_message();
+        assert_eq!(complete["id"], id, "{complete}");
+        assert_eq!(complete["type"], "complete", "{complete}");
     }
+    // A new query must proceed even while subscription admission is cooling
+    // down, and no late burst frames may appear before it.
+    socket.subscribe("barrier", "query { product(id: \"p1\") { id } }");
+    let barrier = socket.next_message();
+    assert_eq!(barrier["id"], "barrier", "late burst frame: {barrier}");
+    assert_eq!(barrier["type"], "next", "{barrier}");
 }
 
 #[test]
@@ -3531,14 +3532,14 @@ struct SlowGate {
 
 #[derive(Default)]
 struct SlowGateState {
-    started: bool,
+    started: usize,
     released: bool,
 }
 
 impl SlowGate {
     fn hold_until_released(&self) {
         let mut state = self.state.lock().expect("slow gate lock");
-        state.started = true;
+        state.started += 1;
         self.changed.notify_all();
         while !state.released {
             state = self.changed.wait(state).expect("slow gate wait");
@@ -3546,9 +3547,13 @@ impl SlowGate {
     }
 
     fn wait_for_started(&self) {
+        self.wait_for_started_count(1);
+    }
+
+    fn wait_for_started_count(&self, count: usize) {
         let deadline = Instant::now() + TEST_TIMEOUT;
         let mut state = self.state.lock().expect("slow gate lock");
-        while !state.started {
+        while state.started < count {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(!remaining.is_zero(), "slow request did not reach products");
             let (next, timeout) = self
@@ -3557,7 +3562,7 @@ impl SlowGate {
                 .expect("slow gate wait");
             state = next;
             assert!(
-                !timeout.timed_out() || state.started,
+                !timeout.timed_out() || state.started >= count,
                 "slow request timed out"
             );
         }
