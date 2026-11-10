@@ -352,7 +352,7 @@ fn full_target_rls_plan_covers_search_documents_and_the_change_log() {
         "{joined}"
     );
     assert!(
-        joined.contains("SECURITY INVOKER SET search_path = pg_catalog"),
+        joined.contains("SECURITY INVOKER SET search_path = pg_catalog, pg_temp"),
         "{joined}"
     );
     // Binary keys compare in the ORM's `bin:<hex>` document encoding.
@@ -1032,13 +1032,45 @@ async fn search_delete_trigger_resists_redirection_and_drift()
     script_as(
         &runtime,
         &[
-            &format!("CREATE TEMP TABLE {SEARCH_TABLE} (entity_pk text)"),
+            // ON COMMIT DROP keeps the pooled session clean for later writes.
+            &format!("CREATE TEMP TABLE {SEARCH_TABLE} (entity_pk text) ON COMMIT DROP"),
             &format!("DELETE FROM rls_cov_docs WHERE id = '{shadowed}'"),
         ],
         Some(&tenant_a),
     )
     .await?;
     assert_eq!(count_as(&owner, &document(&shadowed), None).await?, 0);
+
+    // A same-named pg_temp type cannot change how the trigger reads the key:
+    // a `text` domain over `name` would truncate a key longer than 63 bytes,
+    // so the document delete would match nothing.
+    let long_key = format!("file-{}", "k".repeat(75));
+    for statement in [
+        "mutation { createRlsCovFolder(input: { id: \"fshadow\", label: \"Shadow folder\" }) { success } }".to_string(),
+        format!("mutation {{ createRlsCovFile(input: {{ id: \"{long_key}\", tenantId: \"tenant-a\", folderId: \"fshadow\", note: \"long key secret\" }}) {{ success }} }}"),
+    ] {
+        let response = schema
+            .execute(Request::new(statement.as_str()).data(tenant_a.clone()))
+            .await;
+        assert!(response.errors.is_empty(), "{statement}: {:?}", response.errors);
+    }
+    let long_document = format!(
+        "SELECT COUNT(*)::BIGINT AS count FROM __graphql_orm_search_rls_cov_files WHERE entity_pk = '{long_key}'"
+    );
+    assert_eq!(count_as(&owner, &long_document, None).await?, 1);
+    script_as(
+        &runtime,
+        &[
+            "CREATE DOMAIN pg_temp.text AS pg_catalog.name",
+            &format!("DELETE FROM rls_cov_files WHERE id = '{long_key}'"),
+            // Temp types outlive the transaction; drop it so the pooled
+            // session's own later ORM writes are unaffected.
+            "DROP DOMAIN pg_temp.text",
+        ],
+        Some(&tenant_a),
+    )
+    .await?;
+    assert_eq!(count_as(&owner, &long_document, None).await?, 0);
 
     // A missing search table refuses the base delete instead of orphaning.
     let guarded = create_doc(&schema, "tenant-a", "Guarded secret").await?;

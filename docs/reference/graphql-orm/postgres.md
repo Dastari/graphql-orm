@@ -139,8 +139,8 @@ behalf of RLS entities, and `validate_target` reports drift on them:
   the base row is still visible, including for bulk, cascaded and raw SQL deletes. The plan
   resolves the search table when it creates the trigger and records its schema and name in the
   trigger arguments. `graphql_orm.delete_search_document()` runs as the invoker with
-  `search_path = pg_catalog`, so neither the deleting session's `search_path` nor a `pg_temp` table
-  of the same name can redirect it, and it raises instead of deleting the base row when the search
+  `search_path = pg_catalog, pg_temp` and schema-qualified types, so neither the deleting session's
+  `search_path` nor a `pg_temp` table or type of the same name can redirect it, and it raises instead of deleting the base row when the search
   table is missing. Dropping or rebuilding the search index drops the trigger; re-applying the
   schema target recreates it. The runtime role needs DML on the search table, as before.
 - **Change journal.** An existing `__graphql_orm_change_log` gets RLS enabled (not forced) with

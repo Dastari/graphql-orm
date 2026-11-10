@@ -272,7 +272,7 @@ fn render_search_delete_trigger_sql(search: &RlsSearchTable) -> String {
     let trigger = backend.quote_identifier(SEARCH_DELETE_TRIGGER);
     let search_regclass = sql_string_literal(&backend.quote_identifier(&search.search_table));
     format!(
-        "DO $graphql_orm$ DECLARE target regclass := to_regclass({search_regclass}); target_schema text; target_name text; BEGIN \
+        "DO $graphql_orm$ DECLARE target pg_catalog.regclass := pg_catalog.to_regclass({search_regclass}); target_schema pg_catalog.text; target_name pg_catalog.text; BEGIN \
          IF target IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm search document table %s does not exist', {search_regclass}); END IF; \
          SELECT n.nspname, c.relname INTO target_schema, target_name FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = target; \
          IF target_schema LIKE 'pg\\_temp%' OR target_schema LIKE 'pg\\_toast\\_temp%' THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = 'graphql-orm search document table resolves to a temporary table'; END IF; \
@@ -306,15 +306,18 @@ pub(crate) fn render_drop_search_delete_trigger_sql(base_table: &str) -> String 
 /// as the base delete; it runs before the base row disappears, while the
 /// search policies can still see that row. A missing table raises instead of
 /// silently leaving the document behind.
-pub(crate) const SEARCH_DELETE_FUNCTION_BODY: &str = " DECLARE document_key text; BEGIN IF TG_NARGS <> 4 OR TG_OP <> 'DELETE' OR TG_WHEN <> 'BEFORE' OR TG_LEVEL <> 'ROW' THEN RAISE EXCEPTION 'graphql-orm search document trigger is misconfigured'; END IF; IF to_regclass(format('%I.%I', TG_ARGV[0], TG_ARGV[1])) IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm search document table %I.%I is missing', TG_ARGV[0], TG_ARGV[1]); END IF; IF TG_ARGV[3] = 'bin' THEN EXECUTE format('SELECT ''bin:'' || encode(($1).%I, ''hex'')', TG_ARGV[2]) INTO document_key USING OLD; ELSIF TG_ARGV[3] = 'text' THEN EXECUTE format('SELECT ($1).%I::text', TG_ARGV[2]) INTO document_key USING OLD; ELSE RAISE EXCEPTION 'graphql-orm search document trigger has an unknown key encoding'; END IF; EXECUTE format('DELETE FROM %I.%I WHERE entity_pk = $1', TG_ARGV[0], TG_ARGV[1]) USING document_key; RETURN OLD; END ";
+pub(crate) const SEARCH_DELETE_FUNCTION_BODY: &str = " DECLARE document_key pg_catalog.text; BEGIN IF TG_NARGS <> 4 OR TG_OP <> 'DELETE' OR TG_WHEN <> 'BEFORE' OR TG_LEVEL <> 'ROW' THEN RAISE EXCEPTION 'graphql-orm search document trigger is misconfigured'; END IF; IF to_regclass(format('%I.%I', TG_ARGV[0], TG_ARGV[1])) IS NULL THEN RAISE EXCEPTION USING ERRCODE = '42P01', MESSAGE = format('graphql-orm search document table %I.%I is missing', TG_ARGV[0], TG_ARGV[1]); END IF; IF TG_ARGV[3] = 'bin' THEN EXECUTE format('SELECT ''bin:''::pg_catalog.text || pg_catalog.encode(($1).%I, ''hex'')', TG_ARGV[2]) INTO document_key USING OLD; ELSIF TG_ARGV[3] = 'text' THEN EXECUTE format('SELECT ($1).%I::pg_catalog.text', TG_ARGV[2]) INTO document_key USING OLD; ELSE RAISE EXCEPTION 'graphql-orm search document trigger has an unknown key encoding'; END IF; EXECUTE format('DELETE FROM %I.%I WHERE entity_pk = $1', TG_ARGV[0], TG_ARGV[1]) USING document_key; RETURN OLD; END ";
 
-/// `search_path` pinned on `graphql_orm.delete_search_document()`.
-pub(crate) const SEARCH_DELETE_FUNCTION_CONFIG: &str = "search_path=pg_catalog";
+/// `search_path` pinned on `graphql_orm.delete_search_document()`, in the
+/// stored `pg_proc.proconfig` form. Listing `pg_temp` last stops PostgreSQL
+/// from searching it first for relation and type names; the body also
+/// schema-qualifies its types.
+pub(crate) const SEARCH_DELETE_FUNCTION_CONFIG: &str = "search_path=pg_catalog, pg_temp";
 
 /// Trigger function removing a deleted base row's search document.
 pub fn postgres_search_delete_function_sql() -> String {
     format!(
-        "CREATE OR REPLACE FUNCTION graphql_orm.{SEARCH_DELETE_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog AS $graphql_orm${SEARCH_DELETE_FUNCTION_BODY}$graphql_orm$"
+        "CREATE OR REPLACE FUNCTION graphql_orm.{SEARCH_DELETE_FUNCTION}() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, pg_temp AS $graphql_orm${SEARCH_DELETE_FUNCTION_BODY}$graphql_orm$"
     )
 }
 
