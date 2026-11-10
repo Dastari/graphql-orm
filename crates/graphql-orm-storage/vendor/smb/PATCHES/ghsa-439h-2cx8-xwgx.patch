@@ -130,7 +130,7 @@ index a7c03289..a48d1831 100644
 +    }
 +}
 diff --git a/src/connection/transformer.rs b/src/connection/transformer.rs
-index 37c7d840..0040c9b1 100644
+index 37c7d840..d5b09e4a 100644
 --- a/src/connection/transformer.rs
 +++ b/src/connection/transformer.rs
 @@ -155,6 +155,18 @@ impl Transformer {
@@ -139,24 +139,24 @@ index 37c7d840..0040c9b1 100644
  
 +    /// Whether incoming messages for `session_id` must be encrypted: the session
 +    /// is ready and encryption is required by its flags or the connection
-+    /// config. Unknown sessions report `false`; the session handler still
-+    /// verifies every response it accepts.
-+    pub async fn requires_encryption(&self, session_id: u64) -> bool {
++    /// config. Returns `None` for a session this connection does not know, so
++    /// callers can fail closed.
++    pub async fn requires_encryption(&self, session_id: u64) -> Option<bool> {
 +        self._with_session(session_id, |session| {
 +            Ok(session.is_ready() && session.should_encrypt()?)
 +        })
 +        .await
-+        .unwrap_or(false)
++        .ok()
 +    }
 +
      /// Transforms an outgoing message to a raw SMB message.
      pub async fn transform_outgoing(&self, mut msg: OutgoingMessage) -> crate::Result<IoVec> {
          let should_encrypt = msg.encrypt;
 diff --git a/src/connection/worker/worker_trait.rs b/src/connection/worker/worker_trait.rs
-index c8a40faa..5e6fe99f 100644
+index c8a40faa..4a579cea 100644
 --- a/src/connection/worker/worker_trait.rs
 +++ b/src/connection/worker/worker_trait.rs
-@@ -90,73 +90,75 @@ pub trait Worker: Sized + std::fmt::Debug {
+@@ -90,73 +90,98 @@ pub trait Worker: Sized + std::fmt::Debug {
              ));
          }
  
@@ -206,18 +206,7 @@ index c8a40faa..5e6fe99f 100644
 +        let mut waiting_async = false;
          loop {
 -            let msg = self.receive_next_cancellable(options).await?;
-+            let msg = if waiting_async {
-+                self.receive_next_cancellable(options).await?
-+            } else {
-+                self.receive_next(options).await?
-+            };
-+
-+            // Not async -- return the result. A synchronous final response also
-+            // completes a request after an (unverifiable) interim.
-+            if !msg.message.header.flags.async_command() {
-+                return Ok(msg);
-+            }
- 
+-
 -            // Check if the message is async and has the same ID.
 -            if !msg.message.header.flags.async_command()
 -                || msg.message.header.async_id != Some(async_id)
@@ -232,30 +221,37 @@ index c8a40faa..5e6fe99f 100644
 -                        .unwrap_or("None".to_string()),
 -                    async_id
 -                )));
++            let msg = if waiting_async {
++                self.receive_next_cancellable(options).await?
++            } else {
++                self.receive_next(options).await?
++            };
++
++            // Not async -- return the result. A synchronous final response also
++            // completes a request after an (unverifiable) interim.
++            if !msg.message.header.flags.async_command() {
++                return Ok(msg);
+             }
+ 
+-            // We've got a result!
 +            // Handle async.
 +            if !options.allow_async {
 +                return Err(Error::InvalidArgument(
 +                    "Async command is not allowed in this context.".to_string(),
 +                ));
-             }
- 
--            // We've got a result!
++            }
++
 +            // If not pending, that's the result, right away! The session handler
 +            // verifies it before its status is evaluated.
              if msg.message.header.status != Status::Pending as u32 {
                  return Ok(msg);
              }
  
-+            // An encryption-required session never accepts an unencrypted
-+            // message, so discard such an interim and keep waiting.
-+            if !msg.form.encrypted
-+                && self
-+                    .transformer()
-+                    .requires_encryption(msg.message.header.session_id)
-+                    .await
-+            {
++            // Validate the interim against the request's own session; discard
++            // one that is not acceptable and keep waiting.
++            if !self.interim_acceptable(&msg, options).await {
 +                log::warn!(
-+                    "Discarding unencrypted interim response for message ID {} on an encryption-required session.",
++                    "Discarding interim response for message ID {} that is not valid for the request's session.",
 +                    msg.message.header.message_id
 +                );
 +                continue;
@@ -284,6 +280,34 @@ index c8a40faa..5e6fe99f 100644
 +                }
 +            }
 +            waiting_async = true;
++        }
++    }
++
++    /// (Internal)
++    ///
++    /// Whether an interim response may extend the wait for a request sent on
++    /// `options.session_id`. Delivery is by message ID only, and the header's
++    /// session ID is not authenticated, so the interim must name the request's
++    /// own session, and that session must be known to this connection. On an
++    /// encryption-required session the interim must also be encrypted.
++    /// Requests sent outside a session (no `session_id`) are not checked.
++    #[maybe_async]
++    async fn interim_acceptable(
++        &self,
++        msg: &IncomingMessage,
++        options: &ReceiveOptions<'_>,
++    ) -> bool {
++        let Some(session_id) = options.session_id else {
++            return true;
++        };
++        if msg.message.header.session_id != session_id {
++            return false;
++        }
++        match self.transformer().requires_encryption(session_id).await {
++            Some(true) => msg.form.encrypted,
++            Some(false) => true,
++            // Unknown session: fail closed.
++            None => false,
          }
      }
  
@@ -303,11 +327,47 @@ index 6e798073..ced229ab 100644
      #[error("IO Error: {0}")]
      IoError(#[from] std::io::Error),
      #[error("Binrw Error: {0}")]
+diff --git a/src/msg_handler.rs b/src/msg_handler.rs
+index 9853f614..346e5036 100644
+--- a/src/msg_handler.rs
++++ b/src/msg_handler.rs
+@@ -195,6 +195,11 @@ pub struct ReceiveOptions<'a> {
+     /// A timeout for the receive operation.
+     /// If not set, the default timeout of the connection is used.
+     pub timeout: Option<std::time::Duration>,
++
++    /// The session the awaited request was sent on, set by the session's
++    /// channel handler. Interim responses are validated against this session,
++    /// never against the session ID in their own (unauthenticated) header.
++    pub session_id: Option<u64>,
+ }
+ 
+ impl<'a> ReceiveOptions<'a> {
+@@ -243,6 +248,11 @@ impl<'a> ReceiveOptions<'a> {
+         self.timeout = Some(timeout);
+         self
+     }
++
++    pub fn with_session_id(mut self, session_id: Option<u64>) -> Self {
++        self.session_id = session_id;
++        self
++    }
+ }
+ 
+ impl<'a> Default for ReceiveOptions<'a> {
+@@ -256,6 +266,7 @@ impl<'a> Default for ReceiveOptions<'a> {
+             async_cancel: None,
+             async_msg_ids: None,
+             timeout: None,
++            session_id: None,
+         }
+     }
+ }
 diff --git a/src/session/channel.rs b/src/session/channel.rs
-index 17d02495..81e37385 100644
+index 17d02495..86fd4ea3 100644
 --- a/src/session/channel.rs
 +++ b/src/session/channel.rs
-@@ -95,19 +95,33 @@ impl ChannelMessageHandler {
+@@ -95,41 +95,60 @@ impl ChannelMessageHandler {
      /// This is trustworthy only since we trust the [`Transformer`][crate::connection::transformer::Transformer] implementation
      /// to provide the correct IDs and verify signatures and encryption.
      ///
@@ -344,7 +404,17 @@ index 17d02495..81e37385 100644
          };
  
          // Make sure that it's our session.
-@@ -123,13 +137,18 @@ impl ChannelMessageHandler {
+         if incoming.message.header.session_id == 0 {
+-            return Err(Error::InvalidMessage(
++            return Err(Error::UnverifiedMessage(
+                 "No session ID in message that got to session!".to_string(),
+             ));
+         }
+         if incoming.message.header.session_id != self.session_id {
+-            return Err(Error::InvalidMessage(
++            return Err(Error::UnverifiedMessage(
+                 "Message not for this session!".to_string(),
+             ));
          }
          // Make sure encryption is used when required.
          if !incoming.form.encrypted && encryption_required {
@@ -398,13 +468,16 @@ index 17d02495..81e37385 100644
      /// **Insecure! Insecure! Insecure!**
      ///
      /// Same as [`ChannelMessageHandler::recvo`], but possible skips security validation.
-@@ -153,10 +197,12 @@ impl ChannelMessageHandler {
+@@ -153,10 +197,15 @@ impl ChannelMessageHandler {
          options: ReceiveOptions<'_>,
          skip_security_validation: bool,
      ) -> crate::Result<IncomingMessage> {
 -        let incoming = self.upstream.recvo(options).await?;
 +        let expected_status = options.status;
-+        let incoming = self.upstream.recvo_before_status(options).await?;
++        let incoming = self
++            .upstream
++            .recvo_before_status(options.with_session_id(Some(self.session_id)))
++            .await?;
  
          if !skip_security_validation {
 -            self._verify_incoming(&incoming).await?;
@@ -413,7 +486,7 @@ index 17d02495..81e37385 100644
          } else {
              // Note: this is performed here for extra security,
              // while we could have just checked the session state, let's require
-@@ -169,7 +215,7 @@ impl ChannelMessageHandler {
+@@ -169,7 +218,7 @@ impl ChannelMessageHandler {
              );
          }
  
@@ -422,14 +495,17 @@ index 17d02495..81e37385 100644
      }
  
      /// (Internal)
-@@ -232,15 +278,18 @@ impl MessageHandler for ChannelMessageHandler {
+@@ -232,15 +281,21 @@ impl MessageHandler for ChannelMessageHandler {
      }
  
      async fn recvo(&self, options: ReceiveOptions<'_>) -> crate::Result<IncomingMessage> {
 -        let incoming = self.upstream.recvo(options).await?;
 +        // Verify the signature or encryption before evaluating the status.
 +        let expected_status = options.status;
-+        let incoming = self.upstream.recvo_before_status(options).await?;
++        let incoming = self
++            .upstream
++            .recvo_before_status(options.with_session_id(Some(self.session_id)))
++            .await?;
  
 -        self._verify_incoming(&incoming).await?;
 +        self._verify_incoming(&incoming, Some(expected_status))
@@ -445,7 +521,7 @@ index 17d02495..81e37385 100644
  
          match &msg.message.content {
              ResponseContent::ServerToClientNotification(s2c_notification) => {
-@@ -259,3 +308,453 @@ impl MessageHandler for ChannelMessageHandler {
+@@ -259,3 +314,537 @@ impl MessageHandler for ChannelMessageHandler {
          }
      }
  }
@@ -554,6 +630,16 @@ index 17d02495..81e37385 100644
 +
 +    /// As [`forged_response`], optionally as an async response with `async_id`.
 +    fn forged_response_with(command: Command, status: Status, async_id: Option<u64>) -> Vec<u8> {
++        forged_response_for(SESSION_ID, command, status, async_id)
++    }
++
++    /// As [`forged_response_with`], naming `session_id` in the header.
++    fn forged_response_for(
++        session_id: u64,
++        command: Command,
++        status: Status,
++        async_id: Option<u64>,
++    ) -> Vec<u8> {
 +        let header = Header {
 +            credit_charge: 1,
 +            status: status as u32,
@@ -566,7 +652,7 @@ index 17d02495..81e37385 100644
 +            message_id: MESSAGE_ID,
 +            tree_id: async_id.is_none().then_some(1),
 +            async_id,
-+            session_id: SESSION_ID,
++            session_id,
 +            signature: 0,
 +        };
 +        let mut message = Cursor::new(Vec::new());
@@ -791,10 +877,12 @@ index 17d02495..81e37385 100644
 +    const FORGED_ASYNC_ID: u64 = 0x0bad;
 +    const SERVER_ASYNC_ID: u64 = 0x0600d;
 +
++    /// Receive options as the channel handler passes them to the worker.
 +    fn async_options(ids: &Arc<AsyncMessageIds>) -> ReceiveOptions<'static> {
 +        expect_success(MESSAGE_ID)
 +            .with_allow_async(true)
 +            .with_async_msg_ids(ids.clone())
++            .with_session_id(Some(SESSION_ID))
 +    }
 +
 +    async fn worker_receive(
@@ -897,5 +985,77 @@ index 17d02495..81e37385 100644
 +            u64::MAX,
 +            "an unencrypted interim must not be recorded as the request's async ID"
 +        );
++    }
++
++    const FORGED_SESSION_ID: u64 = 0x9999;
++
++    fn interim_for_session_then_final(interim_session_id: u64) -> Vec<u8> {
++        let mut incoming = forged_response_for(
++            interim_session_id,
++            Command::Create,
++            Status::Pending,
++            Some(FORGED_ASYNC_ID),
++        );
++        incoming.extend(forged_response_with(Command::Create, Status::Success, None));
++        incoming
++    }
++
++    fn recorded_async_id(ids: &Arc<AsyncMessageIds>) -> u64 {
++        ids.async_id.load(std::sync::atomic::Ordering::SeqCst)
++    }
++
++    #[tokio::test]
++    async fn interim_naming_another_session_is_discarded_when_encryption_is_required() {
++        // The interim names a session the connection does not know; the
++        // request's own session requires encryption.
++        let (channel, _upstream) = handlers_for(
++            interim_for_session_then_final(FORGED_SESSION_ID),
++            Dialect::Smb0302,
++            EncryptionMode::Required,
++            Stage::Ready,
++        )
++        .await;
++        let ids = Arc::new(AsyncMessageIds::default());
++        let options = expect_success(MESSAGE_ID)
++            .with_allow_async(true)
++            .with_async_msg_ids(ids.clone());
++
++        // The channel handler binds the receive to its own session; the
++        // unencrypted final is then rejected by session verification.
++        assert_rejected_before_status(channel.recvo(options).await);
++        assert_eq!(
++            recorded_async_id(&ids),
++            u64::MAX,
++            "a forged interim must not be recorded as the request's async ID"
++        );
++    }
++
++    #[tokio::test]
++    async fn interim_naming_another_session_is_discarded_when_only_signing_is_required() {
++        let ids = Arc::new(AsyncMessageIds::default());
++        let result = worker_receive(
++            interim_for_session_then_final(FORGED_SESSION_ID),
++            EncryptionMode::Allowed,
++            &ids,
++        )
++        .await;
++        assert_final(result);
++        assert_eq!(recorded_async_id(&ids), u64::MAX);
++    }
++
++    #[tokio::test]
++    async fn interim_for_an_unknown_request_session_fails_closed() {
++        let (_channel, upstream) = handlers_for(
++            interim_for_session_then_final(FORGED_SESSION_ID),
++            Dialect::Smb021,
++            EncryptionMode::Allowed,
++            Stage::Ready,
++        )
++        .await;
++        let ids = Arc::new(AsyncMessageIds::default());
++        // The request's session matches the interim but is not registered.
++        let options = async_options(&ids).with_session_id(Some(FORGED_SESSION_ID));
++        assert_final(upstream.worker().unwrap().receive(&options).await);
++        assert_eq!(recorded_async_id(&ids), u64::MAX);
 +    }
 +}

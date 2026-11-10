@@ -122,16 +122,11 @@ pub trait Worker: Sized + std::fmt::Debug {
                 return Ok(msg);
             }
 
-            // An encryption-required session never accepts an unencrypted
-            // message, so discard such an interim and keep waiting.
-            if !msg.form.encrypted
-                && self
-                    .transformer()
-                    .requires_encryption(msg.message.header.session_id)
-                    .await
-            {
+            // Validate the interim against the request's own session; discard
+            // one that is not acceptable and keep waiting.
+            if !self.interim_acceptable(&msg, options).await {
                 log::warn!(
-                    "Discarding unencrypted interim response for message ID {} on an encryption-required session.",
+                    "Discarding interim response for message ID {} that is not valid for the request's session.",
                     msg.message.header.message_id
                 );
                 continue;
@@ -159,6 +154,34 @@ pub trait Worker: Sized + std::fmt::Debug {
                 }
             }
             waiting_async = true;
+        }
+    }
+
+    /// (Internal)
+    ///
+    /// Whether an interim response may extend the wait for a request sent on
+    /// `options.session_id`. Delivery is by message ID only, and the header's
+    /// session ID is not authenticated, so the interim must name the request's
+    /// own session, and that session must be known to this connection. On an
+    /// encryption-required session the interim must also be encrypted.
+    /// Requests sent outside a session (no `session_id`) are not checked.
+    #[maybe_async]
+    async fn interim_acceptable(
+        &self,
+        msg: &IncomingMessage,
+        options: &ReceiveOptions<'_>,
+    ) -> bool {
+        let Some(session_id) = options.session_id else {
+            return true;
+        };
+        if msg.message.header.session_id != session_id {
+            return false;
+        }
+        match self.transformer().requires_encryption(session_id).await {
+            Some(true) => msg.form.encrypted,
+            Some(false) => true,
+            // Unknown session: fail closed.
+            None => false,
         }
     }
 

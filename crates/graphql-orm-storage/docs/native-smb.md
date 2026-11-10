@@ -128,14 +128,19 @@ A rejected response leaves its request's outcome unknown, so the error is not
 retryable; verify the affected key before relying on it.
 
 Interim `STATUS_PENDING` responses are consumed before session verification,
-so they are treated as untrusted. On an encryption-required session an
-unencrypted interim is discarded. On a signing-only session an unsigned interim
-is accepted, as the specification allows, but it can only extend the wait: it
+so they are treated as untrusted. Responses are delivered by message ID, and an
+interim's header session ID is not authenticated, so each interim is checked
+against the session the request was sent on. An interim is discarded if it
+names another session, if the request's session is unknown to the connection,
+or if it is unencrypted while that session requires encryption. On a
+signing-only session an unsigned interim for the request's session is
+accepted, as the specification allows, but it can only extend the wait: it
 never completes the request, and a final response with a different async ID, or
 a synchronous one, is still delivered and verified. Forged interims can
 therefore delay a request until `operation_timeout`, but not change its
-outcome. The async ID used to cancel a request is the latest interim's, which
-an on-path party can also forge.
+outcome. On a signing-only session the async ID used to cancel a request is the
+latest accepted interim's, which an on-path party can overwrite; this backend
+does not cancel requests.
 
 Because guest and anonymous sessions are refused, a not-found status is
 authenticated. `blob_exists` returning `false`, `head_blob` returning `None`,

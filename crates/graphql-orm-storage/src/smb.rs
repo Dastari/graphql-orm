@@ -2298,7 +2298,7 @@ mod tests {
         // Other unexpected messages stay protocol failures.
         let error = map_smb_error(
             "head",
-            smb::Error::InvalidMessage("Message not for this session!".to_string()),
+            smb::Error::InvalidMessage("Expected server-to-redir message".to_string()),
         );
         assert_eq!(
             provider_error_kind(&error),

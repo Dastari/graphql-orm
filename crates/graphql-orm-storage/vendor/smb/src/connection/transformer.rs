@@ -157,14 +157,14 @@ impl Transformer {
 
     /// Whether incoming messages for `session_id` must be encrypted: the session
     /// is ready and encryption is required by its flags or the connection
-    /// config. Unknown sessions report `false`; the session handler still
-    /// verifies every response it accepts.
-    pub async fn requires_encryption(&self, session_id: u64) -> bool {
+    /// config. Returns `None` for a session this connection does not know, so
+    /// callers can fail closed.
+    pub async fn requires_encryption(&self, session_id: u64) -> Option<bool> {
         self._with_session(session_id, |session| {
             Ok(session.is_ready() && session.should_encrypt()?)
         })
         .await
-        .unwrap_or(false)
+        .ok()
     }
 
     /// Transforms an outgoing message to a raw SMB message.

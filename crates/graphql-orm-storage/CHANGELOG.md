@@ -23,11 +23,15 @@ supersedes: []
   non-retryable `SecurityNegotiation` error. Only the MS-SMB2 3.2.5.1.3
   exemptions remain (interim `STATUS_PENDING`, and `SESSION_SETUP` before setup
   completes), and only for statuses that fail the request.
-- Interim `STATUS_PENDING` responses are untrusted: an unencrypted interim on an
-  encryption-required session is discarded, and an interim can no longer cause
-  the genuine final response to be rejected because of an async ID mismatch.
-  Forged interims can delay a request up to `operation_timeout`, not change its
-  outcome.
+- Interim `STATUS_PENDING` responses are untrusted and are checked against the
+  session the request was sent on, not the interim's own header. An interim is
+  discarded if it names another session, if that session is unknown, or if it
+  is unencrypted on an encryption-required session. An interim can no longer
+  cause the genuine final response to be rejected because of an async ID
+  mismatch. Forged interims can delay a request up to `operation_timeout`, not
+  change its outcome.
+- A response naming another session, or no session, is rejected with the same
+  `SecurityNegotiation` error as an unsigned one.
 - SMB listings fail closed: a directory reported by enumeration that is not
   found, or does not open as a directory, fails the listing with a
   non-retryable `Protocol` error instead of being skipped. A missing configured

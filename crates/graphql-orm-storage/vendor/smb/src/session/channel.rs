@@ -126,12 +126,12 @@ impl ChannelMessageHandler {
 
         // Make sure that it's our session.
         if incoming.message.header.session_id == 0 {
-            return Err(Error::InvalidMessage(
+            return Err(Error::UnverifiedMessage(
                 "No session ID in message that got to session!".to_string(),
             ));
         }
         if incoming.message.header.session_id != self.session_id {
-            return Err(Error::InvalidMessage(
+            return Err(Error::UnverifiedMessage(
                 "Message not for this session!".to_string(),
             ));
         }
@@ -198,7 +198,10 @@ impl ChannelMessageHandler {
         skip_security_validation: bool,
     ) -> crate::Result<IncomingMessage> {
         let expected_status = options.status;
-        let incoming = self.upstream.recvo_before_status(options).await?;
+        let incoming = self
+            .upstream
+            .recvo_before_status(options.with_session_id(Some(self.session_id)))
+            .await?;
 
         if !skip_security_validation {
             self._verify_incoming(&incoming, Some(expected_status))
@@ -280,7 +283,10 @@ impl MessageHandler for ChannelMessageHandler {
     async fn recvo(&self, options: ReceiveOptions<'_>) -> crate::Result<IncomingMessage> {
         // Verify the signature or encryption before evaluating the status.
         let expected_status = options.status;
-        let incoming = self.upstream.recvo_before_status(options).await?;
+        let incoming = self
+            .upstream
+            .recvo_before_status(options.with_session_id(Some(self.session_id)))
+            .await?;
 
         self._verify_incoming(&incoming, Some(expected_status))
             .await?;
@@ -413,6 +419,16 @@ mod tests {
 
     /// As [`forged_response`], optionally as an async response with `async_id`.
     fn forged_response_with(command: Command, status: Status, async_id: Option<u64>) -> Vec<u8> {
+        forged_response_for(SESSION_ID, command, status, async_id)
+    }
+
+    /// As [`forged_response_with`], naming `session_id` in the header.
+    fn forged_response_for(
+        session_id: u64,
+        command: Command,
+        status: Status,
+        async_id: Option<u64>,
+    ) -> Vec<u8> {
         let header = Header {
             credit_charge: 1,
             status: status as u32,
@@ -425,7 +441,7 @@ mod tests {
             message_id: MESSAGE_ID,
             tree_id: async_id.is_none().then_some(1),
             async_id,
-            session_id: SESSION_ID,
+            session_id,
             signature: 0,
         };
         let mut message = Cursor::new(Vec::new());
@@ -650,10 +666,12 @@ mod tests {
     const FORGED_ASYNC_ID: u64 = 0x0bad;
     const SERVER_ASYNC_ID: u64 = 0x0600d;
 
+    /// Receive options as the channel handler passes them to the worker.
     fn async_options(ids: &Arc<AsyncMessageIds>) -> ReceiveOptions<'static> {
         expect_success(MESSAGE_ID)
             .with_allow_async(true)
             .with_async_msg_ids(ids.clone())
+            .with_session_id(Some(SESSION_ID))
     }
 
     async fn worker_receive(
@@ -756,5 +774,77 @@ mod tests {
             u64::MAX,
             "an unencrypted interim must not be recorded as the request's async ID"
         );
+    }
+
+    const FORGED_SESSION_ID: u64 = 0x9999;
+
+    fn interim_for_session_then_final(interim_session_id: u64) -> Vec<u8> {
+        let mut incoming = forged_response_for(
+            interim_session_id,
+            Command::Create,
+            Status::Pending,
+            Some(FORGED_ASYNC_ID),
+        );
+        incoming.extend(forged_response_with(Command::Create, Status::Success, None));
+        incoming
+    }
+
+    fn recorded_async_id(ids: &Arc<AsyncMessageIds>) -> u64 {
+        ids.async_id.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn interim_naming_another_session_is_discarded_when_encryption_is_required() {
+        // The interim names a session the connection does not know; the
+        // request's own session requires encryption.
+        let (channel, _upstream) = handlers_for(
+            interim_for_session_then_final(FORGED_SESSION_ID),
+            Dialect::Smb0302,
+            EncryptionMode::Required,
+            Stage::Ready,
+        )
+        .await;
+        let ids = Arc::new(AsyncMessageIds::default());
+        let options = expect_success(MESSAGE_ID)
+            .with_allow_async(true)
+            .with_async_msg_ids(ids.clone());
+
+        // The channel handler binds the receive to its own session; the
+        // unencrypted final is then rejected by session verification.
+        assert_rejected_before_status(channel.recvo(options).await);
+        assert_eq!(
+            recorded_async_id(&ids),
+            u64::MAX,
+            "a forged interim must not be recorded as the request's async ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn interim_naming_another_session_is_discarded_when_only_signing_is_required() {
+        let ids = Arc::new(AsyncMessageIds::default());
+        let result = worker_receive(
+            interim_for_session_then_final(FORGED_SESSION_ID),
+            EncryptionMode::Allowed,
+            &ids,
+        )
+        .await;
+        assert_final(result);
+        assert_eq!(recorded_async_id(&ids), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn interim_for_an_unknown_request_session_fails_closed() {
+        let (_channel, upstream) = handlers_for(
+            interim_for_session_then_final(FORGED_SESSION_ID),
+            Dialect::Smb021,
+            EncryptionMode::Allowed,
+            Stage::Ready,
+        )
+        .await;
+        let ids = Arc::new(AsyncMessageIds::default());
+        // The request's session matches the interim but is not registered.
+        let options = async_options(&ids).with_session_id(Some(FORGED_SESSION_ID));
+        assert_final(upstream.worker().unwrap().receive(&options).await);
+        assert_eq!(recorded_async_id(&ids), u64::MAX);
     }
 }
