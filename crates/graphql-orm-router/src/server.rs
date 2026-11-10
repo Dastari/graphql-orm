@@ -20,6 +20,7 @@ use hive_router::{
             on_execute::{OnExecuteStartHookPayload, OnExecuteStartHookResult},
             on_graphql_analysis::{OnGraphqlAnalysisHookPayload, OnGraphqlAnalysisHookResult},
             on_graphql_error::{OnGraphQLErrorHookPayload, OnGraphQLErrorHookResult},
+            on_graphql_parse::{OnGraphQLParseHookResult, OnGraphQLParseStartHookPayload},
             on_http_request::{
                 OnHttpRequestHookFuture, OnHttpRequestHookPayload, OnHttpRequestHookResult,
             },
@@ -669,10 +670,63 @@ impl RouterPlugin for StaticGraphPlugin {
         })
     }
 
+    // Hive also negotiates `text/event-stream` and `multipart/mixed`
+    // subscription streams on the public HTTP path, including GET. Those
+    // streams bypass the public WebSocket gateway's mandatory bearer, expiry
+    // teardown, attempt limiter, and continuity signalling, and Hive does not
+    // run the execute hook for subscriptions. Refuse every subscription that
+    // did not arrive through the authenticated private gateway endpoint,
+    // before validation, planning, or any upstream work. The parsed document
+    // is Hive's own, and the check covers every operation the request could
+    // select, so it is never narrower than Hive's operation selection.
+    async fn on_graphql_parse<'execution>(
+        &'execution self,
+        payload: OnGraphQLParseStartHookPayload<'execution>,
+    ) -> OnGraphQLParseHookResult<'execution> {
+        if payload
+            .context
+            .get_ref::<TrustedInternalSubscription>()
+            .is_some()
+        {
+            return payload.proceed();
+        }
+        let operation_name = payload.graphql_params.operation_name.clone();
+        let gateway_enabled = self.runtime.internal_subscription.is_some();
+        let metrics = self.runtime.lifecycle.metrics();
+        payload.on_end(move |payload| {
+            if !may_select_subscription(&payload.document, operation_name.as_deref()) {
+                return payload.proceed();
+            }
+            metrics.graphql_error();
+            payload.end_with_graphql_error(
+                http_subscription_refusal(gateway_enabled),
+                hive_router::http::StatusCode::BAD_REQUEST,
+            )
+        })
+    }
+
     async fn on_graphql_analysis<'execution>(
         &'execution self,
         payload: &mut OnGraphqlAnalysisHookPayload<'execution>,
     ) -> OnGraphqlAnalysisHookResult {
+        // Backstop for the parse-stage refusal: Hive's selected operation is
+        // authoritative here, and this still precedes planning and execution.
+        if payload.client_request_details.operation.kind == "subscription"
+            && payload
+                .context
+                .get_ref::<TrustedInternalSubscription>()
+                .is_none()
+        {
+            self.runtime.lifecycle.metrics().graphql_error();
+            return OnGraphqlAnalysisHookResult::EndWithResponse(
+                PlanExecutionOutput::from_graphql_errors_to_response(
+                    vec![http_subscription_refusal(
+                        self.runtime.internal_subscription.is_some(),
+                    )],
+                    hive_router::http::StatusCode::BAD_REQUEST,
+                ),
+            );
+        }
         if payload.filtered_operation_for_plan.selection_set.cost()
             > self.runtime.request_limits.max_fields as u64
         {
@@ -925,6 +979,46 @@ impl background_tasks::BackgroundTask for AuthenticationRefreshTask {
             }
         }
     }
+}
+
+/// The private endpoint exists exactly when `subscriptions` is configured, so
+/// only then does the refusal point clients at the public WebSocket gateway.
+fn http_subscription_refusal(gateway_enabled: bool) -> GraphQLError {
+    GraphQLError::from_message_and_code(
+        if gateway_enabled {
+            "subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint"
+        } else {
+            "subscriptions are not enabled on this router"
+        },
+        "SUBSCRIPTIONS_NOT_SUPPORTED",
+    )
+}
+
+/// Whether any operation the request could select is a subscription. With no
+/// operation name Hive selects the first operation, and with a name it selects
+/// the first operation of that name; both are subsets of this check.
+fn may_select_subscription(
+    document: &hive_router::graphql_tools::static_graphql::query::Document,
+    operation_name: Option<&str>,
+) -> bool {
+    use hive_router::graphql_tools::static_graphql::query::{Definition, OperationDefinition};
+    document
+        .definitions
+        .iter()
+        .filter_map(|definition| match definition {
+            Definition::Operation(operation) => Some(operation),
+            Definition::Fragment(_) => None,
+        })
+        .filter(|operation| {
+            let name = match operation {
+                OperationDefinition::Query(query) => query.name.as_deref(),
+                OperationDefinition::Mutation(mutation) => mutation.name.as_deref(),
+                OperationDefinition::Subscription(subscription) => subscription.name.as_deref(),
+                OperationDefinition::SelectionSet(_) => None,
+            };
+            operation_name.is_none_or(|selected| name == Some(selected))
+        })
+        .any(|operation| matches!(operation, OperationDefinition::Subscription(_)))
 }
 
 fn invalid_bearer_response(payload: OnHttpRequestHookPayload<'_>) -> OnHttpRequestHookResult<'_> {

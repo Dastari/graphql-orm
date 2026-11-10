@@ -3,7 +3,7 @@ title: graphql-orm-router threat model
 kind: architecture
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-07
+last_reviewed: 2026-11-09
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -42,6 +42,11 @@ and RLS remain authoritative after router preflight.
 - Public/admin bodies, headers, parsing, graph complexity, downstream time,
   connection pools, WebSockets, operations, messages, and subscription queues
   are bounded.
+- Subscriptions run only through the public `graphql-transport-ws` gateway,
+  which requires a bearer, ends the connection at credential expiry, limits
+  connection attempts and signals continuity loss. The public HTTP path refuses
+  every subscription before validation, so Hive-native SSE or multipart
+  streams cannot bypass those controls.
 - Default logs exclude variables/tokens and use structured info events. Safe
   admin errors omit endpoints, SDL, keys, headers, tokens, and downstream
   bodies.

@@ -3,7 +3,7 @@ title: graphql-orm-router operations runbook
 kind: runbook
 status: active
 owner: graphql-orm-router-maintainers
-last_reviewed: 2026-08-08
+last_reviewed: 2026-11-09
 review_by: 2027-02-07
 supersedes: []
 ---
@@ -143,17 +143,42 @@ Enforce connection/operation limits, rate-limit subscription starts at ingress,
 use jittered reconnect backoff, alert on dropped/lagged counters, and isolate
 untrusted subscription workloads in separate router instances where necessary.
 An upstream operation/subscriber-scoped loss hook is required to eliminate this
-cross-subscriber effect; see [#437](https://github.com/Dastari/graphql-orm/issues/437).
+cross-subscriber effect; see [#548](https://github.com/Dastari/graphql-orm/issues/548).
 
 Hive's executor and fan-out buffers remain bounded and configurable. Raising
 capacities can absorb bursts but is not a continuity guarantee. Keep alerting on
 both counters and tune budgets from observed traffic. The adapter is tested
 against the pinned counters; revalidate those hooks before upgrading Hive.
-This terminal-error contract covers the public `graphql-transport-ws` gateway.
-Hive-native HTTP SSE/multipart subscription streams bypass that gateway and do
-not yet provide the same guarantee; use WebSockets when continuity is required.
-That separate transport defect and the upstream operation-scoped hook are tracked
-in [#437](https://github.com/Dastari/graphql-orm/issues/437).
+This terminal-error contract covers the public `graphql-transport-ws` gateway,
+which is the only subscription transport.
+
+### HTTP subscription requests
+
+Since 0.10.0 the public HTTP path refuses subscriptions. Hive can negotiate
+`text/event-stream`, `multipart/mixed` and Apollo multipart streams, including
+over GET. Those streams would skip the gateway's mandatory bearer, expiry
+teardown, attempt limiter and continuity signalling, as well as execute-time
+authorization (GHSA-3qf7-j9r6-6qv3). A subscription that does not arrive
+through the gateway's authenticated private endpoint gets HTTP 400 with a
+plain JSON GraphQL error:
+
+```json
+{"errors":[{"message":"subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint","extensions":{"code":"SUBSCRIPTIONS_NOT_SUPPORTED"}}]}
+```
+
+A router without `subscriptions` configured has no gateway. It sends the same
+status and code with the message `subscriptions are not enabled on this router`.
+
+The refusal comes after parsing and before validation, planning or upstream
+work. It does not depend on `Accept`, method, credentials or a sub-path of the
+GraphQL path. A document is
+refused when any operation it could select is a subscription, so use
+`operationName` to run a query from a mixed document. Queries and mutations over
+HTTP are unaffected. Clients that see this code must switch to
+`graphql-transport-ws` rather than retry. The HTTP continuity exposure noted in
+[#437](https://github.com/Dastari/graphql-orm/issues/437) no longer applies.
+Its upstream request for an operation-scoped Hive loss hook is now
+[#548](https://github.com/Dastari/graphql-orm/issues/548).
 
 A successful one-shot query or mutation over WebSocket emits `next` and then
 `complete` with the original ID. Retire that ID on `complete`. If the socket is
