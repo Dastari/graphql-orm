@@ -20,8 +20,11 @@ absent from a stage target. It now applies with `ApplyOptions::default()`, like
 `SchemaManager::apply_migration`. A pending stage with a destructive step fails
 with `Migration <stage version> contains destructive step ...; set
 allow_destructive to apply it` before any stage SQL runs, and earlier pending
-stages in the same call are not applied either. `apply_upgrade` now also admits
-every stage before applying any.
+stages in the same call are not applied either. `apply_upgrade` now also
+risk-checks every stage before applying any, and checks
+`expected_current_schema_hash` once against the live baseline. Previously it
+compared the hash with each stage's planned source, so a multi-stage upgrade
+applied its first stage and then failed.
 
 If your stages intentionally remove tables or columns, review the plan and opt in:
 

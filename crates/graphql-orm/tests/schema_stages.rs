@@ -931,3 +931,86 @@ async fn stage_apply_options_dry_run_history_and_baseline() -> Result<(), Box<dy
     );
     Ok(())
 }
+
+#[tokio::test]
+#[cfg_attr(
+    feature = "postgres",
+    ignore = "requires test-owned PostgreSQL container"
+)]
+async fn abi_upgrade_checks_the_baseline_hash_once_before_any_stage()
+-> Result<(), Box<dyn std::error::Error>> {
+    use graphql_orm::graphql::orm::{ApplyOptions, SchemaAbi, introspect_schema};
+
+    let pool = setup_pool().await?;
+    let database = graphql_orm::db::Database::new(pool.clone());
+    let prefix = gate_prefix("abi_baseline")?;
+    let v1 = format!("{prefix}_01");
+    let v2 = format!("{prefix}_02");
+    let v3 = format!("{prefix}_03");
+    let abi = SchemaAbi::new(vec![
+        gate_stage(&v1, vec![gate_table("gate_abi_one", &[("name", false)])]),
+        gate_stage(
+            &v2,
+            vec![
+                gate_table("gate_abi_one", &[("name", false)]),
+                gate_table("gate_abi_two", &[("name", false)]),
+            ],
+        ),
+        gate_stage(
+            &v3,
+            vec![
+                gate_table("gate_abi_one", &[("name", false)]),
+                gate_table("gate_abi_two", &[("name", false)]),
+                gate_table("gate_abi_three", &[("name", false)]),
+            ],
+        ),
+    ])?;
+    database
+        .schema()
+        .apply_upgrade(&abi, &v1, ApplyOptions::default())
+        .await?;
+
+    // A wrong baseline is refused before the first pending stage runs.
+    let error = database
+        .schema()
+        .apply_upgrade(
+            &abi,
+            &v3,
+            ApplyOptions {
+                expected_current_schema_hash: Some("not-the-live-hash".to_string()),
+                ..ApplyOptions::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, sqlx::Error::Protocol(message) if message.contains("baseline hash mismatch")),
+        "{error:?}"
+    );
+    assert!(
+        !gate_table_names(&pool)
+            .await?
+            .contains(&"gate_abi_two".to_string())
+    );
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 1);
+
+    // The live baseline admits the whole multi-stage path, not only its first stage.
+    let live_hash = introspect_schema(&pool).await?.stable_hash();
+    let applied = database
+        .schema()
+        .apply_upgrade(
+            &abi,
+            &v3,
+            ApplyOptions {
+                expected_current_schema_hash: Some(live_hash),
+                ..ApplyOptions::default()
+            },
+        )
+        .await?;
+    assert_eq!(applied.applied.len(), 2);
+    let tables = gate_table_names(&pool).await?;
+    assert!(tables.contains(&"gate_abi_two".to_string()));
+    assert!(tables.contains(&"gate_abi_three".to_string()));
+    assert_eq!(applied_stage_count(&pool, &prefix).await?, 3);
+    Ok(())
+}

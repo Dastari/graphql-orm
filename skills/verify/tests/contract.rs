@@ -1400,7 +1400,16 @@ async fn a_schema_stage_that_drops_entities_is_refused_without_opt_in() {
         "partial stage",
         &[Customer::metadata()],
     )];
-    assert!(db.apply_schema_stages(&stages).await.is_err());
+    let refusal = db.apply_schema_stages(&stages).await.unwrap_err();
+    assert!(
+        matches!(
+            &refusal,
+            graphql_orm::sqlx::Error::Protocol(message)
+                if message.starts_with("Migration partial-stage contains destructive step")
+                    && message.ends_with("set allow_destructive to apply it")
+        ),
+        "{refusal:?}"
+    );
     assert_eq!(Order::count_all(&db).await.unwrap(), 1);
     db.apply_schema_stages_with_options(
         &stages,

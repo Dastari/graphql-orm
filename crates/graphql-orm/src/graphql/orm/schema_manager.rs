@@ -508,9 +508,27 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
         for plan in &planned.stages {
             reject_disallowed_risks(B::DIALECT, plan, &options)?;
         }
+        // The expected baseline describes the live schema, which only the
+        // first stage starts from; later stages start from the previous
+        // stage's target. Check it once, before any stage runs.
+        if let (Some(expected), Some(first)) = (
+            &options.expected_current_schema_hash,
+            planned.stages.first(),
+        ) {
+            if first.source_schema_hash.as_ref() != Some(expected) {
+                return Err(sqlx::Error::Protocol(format!(
+                    "Schema migration baseline hash mismatch: expected {}, planned {:?}",
+                    expected, first.source_schema_hash
+                )));
+            }
+        }
+        let stage_options = ApplyOptions {
+            expected_current_schema_hash: None,
+            ..options
+        };
         let mut applied = Vec::new();
         for plan in &planned.stages {
-            applied.push(self.apply_migration(plan, options.clone()).await?);
+            applied.push(self.apply_migration(plan, stage_options.clone()).await?);
         }
         Ok(AppliedSchemaUpgrade { applied })
     }

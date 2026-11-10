@@ -85,7 +85,9 @@ pub trait SchemaStageRunner {
     /// a stage containing a destructive step is refused unless
     /// `allow_destructive` is set, and `additive_only` refuses any step that is
     /// not additive. `dry_run` plans and admits the stages and returns reports
-    /// without executing SQL. `expected_current_schema_hash`, when set, must
+    /// without executing stage SQL; planning may still prepare the
+    /// `__graphql_orm_migrations` ledger table, creating or upgrading it.
+    /// `expected_current_schema_hash`, when set, must
     /// equal the stable hash of the introspected live schema. Stages always
     /// record history, so `record_history: false` is refused.
     /// `require_clean_schema` applies to ABI upgrades only and is not used here.

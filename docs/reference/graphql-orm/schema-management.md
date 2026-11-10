@@ -3,7 +3,7 @@ title: "Schema Management"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-08-10
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -225,13 +225,65 @@ Upgrade behavior:
 
 1. Read the current migration version.
 2. Resolve the path from that version to the target stage.
-3. Introspect the live schema before each stage.
-4. Validate the baseline when `require_clean_schema` is true.
-5. Build a structured plan.
-6. Reject disallowed risks.
-7. Render backend SQL.
-8. Apply statements explicitly.
-9. Record migration history.
+3. Validate the baseline when `require_clean_schema` is true.
+4. Introspect the live schema once. Plan the first pending stage from it, and
+   each later stage from the previous stage's target.
+5. Plan, classify and risk-check every pending stage, and compare
+   `expected_current_schema_hash` with the live baseline, before any stage SQL
+   runs. A refused later stage leaves earlier stages unapplied.
+6. Render backend SQL.
+7. Apply each stage transactionally.
+8. Record migration history.
+
+## Schema Stages
+
+`SchemaStageRunner` applies ordered `SchemaStage`s directly on a `Database`,
+tracking each applied stage version in migration history. It shares the step
+classification and risk gate of `apply_migration`.
+
+```rust
+use graphql_orm::graphql::orm::{ApplyOptions, SchemaStage, SchemaStageRunner};
+
+let stages = vec![
+    SchemaStage::from_entities("1", "initial schema", &[User::metadata()]),
+    SchemaStage::from_entities("2", "add audit fields", &[User::metadata(), Audit::metadata()]),
+];
+
+for stage in database.plan_schema_stages(&stages).await? {
+    println!("{} {:?}", stage.version, stage.highest_risk());
+}
+
+// Refuses destructive steps, like `ApplyOptions::default()`.
+database.apply_schema_stages(&stages).await?;
+
+// Explicit options, for example after reviewing a plan that drops a column.
+database
+    .apply_schema_stages_with_options(
+        &stages,
+        ApplyOptions {
+            allow_destructive: true,
+            ..ApplyOptions::default()
+        },
+    )
+    .await?;
+```
+
+- Every pending stage is planned, classified and risk-checked before any stage
+  SQL runs. A refusal names the stage version and step, and leaves all pending
+  stages unapplied.
+- The first pending stage is planned from the live schema. Live tables or
+  columns absent from a stage target, such as a newer release's schema after a
+  rollback or unmanaged host tables, appear as destructive steps and are
+  refused by default.
+- `additive_only` refuses any step that is not additive.
+- `dry_run` returns one report per pending stage without running stage SQL;
+  planning may still prepare the migration ledger table.
+- `expected_current_schema_hash` must equal the stable hash of the introspected
+  live schema.
+- `record_history: false` is refused, because stage progress is tracked in
+  history. `require_clean_schema` applies to ABI upgrades only.
+- `PlannedSchemaStage::steps()` and `highest_risk()` expose the classified steps
+  for review.
 
 ## Append-only retention capability changes
 
