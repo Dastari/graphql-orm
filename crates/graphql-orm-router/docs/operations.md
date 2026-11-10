@@ -166,8 +166,12 @@ plain JSON GraphQL error:
 {"errors":[{"message":"subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint","extensions":{"code":"SUBSCRIPTIONS_NOT_SUPPORTED"}}]}
 ```
 
+A router without `subscriptions` configured has no gateway. It sends the same
+status and code with the message `subscriptions are not enabled on this router`.
+
 The refusal comes after parsing and before validation, planning or upstream
-work. It does not depend on `Accept`, method or credentials. A document is
+work. It does not depend on `Accept`, method, credentials or a sub-path of the
+GraphQL path. A document is
 refused when any operation it could select is a subscription, so use
 `operationName` to run a query from a mixed document. Queries and mutations over
 HTTP are unaffected. Clients that see this code must switch to

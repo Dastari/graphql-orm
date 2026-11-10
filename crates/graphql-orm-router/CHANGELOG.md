@@ -26,7 +26,9 @@ supersedes: []
   credentials. A document is refused when any operation it could select is a
   subscription. Queries and mutations over HTTP, and all WebSocket traffic,
   are unchanged. This also removes the HTTP continuity-loss exposure in #437.
-  Fixes #437.
+  Fixes #437. Routers without `subscriptions` configured give the same 400
+  and code with the message `subscriptions are not enabled on this router`,
+  in place of Hive's earlier 415, 406 or one-event stream.
 
 ## 0.9.1 (unreleased)
 

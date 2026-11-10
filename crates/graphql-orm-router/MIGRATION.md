@@ -25,6 +25,13 @@ could select is a subscription. Queries and mutations over HTTP are unchanged,
 including with a streaming-capable `Accept` header. No data migration or public
 Rust API change is needed.
 
+Routers without `subscriptions` configured have no WebSocket gateway. They also
+answer every HTTP subscription with HTTP 400 and `SUBSCRIPTIONS_NOT_SUPPORTED`,
+but the message is `subscriptions are not enabled on this router` and names no
+endpoint. Before 0.10.0, Hive answered these requests with 415 or 406, or with a
+one-event 200 stream when only a streaming `Accept` was offered. Clients that
+branch on those statuses should match the 400 status and the error code instead.
+
 ## 0.9.1: introspection declaration order
 
 Introspection now preserves source order for input fields, object/interface

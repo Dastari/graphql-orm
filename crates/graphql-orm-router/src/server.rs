@@ -691,6 +691,7 @@ impl RouterPlugin for StaticGraphPlugin {
             return payload.proceed();
         }
         let operation_name = payload.graphql_params.operation_name.clone();
+        let gateway_enabled = self.runtime.internal_subscription.is_some();
         let metrics = self.runtime.lifecycle.metrics();
         payload.on_end(move |payload| {
             if !may_select_subscription(&payload.document, operation_name.as_deref()) {
@@ -698,7 +699,7 @@ impl RouterPlugin for StaticGraphPlugin {
             }
             metrics.graphql_error();
             payload.end_with_graphql_error(
-                http_subscription_refusal(),
+                http_subscription_refusal(gateway_enabled),
                 hive_router::http::StatusCode::BAD_REQUEST,
             )
         })
@@ -719,7 +720,9 @@ impl RouterPlugin for StaticGraphPlugin {
             self.runtime.lifecycle.metrics().graphql_error();
             return OnGraphqlAnalysisHookResult::EndWithResponse(
                 PlanExecutionOutput::from_graphql_errors_to_response(
-                    vec![http_subscription_refusal()],
+                    vec![http_subscription_refusal(
+                        self.runtime.internal_subscription.is_some(),
+                    )],
                     hive_router::http::StatusCode::BAD_REQUEST,
                 ),
             );
@@ -978,9 +981,15 @@ impl background_tasks::BackgroundTask for AuthenticationRefreshTask {
     }
 }
 
-fn http_subscription_refusal() -> GraphQLError {
+/// The private endpoint exists exactly when `subscriptions` is configured, so
+/// only then does the refusal point clients at the public WebSocket gateway.
+fn http_subscription_refusal(gateway_enabled: bool) -> GraphQLError {
     GraphQLError::from_message_and_code(
-        "subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint",
+        if gateway_enabled {
+            "subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint"
+        } else {
+            "subscriptions are not enabled on this router"
+        },
         "SUBSCRIPTIONS_NOT_SUPPORTED",
     )
 }

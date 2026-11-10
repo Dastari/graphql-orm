@@ -1847,6 +1847,71 @@ fn public_http_subscription_streams_are_refused_before_upstream_work() {
         assert_http_subscription_refused(case, &response);
     }
 
+    // Hive also serves the GraphQL handler on every sub-path of the GraphQL
+    // path (its persisted-document route). Each one must stay guarded.
+    let public_body = serde_json::to_vec(&public).unwrap();
+    for path in [
+        "/api/graphql/",
+        "/api/graphql/x",
+        "/api/graphql/sha256:abc",
+        "/api/graphql/x/y",
+    ] {
+        for (accept, credentials) in [
+            ("text/event-stream", anonymous),
+            ("multipart/mixed", &bearer[..]),
+        ] {
+            let case = format!("POST {path} with {accept}");
+            let mut headers = vec![("accept", accept)];
+            headers.extend_from_slice(credentials);
+            let response = raw_http_within(
+                router.address,
+                "POST",
+                path,
+                &headers,
+                Some(&public_body),
+                HTTP_STREAM_PROBE,
+            )
+            .unwrap_or_else(|error| panic!("{case}: expected a finite refusal: {error}"));
+            assert_http_subscription_refused(&case, &response);
+        }
+    }
+    let mut get_selected = Url::parse("http://router/api/graphql/x").unwrap();
+    get_selected
+        .query_pairs_mut()
+        .append_pair(
+            "query",
+            "query Lookup { product(id: \"p1\") { id } } \
+             subscription Events { productChanged(id: \"p1\") { id } }",
+        )
+        .append_pair("operationName", "Events");
+    for (case, path) in [
+        (
+            "GET operationName selecting the subscription",
+            "/api/graphql",
+        ),
+        (
+            "GET sub-path operationName selecting the subscription",
+            get_selected.path(),
+        ),
+    ] {
+        let target = format!("{path}?{}", get_selected.query().unwrap());
+        let response = raw_http_within(
+            router.address,
+            "GET",
+            &target,
+            &[("accept", "text/event-stream")],
+            None,
+            HTTP_STREAM_PROBE,
+        )
+        .unwrap_or_else(|error| panic!("{case}: expected a finite refusal: {error}"));
+        assert_http_subscription_refused(case, &response);
+    }
+    assert_eq!(
+        products.opens(),
+        opens_before,
+        "no sub-path or GET subscription may open an upstream subscription"
+    );
+
     // Every operation the request could select is checked, so neither the
     // first-operation default nor an operation name can reach a stream.
     let mixed = "subscription Events { productChanged(id: \"p1\") { id } } \
@@ -1964,6 +2029,14 @@ fn public_http_subscription_streams_are_refused_before_upstream_work() {
 const HTTP_STREAM_PROBE: Duration = Duration::from_secs(3);
 
 fn assert_http_subscription_refused(case: &str, response: &HttpResponse) {
+    assert_http_subscription_refused_with(
+        case,
+        response,
+        "subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint",
+    );
+}
+
+fn assert_http_subscription_refused_with(case: &str, response: &HttpResponse, message: &str) {
     let body = String::from_utf8_lossy(&response.body);
     assert_eq!(response.status, 400, "{case}: {body}");
     let value: Value = serde_json::from_slice(&response.body)
@@ -1972,12 +2045,62 @@ fn assert_http_subscription_refused(case: &str, response: &HttpResponse) {
         value["errors"][0]["extensions"]["code"], "SUBSCRIPTIONS_NOT_SUPPORTED",
         "{case}: {value}"
     );
-    assert_eq!(
-        value["errors"][0]["message"],
-        "subscriptions are not supported over HTTP; use the graphql-transport-ws WebSocket endpoint",
-        "{case}: {value}"
-    );
+    assert_eq!(value["errors"][0]["message"], message, "{case}: {value}");
     assert!(value.get("data").is_none(), "{case}: {value}");
+}
+
+#[test]
+fn http_subscription_without_a_gateway_is_refused_without_naming_one() {
+    let products = LoopbackSubgraph::start(SubgraphKind::Products);
+    let reviews = LoopbackSubgraph::start(SubgraphKind::Reviews);
+    let products_sdl = LoopbackSdl::start(PRODUCTS_V1);
+    let reviews_sdl = LoopbackSdl::start(REVIEWS);
+    // No `subscriptions` configuration, so there is no WebSocket gateway.
+    let mut router = TestRouter::spawn_static(
+        products.endpoint(),
+        reviews.endpoint(),
+        products_sdl.endpoint(),
+        reviews_sdl.endpoint(),
+    );
+    router.wait_until_ready();
+
+    let body = serde_json::to_vec(&json!({
+        "query": "subscription { productChanged(id: \"p1\") { id name } }"
+    }))
+    .unwrap();
+    let opens_before = products.opens();
+    for accept in [
+        "text/event-stream",
+        "multipart/mixed",
+        "application/json",
+        "application/json, text/event-stream",
+    ] {
+        let case = format!("no gateway, {accept}");
+        let response = raw_http_within(
+            router.address,
+            "POST",
+            "/api/graphql",
+            &[("accept", accept)],
+            Some(&body),
+            HTTP_STREAM_PROBE,
+        )
+        .unwrap_or_else(|error| panic!("{case}: expected a finite refusal: {error}"));
+        assert_http_subscription_refused_with(
+            &case,
+            &response,
+            "subscriptions are not enabled on this router",
+        );
+    }
+    assert_eq!(products.opens(), opens_before);
+    assert_eq!(
+        router.graphql_at(
+            "/api/graphql",
+            json!({"query": "query { product(id: \"p1\") { id } }"}),
+            &[]
+        )["data"]["product"]["id"],
+        "p1"
+    );
+    router.stop();
 }
 
 #[test]
