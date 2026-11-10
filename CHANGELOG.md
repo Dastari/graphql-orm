@@ -3,7 +3,7 @@ title: "Changelog"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -15,6 +15,15 @@ This file is the authoritative user-facing release chronology. The former
 for historical context.
 
 ## Unreleased
+
+## 0.120.0
+
+ORM runtime/macros **0.120.0**.
+
+- **Security/breaking (GHSA-hr7v-hr83-2jj4):** a generated GraphQL resolver that reaches a PostgreSQL `#[graphql_rls]` entity without `DbAuthContext` now fails closed with `AUTHORIZATION_MISCONFIGURED` before database work, as `DbAuthContext` documented, under `DeclaredPoliciesRequired` (the default) and stricter modes. Root queries, search, aggregates, mutations, subscriptions, federation lookups, relation fields, relation filters and relation count ordering into RLS targets, and every entity a static dependent delete touches are covered, including from non-RLS roots. `SystemAccess` in the request data is the named trusted bypass; `LegacyPermissive` keeps the previous behaviour. Repository paths are unchanged.
+- **Security/breaking (GHSA-hr7v-hr83-2jj4):** `validate_target` reports `Error` diagnostics when the connection role would bypass RLS: a superuser, a `BYPASSRLS` role, or the owner of a table where `row_security_active` is false (for example `force = false`). New `SchemaManager::validate_rls_enforcement` performs the same check at service start under every schema policy. Healthy deployments validated with a superuser pool now report errors.
+- **Security/breaking (GHSA-7gw2-974x-qhrh):** `plan_schema_target` (via new `build_schema_target_rls_plan`) enables and, matching the entity, forces RLS on each RLS entity's `__graphql_orm_search_<table>` with policies tying documents to the visible base row, and installs a `BEFORE DELETE` trigger removing documents while the base row is visible. The trigger records the search table's schema and name when it is created, its function pins `search_path = pg_catalog` and raises when the table is missing, and dropping a search index drops it; binary keys compare in the ORM's `bin:<hex>` encoding. Only privileged roles can read the change journal: RLS with an `INSERT`-only policy (the runtime role can still append), applied by the plan and by `ensure_change_journal_table`; `export_changes` runs with `row_security = off` and fails for roles subject to RLS instead of exporting nothing. `validate_target` covers both tables, including unexpected extra policies. Validation and dependent deletes accept the ORM's search trigger only when it fires in ordinary sessions with the exact type, arguments, target and function definition. Dependent deletes of RLS entities require a `BYPASSRLS` pool; see the PostgreSQL RLS reference.
+- **Performance:** PostgreSQL cannot use the search GIN index beneath a row-security policy because `@@` is not leakproof, so searches on RLS entities scan the search table. Measured on 200,000 documents: selective searches about 8 ms → 470 ms, broad searches about 85 ms → 430 ms. Non-RLS entities are unchanged; an index-preserving design is tracked in [#555](https://github.com/Dastari/graphql-orm/issues/555). See the 0.120.0 migration guide.
 
 ## 0.119.0
 

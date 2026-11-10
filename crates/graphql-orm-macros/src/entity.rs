@@ -4168,6 +4168,10 @@ fn generate_entity_impl(
                     });
                     related_prepare.push(quote! {
                         if let Some(alternatives) = self.#field_name.as_mut() {
+                            ::graphql_orm::graphql::orm::ensure_rls_request_context::<#target, #backend_marker>(
+                                ctx,
+                                <#target as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                            )?;
                             ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?
                                 .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await?;
                             for filter in alternatives.iter_mut() {
@@ -4291,6 +4295,12 @@ fn generate_entity_impl(
                     relation_order_present.push(quote! { self.#order_field_name.is_some() });
                     relation_order_prepare.push(quote! {
                         if self.#order_field_name.is_some() {
+                            // The count reads the target table: an RLS target
+                            // needs request database authorization.
+                            ::graphql_orm::graphql::orm::ensure_rls_request_context::<#target_type, #backend_marker>(
+                                ctx,
+                                <#target_type as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+                            )?;
                             ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?
                                 .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await?;
                             let prepared = ::graphql_orm::graphql::orm::prepare_relation_count_order::<

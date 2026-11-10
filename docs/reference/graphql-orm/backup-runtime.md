@@ -3,7 +3,7 @@ title: "Backup Runtime API"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-27
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -134,3 +134,11 @@ database.ensure_change_journal_table().await?;
 Generated GraphQL/repository writes and `MutationContext` writes pass through the existing
 transactional mutation event path, so journal rows are written in the same transaction as the data
 change. Restore imports do not use generated mutation paths, so restore does not pollute the journal.
+
+On PostgreSQL only privileged roles can read the journal. `ensure_change_journal_table` enables
+RLS on `__graphql_orm_change_log` with a single `INSERT` policy, so a role subject to RLS can still
+append entries but cannot read, update or delete them. Create the table as the schema owner and grant the
+runtime role `INSERT` on it. `export_changes` runs with `SET LOCAL row_security = off`, so it
+reads every entry as the table owner or a `BYPASSRLS` role and fails with a PostgreSQL error for a
+role subject to RLS, rather than exporting an empty journal. See
+[PostgreSQL RLS](postgres.md#orm-managed-tables).

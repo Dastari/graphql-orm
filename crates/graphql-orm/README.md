@@ -3,12 +3,18 @@ title: "graphql-orm"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # `graphql-orm`
+
+Version 0.120.0 fails closed when a GraphQL request reaches a PostgreSQL RLS
+entity without `DbAuthContext`, reports runtime roles that bypass RLS, and
+extends RLS to search documents and the change journal (GHSA-hr7v-hr83-2jj4,
+GHSA-7gw2-974x-qhrh). Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01200-postgresql-rls-enforcement-and-orm-managed-table-coverage).
 
 Version 0.119.0 orders PostgreSQL and MSSQL migration foreign keys around the
 keys they reference, including cycles and self references. Upgrade runtime and

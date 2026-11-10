@@ -25,7 +25,7 @@ use super::owned_schema::{
 };
 use super::query::PoolProvider;
 #[cfg(feature = "postgres")]
-use super::rls::{LiveRlsPolicy, LiveRlsTable};
+use super::rls::{LiveRlsEnforcement, LiveRlsPolicy, LiveRlsTable};
 use super::{IntrospectionBackend, RlsIntrospectionBackend};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 use sqlx::Row;
@@ -2589,6 +2589,9 @@ fn render_drop_search_index_statement(
     let metadata_table = super::search_metadata_table_name();
     match backend {
         DatabaseBackend::Postgres => vec![
+            // An RLS entity's delete trigger names this table; never leave it
+            // pointing at a dropped search table.
+            super::rls::render_drop_search_delete_trigger_sql(table_name),
             format!(
                 "DROP INDEX IF EXISTS {}",
                 backend.render_identifier(index_name)
@@ -4441,6 +4444,130 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
                 })
             })
             .collect()
+    }
+
+    async fn introspect_rls_enforcement(
+        pool: &Self::Pool,
+    ) -> crate::Result<Option<LiveRlsEnforcement>> {
+        fn table_key(schema_name: String, table_name: String) -> String {
+            if schema_name == "public" {
+                table_name
+            } else {
+                format!("{schema_name}_{table_name}")
+            }
+        }
+        let mut conn = pool.acquire().await?;
+        let role = sqlx::query(
+            "SELECT current_user::text AS role, rolsuper, rolbypassrls
+             FROM pg_roles WHERE rolname = current_user",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        let mut live = LiveRlsEnforcement {
+            role: role.try_get("role")?,
+            superuser: role.try_get("rolsuper")?,
+            bypass_rls: role.try_get("rolbypassrls")?,
+            ..Default::default()
+        };
+        let tables = sqlx::query(
+            "SELECT n.nspname AS schema_name, c.relname AS table_name,
+                    row_security_active(c.oid) AS active
+             FROM pg_class c
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE c.relkind IN ('r', 'p')
+               AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+               AND n.nspname NOT LIKE 'pg_toast%'",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in tables {
+            live.row_security_active.insert(
+                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
+                row.try_get("active")?,
+            );
+        }
+        let triggers = sqlx::query(
+            "SELECT n.nspname AS schema_name, c.relname AS table_name,
+                    t.tgenabled::text AS enabled, t.tgtype::int4 AS trigger_type,
+                    (pn.nspname = 'graphql_orm' AND p.proname = $2 AND p.pronargs = 0)
+                        AS calls_orm_function,
+                    t.tgnargs::int4 AS argument_count, t.tgargs AS arguments
+             FROM pg_trigger t
+             JOIN pg_class c ON c.oid = t.tgrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+             JOIN pg_proc p ON p.oid = t.tgfoid
+             JOIN pg_namespace pn ON pn.oid = p.pronamespace
+             WHERE NOT t.tgisinternal AND t.tgname = $1",
+        )
+        .bind(super::rls::SEARCH_DELETE_TRIGGER)
+        .bind(super::rls::SEARCH_DELETE_FUNCTION)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in triggers {
+            let argument_count: i32 = row.try_get("argument_count")?;
+            let raw: Vec<u8> = row.try_get("arguments")?;
+            // `tgargs` stores each argument NUL-terminated.
+            let arguments = raw
+                .split(|byte| *byte == 0)
+                .take(usize::try_from(argument_count).unwrap_or(0))
+                .map(|argument| String::from_utf8_lossy(argument).into_owned())
+                .collect::<Vec<_>>();
+            let target_exists = match arguments.as_slice() {
+                [schema, table, ..] => {
+                    sqlx::query_scalar::<_, bool>(
+                        "SELECT to_regclass(format('%I.%I', $1::text, $2::text)) IS NOT NULL",
+                    )
+                    .bind(schema)
+                    .bind(table)
+                    .fetch_one(&mut *conn)
+                    .await?
+                }
+                _ => false,
+            };
+            live.search_delete_triggers.insert(
+                table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
+                super::rls::LiveSearchDeleteTrigger {
+                    enabled: row.try_get("enabled")?,
+                    trigger_type: row.try_get("trigger_type")?,
+                    calls_orm_function: row.try_get("calls_orm_function")?,
+                    arguments,
+                    target_exists,
+                },
+            );
+        }
+        let function = sqlx::query(
+            "SELECT p.prosrc AS body, p.prosecdef AS security_definer,
+                    COALESCE(p.proconfig, ARRAY[]::text[]) AS config
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+             WHERE n.nspname = 'graphql_orm' AND p.proname = $1 AND p.pronargs = 0",
+        )
+        .bind(super::rls::SEARCH_DELETE_FUNCTION)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(row) = function {
+            live.search_delete_function = Some(super::rls::LiveSearchDeleteFunction {
+                body: row.try_get("body")?,
+                config: row.try_get("config")?,
+                security_definer: row.try_get("security_definer")?,
+            });
+        }
+        let policies = sqlx::query(
+            "SELECT schemaname, tablename, policyname FROM pg_policies
+             ORDER BY schemaname, tablename, policyname",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in policies {
+            live.policy_names
+                .entry(table_key(
+                    row.try_get("schemaname")?,
+                    row.try_get("tablename")?,
+                ))
+                .or_default()
+                .push(row.try_get("policyname")?);
+        }
+        Ok(Some(live))
     }
 }
 

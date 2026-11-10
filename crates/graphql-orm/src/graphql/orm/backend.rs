@@ -2,7 +2,7 @@ use super::core::{
     AppliedMigrationRecord, DbAuthContext, MigrationApplicationMetadata, SchemaModel, SqlValue,
 };
 use super::dialect::{DatabaseBackend, SqlDialect};
-use super::rls::LiveRlsTable;
+use super::rls::{LiveRlsEnforcement, LiveRlsTable};
 use futures::future::BoxFuture;
 
 pub trait OrmBackend: Copy + Clone + Send + Sync + 'static {
@@ -232,6 +232,15 @@ pub trait RlsIntrospectionBackend: OrmBackend {
     /// Return live table RLS flags and policies known to this backend.
     async fn introspect_rls(_pool: &Self::Pool) -> crate::Result<Vec<LiveRlsTable>> {
         Ok(Vec::new())
+    }
+
+    /// Return whether the current connection role is subject to RLS.
+    ///
+    /// `None` means the backend has no row security to enforce.
+    async fn introspect_rls_enforcement(
+        _pool: &Self::Pool,
+    ) -> crate::Result<Option<LiveRlsEnforcement>> {
+        Ok(None)
     }
 }
 
@@ -1027,7 +1036,7 @@ async fn apply_postgres_auth_context(
 }
 
 #[cfg(feature = "postgres")]
-fn bind_postgres_value<'q>(
+pub(super) fn bind_postgres_value<'q>(
     query: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     value: &'q SqlValue,
 ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {

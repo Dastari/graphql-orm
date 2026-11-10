@@ -377,6 +377,10 @@ pub(crate) fn federation_entity_resolver_tokens(
                         ctx,
                         #resolver_auth_mode,
                     )?;
+            ::graphql_orm::graphql::orm::ensure_rls_request_context::<#struct_name, #backend_marker>(
+                ctx,
+                <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+            )?;
                     #scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
@@ -539,6 +543,10 @@ pub(crate) fn node_id_entity_resolver_tokens(
             let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(
                 ctx,
                 #resolver_auth_mode,
+            )?;
+            ::graphql_orm::graphql::orm::ensure_rls_request_context::<#struct_name, #backend_marker>(
+                ctx,
+                <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
             )?;
             let Some(__gom_node_parts) = ::graphql_orm::graphql::federation::decode_node_id(
                 &__gom_node_id,
