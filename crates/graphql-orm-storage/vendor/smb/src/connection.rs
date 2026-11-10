@@ -604,6 +604,59 @@ impl ConnectionMessageHandler {
         self.worker.get()
     }
 
+    /// Receives a message and applies command, direction and credit
+    /// processing, but does not evaluate its status.
+    ///
+    /// Session-bound callers must verify the signature or encryption of the
+    /// message before calling [`Self::check_expected_status`]: a status from
+    /// an unverified message must never be acted on (GHSA-439h-2cx8-xwgx).
+    #[maybe_async]
+    pub(crate) async fn recvo_before_status(
+        &self,
+        options: ReceiveOptions<'_>,
+    ) -> crate::Result<IncomingMessage> {
+        let msg = self.worker.get().unwrap().receive(&options).await?;
+
+        // Command matching (if needed).
+        if let Some(cmd) = options.cmd {
+            if msg.message.header.command != cmd {
+                return Err(Error::UnexpectedMessageCommand(msg.message.header.command));
+            }
+        }
+
+        // Direction matching.
+        if !msg.message.header.flags.server_to_redir() {
+            return Err(Error::InvalidMessage(
+                "Expected server-to-redir message".into(),
+            ));
+        }
+
+        self.process_sequence_incoming(&msg).await?;
+
+        Ok(msg)
+    }
+
+    /// Expected status matching. Error if no match.
+    pub(crate) fn check_expected_status(
+        msg: IncomingMessage,
+        expected: &[smb_msg::Status],
+    ) -> crate::Result<IncomingMessage> {
+        if !expected
+            .iter()
+            .any(|s| msg.message.header.status == *s as u32)
+        {
+            if let ResponseContent::Error(error_res) = msg.message.content {
+                return Err(Error::ReceivedErrorMessage(
+                    msg.message.header.status,
+                    error_res,
+                ));
+            }
+            return Err(Error::UnexpectedMessageStatus(msg.message.header.status));
+        }
+
+        Ok(msg)
+    }
+
     const SET_CREDIT_CHARGE_CMDS: &'static [Command] = &[
         Command::Read,
         Command::Write,
@@ -802,40 +855,9 @@ impl MessageHandler for ConnectionMessageHandler {
 
     #[maybe_async]
     async fn recvo(&self, options: ReceiveOptions<'_>) -> crate::Result<IncomingMessage> {
-        let msg = self.worker.get().unwrap().receive(&options).await?;
-
-        // Command matching (if needed).
-        if let Some(cmd) = options.cmd {
-            if msg.message.header.command != cmd {
-                return Err(Error::UnexpectedMessageCommand(msg.message.header.command));
-            }
-        }
-
-        // Direction matching.
-        if !msg.message.header.flags.server_to_redir() {
-            return Err(Error::InvalidMessage(
-                "Expected server-to-redir message".into(),
-            ));
-        }
-
-        self.process_sequence_incoming(&msg).await?;
-
-        // Expected status matching. Error if no match.
-        if !options
-            .status
-            .iter()
-            .any(|s| msg.message.header.status == *s as u32)
-        {
-            if let ResponseContent::Error(error_res) = msg.message.content {
-                return Err(Error::ReceivedErrorMessage(
-                    msg.message.header.status,
-                    error_res,
-                ));
-            }
-            return Err(Error::UnexpectedMessageStatus(msg.message.header.status));
-        }
-
-        Ok(msg)
+        let expected_status = options.status;
+        let msg = self.recvo_before_status(options).await?;
+        Self::check_expected_status(msg, expected_status)
     }
 
     #[maybe_async]
@@ -897,5 +919,24 @@ impl Drop for ConnectionMessageHandler {
         tokio::task::spawn(async move {
             worker.stop().await.ok();
         });
+    }
+}
+
+#[cfg(all(test, feature = "async"))]
+impl ConnectionMessageHandler {
+    /// Test-only: a connection handler whose worker reads scripted bytes from
+    /// `transport`, without negotiation.
+    pub(crate) async fn with_test_transport(
+        transport: Box<dyn SmbTransport>,
+    ) -> crate::Result<HandlerReference<Self>> {
+        let handler = HandlerReference::new(Self::new(Guid::generate(), None));
+        // The scripted response answers one request, which consumed its credit.
+        handler.curr_credits.acquire().await?.forget();
+        let worker = WorkerImpl::start(transport, std::time::Duration::from_secs(5)).await?;
+        handler
+            .worker
+            .set(worker)
+            .map_err(|_| Error::InvalidState("Worker is already set".into()))?;
+        Ok(handler)
     }
 }

@@ -91,3 +91,6 @@ Stored object rehydration is explicit through `restore_objects` and a caller-sup
 - Object blob writes and checksum verification use bounded concurrency with configurable limits.
 - `prune` retains manifest chains selected by `KeepPolicy` and removes expired snapshot blobs plus
   unreferenced content-addressed object blobs.
+- `prune` and `delete_snapshot` fail closed on an incomplete snapshot listing: a stored but
+  unlisted parent, or a different manifest set on re-listing, aborts before any snapshot or
+  object is deleted, and the manifest set is checked again before the object sweep.

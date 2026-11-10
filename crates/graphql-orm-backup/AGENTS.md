@@ -65,6 +65,10 @@ This crate is a reusable backup and restore companion for applications that use 
   host guidance. Host-specific integration records are archived outside this
   crate and are not reusable guidance.
 
+- `prune` and `delete_snapshot` derive retention and reachability from the
+  snapshot listing. Keep their fail-closed listing checks ahead of any snapshot
+  deletion, and again ahead of the object sweep.
+
 - Lock release requires explicit single-attempt deletion through
   `delete_blob_once`; never fall back to retrying ordinary deletion after a
   mutation may have reached the server. Ambiguous outcomes require quiescing

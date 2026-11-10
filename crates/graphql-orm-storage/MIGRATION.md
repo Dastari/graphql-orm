@@ -3,12 +3,25 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-storage-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-09
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.8.0 to 0.8.1: SMB response verification (GHSA-439h-2cx8-xwgx)
+
+Update the storage requirement to 0.8.1 and refresh the consumer lockfile. No
+API, configuration or data migration is required. Two SMB behaviours change:
+
+- A response that is not signed or encrypted as the session requires now fails
+  with `StorageProviderErrorKind::SecurityNegotiation` before its status is
+  read. Earlier it could surface as an authoritative status such as
+  `RemotePathNotFound`. Treat the operation's outcome as unknown.
+- A listing fails with a non-retryable `Protocol` error when a directory it
+  enumerated is not found or is not a directory. Earlier the subtree was
+  silently omitted. Investigate outside changes to the share before retrying.
 
 ## 0.7.5 to 0.8.0: resumable multipart uploads
 

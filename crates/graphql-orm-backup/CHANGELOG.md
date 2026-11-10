@@ -3,12 +3,31 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-backup-maintainers
-last_reviewed: 2026-10-27
+last_reviewed: 2026-11-09
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## 0.12.1 (unreleased)
+
+- Security ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)): `prune` and `delete_snapshot` derive retention,
+  dependency checks and object reachability from the snapshot listing, so a
+  truncated listing made them delete live snapshots or their objects. Both now
+  fail closed with `InvalidManifestChain`:
+  - before deleting any snapshot or object, when a listed manifest's parent is
+    stored but was not listed, or when re-listing manifests gives a different
+    set (for example, a child that a listing hid would otherwise let its parent
+    be deleted or expired); and
+  - before the object sweep, when manifests re-listed after snapshot deletion
+    are not exactly the retained snapshots. Expired snapshots may already be
+    deleted at that point; no object is.
+
+  A listing truncated identically on every read cannot be detected here.
+  Storage 0.8.1 fixes the SMB cause: forged unsigned status responses and
+  listings that skipped an unreadable directory.
+- No API, manifest, repository-format or data migration change.
 
 ## 0.12.0 (unreleased)
 

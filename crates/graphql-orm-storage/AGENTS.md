@@ -65,6 +65,13 @@ This crate is a reusable storage companion for applications that use `graphql-or
   backup-facing changes. Historical agent handoffs are archived outside this
   crate and are not current guidance.
 
+- The vendored SMB client must verify a session response's signature or
+  encryption before evaluating its status (GHSA-439h-2cx8-xwgx). Never treat a
+  status from an unverified message as authoritative, and never let a listing
+  skip a directory that enumeration reported. Record every vendor change as a
+  patch in `vendor/smb/PROVENANCE.json` and `scripts/verify-smb-backport.py`,
+  and run `scripts/test-smb-vendor.sh`.
+
 - Lock release requires explicit single-attempt deletion through
   `delete_blob_once`; never fall back to retrying ordinary deletion after a
   mutation may have reached the server. Ambiguous outcomes require quiescing

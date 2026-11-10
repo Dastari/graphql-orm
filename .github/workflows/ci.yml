@@ -419,6 +419,13 @@ jobs:
       - run: cargo check -p graphql-orm-backup --no-default-features --features local,orm-postgres
       - run: cargo check -p graphql-orm-storage --no-default-features --features s3,azure
       - run: cargo check -p graphql-orm-storage --no-default-features --features smb
+      - name: Run owner-local SMB vendor unit tests (GHSA-439h-2cx8-xwgx regression)
+        run: scripts/test-smb-vendor.sh
+      - name: Verify the SMB vendor tree against the registry archive and recorded patches
+        run: |
+          archive="${RUNNER_TEMP}/smb-0.10.2.crate"
+          curl --proto '=https' --tlsv1.2 -sSfL -o "${archive}" https://static.crates.io/crates/smb/smb-0.10.2.crate
+          python3 scripts/verify-smb-backport.py --archive "${archive}"
 
   ai-postgres-parity:
     runs-on: ubuntu-latest

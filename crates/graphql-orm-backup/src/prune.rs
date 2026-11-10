@@ -38,10 +38,20 @@ pub struct PruneResult {
 
 /// Prunes expired snapshots and unreferenced object blobs.
 ///
+/// Retention and object reachability are derived from the snapshot listing,
+/// so pruning fails closed when that listing is incomplete. It aborts with
+/// [`BackupError::InvalidManifestChain`] before deleting any snapshot or object
+/// if a listed manifest's parent is stored but was not listed, or if
+/// re-listing manifests gives a different set. It lists manifests once more
+/// immediately before the object sweep and aborts, without deleting any
+/// object, if the set is not exactly the retained snapshots. A listing that is
+/// truncated the same way every time cannot be detected here; providers must
+/// fail such listings themselves.
+///
 /// # Errors
 ///
 /// Returns [`BackupError`] if repository listing, manifest loading, locking, or
-/// blob deletion fails.
+/// blob deletion fails, or if the snapshot listing is incomplete.
 pub async fn prune(
     repository: &dyn BackupRepository,
     keep_policy: &KeepPolicy,
@@ -61,6 +71,10 @@ async fn prune_inner(
     keep_policy: &KeepPolicy,
 ) -> Result<PruneResult, BackupError> {
     let mut manifests = load_all_manifests(repository).await?;
+    ensure_listed_parents(repository, &manifests).await?;
+    // A listing that hid a newer child would expire its parent: confirm the
+    // listing before deleting anything.
+    ensure_stable_listing(repository, &manifest_ids(&manifests)).await?;
     manifests.sort_by(|left, right| {
         right
             .created_at
@@ -84,10 +98,7 @@ async fn prune_inner(
         }
     }
 
-    let all_ids = manifests
-        .iter()
-        .map(|manifest| manifest.snapshot_id)
-        .collect::<HashSet<_>>();
+    let all_ids = manifest_ids(&manifests);
     let expired_ids = all_ids
         .difference(&retained_ids)
         .copied()
@@ -104,6 +115,7 @@ async fn prune_inner(
         }
     }
 
+    ensure_stable_listing(repository, &retained_ids).await?;
     for key in repository.list_blobs("objects/sha256").await? {
         if !reachable_content_keys.contains(&key) {
             repository.delete_blob(&key).await?;
@@ -130,12 +142,17 @@ pub struct DeleteSnapshotResult {
 /// Deletes one snapshot and any object blobs no other snapshot references.
 ///
 /// Snapshots that are the parent of another manifest cannot be deleted;
-/// dependent snapshots must be deleted or compacted first.
+/// dependent snapshots must be deleted or compacted first. Like [`prune`], it
+/// fails closed when the snapshot listing is incomplete: a stored but unlisted
+/// parent, or a different manifest set on re-listing, aborts before the
+/// snapshot or any object is deleted, and the manifest set is checked again
+/// before the object sweep.
 ///
 /// # Errors
 ///
 /// Returns [`BackupError`] if the snapshot is missing, another manifest depends
-/// on it, or repository listing, locking, or blob deletion fails.
+/// on it, the snapshot listing is incomplete, or repository listing, locking,
+/// or blob deletion fails.
 pub async fn delete_snapshot(
     repository: &dyn BackupRepository,
     snapshot_id: Uuid,
@@ -156,6 +173,9 @@ async fn delete_snapshot_inner(
     snapshot_id: Uuid,
 ) -> Result<DeleteSnapshotResult, BackupError> {
     let manifests = load_all_manifests(repository).await?;
+    ensure_listed_parents(repository, &manifests).await?;
+    // A listing that hid a child would pass the dependency check below.
+    ensure_stable_listing(repository, &manifest_ids(&manifests)).await?;
     if !manifests
         .iter()
         .any(|manifest| manifest.snapshot_id == snapshot_id)
@@ -192,6 +212,12 @@ async fn delete_snapshot_inner(
     {
         collect_reachable_keys(manifest, &mut reachable_content_keys);
     }
+    let remaining_ids = manifests
+        .iter()
+        .map(|manifest| manifest.snapshot_id)
+        .filter(|id| *id != snapshot_id)
+        .collect::<HashSet<_>>();
+    ensure_stable_listing(repository, &remaining_ids).await?;
     for key in repository.list_blobs("objects/sha256").await? {
         if !reachable_content_keys.contains(&key) {
             repository.delete_blob(&key).await?;
@@ -216,6 +242,84 @@ async fn load_all_manifests(
         manifests.push(load_manifest(repository, snapshot_id).await?);
     }
     Ok(manifests)
+}
+
+async fn list_manifest_ids(
+    repository: &dyn BackupRepository,
+) -> Result<HashSet<Uuid>, BackupError> {
+    Ok(repository
+        .list_blobs("snapshots")
+        .await?
+        .iter()
+        .filter_map(|key| snapshot_id_from_manifest_key(key))
+        .collect())
+}
+
+/// Refuses a listing that omits a stored parent of a listed manifest.
+///
+/// A parent missing from storage is a pre-existing broken chain, which manifest
+/// chain loading reports where it matters; a parent that is stored but was not
+/// listed proves the listing is incomplete.
+async fn ensure_listed_parents(
+    repository: &dyn BackupRepository,
+    manifests: &[BackupSnapshotManifest],
+) -> Result<(), BackupError> {
+    let listed = manifests
+        .iter()
+        .map(|manifest| manifest.snapshot_id)
+        .collect::<HashSet<_>>();
+    for manifest in manifests {
+        let Some(parent) = manifest.parent_snapshot_id else {
+            continue;
+        };
+        if !listed.contains(&parent)
+            && repository
+                .blob_exists(&snapshot_manifest_key(parent))
+                .await?
+        {
+            return Err(incomplete_listing(format!(
+                "parent snapshot {parent} of snapshot {} is stored but was not listed",
+                manifest.snapshot_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn manifest_ids(manifests: &[BackupSnapshotManifest]) -> HashSet<Uuid> {
+    manifests
+        .iter()
+        .map(|manifest| manifest.snapshot_id)
+        .collect()
+}
+
+/// Re-lists manifests and refuses to continue unless the set is exactly
+/// `expected`: the first listing before any deletion, or the retained
+/// snapshots before the object sweep.
+async fn ensure_stable_listing(
+    repository: &dyn BackupRepository,
+    expected: &HashSet<Uuid>,
+) -> Result<(), BackupError> {
+    let listed = list_manifest_ids(repository).await?;
+    if listed != *expected {
+        let mut unexpected = listed.difference(expected).copied().collect::<Vec<_>>();
+        let mut missing = expected.difference(&listed).copied().collect::<Vec<_>>();
+        unexpected.sort();
+        missing.sort();
+        return Err(incomplete_listing(format!(
+            "manifest listing changed between reads (newly listed: {unexpected:?}, \
+             no longer listed: {missing:?})"
+        )));
+    }
+    Ok(())
+}
+
+fn incomplete_listing(detail: String) -> BackupError {
+    BackupError::InvalidManifestChain {
+        reason: format!(
+            "snapshot listing is incomplete; refusing to delete snapshots or objects: {detail}"
+        ),
+    }
 }
 
 fn snapshot_id_from_manifest_key(key: &str) -> Option<Uuid> {

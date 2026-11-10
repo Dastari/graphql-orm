@@ -1,11 +1,14 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use graphql_orm_backup::{
-    BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef, BackupRepository,
-    BackupTableExport, FullBackupRequest, GraphqlOrmBackupAdapter, GraphqlOrmBackupSchema,
-    KeepPolicy, LocalBackupRepository, RepositoryLockOptions, RestoreContext, bytes_sha256_hex,
-    create_full_backup, delete_snapshot, object_content_key, prune, snapshot_manifest_key,
+    BackupCapacityLimits, BackupChangeExport, BackupError, BackupObjectIndex, BackupObjectRef,
+    BackupRepository, BackupTableExport, FullBackupRequest, GraphqlOrmBackupAdapter,
+    GraphqlOrmBackupSchema, IncrementalBackupRequest, KeepPolicy, LocalBackupRepository,
+    RepositoryLockOptions, RestoreContext, bytes_sha256_hex, create_full_backup,
+    create_incremental_backup, delete_snapshot, object_content_key, prune, snapshot_manifest_key,
 };
+use graphql_orm_storage::StorageByteStream;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -336,4 +339,309 @@ async fn dropped_holder_leaves_lock_for_offline_recovery() {
         RepositoryLock::acquire(&repository, &options).await,
         Err(BackupError::RepositoryLocked { .. })
     ));
+}
+
+/// Omits one manifest from snapshot listings, as a truncated provider listing
+/// would (GHSA-439h-2cx8-xwgx). `hidden_listings` bounds how many listings omit
+/// it; `usize::MAX` hides it from every listing.
+struct TruncatedListingRepository {
+    inner: LocalBackupRepository,
+    hidden_key: String,
+    hidden_listings: AtomicUsize,
+}
+
+impl TruncatedListingRepository {
+    fn new(inner: LocalBackupRepository, hidden_key: String, hidden_listings: usize) -> Self {
+        Self {
+            inner,
+            hidden_key,
+            hidden_listings: AtomicUsize::new(hidden_listings),
+        }
+    }
+}
+
+#[async_trait]
+impl BackupRepository for TruncatedListingRepository {
+    fn capacity_limits(&self) -> BackupCapacityLimits {
+        self.inner.capacity_limits()
+    }
+    async fn delete_blob_once(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob_once(key).await
+    }
+    async fn put_blob(&self, key: &str, body: Bytes) -> Result<(), BackupError> {
+        self.inner.put_blob(key, body).await
+    }
+    async fn put_blob_if_absent(&self, key: &str, body: Bytes) -> Result<bool, BackupError> {
+        self.inner.put_blob_if_absent(key, body).await
+    }
+    async fn get_blob(&self, key: &str) -> Result<Bytes, BackupError> {
+        self.inner.get_blob(key).await
+    }
+    async fn get_blob_stream(&self, key: &str) -> Result<StorageByteStream, BackupError> {
+        self.inner.get_blob_stream(key).await
+    }
+    async fn blob_exists(&self, key: &str) -> Result<bool, BackupError> {
+        self.inner.blob_exists(key).await
+    }
+    async fn list_blobs(&self, prefix: &str) -> Result<Vec<String>, BackupError> {
+        let mut keys = self.inner.list_blobs(prefix).await?;
+        if prefix == "snapshots"
+            && self
+                .hidden_listings
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| match left {
+                    0 => None,
+                    usize::MAX => Some(usize::MAX),
+                    left => Some(left - 1),
+                })
+                .is_ok()
+        {
+            keys.retain(|key| key != &self.hidden_key);
+        }
+        Ok(keys)
+    }
+    async fn delete_blob(&self, key: &str) -> Result<(), BackupError> {
+        self.inner.delete_blob(key).await
+    }
+}
+
+async fn two_full_snapshots(repository: &LocalBackupRepository) -> (String, String) {
+    let first_object = Bytes::from_static(b"first object");
+    let first_hash = bytes_sha256_hex(&first_object);
+    create_full_backup(
+        repository,
+        &MockDatabase,
+        &MockObjectIndex::new(first_hash.clone(), first_object),
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("first backup");
+    let second_object = Bytes::from_static(b"second object");
+    let second_hash = bytes_sha256_hex(&second_object);
+    create_full_backup(
+        repository,
+        &MockDatabase,
+        &MockObjectIndex::new(second_hash.clone(), second_object),
+        backup_request(second_id(), 2),
+    )
+    .await
+    .expect("second backup");
+    (first_hash, second_hash)
+}
+
+#[tokio::test]
+async fn prune_refuses_to_sweep_objects_after_a_truncated_snapshot_listing() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = LocalBackupRepository::new(temp.path());
+    let (first_hash, second_hash) = two_full_snapshots(&local).await;
+    // The newest manifest is missing from the listing prune plans with.
+    let repository = TruncatedListingRepository::new(local, snapshot_manifest_key(second_id()), 1);
+
+    let error = prune(
+        &repository,
+        &KeepPolicy {
+            keep_last: 1,
+            ..KeepPolicy::default()
+        },
+    )
+    .await
+    .expect_err("an incomplete listing must not drive the object sweep");
+
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        "unexpected error: {error:?}"
+    );
+    for key in [
+        snapshot_manifest_key(first_id()),
+        snapshot_manifest_key(second_id()),
+        object_content_key(&first_hash),
+        object_content_key(&second_hash),
+    ] {
+        assert!(
+            repository.blob_exists(&key).await.expect("exists check"),
+            "{key} must survive"
+        );
+    }
+}
+
+#[tokio::test]
+async fn delete_snapshot_refuses_a_listing_that_omits_a_stored_parent() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = LocalBackupRepository::new(temp.path());
+    let object = Bytes::from_static(b"parent object");
+    let hash = bytes_sha256_hex(&object);
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::new(hash.clone(), object),
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("parent backup");
+    create_incremental_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::default(),
+        IncrementalBackupRequest {
+            snapshot_id: second_id(),
+            parent_snapshot_id: first_id(),
+            created_at: 2,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect("child backup");
+    let repository =
+        TruncatedListingRepository::new(local, snapshot_manifest_key(first_id()), usize::MAX);
+
+    let error = delete_snapshot(&repository, second_id(), &RepositoryLockOptions::default())
+        .await
+        .expect_err("a listing that omits a stored parent is incomplete");
+
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("stored but was not listed")),
+        "unexpected error: {error:?}"
+    );
+    assert!(
+        repository
+            .blob_exists(&object_content_key(&hash))
+            .await
+            .expect("exists check")
+    );
+    assert!(
+        repository
+            .blob_exists(&snapshot_manifest_key(second_id()))
+            .await
+            .expect("exists check")
+    );
+}
+
+fn third_id() -> Uuid {
+    Uuid::parse_str("dddddddd-dddd-4ddd-dddd-dddddddddddd").expect("valid uuid")
+}
+
+async fn incremental_child(repository: &LocalBackupRepository, child: Uuid, parent: Uuid, at: i64) {
+    create_incremental_backup(
+        repository,
+        &MockDatabase,
+        &MockObjectIndex::default(),
+        IncrementalBackupRequest {
+            snapshot_id: child,
+            parent_snapshot_id: parent,
+            created_at: at,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect("child backup");
+}
+
+/// Every key of the three fixture snapshot trees. Per-snapshot prefixes are
+/// never truncated by the wrapper.
+async fn snapshot_keys(repository: &dyn BackupRepository) -> Vec<String> {
+    let mut keys = Vec::new();
+    for snapshot_id in [first_id(), second_id(), third_id()] {
+        keys.extend(
+            repository
+                .list_blobs(&format!("snapshots/{snapshot_id}"))
+                .await
+                .expect("list snapshot tree"),
+        );
+    }
+    keys
+}
+
+#[tokio::test]
+async fn delete_snapshot_refuses_a_parent_whose_child_was_transiently_unlisted() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = LocalBackupRepository::new(temp.path());
+    let object = Bytes::from_static(b"parent object");
+    let hash = bytes_sha256_hex(&object);
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::new(hash.clone(), object),
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("parent backup");
+    incremental_child(&local, second_id(), first_id(), 2).await;
+    // The child is missing from the listing the dependency check uses.
+    let before = snapshot_keys(&local).await;
+    let repository = TruncatedListingRepository::new(local, snapshot_manifest_key(second_id()), 1);
+
+    let error = delete_snapshot(&repository, first_id(), &RepositoryLockOptions::default())
+        .await
+        .expect_err("a hidden child must not let its parent be deleted");
+
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        snapshot_keys(&repository).await,
+        before,
+        "no snapshot data may be deleted"
+    );
+    assert!(
+        repository
+            .blob_exists(&object_content_key(&hash))
+            .await
+            .expect("exists check")
+    );
+}
+
+#[tokio::test]
+async fn prune_refuses_to_expire_the_parent_of_a_transiently_unlisted_newest_child() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = LocalBackupRepository::new(temp.path());
+    let object = Bytes::from_static(b"chain object");
+    let hash = bytes_sha256_hex(&object);
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::new(hash.clone(), object),
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("full A");
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::default(),
+        backup_request(third_id(), 2),
+    )
+    .await
+    .expect("full C");
+    // B is the newest snapshot and an incremental child of A.
+    incremental_child(&local, second_id(), first_id(), 3).await;
+    let before = snapshot_keys(&local).await;
+    let repository = TruncatedListingRepository::new(local, snapshot_manifest_key(second_id()), 1);
+
+    let error = prune(
+        &repository,
+        &KeepPolicy {
+            keep_last: 1,
+            ..KeepPolicy::default()
+        },
+    )
+    .await
+    .expect_err("a hidden newest child must not expire its parent");
+
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        snapshot_keys(&repository).await,
+        before,
+        "no snapshot data may be deleted"
+    );
+    assert!(
+        repository
+            .blob_exists(&object_content_key(&hash))
+            .await
+            .expect("exists check")
+    );
 }

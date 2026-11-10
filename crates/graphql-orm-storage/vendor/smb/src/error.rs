@@ -15,6 +15,11 @@ pub enum TimedOutTask {
 pub enum Error {
     #[error("Unexpected Message, {0}")]
     InvalidMessage(String),
+    /// A session response was not signed or encrypted as the session requires.
+    /// It was rejected before its status was evaluated, so the outcome of the
+    /// request it answered is unknown (GHSA-439h-2cx8-xwgx).
+    #[error("Unverified message rejected, {0}")]
+    UnverifiedMessage(String),
     #[error("IO Error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("Binrw Error: {0}")]

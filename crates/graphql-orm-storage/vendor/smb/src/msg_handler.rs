@@ -195,6 +195,11 @@ pub struct ReceiveOptions<'a> {
     /// A timeout for the receive operation.
     /// If not set, the default timeout of the connection is used.
     pub timeout: Option<std::time::Duration>,
+
+    /// The session the awaited request was sent on, set by the session's
+    /// channel handler. Interim responses are validated against this session,
+    /// never against the session ID in their own (unauthenticated) header.
+    pub session_id: Option<u64>,
 }
 
 impl<'a> ReceiveOptions<'a> {
@@ -243,6 +248,11 @@ impl<'a> ReceiveOptions<'a> {
         self.timeout = Some(timeout);
         self
     }
+
+    pub fn with_session_id(mut self, session_id: Option<u64>) -> Self {
+        self.session_id = session_id;
+        self
+    }
 }
 
 impl<'a> Default for ReceiveOptions<'a> {
@@ -256,6 +266,7 @@ impl<'a> Default for ReceiveOptions<'a> {
             async_cancel: None,
             async_msg_ids: None,
             timeout: None,
+            session_id: None,
         }
     }
 }

@@ -1159,10 +1159,11 @@ impl SmbStorageBackend {
     async fn collect_keys_once(&self, client: &Client) -> Result<Vec<String>, StorageError> {
         let base = self.share_path()?;
         let start = self.inner.config.root_prefix.clone().unwrap_or_default();
-        let mut stack = vec![start];
+        // Each entry records whether the directory was discovered by enumeration.
+        let mut stack = vec![(start, false)];
         let mut keys = Vec::new();
 
-        while let Some(directory_path) = stack.pop() {
+        while let Some((directory_path, discovered)) = stack.pop() {
             let target = base.clone().with_path(&directory_path);
             let resource = match self
                 .with_timeout(
@@ -1180,13 +1181,16 @@ impl SmbStorageBackend {
                 .await
             {
                 Ok(resource) => resource,
-                Err(error) if is_not_found(&error) => continue,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    listing_open_failure(&directory_path, discovered, error)?;
+                    continue;
+                }
             };
             let directory = match resource {
                 Resource::Directory(directory) => Arc::new(directory),
                 other => {
                     let _ = close_resource(other).await;
+                    listing_not_directory(&directory_path, discovered)?;
                     continue;
                 }
             };
@@ -1222,7 +1226,7 @@ impl SmbStorageBackend {
                     format!("{directory_path}/{name}")
                 };
                 if entry.file_attributes.directory() {
-                    stack.push(child);
+                    stack.push((child, true));
                 } else if !is_temp_key(&child) {
                     let key = match &self.inner.config.root_prefix {
                         Some(root) => child
@@ -1886,6 +1890,52 @@ where
     dispose(handle).await.map_err(StorageError::single_attempt)
 }
 
+/// Decides whether a listing may skip a directory it could not open.
+///
+/// Only the configured root may be absent, which lists as empty. A directory
+/// that an enumeration reported must open: skipping it would silently return a
+/// truncated listing, which callers such as backup pruning would treat as
+/// authoritative. This backend never removes directories.
+fn listing_open_failure(
+    directory_path: &str,
+    discovered: bool,
+    error: StorageError,
+) -> Result<(), StorageError> {
+    if !discovered && is_not_found(&error) {
+        return Ok(());
+    }
+    if discovered && is_not_found(&error) {
+        return Err(incomplete_listing(
+            directory_path,
+            "was not found when opened",
+        ));
+    }
+    Err(error)
+}
+
+/// A listed directory that opens as another resource type fails the listing.
+fn listing_not_directory(directory_path: &str, discovered: bool) -> Result<(), StorageError> {
+    if discovered {
+        return Err(incomplete_listing(
+            directory_path,
+            "did not open as a directory",
+        ));
+    }
+    Ok(())
+}
+
+fn incomplete_listing(directory_path: &str, reason: &str) -> StorageError {
+    remote_error(
+        StorageProviderErrorKind::Protocol,
+        "list",
+        format!(
+            "listing is incomplete: enumerated directory {directory_path:?} {reason}; \
+             refusing to return a partial listing"
+        ),
+        false,
+    )
+}
+
 async fn connect_client(
     config: &SmbStorageConfig,
     generation: u64,
@@ -2110,6 +2160,9 @@ fn map_smb_error(operation: &'static str, error: smb::Error) -> StorageError {
             smb::Error::NegotiationError(_)
             | smb::Error::SignatureVerificationFailed
             | smb::Error::CryptoError(_) => StorageProviderErrorKind::SecurityNegotiation,
+            // The client rejected an unsigned or unencrypted response before
+            // evaluating its status. Its operation's outcome is unknown.
+            smb::Error::UnverifiedMessage(_) => StorageProviderErrorKind::SecurityNegotiation,
             _ => StorageProviderErrorKind::Protocol,
         },
     };
@@ -2137,6 +2190,13 @@ fn remote_error(
     }
 }
 
+/// Whether the server reported that a path does not exist.
+///
+/// `blob_exists`, `head_blob` and deletion treat this as authoritative. That is
+/// sound only because the connection refuses guest or anonymous sessions, and
+/// the vendored client verifies a response's signature or encryption before it
+/// evaluates its status (GHSA-439h-2cx8-xwgx), so an on-path party cannot
+/// forge a not-found status.
 fn is_not_found(error: &StorageError) -> bool {
     matches!(
         error,
@@ -2167,6 +2227,84 @@ fn provider_error_kind(error: &StorageError) -> Option<StorageProviderErrorKind>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn not_found() -> StorageError {
+        remote_error(
+            StorageProviderErrorKind::RemotePathNotFound,
+            "list",
+            "Object Name Not Found",
+            false,
+        )
+    }
+
+    #[test]
+    fn listing_skips_only_a_missing_configured_root() {
+        listing_open_failure("", false, not_found()).expect("missing root lists as empty");
+        listing_open_failure("root", false, not_found()).expect("missing root lists as empty");
+        listing_not_directory("root", false).expect("root file lists as empty");
+    }
+
+    #[test]
+    fn listing_fails_closed_for_a_missing_enumerated_directory() {
+        let error = listing_open_failure("snapshots/1234", true, not_found())
+            .expect_err("an enumerated directory must not be skipped");
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::Protocol)
+        );
+        assert!(!error.is_retryable());
+        assert!(!is_not_found(&error), "must not read as an absent key");
+        assert!(error.to_string().contains("listing is incomplete"));
+
+        let error = listing_not_directory("snapshots/1234", true)
+            .expect_err("an enumerated directory must open as a directory");
+        assert!(error.to_string().contains("listing is incomplete"));
+    }
+
+    #[test]
+    fn listing_propagates_other_open_failures() {
+        for discovered in [false, true] {
+            let error = listing_open_failure(
+                "objects",
+                discovered,
+                remote_error(
+                    StorageProviderErrorKind::PermissionDenied,
+                    "list",
+                    "Access Denied",
+                    false,
+                ),
+            )
+            .expect_err("permission failures are not skipped");
+            assert_eq!(
+                provider_error_kind(&error),
+                Some(StorageProviderErrorKind::PermissionDenied)
+            );
+        }
+    }
+
+    #[test]
+    fn rejected_unverified_responses_are_security_failures() {
+        let error = map_smb_error(
+            "head",
+            smb::Error::UnverifiedMessage("not signed".to_string()),
+        );
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::SecurityNegotiation)
+        );
+        assert!(!error.is_retryable());
+        assert!(!is_not_found(&error));
+
+        // Other unexpected messages stay protocol failures.
+        let error = map_smb_error(
+            "head",
+            smb::Error::InvalidMessage("Expected server-to-redir message".to_string()),
+        );
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::Protocol)
+        );
+    }
 
     #[derive(Default)]
     struct RecordingWriter {

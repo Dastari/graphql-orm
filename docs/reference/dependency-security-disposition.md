@@ -107,6 +107,13 @@ files and selected features; it does not establish absence of vulnerabilities.
 Registry companions retain ordinary audit coverage. Reassess upstream advisories
 and the backport whenever its code, features or source changes.
 
+Storage 0.8.1 adds an owner-local security patch for
+[GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx):
+the client verifies signing or encryption before acting on a response status.
+Upstream smb-rs has the same ordering, so a registry update would not fix it;
+provenance records the patch, and the [native SMB reference](../../crates/graphql-orm-storage/docs/native-smb.md#response-verification)
+states the corrected behaviour. Re-review it with any vendor update.
+
 ## Retained findings and conditions
 
 Maintenance roles and the **2026-11-15** review date below are recommended

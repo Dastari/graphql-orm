@@ -90,73 +90,98 @@ pub trait Worker: Sized + std::fmt::Debug {
             ));
         }
 
-        let curr = self.receive_next(options).await?;
-
-        // Not async -- return the result.
-        if !curr.message.header.flags.async_command() {
-            return Ok(curr);
-        }
-
-        // Handle async.
-        if !options.allow_async {
-            return Err(Error::InvalidArgument(
-                "Async command is not allowed in this context.".to_string(),
-            ));
-        }
-
-        // If not pending, that's the result, right away!
-        if curr.message.header.status != Status::Pending as u32 {
-            return Ok(curr);
-        }
-
-        log::debug!(
-            "Received async pending message with ID {} and status {}.",
-            curr.message.header.message_id,
-            curr.message.header.status
-        );
-
-        let async_id = match curr.message.header.async_id {
-            Some(async_id) => async_id,
-            None => panic!("Async ID is None, but async command is set. This should not happen."),
-        };
-
-        if async_id == 0 {
-            return Ok(curr);
-        }
-
-        if let Some(async_msg_ids) = &options.async_msg_ids {
-            async_msg_ids.set(options.msg_id, async_id);
-        }
-
+        // Interim (STATUS_PENDING) responses are exempt from signing (MS-SMB2
+        // 3.2.5.1.3) and are consumed here, before any session verification.
+        // An interim is therefore untrusted: it may only extend the wait. It
+        // never completes the request, and it never causes the final response
+        // to be rejected (GHSA-439h-2cx8-xwgx).
+        let mut waiting_async = false;
         loop {
-            let msg = self.receive_next_cancellable(options).await?;
+            let msg = if waiting_async {
+                self.receive_next_cancellable(options).await?
+            } else {
+                self.receive_next(options).await?
+            };
 
-            // Check if the message is async and has the same ID.
-            if !msg.message.header.flags.async_command()
-                || msg.message.header.async_id != Some(async_id)
-            {
-                return Err(Error::InvalidArgument(format!(
-                    "Received message for msgid {} with async ID {} but expected async ID {}",
-                    msg.message.header.message_id,
-                    msg.message
-                        .header
-                        .async_id
-                        .map(|x| x.to_string())
-                        .unwrap_or("None".to_string()),
-                    async_id
-                )));
+            // Not async -- return the result. A synchronous final response also
+            // completes a request after an (unverifiable) interim.
+            if !msg.message.header.flags.async_command() {
+                return Ok(msg);
             }
 
-            // We've got a result!
+            // Handle async.
+            if !options.allow_async {
+                return Err(Error::InvalidArgument(
+                    "Async command is not allowed in this context.".to_string(),
+                ));
+            }
+
+            // If not pending, that's the result, right away! The session handler
+            // verifies it before its status is evaluated.
             if msg.message.header.status != Status::Pending as u32 {
                 return Ok(msg);
             }
 
+            // Validate the interim against the request's own session; discard
+            // one that is not acceptable and keep waiting.
+            if !self.interim_acceptable(&msg, options).await {
+                log::warn!(
+                    "Discarding interim response for message ID {} that is not valid for the request's session.",
+                    msg.message.header.message_id
+                );
+                continue;
+            }
+
             log::debug!(
-                "Received another async pending message with ID {} and status {}.",
+                "Received async pending message with ID {} and status {}.",
                 msg.message.header.message_id,
                 msg.message.header.status
             );
+
+            let async_id = match msg.message.header.async_id {
+                Some(async_id) => async_id,
+                None => {
+                    panic!("Async ID is None, but async command is set. This should not happen.")
+                }
+            };
+
+            // The most recent interim names the async ID used for cancellation.
+            // A later interim or final response may carry another async ID: an
+            // earlier interim may have been forged, so it is not binding.
+            if async_id != 0 {
+                if let Some(async_msg_ids) = &options.async_msg_ids {
+                    async_msg_ids.set(options.msg_id, async_id);
+                }
+            }
+            waiting_async = true;
+        }
+    }
+
+    /// (Internal)
+    ///
+    /// Whether an interim response may extend the wait for a request sent on
+    /// `options.session_id`. Delivery is by message ID only, and the header's
+    /// session ID is not authenticated, so the interim must name the request's
+    /// own session, and that session must be known to this connection. On an
+    /// encryption-required session the interim must also be encrypted.
+    /// Requests sent outside a session (no `session_id`) are not checked.
+    #[maybe_async]
+    async fn interim_acceptable(
+        &self,
+        msg: &IncomingMessage,
+        options: &ReceiveOptions<'_>,
+    ) -> bool {
+        let Some(session_id) = options.session_id else {
+            return true;
+        };
+        if msg.message.header.session_id != session_id {
+            return false;
+        }
+        match self.transformer().requires_encryption(session_id).await {
+            Some(true) => msg.form.encrypted,
+            Some(false) => true,
+            // Unknown session: fail closed.
+            None => false,
         }
     }
 
