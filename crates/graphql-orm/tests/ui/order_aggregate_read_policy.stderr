@@ -1,0 +1,7 @@
+error: relation order_aggregate cannot be combined with a relation read_policy; per-record field policies cannot be enforced on an ORDER BY count
+  --> tests/ui/order_aggregate_read_policy.rs:8:5
+   |
+ 8 | /     #[graphql_orm(read_policy = "parent.children.read")]
+ 9 | |     #[relation(target = "Child", from = "id", to = "parent_id", emit_fk = false, multiple, order_aggregate(name = "ChildCount", ag...
+10 | |     children: Vec<Child>,
+   | |________________________^

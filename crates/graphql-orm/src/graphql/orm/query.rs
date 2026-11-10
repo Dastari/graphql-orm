@@ -339,6 +339,16 @@ pub trait DatabaseOrderBy {
         self.to_sql_order().map(SortExpression::unbound)
     }
 
+    /// Report whether this order may be rendered on a policy-aware read.
+    ///
+    /// Generated inputs return an error when an `order_aggregate` term is set
+    /// but was not authorized for the current request. Every query builder
+    /// treats that as invalid input and refuses to execute, so related-row
+    /// counts never bypass the target's read visibility.
+    fn validate_order(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
     /// Resolve an ordering expression whose bind values come from trusted
     /// server context rather than GraphQL input.
     fn to_sort_expression_with_context(
@@ -3239,6 +3249,7 @@ where
     }
 
     fn order_by(mut self, order: P::Order) -> Self {
+        self.filter_is_valid &= order.validate_order().is_ok();
         if let Some(sort) = order.to_sort_expression() {
             self.order_clauses.push(sort.clause);
         }
@@ -3714,6 +3725,7 @@ where
     where
         O: DatabaseOrderBy,
     {
+        self.filter_is_valid &= order.validate_order().is_ok();
         if let Some(sort) = order.to_sort_expression() {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);
@@ -3731,6 +3743,9 @@ where
     where
         O: DatabaseOrderBy,
     {
+        order
+            .validate_order()
+            .map_err(crate::graphql::errors::graphql_error_from_sqlx)?;
         if let Some(sort) = order.to_sort_expression_with_context(ctx)? {
             self.order_clauses.push(sort.clause);
             self.order_values.push(sort.values);

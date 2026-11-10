@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.118.0 makes `order_aggregate` count ordering count only related
+rows the request may read, failing closed for policies SQL cannot express, and
+rejects `order_aggregate` on relations with a `read_policy`
+(GHSA-f7xj-6695-ww2q). See the
+[root migration guide](../../MIGRATION.md#01180-authorized-relation-count-ordering).
+
 Version 0.113.0 fixes SQLite internal-prefix introspection so user table
 lookalikes remain visible to migrations. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01130-sqlite-internal-name-introspection).
@@ -481,8 +487,9 @@ names remain compile-time server configuration. Raw backend placeholders are
 rejected, and generated pagination adds missing primary-key tie-breakers.
 Entities that need relationship counts can add
 `order_aggregate(name = "...", aggregate = "count")` to an unconditional,
-readable relation; the generated correlated count uses only its declared key
-mapping and target entity table. Entities that also have handwritten complex fields use
+readable relation without a `read_policy`; the generated correlated count uses
+only its declared key mapping and target entity table, and counts only target
+rows the request may read. Entities that also have handwritten complex fields use
 `graphql_orm(compose_complex_object)` and apply `graphql_complex_object` to the
 handwritten impl so generated relations are flattened into the same
 `ComplexObject` surface.

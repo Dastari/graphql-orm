@@ -10,6 +10,34 @@ supersedes: []
 
 # Migration Guide
 
+## 0.118.0: authorized relation count ordering
+
+Upgrade runtime and macros together. No data migration is needed.
+
+`order_aggregate` count terms (GHSA-f7xj-6695-ww2q) now count only the target
+rows the current request may read:
+
+- Generated GraphQL list and relation resolvers check the relation field, the
+  target entity's read access and its SQL row visibility before running SQL.
+  Results change only where the target has a row policy: hidden children no
+  longer contribute to the count.
+- A target whose read visibility is `CallbackOnly` or `Prefilter` cannot be
+  counted in SQL. Requests that order by such a count now fail with
+  `AUTHORIZATION_MISCONFIGURED`. Return `Complete` SQL visibility for the target,
+  or remove the `order_aggregate`. A denied target fails with `FORBIDDEN`.
+- `order_aggregate` on a relation that also declares
+  `#[graphql_orm(read_policy = "...")]` no longer compiles. Remove one of them;
+  a per-record relation policy cannot be enforced on an `ORDER BY` count.
+- Generated order inputs with count terms gain a hidden
+  `__gom_relation_counts` field. Build them with `..Default::default()`.
+- Programmatic queries (`EntityQuery` and the repository, projection,
+  write-hook and fallback search builders on it) refuse an order input with a
+  count term set, because no request has authorized it;
+  `DatabaseOrderBy::validate_order` reports this.
+  Trusted host code that needs raw counts should write its own SQL.
+  Handwritten `DatabaseOrderBy` implementations need no change: the new
+  method defaults to `Ok(())`.
+
 ## 0.113.0: SQLite internal-name introspection
 
 **Upgrade warning: newly visible unmanaged tables can be dropped by strict plans.**

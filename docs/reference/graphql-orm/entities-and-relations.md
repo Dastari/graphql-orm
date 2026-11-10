@@ -3,7 +3,7 @@ title: "Entities And Relations"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-08
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -298,7 +298,15 @@ This adds `AssignedStaffCount: OrderDirection` to the parent order input. The
 generated SQL is a correlated `COUNT(*)` using the relation key mapping and
 the target entity's table; neither SQL nor identifiers are accepted from the
 request. Index the target key columns used by frequently sorted relations.
-Only `count` is currently accepted, and conditional relations cannot opt in.
+Only `count` is currently accepted, and conditional relations or relations
+with a `read_policy` cannot opt in.
+
+The count covers only target rows the request may read. Generated resolvers
+check the target's read access and AND its SQL row visibility into the count,
+as for `relation(filter)`. Callback-only or residual target policies fail
+closed with `AUTHORIZATION_MISCONFIGURED`; programmatic query builders refuse
+count terms that a generated resolver has not authorized. See
+[macros and attributes](macros-and-attributes.md) for details.
 
 Related fields can be copied into the parent search document:
 
