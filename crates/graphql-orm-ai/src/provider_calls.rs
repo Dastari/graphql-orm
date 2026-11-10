@@ -7389,15 +7389,9 @@ mod tests {
             .expect("test runtime should build");
         runtime
             .start_gate()
-            .open(&AiRuntimeReadinessReport {
-                module_fingerprint: runtime
-                    .start_gate()
-                    .expected_module_fingerprint()
-                    .to_owned(),
-                executor_bound: true,
-                restore_reconciled: true,
-                fatal_issue_count: 0,
-            })
+            .open(&crate::AiRuntimeReadinessProof::for_test(
+                runtime.start_gate().expected_module_fingerprint(),
+            ))
             .expect("test runtime should open");
 
         Fixture {

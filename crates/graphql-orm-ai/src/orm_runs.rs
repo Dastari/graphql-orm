@@ -3936,6 +3936,7 @@ impl OrmAiRunService {
         self.database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let current = load_and_validate_active_lease(tx, &lease, now).await?;
                     if !matches!(
                         persisted_state(&current)?,
@@ -4343,6 +4344,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut candidates = Vec::new();
                     for state in [AiRunState::Queued, AiRunState::RetryScheduled] {
                         let mut rows = tx
@@ -4443,6 +4445,7 @@ impl OrmAiRunService {
         database
             .transaction(TransactionMode::StateMachine, move |tx| {
                 Box::pin(async move {
+                    crate::orm_runtime_recovery::require_live_epoch(tx).await?;
                     let mut approvals = tx
                         .query::<AiApprovalRecord>()
                         .filter(AiApprovalRecordWhereInput {
@@ -6187,6 +6190,9 @@ pub(crate) fn canonical_second(value: OffsetDateTime) -> OffsetDateTime {
 
 fn map_transaction(error: TransactionError) -> AiError {
     let public = error.public_error();
+    if crate::orm_runtime_recovery::is_epoch_not_live(public) {
+        return AiError::RuntimeNotReady;
+    }
     match public.code {
         OrmErrorCode::InvalidInput
         | OrmErrorCode::CursorInvalid

@@ -672,12 +672,9 @@ async fn media_fixture_resolution(
     let runtime = builder.build().unwrap();
     runtime
         .start_gate()
-        .open(&AiRuntimeReadinessReport {
-            module_fingerprint: runtime.start_gate().expected_module_fingerprint().into(),
-            executor_bound: true,
-            restore_reconciled: true,
-            fatal_issue_count: 0,
-        })
+        .open(&crate::AiRuntimeReadinessProof::for_test(
+            runtime.start_gate().expected_module_fingerprint(),
+        ))
         .unwrap();
     fixture.runtime = Arc::new(runtime);
     let service = Arc::new(OrmAiApplicationToolCallService::new(

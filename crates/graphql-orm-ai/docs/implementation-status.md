@@ -3,7 +3,7 @@ title: "Implementation Status"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-09-25
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -164,8 +164,11 @@ verification evidence belongs in the focused guides.
   bounds, it also completes the stable attachment/artifact lifecycle,
   ownership, parent, and safe unique object-reference metadata graph. Verified
   manifest plus restored-target object-byte integrity remains a separate fatal
-  incomplete audit. The repair applier,
-  complete validator, recovery epoch, and runtime-start proof remain closed.
+  incomplete audit. The recovery epoch ledger, crate-minted runtime-start
+  proof, and restore closure applier are implemented: a restored store stays
+  closed, and closure expires restored approvals and closes restored leases.
+  The complete validator and the remaining audits stay closed, so a restored
+  runtime cannot open yet.
 - Applied backup/restore, durable tool-policy management, generic privileged
   uncertain-effect recovery, and production MSSQL writes remain closed.
 

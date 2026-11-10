@@ -16,6 +16,8 @@ for historical context.
 
 ## Unreleased
 
+- AI 0.128.0: **breaking:** enforce AI runtime closure after a snapshot restore. The runtime start gate opens only with a proof minted from a live recovery epoch (AI schema module `0.77.0`), and worker claims and approval consumption refuse while the epoch is not live. A restored store stays closed; `OrmAiRuntimeRecoveryService::reconcile_restore` expires restored approvals, revokes restored egress consents and closes restored leases under a new generation. Restore facts now decode strictly. See the [AI migration guide](crates/graphql-orm-ai/MIGRATION.md#01270-to-01280-enforced-runtime-closure-after-restore).
+
 ## 0.124.0
 
 ORM runtime/macros **0.124.0**.

@@ -232,7 +232,9 @@ impl AiRestoreAttachmentMetadataAuditLimits {
 ///
 /// Collection runs in one read transaction, performs no provider, tool, blob,
 /// or application I/O, and marks every audit not implemented by this version
-/// as incomplete. The resulting opaque facts can create only a dry-run plan.
+/// as incomplete. Pass the collector to
+/// [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] to apply runtime
+/// closure; the facts alone only build a plan.
 #[derive(Clone)]
 pub struct OrmAiRestoreFactCollector {
     database: Database<DefaultWriteBackend>,
@@ -287,6 +289,21 @@ impl OrmAiRestoreFactCollector {
     /// Returns the ORM database handle used by the collector.
     pub fn database(&self) -> &Database<DefaultWriteBackend> {
         &self.database
+    }
+
+    /// Deployment-owned collection bounds.
+    pub const fn limits(&self) -> AiRestoreCollectorLimits {
+        self.limits
+    }
+
+    /// Returns the same audit configuration bound to another database handle.
+    pub(crate) fn rebind(&self, database: Database<DefaultWriteBackend>) -> Self {
+        Self {
+            database,
+            limits: self.limits,
+            policy_audit_limits: self.policy_audit_limits,
+            attachment_metadata_audit_limits: self.attachment_metadata_audit_limits,
+        }
     }
 
     /// Collects redacted restore facts from the restored database.
@@ -580,59 +597,10 @@ impl CollectedRows {
         let mut invalid_runs = 0_u64;
         let mut runs = Vec::with_capacity(self.runs.len());
         for run in self.runs {
-            let Some(state) = AiRunState::from_persisted(&run.state) else {
-                invalid_runs += 1;
-                continue;
-            };
-            if run.retry_count < 0 || run.lease_generation < 0 {
-                invalid_runs += 1;
-                continue;
+            match classify_restored_run(&run) {
+                Some(restored) => runs.push(restored),
+                None => invalid_runs += 1,
             }
-            let external_effect = match state {
-                AiRunState::Queued
-                    if run.attempt_id.is_none()
-                        && run.lease_owner.is_none()
-                        && run.lease_generation == 0
-                        && run.lease_expires_at.is_none()
-                        && run.lease_heartbeat_at.is_none()
-                        && run.retry_count == 0
-                        && run.latest_checkpoint_id.is_none() =>
-                {
-                    AiExternalEffectState::None
-                }
-                AiRunState::Leased
-                    if run.attempt_id.is_some()
-                        && run.lease_owner.is_some()
-                        && run.lease_generation == 1
-                        && run.lease_expires_at.is_some()
-                        && run.lease_heartbeat_at.is_some()
-                        && run.retry_count == 0
-                        && run.latest_checkpoint_id.is_none() =>
-                {
-                    AiExternalEffectState::None
-                }
-                AiRunState::Completed | AiRunState::Failed | AiRunState::Cancelled => {
-                    AiExternalEffectState::Confirmed
-                }
-                AiRunState::Queued
-                | AiRunState::Leased
-                | AiRunState::RetryScheduled
-                | AiRunState::Running
-                | AiRunState::WaitingApproval
-                | AiRunState::WaitingTool
-                | AiRunState::WaitingReauth
-                | AiRunState::WaitingProvider
-                | AiRunState::WaitingSubscription
-                | AiRunState::RecoveryRequired => AiExternalEffectState::Uncertain,
-            };
-            runs.push(AiRestoredRun {
-                run_id: AiRunId(run.id),
-                state,
-                external_effect,
-                coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
-                has_provider_continuation: false,
-                has_provider_file: false,
-            });
         }
         statuses.insert(
             AiRestoreAuditKind::RunRecoveryClassification,
@@ -859,6 +827,63 @@ impl CollectedRows {
             hex::encode(Sha256::digest(source_rows)),
         )
     }
+}
+
+/// Conservatively classifies one restored run row.
+///
+/// Returns `None` for a row that fails structural validation. Only a pristine
+/// queued row or a first unstarted lease is classified as effect-free; every
+/// other non-terminal state is uncertain.
+pub(crate) fn classify_restored_run(run: &AiRunRecord) -> Option<AiRestoredRun> {
+    let state = AiRunState::from_persisted(&run.state)?;
+    if run.retry_count < 0 || run.lease_generation < 0 {
+        return None;
+    }
+    let external_effect = match state {
+        AiRunState::Queued
+            if run.attempt_id.is_none()
+                && run.lease_owner.is_none()
+                && run.lease_generation == 0
+                && run.lease_expires_at.is_none()
+                && run.lease_heartbeat_at.is_none()
+                && run.retry_count == 0
+                && run.latest_checkpoint_id.is_none() =>
+        {
+            AiExternalEffectState::None
+        }
+        AiRunState::Leased
+            if run.attempt_id.is_some()
+                && run.lease_owner.is_some()
+                && run.lease_generation == 1
+                && run.lease_expires_at.is_some()
+                && run.lease_heartbeat_at.is_some()
+                && run.retry_count == 0
+                && run.latest_checkpoint_id.is_none() =>
+        {
+            AiExternalEffectState::None
+        }
+        AiRunState::Completed | AiRunState::Failed | AiRunState::Cancelled => {
+            AiExternalEffectState::Confirmed
+        }
+        AiRunState::Queued
+        | AiRunState::Leased
+        | AiRunState::RetryScheduled
+        | AiRunState::Running
+        | AiRunState::WaitingApproval
+        | AiRunState::WaitingTool
+        | AiRunState::WaitingReauth
+        | AiRunState::WaitingProvider
+        | AiRunState::WaitingSubscription
+        | AiRunState::RecoveryRequired => AiExternalEffectState::Uncertain,
+    };
+    Some(AiRestoredRun {
+        run_id: AiRunId(run.id),
+        state,
+        external_effect,
+        coordinator_checkpoint: AiRestoredCoordinatorCheckpoint::None,
+        has_provider_continuation: false,
+        has_provider_file: false,
+    })
 }
 
 #[derive(serde::Serialize)]

@@ -80,7 +80,11 @@ pub struct AiRestoredRun {
 }
 
 /// Preflight facts for one restored snapshot.
+///
+/// Decoding is strict: every count must be present and unknown fields are
+/// rejected, so an absent or misspelled audit can never read as a zero.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AiRestoreSnapshotFacts {
     /// Backup module fingerprint.
     pub module_fingerprint: String,
@@ -95,11 +99,9 @@ pub struct AiRestoreSnapshotFacts {
     pub pending_egress_consent_count: u64,
     /// Attachment, artifact, parent, or lifecycle metadata rows that fail the
     /// database-only graph audit.
-    #[serde(default, alias = "invalid_attachment_count")]
     pub invalid_attachment_metadata_count: u64,
     /// Local attachment/artifact objects that fail verified-manifest and
     /// restored-target byte-count/SHA-256 validation.
-    #[serde(default)]
     pub invalid_attachment_object_count: u64,
     /// Usage facts that fail reservation, scope, principal, provider, or
     /// non-negative/cached-subset integrity validation.
@@ -122,26 +124,22 @@ pub struct AiRestoreSnapshotFacts {
     /// Context-summary checkpoints with invalid exact prefix coverage, source
     /// hash/provenance, parent lineage, protection envelope, provider/budget
     /// evidence, or retention invalidation state.
-    #[serde(default)]
     pub invalid_context_checkpoint_count: u64,
     /// Provider webhook receipts with invalid deterministic identity,
     /// provider/profile/event/response binding, signature fact, lifecycle
     /// state, exact submission/run/attempt terminal linkage, or creation and
     /// reconciliation audit linkage.
-    #[serde(default)]
     pub invalid_provider_webhook_receipt_count: u64,
     /// Provider background submissions with invalid deterministic identity,
     /// run/attempt/fence/profile/request/budget/egress/response binding,
     /// lifecycle state, terminal outcome/usage/output/checkpoint/event/receipt
     /// graph, or preparation/acceptance/reconciliation audit linkage.
-    #[serde(default)]
     pub invalid_provider_background_submission_count: u64,
     /// Durable provider-session bindings present in a restored snapshot.
     ///
     /// Portable restore support is deliberately fail-closed in this release:
     /// opaque cursors are backup-redacted and their loss is not provider
     /// absence proof. Deployments must drain/delete bindings before backup.
-    #[serde(default)]
     pub invalid_provider_session_binding_count: u64,
     /// UI-intent session/inbox event pairs with invalid protected payloads,
     /// source/binding evidence, owner/scope linkage, or committed budget proof.
@@ -266,9 +264,9 @@ impl AiRestoreAuditStatus {
 /// Database-derived restore facts and explicit audit-completeness evidence.
 ///
 /// Fields are private so a host cannot silently replace an unimplemented or
-/// truncated audit with a successful zero count. This value is still dry-run
-/// planning input; it does not prove that repairs were applied and cannot open
-/// runtime readiness.
+/// truncated audit with a successful zero count. This value is planning input;
+/// it does not prove that repairs were applied and cannot open runtime
+/// readiness by itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AiCollectedRestoreFacts {
     facts: AiRestoreSnapshotFacts,
@@ -450,9 +448,28 @@ impl AiRestoreReconciler {
         }
     }
 
-    /// Builds a dry-run plan. This method never resumes provider work or
-    /// invokes application tools.
+    /// Builds an evidence-free preview from caller-supplied facts.
+    ///
+    /// Caller-supplied facts carry no audit evidence, so the preview always
+    /// includes one fatal `AI_RESTORE_AUDIT_EVIDENCE_MISSING` issue per
+    /// required audit and can never report readiness. Use
+    /// [`Self::plan_collected`] with database-collected facts, and
+    /// [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] to apply
+    /// closure. This method never resumes provider work or invokes
+    /// application tools.
     pub fn plan(&self, facts: &AiRestoreSnapshotFacts) -> AiRestorePlan {
+        let mut plan = self.plan_facts(facts);
+        for audit in AiRestoreAuditKind::required() {
+            plan.issues.push(AiRestoreIssue {
+                code: "AI_RESTORE_AUDIT_EVIDENCE_MISSING".to_owned(),
+                severity: AiRestoreIssueSeverity::Fatal,
+                resource_ref: Some(audit.as_str().to_owned()),
+            });
+        }
+        plan
+    }
+
+    fn plan_facts(&self, facts: &AiRestoreSnapshotFacts) -> AiRestorePlan {
         let mut issues = Vec::new();
         if facts.module_fingerprint != self.expected_module_fingerprint {
             issues.push(AiRestoreIssue {
@@ -605,8 +622,9 @@ impl AiRestoreReconciler {
     /// Builds a fail-closed dry-run plan from database-collected facts.
     ///
     /// Every incomplete, truncated, or structurally invalid audit becomes a
-    /// fatal issue. The returned digests are suitable for binding a future
-    /// recovery epoch, but do not prove application or validation.
+    /// fatal issue. The returned digests bind the recovery epoch that
+    /// [`crate::OrmAiRuntimeRecoveryService::reconcile_restore`] records, but
+    /// do not themselves prove application or validation.
     ///
     /// # Errors
     ///
@@ -616,7 +634,7 @@ impl AiRestoreReconciler {
         &self,
         collected: &AiCollectedRestoreFacts,
     ) -> Result<AiCollectedRestorePlan, crate::AiError> {
-        let mut plan = self.plan(collected.facts());
+        let mut plan = self.plan_facts(collected.facts());
         for audit in AiRestoreAuditKind::required() {
             let status = collected
                 .audit_statuses()
@@ -646,7 +664,7 @@ impl AiRestoreReconciler {
     }
 }
 
-fn restored_run_disposition(run: &AiRestoredRun) -> AiRestoredRunDisposition {
+pub(crate) fn restored_run_disposition(run: &AiRestoredRun) -> AiRestoredRunDisposition {
     if run.state.is_terminal() {
         return AiRestoredRunDisposition::PreserveTerminal;
     }

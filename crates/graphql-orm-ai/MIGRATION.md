@@ -3,12 +3,82 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.127.0 to 0.128.0: enforced runtime closure after restore
+
+This release changes the public Rust API, the AI schema module, and runtime
+startup and restore behaviour.
+
+**Schema.** Apply the normal `AiSchemaModule` migration to version `0.77.0`
+before starting any worker. It adds `epoch_sequence` (unique) and `live_at`
+to `graphql_orm_ai_runtime_recovery`, which earlier releases never wrote. No
+row data migration is needed. All workers must upgrade together.
+
+**Opening the runtime.** `AiRuntimeStartGate::open` now takes an
+`AiRuntimeReadinessProof`. Replace host-built `AiRuntimeReadinessReport`
+values with a proof from the recovery service:
+
+```rust,ignore
+let recovery = OrmAiRuntimeRecoveryService::new(database.clone(), clock.clone());
+let proof = recovery.readiness_proof(runtime.start_gate()).await?;
+runtime.start_gate().open(&proof)?;
+```
+
+`AiRuntimeReadinessReport` keeps its fields for `AiRestoreReadinessTelemetry`
+but cannot open the gate. `AiRuntimeStartGate::epoch_id` reports the epoch the
+gate was opened for.
+
+**First open after upgrading.** The ledger starts empty. The first
+`readiness_proof` call records the first live epoch and, in the same
+transaction, expires every pending, approved and resume-claimed approval and
+expires every active lease, so ordinary `recover_expired_leases` reclassifies
+those runs. Users must request expired approvals again. To avoid this, stop
+workers and let open approvals resolve before upgrading. Later restarts reopen
+the same live epoch and change nothing. Open the runtime once after upgrading
+before you take a portable backup: a backup taken earlier restores with an
+empty ledger and receives only this first-epoch closure.
+
+**Workers.** `OrmAiRunService::claim_next`, `claim_next_approved` and
+`OrmAiApprovalService::consume_approval` return `AiError::RuntimeNotReady`
+while the current epoch is not live. Treat it as a closed runtime: stop
+claiming and back off. Stores whose ledger is still empty keep claiming as
+before until the runtime is first opened.
+
+**Restoring.** After a portable `graphql-orm-backup` restore, the restored
+ledger row has no liveness marker, so `readiness_proof` and the claim paths
+return `RuntimeNotReady`. With every worker and writer stopped, run:
+
+```rust,ignore
+let applied = recovery
+    .reconcile_restore(&collector, snapshot_module_fingerprint, Some(operator_subject))
+    .await?;
+```
+
+It expires reusable approvals, revokes unrevoked egress consents, requeues
+only unstarted first leases, moves every other non-terminal run to
+`RecoveryRequired` under a new lease generation, and records a new epoch. In
+this release the collector still reports several audits as not implemented,
+so the plan is fatal, the epoch is recorded as `blocked`, and the restored
+runtime stays closed, as documented in
+[recovery and restore](docs/recovery-and-restore.md). After a file-level or
+physical database restore, the liveness marker is restored with the rows, so
+run `reconcile_restore` before starting any worker.
+
+**Restore planning.** `AiRestoreSnapshotFacts` now rejects missing counts and
+unknown fields, including `invalid_attachment_count`; serialize every count.
+`AiRestoreReconciler::plan` now adds a fatal
+`AI_RESTORE_AUDIT_EVIDENCE_MISSING` issue for each required audit. Use
+`OrmAiRestoreFactCollector::collect` and `AiRestoreReconciler::plan_collected`
+for database-derived plans. `OrmAiRestoreFactCollector::limits` is new.
+
+**MSSQL.** MSSQL-only builds have no recovery service, so their runtime gate
+cannot open. MSSQL remains an experimental compile and schema profile.
 
 ## 0.126.0 to 0.127.0: alternate-backend test hygiene
 

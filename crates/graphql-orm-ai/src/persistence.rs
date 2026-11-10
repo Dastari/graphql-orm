@@ -2464,7 +2464,12 @@ pub(crate) struct AiEgressEventRecord {
     pub created_at: i64,
 }
 
-/// Restore/recovery epoch and runtime start gate.
+/// Crate-owned runtime recovery epoch ledger.
+///
+/// The latest row (by `epoch_sequence`) decides whether workers may claim
+/// runs or consume approvals. `live_at` is excluded from portable backups, so
+/// a restored row is never live and the restored store stays closed until
+/// [`crate::OrmAiRuntimeRecoveryService`] records a new epoch.
 #[backend_selected_graphql_entity(
     table = "graphql_orm_ai_runtime_recovery",
     plural = "GraphqlOrmAiRuntimeRecovery",
@@ -2479,16 +2484,25 @@ pub(crate) struct AiEgressEventRecord {
 pub(crate) struct AiRuntimeRecoveryRecord {
     /// Recovery epoch ID.
     #[primary_key]
+    #[graphql_orm(auto_generated = false)]
     #[filterable(type = "uuid")]
     pub id: graphql_orm::uuid::Uuid,
+    /// Strictly increasing ledger position; the highest value is current.
+    #[unique]
+    #[sortable]
+    pub epoch_sequence: i64,
     /// Schema module version.
     pub module_version: String,
     /// Schema module fingerprint.
     pub module_fingerprint: String,
-    /// Dry-run/applied state.
+    /// `live`, `blocked`, or another closed recovery state.
     pub state: String,
-    /// Runtime start gate.
+    /// Whether this epoch was recorded as able to open the runtime.
     pub start_gate_open: bool,
+    /// Deployment-local liveness marker. Portable backups exclude it, so a
+    /// restored epoch is never live.
+    #[backup(exclude)]
+    pub live_at: Option<i64>,
     /// Fatal issue count.
     pub fatal_issue_count: i64,
     /// Warning count.
@@ -2511,7 +2525,7 @@ pub(crate) struct AiRuntimeRecoveryRecord {
 /// Stable schema module ID.
 pub const AI_SCHEMA_MODULE_ID: &str = "com.dastari.graphql-orm-ai";
 /// Current AI schema module version.
-pub const AI_SCHEMA_MODULE_VERSION: &str = "0.76.0";
+pub const AI_SCHEMA_MODULE_VERSION: &str = "0.77.0";
 /// Reserved table namespace.
 pub const AI_TABLE_NAMESPACE: &str = "graphql_orm_ai_";
 

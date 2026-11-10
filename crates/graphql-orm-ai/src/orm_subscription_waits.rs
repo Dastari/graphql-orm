@@ -4280,15 +4280,9 @@ mod tests {
             .expect("subscription runtime builds");
         runtime
             .start_gate()
-            .open(&crate::AiRuntimeReadinessReport {
-                module_fingerprint: runtime
-                    .start_gate()
-                    .expected_module_fingerprint()
-                    .to_owned(),
-                executor_bound: true,
-                restore_reconciled: true,
-                fatal_issue_count: 0,
-            })
+            .open(&crate::AiRuntimeReadinessProof::for_test(
+                runtime.start_gate().expected_module_fingerprint(),
+            ))
             .expect("runtime opens");
         let run_service = OrmAiRunService::new(
             database.clone(),

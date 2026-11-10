@@ -1,11 +1,15 @@
+#![cfg(feature = "sqlite")]
+
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use agql_auth::{
     AccessTokenMetadata, AuthPrincipal, AuthUser, CurrentPrincipalResolver, PrincipalReference,
-    ResolvedPrincipal, SessionContext,
+    ResolvedPrincipal, SessionContext, SystemClock,
 };
 use async_trait::async_trait;
+use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
+use graphql_orm::prelude::{Database, SqliteBackend};
 use graphql_orm_ai::*;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -336,19 +340,37 @@ fn current_request(runtime: &AiRuntime, variables: serde_json::Value) -> ToolGra
     }
 }
 
-fn open_runtime(runtime: &AiRuntime) {
+async fn recovery_service() -> OrmAiRuntimeRecoveryService {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+        .await
+        .expect("in-memory SQLite should open");
+    let plan = database
+        .schema()
+        .plan_migration_to_entities(
+            "ai-runtime-contracts-v1",
+            "AI runtime contract test",
+            AiSchemaModule.entities(),
+        )
+        .await
+        .expect("AI schema should plan");
+    database
+        .schema()
+        .apply_migration(&plan, ApplyOptions::default())
+        .await
+        .expect("AI schema should apply");
+    OrmAiRuntimeRecoveryService::new(database, Arc::new(SystemClock))
+}
+
+async fn open_runtime(runtime: &AiRuntime) {
+    let proof = recovery_service()
+        .await
+        .readiness_proof(runtime.start_gate())
+        .await
+        .expect("a new store should record its first live epoch");
     runtime
         .start_gate()
-        .open(&AiRuntimeReadinessReport {
-            module_fingerprint: runtime
-                .start_gate()
-                .expected_module_fingerprint()
-                .to_owned(),
-            executor_bound: true,
-            restore_reconciled: true,
-            fatal_issue_count: 0,
-        })
-        .expect("matching readiness should open runtime");
+        .open(&proof)
+        .expect("a crate-minted proof should open runtime");
 }
 
 #[tokio::test]
@@ -367,19 +389,24 @@ async fn runtime_is_closed_until_matching_readiness_evidence() {
             .await,
         Err(AiError::RuntimeNotReady)
     ));
-    assert!(
-        runtime
-            .start_gate()
-            .open(&AiRuntimeReadinessReport {
-                module_fingerprint: "wrong".to_owned(),
-                executor_bound: true,
-                restore_reconciled: true,
-                fatal_issue_count: 0,
-            })
-            .is_err()
-    );
+    assert!(!runtime.start_gate().is_ready());
+    assert_eq!(runtime.start_gate().epoch_id(), None);
 
-    open_runtime(&runtime);
+    let recovery = recovery_service().await;
+    let first = recovery
+        .readiness_proof(runtime.start_gate())
+        .await
+        .expect("a new store should record its first live epoch");
+    let restarted = recovery
+        .readiness_proof(runtime.start_gate())
+        .await
+        .expect("a live epoch should reopen without a new transition");
+    assert_eq!(first.epoch_id(), restarted.epoch_id());
+    runtime
+        .start_gate()
+        .open(&restarted)
+        .expect("a crate-minted proof should open runtime");
+    assert_eq!(runtime.start_gate().epoch_id(), Some(first.epoch_id()));
     let response = runtime
         .execute_tool(
             &principal_reference,
@@ -407,7 +434,7 @@ async fn runtime_is_closed_until_matching_readiness_evidence() {
 #[tokio::test]
 async fn runtime_rejects_invalid_arguments_and_non_disclosed_resolver_fields() {
     let runtime = runtime();
-    open_runtime(&runtime);
+    open_runtime(&runtime).await;
     let principal_reference = principal(&["records:read"]).reference();
     let tool_id = AiToolId::parse("records.current").expect("tool ID");
 
@@ -455,7 +482,7 @@ async fn runtime_rejects_invalid_arguments_and_non_disclosed_resolver_fields() {
 #[tokio::test]
 async fn runtime_preserves_result_budget_failures_from_transport_and_descriptor_limits() {
     let runtime = runtime();
-    open_runtime(&runtime);
+    open_runtime(&runtime).await;
     let principal_reference = principal(&["records:read"]).reference();
     let tool_id = AiToolId::parse("records.current").expect("tool ID");
 
@@ -480,7 +507,7 @@ async fn runtime_preserves_result_budget_failures_from_transport_and_descriptor_
 #[tokio::test]
 async fn runtime_preserves_authorization_and_reauthorization_failures() {
     let runtime = runtime();
-    open_runtime(&runtime);
+    open_runtime(&runtime).await;
     let principal_reference = principal(&["records:read"]).reference();
     let tool_id = AiToolId::parse("records.current").expect("tool ID");
 
@@ -554,7 +581,7 @@ async fn current_invocation_policy_receives_exact_request_and_cannot_authorize_a
         observed: std::sync::Mutex::new(vec![]),
     });
     let runtime = runtime_with_policy(policy.clone());
-    open_runtime(&runtime);
+    open_runtime(&runtime).await;
     let reference = principal(&["stale:scope"]).reference();
     let id = AiToolId::parse("records.current").unwrap();
     let mut request = current_request(&runtime, json!({}));

@@ -3,12 +3,22 @@ title: "Changelog"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-10-31
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Changelog
+
+## Unreleased - 0.128.0
+
+- **Breaking:** enforce AI runtime closure after a snapshot restore. A crate-owned recovery epoch ledger (`graphql_orm_ai_runtime_recovery`, AI schema module `0.77.0`) now decides whether a deployment may open the runtime. Its liveness marker is excluded from portable backups, so a restored store starts closed. `AiRuntimeStartGate::open` takes an `AiRuntimeReadinessProof`, which only `OrmAiRuntimeRecoveryService::readiness_proof` mints; a host-built `AiRuntimeReadinessReport` no longer opens the gate and remains for telemetry only. `OrmAiRunService::claim_next`, `claim_next_approved` and approval consumption refuse with `RuntimeNotReady` inside their transactions while the current epoch is not live.
+- **Added:** `OrmAiRuntimeRecoveryService::reconcile_restore` applies runtime closure to a restored store in one generated-ORM transaction. It expires every pending, approved and resume-claimed approval, revokes unrevoked egress consents, requeues only unstarted first leases that the plan and current row both classify as effect-free, and moves every other non-terminal run to `RecoveryRequired` with its lease cleared and its lease generation incremented. It then verifies no reusable approval, unrevoked consent or held lease remains and records a new epoch. The epoch is live only for a zero-fatal collected plan; while collector audits remain incomplete, a restored store stays closed. `AiAppliedRestore` and `AiRuntimeClosureCounts` report the outcome.
+- **Behaviour change:** the first runtime open of a store with an empty ledger (a new store, or the first open after this upgrade) records the first live epoch and, once, expires unconsumed approvals and fences active leases for ordinary lease recovery. Later restarts reopen the live epoch without changes; an in-place module upgrade records a live successor epoch.
+- **Breaking:** `AiRestoreSnapshotFacts` decodes strictly. Every count is required and unknown fields, including the legacy `invalid_attachment_count` alias, are rejected. `AiRestoreReconciler::plan` adds a fatal `AI_RESTORE_AUDIT_EVIDENCE_MISSING` issue for every required audit, so caller-supplied facts never report readiness; use `OrmAiRestoreFactCollector` with `plan_collected`.
+- **Behaviour change:** the runtime gate cannot open on MSSQL-only builds, which have no generated-ORM recovery service. MSSQL remains an experimental compile and schema profile.
+
+See the migration guide for the upgrade, restore and worker changes.
 
 ## Unreleased - 0.127.0
 

@@ -175,7 +175,18 @@ fn restore_never_replays_uncertain_external_effect() {
     assert!(provider_wait.reverify_provider_continuation);
     assert_eq!(plan.approvals_to_revalidate, 2);
     assert_eq!(plan.consents_to_revalidate, 3);
-    assert_eq!(plan.fatal_issue_count(), 0);
+    // Caller-supplied facts carry no audit evidence, so the preview is fatal
+    // for every required audit even when every count is zero.
+    assert_eq!(
+        plan.fatal_issue_count(),
+        AiRestoreAuditKind::required().len() as u64
+    );
+    assert!(
+        plan.issues
+            .iter()
+            .filter(|issue| issue.severity == AiRestoreIssueSeverity::Fatal)
+            .all(|issue| issue.code == "AI_RESTORE_AUDIT_EVIDENCE_MISSING")
+    );
 }
 
 #[test]
@@ -228,11 +239,14 @@ fn restore_fatal_checks_keep_start_gate_closed() {
         stream_gap_count: 0,
     });
 
-    assert_eq!(plan.fatal_issue_count(), 17);
+    assert_eq!(
+        plan.fatal_issue_count(),
+        17 + AiRestoreAuditKind::required().len() as u64
+    );
 }
 
 #[test]
-fn legacy_restore_facts_default_new_validation_counts_to_zero() {
+fn restore_facts_reject_missing_and_unknown_fields() {
     let facts = AiRestoreSnapshotFacts {
         module_fingerprint: "expected".to_owned(),
         missing_key_versions: Vec::new(),
@@ -256,61 +270,42 @@ fn legacy_restore_facts_default_new_validation_counts_to_zero() {
         duplicate_stream_sequence_count: 0,
         stream_gap_count: 0,
     };
-    let mut value = serde_json::to_value(facts).expect("restore facts should serialize");
-    value
-        .as_object_mut()
-        .expect("restore facts should be an object")
-        .remove("invalid_context_checkpoint_count");
-    value
-        .as_object_mut()
-        .expect("restore facts should be an object")
-        .remove("invalid_provider_webhook_receipt_count");
-    value
-        .as_object_mut()
-        .expect("restore facts should be an object")
-        .remove("invalid_provider_background_submission_count");
-    value
-        .as_object_mut()
-        .expect("restore facts should be an object")
-        .remove("invalid_provider_session_binding_count");
-    let object = value
-        .as_object_mut()
-        .expect("restore facts should be an object");
-    object.remove("invalid_attachment_metadata_count");
-    object.remove("invalid_attachment_object_count");
-    object.insert("invalid_attachment_count".to_owned(), 2.into());
+    let current = serde_json::to_value(&facts).expect("restore facts should serialize");
     let decoded: AiRestoreSnapshotFacts =
-        serde_json::from_value(value).expect("legacy restore facts should decode");
-    assert_eq!(decoded.invalid_attachment_metadata_count, 2);
-    assert_eq!(decoded.invalid_attachment_object_count, 0);
-    assert_eq!(decoded.invalid_context_checkpoint_count, 0);
-    assert_eq!(decoded.invalid_provider_webhook_receipt_count, 0);
-    assert_eq!(decoded.invalid_provider_background_submission_count, 0);
-    assert_eq!(decoded.invalid_provider_session_binding_count, 0);
+        serde_json::from_value(current.clone()).expect("complete restore facts should decode");
+    assert_eq!(decoded, facts);
 
-    let current = serde_json::to_value(&decoded).expect("current restore facts should serialize");
-    let current_object = current
-        .as_object()
-        .expect("current restore facts should be an object");
-    assert!(current_object.contains_key("invalid_attachment_metadata_count"));
-    assert!(current_object.contains_key("invalid_attachment_object_count"));
-    assert!(!current_object.contains_key("invalid_attachment_count"));
+    // An absent count must never read as a successful zero-count audit.
+    for field in [
+        "invalid_attachment_metadata_count",
+        "invalid_attachment_object_count",
+        "invalid_context_checkpoint_count",
+        "invalid_provider_webhook_receipt_count",
+        "invalid_provider_background_submission_count",
+        "invalid_provider_session_binding_count",
+        "invalid_usage_fact_count",
+    ] {
+        let mut missing = current.clone();
+        missing
+            .as_object_mut()
+            .expect("restore facts should be an object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<AiRestoreSnapshotFacts>(missing).is_err(),
+            "missing {field} must be rejected"
+        );
+    }
 
-    let mut missing = current.clone();
-    let missing_object = missing
-        .as_object_mut()
-        .expect("missing-field facts should be an object");
-    missing_object.remove("invalid_attachment_metadata_count");
-    missing_object.remove("invalid_attachment_object_count");
-    let missing: AiRestoreSnapshotFacts =
-        serde_json::from_value(missing).expect("missing attachment counts should default");
-    assert_eq!(missing.invalid_attachment_metadata_count, 0);
-    assert_eq!(missing.invalid_attachment_object_count, 0);
-
-    let mut ambiguous = current;
-    ambiguous
-        .as_object_mut()
-        .expect("ambiguous facts should be an object")
-        .insert("invalid_attachment_count".to_owned(), 3.into());
-    assert!(serde_json::from_value::<AiRestoreSnapshotFacts>(ambiguous).is_err());
+    // Unknown and legacy field names are rejected rather than ignored.
+    for field in ["invalid_attachment_count", "unexpected_audit_count"] {
+        let mut unknown = current.clone();
+        unknown
+            .as_object_mut()
+            .expect("restore facts should be an object")
+            .insert(field.to_owned(), 0.into());
+        assert!(
+            serde_json::from_value::<AiRestoreSnapshotFacts>(unknown).is_err(),
+            "unknown {field} must be rejected"
+        );
+    }
 }

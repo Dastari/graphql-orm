@@ -2827,7 +2827,7 @@ mod tests {
         fixture_with_wait_policy(true).await
     }
 
-    async fn fixture_with_wait_policy(may_continue: bool) -> Fixture {
+    async fn migrated_database() -> Database<SqliteBackend> {
         let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
             .await
             .expect("in-memory SQLite should open");
@@ -2846,6 +2846,18 @@ mod tests {
             .apply_migration(&plan, ApplyOptions::default())
             .await
             .expect("AI approval schema should apply to in-memory SQLite");
+        database
+    }
+
+    async fn fixture_with_wait_policy(may_continue: bool) -> Fixture {
+        fixture_on(migrated_database().await, may_continue, None).await
+    }
+
+    async fn fixture_on(
+        database: Database<SqliteBackend>,
+        may_continue: bool,
+        principal: Option<AuthPrincipal>,
+    ) -> Fixture {
         let now = OffsetDateTime::from_unix_timestamp(1_800_000_000)
             .expect("fixed test timestamp should be valid");
         let assurance = SessionAssurance::new(
@@ -2856,19 +2868,21 @@ mod tests {
             MfaAcceptance::Satisfied,
         )
         .expect("test assurance should validate");
-        let principal = AuthPrincipal::User(AuthUser {
-            user_id: "approval-user".to_owned(),
-            session_id: Uuid::new_v4(),
-            roles: vec![],
-            scopes: vec![],
-            session: SessionContext::default().with_assurance(assurance),
-            token_claims: AccessTokenMetadata {
-                tenant_id: Some("tenant-approval".to_owned()),
-                auth_time: Some(now.unix_timestamp()),
-                amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
-                acr: Some("urn:test:loa:2".to_owned()),
-                ..AccessTokenMetadata::default()
-            },
+        let principal = principal.unwrap_or_else(|| {
+            AuthPrincipal::User(AuthUser {
+                user_id: "approval-user".to_owned(),
+                session_id: Uuid::new_v4(),
+                roles: vec![],
+                scopes: vec![],
+                session: SessionContext::default().with_assurance(assurance),
+                token_claims: AccessTokenMetadata {
+                    tenant_id: Some("tenant-approval".to_owned()),
+                    auth_time: Some(now.unix_timestamp()),
+                    amr: Some(vec!["otp".to_owned(), "pwd".to_owned()]),
+                    acr: Some("urn:test:loa:2".to_owned()),
+                    ..AccessTokenMetadata::default()
+                },
+            })
         });
         let scope = AiScope::new("tenant", "tenant-approval").with_tenant_id("tenant-approval");
         let run_limits = AiRunServiceLimits::new(Duration::hours(1), Duration::hours(1), 16, 2, 8)
@@ -3771,5 +3785,255 @@ mod tests {
         assert_eq!(record.state, "consumed");
         assert_eq!(record.consumed_uses, 1);
         assert!(record.consumed_at.is_some());
+    }
+
+    /// Exports every AI-owned table through the portable ORM backup runtime.
+    async fn export_snapshot(
+        database: &Database<SqliteBackend>,
+    ) -> (
+        graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot,
+        std::collections::BTreeMap<String, Vec<graphql_orm::graphql::orm::BackupRow>>,
+    ) {
+        use graphql_orm::graphql::orm::GraphqlOrmBackupRuntime;
+        let entities = crate::AiSchemaModule.entities().to_vec();
+        let schema = database.schema_snapshot("ai-approval-test-v1", &entities);
+        let mut descriptors = database.list_backup_entities(&entities);
+        descriptors
+            .sort_by_key(|descriptor| (descriptor.export_order, descriptor.table_name.clone()));
+        let mut snapshot = database
+            .begin_consistent_snapshot()
+            .await
+            .expect("backup snapshot should begin");
+        let mut rows = std::collections::BTreeMap::new();
+        for descriptor in &descriptors {
+            let exported = database
+                .export_table_rows(&mut snapshot, descriptor)
+                .await
+                .expect("backup rows should export");
+            rows.insert(descriptor.table_name.clone(), exported);
+        }
+        drop(snapshot);
+        (schema, rows)
+    }
+
+    /// Restores an exported snapshot into a fresh, migrated, empty target.
+    async fn restore_snapshot(
+        schema: &graphql_orm::graphql::orm::GraphqlOrmSchemaSnapshot,
+        rows: &std::collections::BTreeMap<String, Vec<graphql_orm::graphql::orm::BackupRow>>,
+    ) -> Database<SqliteBackend> {
+        use graphql_orm::graphql::orm::{GraphqlOrmBackupRuntime, RestoreContext};
+        let target = migrated_database().await;
+        let entities = crate::AiSchemaModule.entities().to_vec();
+        let current = target.schema_snapshot("ai-approval-test-v1", &entities);
+        target
+            .restore_backup_rows(schema, &current, rows, &RestoreContext::empty_database())
+            .await
+            .expect("snapshot should restore into an empty target");
+        target
+    }
+
+    #[tokio::test]
+    async fn restored_snapshot_cannot_reissue_a_consumed_approval() {
+        let fingerprint =
+            crate::runtime::ai_schema_module_fingerprint().expect("module fingerprint");
+        let fixture = fixture().await;
+        let recovery = crate::OrmAiRuntimeRecoveryService::new(
+            fixture.database.clone(),
+            fixture.clock.clone(),
+        );
+        let gate = crate::AiRuntimeStartGate::new(fingerprint.clone());
+        let proof = recovery
+            .readiness_proof(&gate)
+            .await
+            .expect("a new store should record its first live epoch");
+        gate.open(&proof)
+            .expect("the live epoch should open the runtime");
+
+        let (running, tool_call_id) = seed_running_tool(&fixture).await;
+        let (binding, preview) = approval_binding(&fixture, &running, tool_call_id);
+        let requested = fixture
+            .approval_service
+            .request_approval(
+                &running,
+                binding.clone(),
+                preview.clone(),
+                fixture.now + Duration::minutes(30),
+                true,
+            )
+            .await
+            .expect("approval request should park the run");
+        let view = fixture
+            .approval_service
+            .approval(&fixture.principal, requested.approval_id())
+            .await
+            .expect("approval read should succeed")
+            .expect("approval should be visible");
+        fixture
+            .approval_service
+            .decide_approval(
+                &fixture.principal,
+                DecideAiApprovalInput {
+                    id: view.id,
+                    decision: AiApprovalDecision::Approve,
+                    expected_version: view.row_version,
+                },
+            )
+            .await
+            .expect("approval should be granted");
+
+        // The snapshot is taken while the grant is approved but unconsumed.
+        let (schema, rows) = export_snapshot(&fixture.database).await;
+
+        let claim = fixture
+            .run_service
+            .claim_next_approved("approval-before-restore")
+            .await
+            .expect("approved wait should be claimable")
+            .expect("approved wait should be handed off");
+        fixture
+            .approval_service
+            .consume_approval(claim.lease(), requested.approval_id(), &binding, &preview)
+            .await
+            .expect("approval should be consumed once before the restore");
+
+        let restored = fixture_on(
+            restore_snapshot(&schema, &rows).await,
+            true,
+            Some(fixture.principal.clone()),
+        )
+        .await;
+        let restored_recovery = crate::OrmAiRuntimeRecoveryService::new(
+            restored.database.clone(),
+            restored.clock.clone(),
+        );
+        let restored_gate = crate::AiRuntimeStartGate::new(fingerprint.clone());
+
+        // The restored epoch row is not live, so the gate cannot open and no
+        // worker may claim the restored grant or consume it.
+        assert!(matches!(
+            restored_recovery.readiness_proof(&restored_gate).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(!restored_gate.is_ready());
+        assert!(matches!(
+            restored
+                .run_service
+                .claim_next_approved("approval-after-restore")
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            restored.run_service.claim_next("run-after-restore").await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(
+            restored
+                .approval_service
+                .consume_approval(claim.lease(), requested.approval_id(), &binding, &preview)
+                .await
+                .is_err()
+        );
+
+        // Applying closure expires the grant and closes the run under a new
+        // generation. The collector's audits are incomplete, so the new epoch
+        // is recorded as blocked and the runtime stays closed.
+        let restored_run = AiRunRecord::find_by_id(&restored.database, &running.run_id().0)
+            .await
+            .expect("restored run lookup")
+            .expect("restored run");
+        assert_eq!(restored_run.state, "waiting_approval");
+        let applied = restored_recovery
+            .reconcile_restore(
+                &crate::OrmAiRestoreFactCollector::new(restored.database.clone()),
+                fingerprint.clone(),
+                Some("restore-operator".to_owned()),
+            )
+            .await
+            .expect("restore closure should apply");
+        assert!(!applied.is_live());
+        assert!(applied.readiness_proof().is_none());
+        assert!(applied.plan().plan().fatal_issue_count() > 0);
+        assert_eq!(applied.closure().approvals_expired(), 1);
+        assert_eq!(applied.closure().runs_recovery_required(), 1);
+
+        let approval = AiApprovalRecord::find_by_id(&restored.database, &requested.approval_id().0)
+            .await
+            .expect("restored approval lookup")
+            .expect("restored approval");
+        assert_eq!(approval.state, "expired");
+        assert_eq!(approval.consumed_uses, 0);
+        let closed_run = AiRunRecord::find_by_id(&restored.database, &running.run_id().0)
+            .await
+            .expect("closed run lookup")
+            .expect("closed run");
+        assert_eq!(closed_run.state, "recovery_required");
+        assert_eq!(
+            closed_run.lease_generation,
+            restored_run.lease_generation + 1
+        );
+        assert!(closed_run.lease_owner.is_none() && closed_run.lease_expires_at.is_none());
+
+        assert!(matches!(
+            restored_recovery.readiness_proof(&restored_gate).await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(matches!(
+            restored
+                .run_service
+                .claim_next_approved("approval-after-closure")
+                .await,
+            Err(AiError::RuntimeNotReady)
+        ));
+        assert!(
+            restored
+                .approval_service
+                .consume_approval(claim.lease(), requested.approval_id(), &binding, &preview)
+                .await
+                .is_err()
+        );
+
+        // The source deployment keeps its live epoch across restarts.
+        let reopened = recovery
+            .readiness_proof(&gate)
+            .await
+            .expect("the source epoch stays live");
+        assert_eq!(reopened.epoch_id(), proof.epoch_id());
+    }
+
+    #[tokio::test]
+    async fn first_epoch_expires_unconsumed_approvals_and_fences_leases() {
+        let fingerprint =
+            crate::runtime::ai_schema_module_fingerprint().expect("module fingerprint");
+        let fixture = fixture().await;
+        let (requested, _) = request_wait(&fixture, fixture.now + Duration::minutes(30)).await;
+        let (running, _) = seed_running_tool(&fixture).await;
+
+        let recovery = crate::OrmAiRuntimeRecoveryService::new(
+            fixture.database.clone(),
+            fixture.clock.clone(),
+        );
+        let gate = crate::AiRuntimeStartGate::new(fingerprint);
+        let proof = recovery
+            .readiness_proof(&gate)
+            .await
+            .expect("an empty ledger should record the first live epoch");
+        gate.open(&proof)
+            .expect("the first epoch should open the runtime");
+
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &requested.approval_id().0)
+            .await
+            .expect("approval lookup")
+            .expect("approval");
+        assert_eq!(approval.state, "expired");
+        assert!(matches!(
+            fixture.run_service.heartbeat(&running).await,
+            Err(AiError::Conflict)
+        ));
+        let report = fixture
+            .run_service
+            .recover_expired_leases()
+            .await
+            .expect("fenced leases should recover through the ordinary path");
+        assert_eq!(report.recovery_required, 1);
     }
 }
