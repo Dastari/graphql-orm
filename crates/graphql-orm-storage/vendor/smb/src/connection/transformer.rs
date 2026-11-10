@@ -155,6 +155,18 @@ impl Transformer {
         f(&session_info)
     }
 
+    /// Whether incoming messages for `session_id` must be encrypted: the session
+    /// is ready and encryption is required by its flags or the connection
+    /// config. Unknown sessions report `false`; the session handler still
+    /// verifies every response it accepts.
+    pub async fn requires_encryption(&self, session_id: u64) -> bool {
+        self._with_session(session_id, |session| {
+            Ok(session.is_ready() && session.should_encrypt()?)
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     /// Transforms an outgoing message to a raw SMB message.
     pub async fn transform_outgoing(&self, mut msg: OutgoingMessage) -> crate::Result<IoVec> {
         let should_encrypt = msg.encrypt;

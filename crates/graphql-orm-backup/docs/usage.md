@@ -342,11 +342,14 @@ async fn compact(
 `prune` retains the newest manifest chains selected by `KeepPolicy` and deletes
 expired snapshot blobs plus unreferenced content-addressed object blobs.
 
-Reachability comes from the snapshot listing, so `prune` and `delete_snapshot`
-fail closed when that listing is incomplete. They return
-`BackupError::InvalidManifestChain` before deleting any object if a listed
-manifest's parent is stored but was not listed, or if re-listing manifests just
-before the object sweep gives a different set.
+Retention, dependency checks and reachability come from the snapshot listing,
+so `prune` and `delete_snapshot` fail closed when that listing is incomplete.
+They return `BackupError::InvalidManifestChain` before deleting any snapshot or
+object if a listed manifest's parent is stored but was not listed, or if
+re-listing manifests gives a different set. Just before the object sweep they
+list manifests again and stop, without deleting any object, unless the set is
+exactly the retained snapshots. A listing truncated identically on every read
+cannot be detected; the storage provider must fail such listings.
 
 `delete_snapshot` removes one snapshot under the repository writer lock. It
 refuses to delete a snapshot that is the parent of another manifest and

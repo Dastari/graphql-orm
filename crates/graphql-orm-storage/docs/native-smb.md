@@ -37,7 +37,8 @@ original file hashes, the immutable backport and local patches, and the
 MIT-license source. `python3 scripts/verify-smb-backport.py --archive <smb-0.10.2.crate>`
 reverses both patches offline and compares the result with the archive.
 `scripts/test-smb-vendor.sh` runs the vendored unit tests, including the
-regression tests for the local patch, on a temporary copy. The exact upstream
+regression tests for the local patch, on a temporary copy with the archived
+lockfile under `--locked`. CI runs both. The exact upstream
 license is retained as [LICENSE](../vendor/smb/LICENSE). The archive's original
 `Cargo.lock` is preserved as `Cargo.lock.upstream` for provenance only; the
 workspace lockfile governs builds. The six original upstream Markdown files
@@ -113,8 +114,9 @@ audit; this crate does not serialize credentials.
 
 The vendored client verifies a session response's signature or encryption
 before it evaluates the response status. A message that is not signed when
-signing is required, or not encrypted when encryption is required, fails with a
-`SecurityNegotiation` error and its status is never acted on. Before 0.8.1, the
+signing is required, or not encrypted when encryption is required, is rejected
+with the client's typed `UnverifiedMessage` error, reported as a
+`SecurityNegotiation` error, and its status is never acted on. Before 0.8.1, the
 status was checked first, so an on-path party without credentials could answer
 a pending request with an unsigned error such as `STATUS_OBJECT_NAME_NOT_FOUND`,
 even with `require_encryption = true`.
@@ -124,6 +126,16 @@ does not accept, so an unsigned response can only fail a request: an interim
 `STATUS_PENDING`, and a `SESSION_SETUP` response before session setup completes.
 A rejected response leaves its request's outcome unknown, so the error is not
 retryable; verify the affected key before relying on it.
+
+Interim `STATUS_PENDING` responses are consumed before session verification,
+so they are treated as untrusted. On an encryption-required session an
+unencrypted interim is discarded. On a signing-only session an unsigned interim
+is accepted, as the specification allows, but it can only extend the wait: it
+never completes the request, and a final response with a different async ID, or
+a synchronous one, is still delivered and verified. Forged interims can
+therefore delay a request until `operation_timeout`, but not change its
+outcome. The async ID used to cancel a request is the latest interim's, which
+an on-path party can also forge.
 
 Because guest and anonymous sessions are refused, a not-found status is
 authenticated. `blob_exists` returning `false`, `head_blob` returning `None`,

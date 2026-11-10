@@ -2162,12 +2162,7 @@ fn map_smb_error(operation: &'static str, error: smb::Error) -> StorageError {
             | smb::Error::CryptoError(_) => StorageProviderErrorKind::SecurityNegotiation,
             // The client rejected an unsigned or unencrypted response before
             // evaluating its status. Its operation's outcome is unknown.
-            smb::Error::InvalidMessage(message)
-                if message.contains("signing is required")
-                    || message.contains("encryption is required") =>
-            {
-                StorageProviderErrorKind::SecurityNegotiation
-            }
+            smb::Error::UnverifiedMessage(_) => StorageProviderErrorKind::SecurityNegotiation,
             _ => StorageProviderErrorKind::Protocol,
         },
     };
@@ -2289,18 +2284,26 @@ mod tests {
 
     #[test]
     fn rejected_unverified_responses_are_security_failures() {
-        for message in [
-            "Message not signed or encrypted, but signing is required for the session!",
-            "Message not encrypted, but encryption is required for the session!",
-        ] {
-            let error = map_smb_error("head", smb::Error::InvalidMessage(message.to_string()));
-            assert_eq!(
-                provider_error_kind(&error),
-                Some(StorageProviderErrorKind::SecurityNegotiation)
-            );
-            assert!(!error.is_retryable());
-            assert!(!is_not_found(&error));
-        }
+        let error = map_smb_error(
+            "head",
+            smb::Error::UnverifiedMessage("not signed".to_string()),
+        );
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::SecurityNegotiation)
+        );
+        assert!(!error.is_retryable());
+        assert!(!is_not_found(&error));
+
+        // Other unexpected messages stay protocol failures.
+        let error = map_smb_error(
+            "head",
+            smb::Error::InvalidMessage("Message not for this session!".to_string()),
+        );
+        assert_eq!(
+            provider_error_kind(&error),
+            Some(StorageProviderErrorKind::Protocol)
+        );
     }
 
     #[derive(Default)]

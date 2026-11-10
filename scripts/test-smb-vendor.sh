@@ -3,8 +3,9 @@
 # verify-before-status regression tests) with storage's selected features.
 #
 # The vendored package is an isolated, excluded workspace. Tests run on a
-# temporary copy seeded with the archived upstream lockfile, so the vendor
-# directory keeps its exact reviewed file set.
+# temporary copy with the archived upstream lockfile, under --locked, so the
+# vendor directory keeps its exact reviewed file set and the resolved graph
+# cannot drift.
 set -euo pipefail
 
 repository_root=$(git rev-parse --show-toplevel)
@@ -16,5 +17,5 @@ cp -R "${vendor}" "${work}/smb"
 cp "${work}/smb/Cargo.lock.upstream" "${work}/smb/Cargo.lock"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${work}/target}"
 
-cargo test --manifest-path "${work}/smb/Cargo.toml" --lib \
+cargo test --manifest-path "${work}/smb/Cargo.toml" --lib --locked \
   --no-default-features --features async,encrypt,sign,netbios-transport "$@"

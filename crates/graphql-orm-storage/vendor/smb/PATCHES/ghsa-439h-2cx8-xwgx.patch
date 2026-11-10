@@ -129,8 +129,182 @@ index a7c03289..a48d1831 100644
 +        Ok(handler)
 +    }
 +}
+diff --git a/src/connection/transformer.rs b/src/connection/transformer.rs
+index 37c7d840..0040c9b1 100644
+--- a/src/connection/transformer.rs
++++ b/src/connection/transformer.rs
+@@ -155,6 +155,18 @@ impl Transformer {
+         f(&session_info)
+     }
+ 
++    /// Whether incoming messages for `session_id` must be encrypted: the session
++    /// is ready and encryption is required by its flags or the connection
++    /// config. Unknown sessions report `false`; the session handler still
++    /// verifies every response it accepts.
++    pub async fn requires_encryption(&self, session_id: u64) -> bool {
++        self._with_session(session_id, |session| {
++            Ok(session.is_ready() && session.should_encrypt()?)
++        })
++        .await
++        .unwrap_or(false)
++    }
++
+     /// Transforms an outgoing message to a raw SMB message.
+     pub async fn transform_outgoing(&self, mut msg: OutgoingMessage) -> crate::Result<IoVec> {
+         let should_encrypt = msg.encrypt;
+diff --git a/src/connection/worker/worker_trait.rs b/src/connection/worker/worker_trait.rs
+index c8a40faa..5e6fe99f 100644
+--- a/src/connection/worker/worker_trait.rs
++++ b/src/connection/worker/worker_trait.rs
+@@ -90,73 +90,75 @@ pub trait Worker: Sized + std::fmt::Debug {
+             ));
+         }
+ 
+-        let curr = self.receive_next(options).await?;
+-
+-        // Not async -- return the result.
+-        if !curr.message.header.flags.async_command() {
+-            return Ok(curr);
+-        }
+-
+-        // Handle async.
+-        if !options.allow_async {
+-            return Err(Error::InvalidArgument(
+-                "Async command is not allowed in this context.".to_string(),
+-            ));
+-        }
+-
+-        // If not pending, that's the result, right away!
+-        if curr.message.header.status != Status::Pending as u32 {
+-            return Ok(curr);
+-        }
+-
+-        log::debug!(
+-            "Received async pending message with ID {} and status {}.",
+-            curr.message.header.message_id,
+-            curr.message.header.status
+-        );
+-
+-        let async_id = match curr.message.header.async_id {
+-            Some(async_id) => async_id,
+-            None => panic!("Async ID is None, but async command is set. This should not happen."),
+-        };
+-
+-        if async_id == 0 {
+-            return Ok(curr);
+-        }
+-
+-        if let Some(async_msg_ids) = &options.async_msg_ids {
+-            async_msg_ids.set(options.msg_id, async_id);
+-        }
+-
++        // Interim (STATUS_PENDING) responses are exempt from signing (MS-SMB2
++        // 3.2.5.1.3) and are consumed here, before any session verification.
++        // An interim is therefore untrusted: it may only extend the wait. It
++        // never completes the request, and it never causes the final response
++        // to be rejected (GHSA-439h-2cx8-xwgx).
++        let mut waiting_async = false;
+         loop {
+-            let msg = self.receive_next_cancellable(options).await?;
++            let msg = if waiting_async {
++                self.receive_next_cancellable(options).await?
++            } else {
++                self.receive_next(options).await?
++            };
++
++            // Not async -- return the result. A synchronous final response also
++            // completes a request after an (unverifiable) interim.
++            if !msg.message.header.flags.async_command() {
++                return Ok(msg);
++            }
+ 
+-            // Check if the message is async and has the same ID.
+-            if !msg.message.header.flags.async_command()
+-                || msg.message.header.async_id != Some(async_id)
+-            {
+-                return Err(Error::InvalidArgument(format!(
+-                    "Received message for msgid {} with async ID {} but expected async ID {}",
+-                    msg.message.header.message_id,
+-                    msg.message
+-                        .header
+-                        .async_id
+-                        .map(|x| x.to_string())
+-                        .unwrap_or("None".to_string()),
+-                    async_id
+-                )));
++            // Handle async.
++            if !options.allow_async {
++                return Err(Error::InvalidArgument(
++                    "Async command is not allowed in this context.".to_string(),
++                ));
+             }
+ 
+-            // We've got a result!
++            // If not pending, that's the result, right away! The session handler
++            // verifies it before its status is evaluated.
+             if msg.message.header.status != Status::Pending as u32 {
+                 return Ok(msg);
+             }
+ 
++            // An encryption-required session never accepts an unencrypted
++            // message, so discard such an interim and keep waiting.
++            if !msg.form.encrypted
++                && self
++                    .transformer()
++                    .requires_encryption(msg.message.header.session_id)
++                    .await
++            {
++                log::warn!(
++                    "Discarding unencrypted interim response for message ID {} on an encryption-required session.",
++                    msg.message.header.message_id
++                );
++                continue;
++            }
++
+             log::debug!(
+-                "Received another async pending message with ID {} and status {}.",
++                "Received async pending message with ID {} and status {}.",
+                 msg.message.header.message_id,
+                 msg.message.header.status
+             );
++
++            let async_id = match msg.message.header.async_id {
++                Some(async_id) => async_id,
++                None => {
++                    panic!("Async ID is None, but async command is set. This should not happen.")
++                }
++            };
++
++            // The most recent interim names the async ID used for cancellation.
++            // A later interim or final response may carry another async ID: an
++            // earlier interim may have been forged, so it is not binding.
++            if async_id != 0 {
++                if let Some(async_msg_ids) = &options.async_msg_ids {
++                    async_msg_ids.set(options.msg_id, async_id);
++                }
++            }
++            waiting_async = true;
+         }
+     }
+ 
+diff --git a/src/error.rs b/src/error.rs
+index 6e798073..ced229ab 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -15,6 +15,11 @@ pub enum TimedOutTask {
+ pub enum Error {
+     #[error("Unexpected Message, {0}")]
+     InvalidMessage(String),
++    /// A session response was not signed or encrypted as the session requires.
++    /// It was rejected before its status was evaluated, so the outcome of the
++    /// request it answered is unknown (GHSA-439h-2cx8-xwgx).
++    #[error("Unverified message rejected, {0}")]
++    UnverifiedMessage(String),
+     #[error("IO Error: {0}")]
+     IoError(#[from] std::io::Error),
+     #[error("Binrw Error: {0}")]
 diff --git a/src/session/channel.rs b/src/session/channel.rs
-index 17d02495..57c321fc 100644
+index 17d02495..81e37385 100644
 --- a/src/session/channel.rs
 +++ b/src/session/channel.rs
 @@ -95,19 +95,33 @@ impl ChannelMessageHandler {
@@ -170,20 +344,28 @@ index 17d02495..57c321fc 100644
          };
  
          // Make sure that it's our session.
-@@ -128,7 +142,12 @@ impl ChannelMessageHandler {
+@@ -123,13 +137,18 @@ impl ChannelMessageHandler {
+         }
+         // Make sure encryption is used when required.
+         if !incoming.form.encrypted && encryption_required {
+-            return Err(Error::InvalidMessage(
++            return Err(Error::UnverifiedMessage(
+                 "Message not encrypted, but encryption is required for the session!".to_string(),
              ));
          }
          // and signed, unless allowed not to.
 -        if !incoming.form.signed_or_encrypted() && !unsigned_allowed {
+-            return Err(Error::InvalidMessage(
 +        if !incoming.form.signed_or_encrypted()
 +            && !unsigned_allowed
 +            && !expected_status.is_some_and(|expected| {
 +                Self::unsigned_response_permitted(incoming, session_ready, expected)
 +            })
 +        {
-             return Err(Error::InvalidMessage(
++            return Err(Error::UnverifiedMessage(
                  "Message not signed or encrypted, but signing is required for the session!"
                      .to_string(),
+             ));
 @@ -138,6 +157,31 @@ impl ChannelMessageHandler {
          Ok(())
      }
@@ -263,7 +445,7 @@ index 17d02495..57c321fc 100644
  
          match &msg.message.content {
              ResponseContent::ServerToClientNotification(s2c_notification) => {
-@@ -259,3 +308,302 @@ impl MessageHandler for ChannelMessageHandler {
+@@ -259,3 +308,453 @@ impl MessageHandler for ChannelMessageHandler {
          }
      }
  }
@@ -276,7 +458,9 @@ index 17d02495..57c321fc 100644
 +    use super::*;
 +    use crate::connection::config::{ConnectionConfig, EncryptionMode};
 +    use crate::connection::connection_info::{ConnectionInfo, NegotiatedProperties};
++    use crate::connection::worker::Worker;
 +    use crate::dialects::DialectImpl;
++    use crate::msg_handler::AsyncMessageIds;
 +    use binrw::BinWrite;
 +    use futures_core::future::BoxFuture;
 +    use futures_util::FutureExt;
@@ -365,16 +549,23 @@ index 17d02495..57c321fc 100644
 +
 +    /// An unsigned, unencrypted plain response as an on-path party would forge it.
 +    fn forged_response(command: Command, status: Status) -> Vec<u8> {
++        forged_response_with(command, status, None)
++    }
++
++    /// As [`forged_response`], optionally as an async response with `async_id`.
++    fn forged_response_with(command: Command, status: Status, async_id: Option<u64>) -> Vec<u8> {
 +        let header = Header {
 +            credit_charge: 1,
 +            status: status as u32,
 +            command,
 +            credit_request: 1,
-+            flags: HeaderFlags::new().with_server_to_redir(true),
++            flags: HeaderFlags::new()
++                .with_server_to_redir(true)
++                .with_async_command(async_id.is_some()),
 +            next_command: 0,
 +            message_id: MESSAGE_ID,
-+            tree_id: Some(1),
-+            async_id: None,
++            tree_id: async_id.is_none().then_some(1),
++            async_id,
 +            session_id: SESSION_ID,
 +            signature: 0,
 +        };
@@ -431,6 +622,22 @@ index 17d02495..57c321fc 100644
 +        encryption_mode: EncryptionMode,
 +        stage: Stage,
 +    ) -> HandlerReference<ChannelMessageHandler> {
++        handlers_for(incoming, dialect, encryption_mode, stage)
++            .await
++            .0
++    }
++
++    /// A channel handler and its connection handler, with the session
++    /// registered in the connection's transformer.
++    async fn handlers_for(
++        incoming: Vec<u8>,
++        dialect: Dialect,
++        encryption_mode: EncryptionMode,
++        stage: Stage,
++    ) -> (
++        HandlerReference<ChannelMessageHandler>,
++        HandlerReference<ConnectionMessageHandler>,
++    ) {
 +        let info = connection_info(dialect, encryption_mode);
 +        let mut session = SessionInfo::new(SESSION_ID);
 +        session.setup(&SESSION_KEY, &None, &info).unwrap();
@@ -447,7 +654,13 @@ index 17d02495..57c321fc 100644
 +        }))
 +        .await
 +        .unwrap();
-+        ChannelMessageHandler::new(SESSION_ID, 1, &upstream, &state)
++        let worker = upstream.worker().unwrap();
++        worker.negotaite_complete(&info).await;
++        worker.session_started(&state).await.unwrap();
++        (
++            ChannelMessageHandler::new(SESSION_ID, 1, &upstream, &state),
++            upstream,
++        )
 +    }
 +
 +    fn expect_success(msg_id: u64) -> ReceiveOptions<'static> {
@@ -458,12 +671,7 @@ index 17d02495..57c321fc 100644
 +
 +    fn assert_rejected_before_status(result: crate::Result<IncomingMessage>) {
 +        match result {
-+            Err(Error::InvalidMessage(reason)) => {
-+                assert!(
-+                    reason.contains("not signed") || reason.contains("not encrypted"),
-+                    "unexpected rejection: {reason}"
-+                );
-+            }
++            Err(Error::UnverifiedMessage(_)) => {}
 +            Err(Error::ReceivedErrorMessage(status, _))
 +            | Err(Error::UnexpectedMessageStatus(status)) => {
 +                panic!("forged unsigned status {status:#x} was acted on before verification")
@@ -563,6 +771,131 @@ index 17d02495..57c321fc 100644
 +            channel
 +                .recvo_internal(expect_success(MESSAGE_ID), false)
 +                .await,
++        );
++    }
++
++    #[tokio::test]
++    async fn unsigned_no_more_files_cannot_truncate_a_directory_listing() {
++        // `Directory` ends its listing on STATUS_NO_MORE_FILES; a forged one
++        // must be rejected, not reported as the end of the directory.
++        let channel = channel_for(
++            forged_response(Command::QueryDirectory, Status::NoMoreFiles),
++            Dialect::Smb021,
++            EncryptionMode::Allowed,
++            Stage::Ready,
++        )
++        .await;
++        assert_rejected_before_status(channel.recvo(expect_success(MESSAGE_ID)).await);
++    }
++
++    const FORGED_ASYNC_ID: u64 = 0x0bad;
++    const SERVER_ASYNC_ID: u64 = 0x0600d;
++
++    fn async_options(ids: &Arc<AsyncMessageIds>) -> ReceiveOptions<'static> {
++        expect_success(MESSAGE_ID)
++            .with_allow_async(true)
++            .with_async_msg_ids(ids.clone())
++    }
++
++    async fn worker_receive(
++        incoming: Vec<u8>,
++        encryption_mode: EncryptionMode,
++        ids: &Arc<AsyncMessageIds>,
++    ) -> crate::Result<IncomingMessage> {
++        let dialect = if encryption_mode.is_required() {
++            Dialect::Smb0302
++        } else {
++            Dialect::Smb021
++        };
++        let (_channel, upstream) =
++            handlers_for(incoming, dialect, encryption_mode, Stage::Ready).await;
++        upstream
++            .worker()
++            .unwrap()
++            .receive(&async_options(ids))
++            .await
++    }
++
++    fn interim_then_final(interim_async_id: u64, final_async_id: Option<u64>) -> Vec<u8> {
++        let mut incoming =
++            forged_response_with(Command::Create, Status::Pending, Some(interim_async_id));
++        incoming.extend(forged_response_with(
++            Command::Create,
++            Status::Success,
++            final_async_id,
++        ));
++        incoming
++    }
++
++    fn assert_final(result: crate::Result<IncomingMessage>) {
++        let msg = result.expect("the final response must be delivered");
++        assert_eq!(msg.message.header.status, Status::Success as u32);
++    }
++
++    #[tokio::test]
++    async fn forged_interim_does_not_reject_a_final_with_another_async_id() {
++        let ids = Arc::new(AsyncMessageIds::default());
++        let result = worker_receive(
++            interim_then_final(FORGED_ASYNC_ID, Some(SERVER_ASYNC_ID)),
++            EncryptionMode::Allowed,
++            &ids,
++        )
++        .await;
++        assert_final(result);
++    }
++
++    #[tokio::test]
++    async fn forged_interim_does_not_reject_a_synchronous_final() {
++        let ids = Arc::new(AsyncMessageIds::default());
++        let result = worker_receive(
++            interim_then_final(FORGED_ASYNC_ID, None),
++            EncryptionMode::Allowed,
++            &ids,
++        )
++        .await;
++        assert_final(result);
++    }
++
++    #[tokio::test]
++    async fn interim_with_zero_async_id_is_not_returned_as_a_result() {
++        let ids = Arc::new(AsyncMessageIds::default());
++        let result =
++            worker_receive(interim_then_final(0, None), EncryptionMode::Allowed, &ids).await;
++        assert_final(result);
++    }
++
++    #[tokio::test]
++    async fn unsigned_interim_is_honoured_when_only_signing_is_required() {
++        // MS-SMB2 3.2.5.1.3 exempts STATUS_PENDING from signing.
++        let ids = Arc::new(AsyncMessageIds::default());
++        let result = worker_receive(
++            interim_then_final(SERVER_ASYNC_ID, Some(SERVER_ASYNC_ID)),
++            EncryptionMode::Allowed,
++            &ids,
++        )
++        .await;
++        assert_final(result);
++        assert_eq!(
++            ids.async_id.load(std::sync::atomic::Ordering::SeqCst),
++            SERVER_ASYNC_ID
++        );
++    }
++
++    #[tokio::test]
++    async fn unencrypted_interim_is_discarded_when_encryption_is_required() {
++        let ids = Arc::new(AsyncMessageIds::default());
++        let result = worker_receive(
++            interim_then_final(FORGED_ASYNC_ID, None),
++            EncryptionMode::Required,
++            &ids,
++        )
++        .await;
++        // The worker delivers the final; the session handler then verifies it.
++        assert_final(result);
++        assert_eq!(
++            ids.async_id.load(std::sync::atomic::Ordering::SeqCst),
++            u64::MAX,
++            "an unencrypted interim must not be recorded as the request's async ID"
 +        );
 +    }
 +}

@@ -515,3 +515,133 @@ async fn delete_snapshot_refuses_a_listing_that_omits_a_stored_parent() {
             .expect("exists check")
     );
 }
+
+fn third_id() -> Uuid {
+    Uuid::parse_str("dddddddd-dddd-4ddd-dddd-dddddddddddd").expect("valid uuid")
+}
+
+async fn incremental_child(repository: &LocalBackupRepository, child: Uuid, parent: Uuid, at: i64) {
+    create_incremental_backup(
+        repository,
+        &MockDatabase,
+        &MockObjectIndex::default(),
+        IncrementalBackupRequest {
+            snapshot_id: child,
+            parent_snapshot_id: parent,
+            created_at: at,
+            app_id: "example-app".to_string(),
+            app_version: "0.1.0".to_string(),
+        },
+    )
+    .await
+    .expect("child backup");
+}
+
+/// Every key of the three fixture snapshot trees. Per-snapshot prefixes are
+/// never truncated by the wrapper.
+async fn snapshot_keys(repository: &dyn BackupRepository) -> Vec<String> {
+    let mut keys = Vec::new();
+    for snapshot_id in [first_id(), second_id(), third_id()] {
+        keys.extend(
+            repository
+                .list_blobs(&format!("snapshots/{snapshot_id}"))
+                .await
+                .expect("list snapshot tree"),
+        );
+    }
+    keys
+}
+
+#[tokio::test]
+async fn delete_snapshot_refuses_a_parent_whose_child_was_transiently_unlisted() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = LocalBackupRepository::new(temp.path());
+    let object = Bytes::from_static(b"parent object");
+    let hash = bytes_sha256_hex(&object);
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::new(hash.clone(), object),
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("parent backup");
+    incremental_child(&local, second_id(), first_id(), 2).await;
+    // The child is missing from the listing the dependency check uses.
+    let before = snapshot_keys(&local).await;
+    let repository = TruncatedListingRepository::new(local, snapshot_manifest_key(second_id()), 1);
+
+    let error = delete_snapshot(&repository, first_id(), &RepositoryLockOptions::default())
+        .await
+        .expect_err("a hidden child must not let its parent be deleted");
+
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        snapshot_keys(&repository).await,
+        before,
+        "no snapshot data may be deleted"
+    );
+    assert!(
+        repository
+            .blob_exists(&object_content_key(&hash))
+            .await
+            .expect("exists check")
+    );
+}
+
+#[tokio::test]
+async fn prune_refuses_to_expire_the_parent_of_a_transiently_unlisted_newest_child() {
+    let temp = TempDir::new().expect("temp dir");
+    let local = LocalBackupRepository::new(temp.path());
+    let object = Bytes::from_static(b"chain object");
+    let hash = bytes_sha256_hex(&object);
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::new(hash.clone(), object),
+        backup_request(first_id(), 1),
+    )
+    .await
+    .expect("full A");
+    create_full_backup(
+        &local,
+        &MockDatabase,
+        &MockObjectIndex::default(),
+        backup_request(third_id(), 2),
+    )
+    .await
+    .expect("full C");
+    // B is the newest snapshot and an incremental child of A.
+    incremental_child(&local, second_id(), first_id(), 3).await;
+    let before = snapshot_keys(&local).await;
+    let repository = TruncatedListingRepository::new(local, snapshot_manifest_key(second_id()), 1);
+
+    let error = prune(
+        &repository,
+        &KeepPolicy {
+            keep_last: 1,
+            ..KeepPolicy::default()
+        },
+    )
+    .await
+    .expect_err("a hidden newest child must not expire its parent");
+
+    assert!(
+        matches!(&error, BackupError::InvalidManifestChain { reason } if reason.contains("listing is incomplete")),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        snapshot_keys(&repository).await,
+        before,
+        "no snapshot data may be deleted"
+    );
+    assert!(
+        repository
+            .blob_exists(&object_content_key(&hash))
+            .await
+            .expect("exists check")
+    );
+}

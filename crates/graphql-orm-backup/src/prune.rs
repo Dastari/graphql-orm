@@ -38,11 +38,15 @@ pub struct PruneResult {
 
 /// Prunes expired snapshots and unreferenced object blobs.
 ///
-/// Object reachability is derived from the snapshot listing, so pruning fails
-/// closed when that listing is incomplete: a listed manifest's parent that is
-/// stored but not listed, or a manifest set that differs when re-listed
-/// immediately before the object sweep, aborts with
-/// [`BackupError::InvalidManifestChain`] before any object is deleted.
+/// Retention and object reachability are derived from the snapshot listing,
+/// so pruning fails closed when that listing is incomplete. It aborts with
+/// [`BackupError::InvalidManifestChain`] before deleting any snapshot or object
+/// if a listed manifest's parent is stored but was not listed, or if
+/// re-listing manifests gives a different set. It lists manifests once more
+/// immediately before the object sweep and aborts, without deleting any
+/// object, if the set is not exactly the retained snapshots. A listing that is
+/// truncated the same way every time cannot be detected here; providers must
+/// fail such listings themselves.
 ///
 /// # Errors
 ///
@@ -68,6 +72,9 @@ async fn prune_inner(
 ) -> Result<PruneResult, BackupError> {
     let mut manifests = load_all_manifests(repository).await?;
     ensure_listed_parents(repository, &manifests).await?;
+    // A listing that hid a newer child would expire its parent: confirm the
+    // listing before deleting anything.
+    ensure_stable_listing(repository, &manifest_ids(&manifests)).await?;
     manifests.sort_by(|left, right| {
         right
             .created_at
@@ -91,10 +98,7 @@ async fn prune_inner(
         }
     }
 
-    let all_ids = manifests
-        .iter()
-        .map(|manifest| manifest.snapshot_id)
-        .collect::<HashSet<_>>();
+    let all_ids = manifest_ids(&manifests);
     let expired_ids = all_ids
         .difference(&retained_ids)
         .copied()
@@ -138,8 +142,11 @@ pub struct DeleteSnapshotResult {
 /// Deletes one snapshot and any object blobs no other snapshot references.
 ///
 /// Snapshots that are the parent of another manifest cannot be deleted;
-/// dependent snapshots must be deleted or compacted first. Like [`prune`], the
-/// object sweep fails closed when the snapshot listing is incomplete.
+/// dependent snapshots must be deleted or compacted first. Like [`prune`], it
+/// fails closed when the snapshot listing is incomplete: a stored but unlisted
+/// parent, or a different manifest set on re-listing, aborts before the
+/// snapshot or any object is deleted, and the manifest set is checked again
+/// before the object sweep.
 ///
 /// # Errors
 ///
@@ -167,6 +174,8 @@ async fn delete_snapshot_inner(
 ) -> Result<DeleteSnapshotResult, BackupError> {
     let manifests = load_all_manifests(repository).await?;
     ensure_listed_parents(repository, &manifests).await?;
+    // A listing that hid a child would pass the dependency check below.
+    ensure_stable_listing(repository, &manifest_ids(&manifests)).await?;
     if !manifests
         .iter()
         .any(|manifest| manifest.snapshot_id == snapshot_id)
@@ -277,8 +286,16 @@ async fn ensure_listed_parents(
     Ok(())
 }
 
-/// Re-lists manifests immediately before the object sweep and refuses to
-/// delete objects unless the set matches the snapshots the sweep keeps.
+fn manifest_ids(manifests: &[BackupSnapshotManifest]) -> HashSet<Uuid> {
+    manifests
+        .iter()
+        .map(|manifest| manifest.snapshot_id)
+        .collect()
+}
+
+/// Re-lists manifests and refuses to continue unless the set is exactly
+/// `expected`: the first listing before any deletion, or the retained
+/// snapshots before the object sweep.
 async fn ensure_stable_listing(
     repository: &dyn BackupRepository,
     expected: &HashSet<Uuid>,
@@ -290,7 +307,7 @@ async fn ensure_stable_listing(
         unexpected.sort();
         missing.sort();
         return Err(incomplete_listing(format!(
-            "manifest listing changed before the object sweep (newly listed: {unexpected:?}, \
+            "manifest listing changed between reads (newly listed: {unexpected:?}, \
              no longer listed: {missing:?})"
         )));
     }
@@ -300,7 +317,7 @@ async fn ensure_stable_listing(
 fn incomplete_listing(detail: String) -> BackupError {
     BackupError::InvalidManifestChain {
         reason: format!(
-            "snapshot listing is incomplete; refusing to delete unreferenced objects: {detail}"
+            "snapshot listing is incomplete; refusing to delete snapshots or objects: {detail}"
         ),
     }
 }

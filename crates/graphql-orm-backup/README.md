@@ -10,8 +10,8 @@ supersedes: []
 
 # graphql-orm-backup
 
-Version 0.12.1 makes `prune` and `delete_snapshot` refuse to delete objects
-when the snapshot listing is incomplete ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)). Use it with storage 0.8.1;
+Version 0.12.1 makes `prune` and `delete_snapshot` refuse to delete snapshots
+or objects when the snapshot listing is incomplete ([GHSA-439h-2cx8-xwgx](https://github.com/Dastari/graphql-orm/security/advisories/GHSA-439h-2cx8-xwgx)). Use it with storage 0.8.1;
 see [MIGRATION.md](MIGRATION.md).
 
 Version 0.12.0 aligns the optional ORM adapter's public types with ORM 0.80.0

@@ -15,9 +15,11 @@ supersedes: []
 Update backup to 0.12.1 and storage to 0.8.1 from one reviewed workspace
 revision, then refresh the consumer lockfile. No API, manifest or data
 migration is required. `prune` and `delete_snapshot` may now return
-`InvalidManifestChain` with "snapshot listing is incomplete" instead of
-deleting objects. Nothing is deleted from the object store in that case; find
-out why the listing was incomplete before retrying, and do not work around it.
+`InvalidManifestChain` with "snapshot listing is incomplete". When the check
+before deletion fails, nothing has been deleted. When the check before the
+object sweep fails, expired snapshots may have been deleted but no object has.
+Find out why the listing was incomplete before retrying, and do not work around
+it. A dedicated error variant is planned for the next minor release.
 
 ## 0.11.1 to 0.12.0: optional ORM public type identity
 

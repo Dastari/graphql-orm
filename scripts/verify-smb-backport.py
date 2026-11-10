@@ -14,7 +14,7 @@ PATCH = '5614aa2e0d3090d1051cae66858014c17432c959a817bfd0a628b778f3ad78ba'
 # Owner-local patches, applied in order after the backport.
 LOCAL_PATCHES = (
     ('GHSA-439h-2cx8-xwgx', 'PATCHES/ghsa-439h-2cx8-xwgx.patch',
-     '47a00717822a1f7faf76cc5a7d77225cbeae260e1fbafc39ab0c070fe05dd889'),
+     '0c984fb3a6e99ce5b31c50570f4df4ef283bd98d19513a9511c6bdf3cfa3e3d9'),
 )
 LICENSE = '59889992272e339d6af995962dca57cb4565c364255f9a453b0f6f20b0365816'
 ROOT = Path(__file__).resolve().parents[1]
