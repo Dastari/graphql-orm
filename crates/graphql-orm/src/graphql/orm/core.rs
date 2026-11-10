@@ -361,8 +361,21 @@ impl DecimalValue {
 /// as transaction-local `app.*` settings before executing database work.
 ///
 /// Under [`crate::graphql::auth::AuthorizationMode::DeclaredPoliciesRequired`]
-/// (and stricter modes), entities that declare tenant/RLS metadata fail closed
-/// when this context is missing.
+/// (and stricter modes), a generated GraphQL resolver that reaches a PostgreSQL
+/// entity with `#[graphql_rls]` metadata fails closed with
+/// `AUTHORIZATION_MISCONFIGURED` when the request carries neither this context
+/// nor an explicit [`SystemAccess`](crate::graphql::auth::SystemAccess); see
+/// [`ensure_rls_request_context`](crate::graphql::orm::ensure_rls_request_context).
+/// [`crate::graphql::auth::AuthorizationMode::LegacyPermissive`] keeps the
+/// earlier behaviour of running such queries without `app.*` settings.
+///
+/// Repository and lower-level APIs that take `Option<&DbAuthContext>` (for
+/// example [`fetch_rows_with_auth`](crate::graphql::orm::fetch_rows_with_auth))
+/// are trusted host paths: with `None` they run without settings, and the
+/// database policies then see no tenant or user. That is fail-closed only
+/// when PostgreSQL actually enforces RLS for the pool's role, which
+/// [`SchemaManager::validate_rls_enforcement`](crate::graphql::orm::SchemaManager::validate_rls_enforcement)
+/// checks.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct DbAuthContext {
     /// Application user identifier exposed as `app.user_id`.

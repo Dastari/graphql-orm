@@ -3,12 +3,85 @@ title: "Migration Guide"
 kind: reference
 status: active
 owner: workspace-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
 
 # Migration Guide
+
+## 0.120.0: PostgreSQL RLS enforcement and ORM-managed table coverage
+
+Upgrade runtime and macros together. These changes fix GHSA-hr7v-hr83-2jj4 and
+GHSA-7gw2-974x-qhrh and apply to PostgreSQL targets with `#[graphql_rls]`
+entities. SQLite, MSSQL and PostgreSQL schemas without RLS entities are
+unchanged.
+
+**GraphQL requests without `DbAuthContext` now fail.** Under the default
+`AuthorizationMode::DeclaredPoliciesRequired`, and under
+`ExplicitPolicyForAllExposedOperations`, a generated resolver that reaches an
+RLS entity returns `AUTHORIZATION_MISCONFIGURED` when the request carries no
+`DbAuthContext`. Attach `DbAuthContext::from_subject(...)` to every request
+that touches RLS entities. A trusted internal schema that deliberately runs
+without a principal attaches `SystemAccess::new("<name>")` instead.
+`LegacyPermissive` keeps the old behaviour. Repository APIs are unchanged. The
+check also applies when a non-RLS root reaches an RLS entity through a relation
+filter, relation count ordering or a static dependent delete.
+
+`SystemAccess` only skips the ORM-side check: under a correctly validated
+runtime role the database still hides RLS rows. Static dependent deletes of RLS
+entities run with `row_security = off` and therefore need a separate
+`BYPASSRLS` pool, which `validate_rls_enforcement` reports as an error on that
+pool. Authorize the root row with entity and row policies there, and validate
+enforcement against the runtime pool instead.
+
+**Validation now reports roles that bypass RLS.** `validate_target` returns
+`Error` diagnostics when the pool's role is a superuser or has `BYPASSRLS`,
+or owns an RLS table where RLS is not active for it (for example an entity with
+`force = false`). Validate with the runtime pool rather than the migration
+pool, and call `database.schema().validate_rls_enforcement(&target)` at service
+start; refuse to serve on errors. If the runtime role owns the tables, move
+ownership to a separate schema owner role, or keep `force = true`. Do not grant
+`BYPASSRLS` or superuser to the runtime role.
+
+**Re-plan and apply the schema target.** `plan_schema_target` now also emits:
+
+- `ENABLE`/`FORCE ROW LEVEL SECURITY` and four policies on each RLS entity's
+  `__graphql_orm_search_<table>`, plus a `graphql_orm_search_delete` trigger on
+  the base table and the `graphql_orm.delete_search_document()` function. The
+  trigger names the search table by schema, so apply the plan after the search
+  table exists; a base delete raises while the search table is missing;
+- RLS with an `INSERT`-only policy on an existing `__graphql_orm_change_log`.
+
+Apply the plan as the schema owner. Until it is applied, `validate_target`
+reports the missing search-table and journal policies. Hosts that call
+`build_rls_policy_plan` directly should switch to
+`build_schema_target_rls_plan`, which takes the full `SchemaTarget`.
+
+**Only privileged roles can read the change journal.** The runtime role keeps
+`INSERT` on `__graphql_orm_change_log`, so it can still append entries, but it
+can no longer read, update or delete them.
+`export_changes` must run as the table owner or a `BYPASSRLS` role; a role
+subject to RLS now gets a PostgreSQL error instead of an empty export. Create
+the journal with the schema owner: if the runtime role creates and owns it,
+validation reports it as not enforced. `ensure_change_journal_table` secures an
+unsecured journal, which requires ownership; a non-owner calling it on an
+already-secured journal is unaffected.
+
+**Search on RLS entities is slower.** PostgreSQL cannot use the search GIN
+index beneath a row-security policy because `@@` is not leakproof, so each
+search scans the search document table and probes the base primary key per
+document. In a 200,000-document measurement, selective searches went from
+about 8 ms to about 470 ms. Review capacity for large RLS search tables before
+upgrading. An index-preserving design is tracked in
+[#555](https://github.com/Dastari/graphql-orm/issues/555).
+
+Search documents become visible only while the base row is visible to the
+session. For a search-indexed RLS entity, a create whose new row the caller
+cannot see under the entity's `SELECT` policy now fails on the search document
+write.
+
+No data conversion is required.
 
 ## 0.119.0: foreign-key dependency ordering
 

@@ -124,6 +124,8 @@ run_postgres_legacy() {
     --test trusted_internal_writes \
     --test uuid_contract \
     -- --include-ignored --test-threads=1
+  cargo test -p graphql-orm --locked --no-default-features --features postgres,change-journal \
+    --test postgres_rls_coverage -- --include-ignored --test-threads=1
   cargo test -p graphql-orm --locked --no-default-features --features sqlite \
     --test federation_end_to_end_fixture -- --ignored node_lookup_through_the_router_on_owned_postgres
 }

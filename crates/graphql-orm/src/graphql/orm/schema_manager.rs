@@ -12,7 +12,10 @@ use super::migrations::{
     build_migration_plan, classify_migration_steps, validate_migration_step_capabilities,
 };
 use super::owned_schema::{SchemaRef, StepRef};
-use super::rls::{build_rls_policy_plan, validate_rls_models};
+use super::rls::{
+    build_schema_target_rls_plan, validate_protected_rls_tables, validate_rls_enforcement_state,
+    validate_rls_models,
+};
 use super::{IntrospectionBackend, MigrationBackend, OrmBackend, RlsIntrospectionBackend};
 use crate::db::Database;
 
@@ -75,6 +78,14 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
 
     /// Introspect the live database and validate it against a full schema target,
     /// including Postgres RLS metadata when the schema policy manages or validates it.
+    ///
+    /// For a target with RLS entities on PostgreSQL, the report also contains
+    /// [`SchemaDiagnosticSeverity::Error`] diagnostics when RLS would not be
+    /// enforced for this database handle's connection role (see
+    /// [`Self::validate_rls_enforcement`]), and drift diagnostics for the
+    /// search document tables of RLS entities and for the change journal.
+    /// Run it with the runtime pool: the role being checked is the one the
+    /// pool connects as.
     pub async fn validate_target(
         &self,
         target: &SchemaTarget,
@@ -84,21 +95,66 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
     {
         let current = B::introspect_schema(self.database.pool()).await?;
         let schema = self.validate(&current, &target.schema)?;
-        let rls_diagnostics = if matches!(
+        let live = if target.rls.entities.is_empty() {
+            None
+        } else {
+            B::introspect_rls_enforcement(self.database.pool()).await?
+        };
+        let mut rls_diagnostics = if matches!(
             self.policy(),
             SchemaPolicy::ExternalReadOnly | SchemaPolicy::ExternalWritable
         ) {
             Vec::new()
         } else {
             let current_rls = B::introspect_rls(self.database.pool()).await?;
-            validate_rls_models(B::DIALECT, self.policy(), &current_rls, &target.rls)
+            let mut diagnostics =
+                validate_rls_models(B::DIALECT, self.policy(), &current_rls, &target.rls);
+            diagnostics.extend(validate_protected_rls_tables(
+                B::DIALECT,
+                self.policy(),
+                &current_rls,
+                live.as_ref(),
+                target,
+            ));
+            diagnostics
         };
+        if let Some(live) = &live {
+            rls_diagnostics.extend(validate_rls_enforcement_state(B::DIALECT, live, target));
+        }
         Ok(SchemaTargetValidationReport {
             backend: B::DIALECT.name(),
             policy: self.policy(),
             schema,
             rls_diagnostics,
         })
+    }
+
+    /// Check that PostgreSQL enforces the target's RLS for this handle's
+    /// connection role, without validating the rest of the schema.
+    ///
+    /// Call this at service start with the runtime pool and refuse to serve
+    /// on any [`SchemaDiagnosticSeverity::Error`]. PostgreSQL skips every
+    /// policy for a superuser or `BYPASSRLS` role and for the owner of a table
+    /// without `FORCE ROW LEVEL SECURITY`; each case is reported here. The
+    /// check covers RLS entity tables, their search document tables and the
+    /// change journal, applies under every [`SchemaPolicy`], and returns no
+    /// diagnostics for targets without RLS entities or non-PostgreSQL backends.
+    pub async fn validate_rls_enforcement(
+        &self,
+        target: &SchemaTarget,
+    ) -> crate::Result<Vec<SchemaDiagnostic>>
+    where
+        B: RlsIntrospectionBackend,
+    {
+        if target.rls.entities.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(
+            match B::introspect_rls_enforcement(self.database.pool()).await? {
+                Some(live) => validate_rls_enforcement_state(B::DIALECT, &live, target),
+                None => Vec::new(),
+            },
+        )
     }
 
     /// Build a structured migration plan from one schema model to another.
@@ -217,7 +273,7 @@ impl<'db, B: OrmBackend> SchemaManager<'db, B> {
             &planned_current,
             &target.schema,
         )?;
-        let rls = build_rls_policy_plan(B::DIALECT, self.policy(), &target.rls);
+        let rls = build_schema_target_rls_plan(B::DIALECT, self.policy(), target);
         let mut statements = migration.statements.clone();
         statements.extend(rls.statements.clone());
         let target_hash = target.stable_hash();

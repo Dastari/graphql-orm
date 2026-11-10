@@ -215,8 +215,20 @@ impl StaticDeleteBackend for PostgresBackend {
                 .await
                 .map_err(|_| sqlx::Error::Protocol("Dependent delete refused".into()))?;
             // Only native FK/unique/exclusion constraint triggers have modeled
-            // effects. User and extension trigger bodies are opaque.
-            let triggered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger tr JOIN pg_class t ON t.oid=tr.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=tr.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_constraint con ON con.oid=tr.tgconstraint WHERE n.nspname=current_schema() AND t.relname=ANY($1) AND NOT COALESCE(tr.tgisinternal AND pn.nspname='pg_catalog' AND con.contype IN ('f','u','x'),false))").bind(ownership.tables().collect::<Vec<_>>()).fetch_one(tx.as_mut()).await?;
+            // effects. User and extension trigger bodies are opaque. The ORM's
+            // own RLS search-document trigger only deletes from its search
+            // table, which holds no foreign keys or entity rows; it is exempt
+            // only when it fires normally, has the exact type, arguments and
+            // target, and calls the unmodified ORM function.
+            let owned_tables = ownership
+                .tables()
+                .map(|table| table.to_string())
+                .collect::<Vec<_>>();
+            let owned_search_tables = owned_tables
+                .iter()
+                .map(|table| super::search::search_table_name(table))
+                .collect::<Vec<_>>();
+            let triggered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_trigger tr JOIN pg_class t ON t.oid=tr.tgrelid JOIN pg_namespace n ON n.oid=t.relnamespace JOIN pg_proc p ON p.oid=tr.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace LEFT JOIN pg_constraint con ON con.oid=tr.tgconstraint WHERE n.nspname=current_schema() AND t.relname=ANY($1) AND NOT COALESCE(tr.tgisinternal AND pn.nspname='pg_catalog' AND con.contype IN ('f','u','x'),false) AND NOT (NOT tr.tgisinternal AND tr.tgname=$2 AND tr.tgenabled='O' AND tr.tgtype=$4 AND tr.tgnargs=4 AND pn.nspname='graphql_orm' AND p.proname=$3 AND p.pronargs=0 AND NOT p.prosecdef AND p.prosrc=$5 AND p.proconfig=ARRAY[$6]::text[] AND EXISTS (SELECT 1 FROM unnest($1::text[], $7::text[]) AS e(base, search) WHERE e.base=t.relname AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[1]=current_schema() AND (string_to_array(encode(tr.tgargs,'escape'),'\\000'))[2]=e.search)))").bind(&owned_tables).bind(super::rls::SEARCH_DELETE_TRIGGER).bind(super::rls::SEARCH_DELETE_FUNCTION).bind(i16::try_from(super::rls::SEARCH_DELETE_TRIGGER_TYPE).unwrap_or(0)).bind(super::rls::SEARCH_DELETE_FUNCTION_BODY).bind(super::rls::SEARCH_DELETE_FUNCTION_CONFIG).bind(&owned_search_tables).fetch_one(tx.as_mut()).await?;
             if triggered {
                 return Err(sqlx::Error::Protocol("Dependent delete refused".into()));
             }
@@ -325,7 +337,9 @@ pub trait StaticPreparedWrite<B: StaticDeleteBackend>: Send {
 #[diagnostic::on_unimplemented(
     message = "dependent_deletes requires `{Self}` to also opt in with #[graphql_entity(dependent_deletes)]"
 )]
-pub trait StaticDeleteEntity<B: StaticDeleteBackend>: Entity + Send + Sync + 'static {
+pub trait StaticDeleteEntity<B: StaticDeleteBackend>:
+    Entity + super::DatabaseRls + Send + Sync + 'static
+{
     fn select<'a>(
         tx: &'a mut MutationContext<'_, B>,
         column: &'a str,
@@ -342,6 +356,9 @@ pub trait StaticDeleteEntity<B: StaticDeleteBackend>: Entity + Send + Sync + 'st
 }
 trait Adapter<B: StaticDeleteBackend>: Send + Sync {
     fn entity_type_id(&self) -> TypeId;
+    /// Fail closed when this entity has PostgreSQL RLS and the request has no
+    /// database authorization; see [`super::ensure_rls_request_context`].
+    fn ensure_rls_context(&self, ctx: &Context<'_>) -> Result<()>;
     fn metadata(&self) -> &'static EntityMetadata;
     fn select<'a>(
         &self,
@@ -363,6 +380,9 @@ struct TypedAdapter<T>(PhantomData<T>);
 impl<B: StaticDeleteBackend, T: StaticDeleteEntity<B>> Adapter<B> for TypedAdapter<T> {
     fn entity_type_id(&self) -> TypeId {
         TypeId::of::<T>()
+    }
+    fn ensure_rls_context(&self, ctx: &Context<'_>) -> Result<()> {
+        super::ensure_rls_request_context::<T, B>(ctx, T::entity_name())
     }
     fn metadata(&self) -> &'static EntityMetadata {
         T::metadata()
@@ -483,6 +503,7 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
             .await
             .map_err(|_| refusal())?;
         let root = self.entities.get(table).ok_or_else(refusal)?;
+        root.ensure_rls_context(ctx)?;
         let mut rows = root
             .select(&mut tx, root.metadata().primary_key, key, 2)
             .await?;
@@ -528,6 +549,9 @@ impl<B: StaticDeleteBackend> StaticDependentDeletes<B> {
                         .entities
                         .get(source.table_name.as_str())
                         .ok_or_else(refusal)?;
+                    // Every dependent the delete reads or writes needs the same
+                    // request authorization as the root.
+                    adapter.ensure_rls_context(ctx)?;
                     let metadata = adapter.metadata();
                     if fk.column_pairs.len() != 1
                         || metadata.primary_keys.len() != 1

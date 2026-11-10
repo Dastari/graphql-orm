@@ -1387,6 +1387,12 @@ fn generate_graphql_operations_unfiltered(
     let backend_writable = backend != BackendKind::Mssql
         || entity_meta.schema_policy.as_deref() == Some("external_writable");
     let backend_marker = backend_marker_tokens(backend);
+    let rls_request_guard = quote! {
+        ::graphql_orm::graphql::orm::ensure_rls_request_context::<#struct_name, #backend_marker>(
+            ctx,
+            <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
+        )?;
+    };
     let is_mssql = backend == BackendKind::Mssql;
     let pool_type = backend_pool_type_tokens(backend);
 
@@ -2360,7 +2366,7 @@ fn generate_graphql_operations_unfiltered(
         #[doc(hidden)]
         #subscription_key_visibility fn __gom_authorize_changed_operation(ctx: &::graphql_orm::async_graphql::Context<'_>)
             -> ::graphql_orm::async_graphql::Result<()> {
-            let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+            let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
             #subscription_scope_enforcement
             ::graphql_orm::graphql::assurance::enforce_operation_assurance(
                 ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription, #subscription_name,
@@ -4221,7 +4227,7 @@ fn generate_graphql_operations_unfiltered(
                 ctx: &::graphql_orm::async_graphql::Context<'_>,
                 #[graphql(name = #input_arg_name, desc = #input_arg_description)] input: #graphql_create_input,
             ) -> ::graphql_orm::async_graphql::Result<#upsert_result_type> {
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #upsert_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -5279,7 +5285,7 @@ fn generate_graphql_operations_unfiltered(
                 #runtime_keyset_argument
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: ::graphql_orm::graphql::pagination::KeysetPageInput,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #keyset_list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -5304,7 +5310,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #where_arg_name)] where_input: Option<#where_input>,
                 #[graphql(name = #page_arg_name)] page: ::graphql_orm::graphql::orm::AuthorizedScanInput,
             ) -> ::graphql_orm::async_graphql::Result<#scan_connection_type> {
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #keyset_list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
@@ -5368,7 +5374,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #where_arg_name, desc = #where_arg_description)] where_input: Option<#where_input>,
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#search_connection_type> {
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #search_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -5656,7 +5662,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<#result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #create_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -5832,7 +5838,7 @@ fn generate_graphql_operations_unfiltered(
                 ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                     use ::graphql_orm::futures::StreamExt;
                     ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
-                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                     #subscription_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
@@ -5886,7 +5892,7 @@ fn generate_graphql_operations_unfiltered(
                                     != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
                                 if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
                                 let authorize_current = || async {
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                                     #subscription_scope_enforcement
                                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
@@ -5907,7 +5913,7 @@ fn generate_graphql_operations_unfiltered(
                                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                                     #subscription_scope_enforcement
                                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
@@ -7157,7 +7163,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #metrics_arg_name, desc = #metrics_arg_description)] metrics: Vec<#aggregate_metric_input>,
                 #[graphql(name = #group_limit_arg_name, desc = #group_limit_arg_description)] group_limit: i32,
             ) -> ::graphql_orm::async_graphql::Result<Vec<::graphql_orm::graphql::orm::GraphqlAggregateResultRow>> {
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #aggregate_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -7725,7 +7731,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<impl ::graphql_orm::futures::Stream<Item = ::graphql_orm::async_graphql::Result<::graphql_orm::graphql::subscriptions::ChangedPayload<#changed_event>>>> {
                 use ::graphql_orm::futures::StreamExt;
                     ::graphql_orm::graphql::subscriptions::admit_generated_operation(ctx)?;
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #subscription_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -7780,7 +7786,7 @@ fn generate_graphql_operations_unfiltered(
                                     != ::graphql_orm::graphql::loaders::RelationKey::from_sql_values(&#struct_name::__gom_key_values(&#subscription_event_key)) { return None; }
                                 if actions.as_ref().is_some_and(|actions| !actions.contains(&event.action)) { return None; }
                                 let authorize_current = || async {
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                                     #subscription_scope_enforcement
                                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
@@ -7801,7 +7807,7 @@ fn generate_graphql_operations_unfiltered(
                                         <#struct_name as ::graphql_orm::graphql::orm::Entity>::metadata().read_policy,
                                         ::graphql_orm::graphql::orm::EntityAccessKind::Read,
                                         ::graphql_orm::graphql::orm::EntityAccessSurface::GraphqlSubscription).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
-                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                                     #subscription_scope_enforcement
                                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(ctx, ::graphql_orm::graphql::orm::GraphqlOperationKind::Subscription)?;
                                     witness.authorize_provenance(&db, ctx, event.source_entity.as_deref(), event.source_id.as_deref(), &event.path, event.change_kind == ::graphql_orm::graphql::orm::ChangeKind::Propagated).await?;
@@ -8001,7 +8007,7 @@ fn generate_graphql_operations_unfiltered(
                 ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                     use ::graphql_orm::graphql::orm::{DatabaseOrderBy, EntityQuery};
 
-                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                     #list_scope_enforcement
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                         ctx,
@@ -8105,7 +8111,7 @@ fn generate_graphql_operations_unfiltered(
                 ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                     use ::graphql_orm::graphql::orm::EntityQuery;
 
-                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                    let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                     #single_read_scope_enforcement
                     #single_query_key_init
                     ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -8404,7 +8410,7 @@ fn generate_graphql_operations_unfiltered(
                 #[graphql(name = #page_arg_name, desc = #page_arg_description)] page: Option<::graphql_orm::graphql::orm::PageInput>,
             ) -> ::graphql_orm::async_graphql::Result<#connection_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, DatabaseOrderBy, EntityQuery, FromSqlRow};
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #list_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -8507,7 +8513,7 @@ fn generate_graphql_operations_unfiltered(
                 #(#single_query_args)*
             ) -> ::graphql_orm::async_graphql::Result<Option<#struct_name>> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow};
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #single_read_scope_enforcement
                 #single_query_key_init
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
@@ -8580,7 +8586,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, FromSqlRow, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #update_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -8758,7 +8764,7 @@ fn generate_graphql_operations_unfiltered(
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, EntityQuery, SqlValue};
                 let __gom_expected_version: Option<i64> = #expected_version_binding;
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #delete_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -8887,7 +8893,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<#update_many_result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseFilter, EntityQuery};
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #update_many_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,
@@ -8940,7 +8946,7 @@ fn generate_graphql_operations_unfiltered(
             ) -> ::graphql_orm::async_graphql::Result<#delete_many_result_type> {
                 use ::graphql_orm::graphql::orm::{DatabaseEntity, DatabaseFilter, EntityQuery};
 
-                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?;
+                let _auth_subject = ::graphql_orm::graphql::auth::enforce_resolver_auth(ctx, #resolver_auth_mode)?; #rls_request_guard
                 #delete_many_scope_enforcement
                 ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
                     ctx,

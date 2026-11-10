@@ -4,11 +4,13 @@ use super::{
     backup_descriptors_from_entities, current_backend, execute_with_binds_on,
     schema_snapshot_from_entities,
 };
+use crate::DbPool;
+#[cfg(not(feature = "postgres"))]
+use crate::DefaultBackend;
 #[cfg(feature = "postgres")]
 use crate::PostgresBackend;
 #[cfg(feature = "sqlite")]
 use crate::SqliteBackend;
-use crate::{DbPool, DefaultBackend};
 use sqlx::Row;
 use std::collections::BTreeMap;
 
@@ -449,6 +451,12 @@ async fn ensure_change_journal_table(pool: &DbPool) -> crate::Result<()> {
     );
 
     sqlx::query(&sql).execute(pool).await?;
+    // The journal names every tenant's keys. Only privileged roles read it:
+    // a role subject to RLS may append entries but never read or alter them.
+    #[cfg(feature = "postgres")]
+    sqlx::query(&super::rls::postgres_ensure_change_log_rls_sql())
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -529,6 +537,24 @@ async fn export_changes(pool: &DbPool, window: ChangeWindow) -> crate::Result<Ve
         quote_identifier(CHANGE_JOURNAL_TABLE),
         conditions.join(" AND ")
     );
+    #[cfg(feature = "postgres")]
+    let rows = {
+        // `row_security = off` makes PostgreSQL refuse the read for a role
+        // subject to RLS instead of silently exporting an empty journal.
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL row_security = off")
+            .execute(&mut *tx)
+            .await?;
+        let sql = <PostgresBackend as super::OrmBackend>::normalize_sql(&sql, 1);
+        let mut query = sqlx::query(&sql);
+        for value in &values {
+            query = super::backend::bind_postgres_value(query, value);
+        }
+        let rows = query.fetch_all(&mut *tx).await?;
+        tx.commit().await?;
+        rows
+    };
+    #[cfg(not(feature = "postgres"))]
     let rows = super::fetch_rows::<DefaultBackend>(pool, &sql, &values).await?;
     rows.into_iter().map(decode_backup_change).collect()
 }

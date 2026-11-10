@@ -3,7 +3,7 @@ title: "PostgreSQL RLS"
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-10-15
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -90,13 +90,82 @@ database
 
 Policy behavior:
 
-- `Managed`: create helper functions, enable/force RLS, and create deterministic named policies.
+- `Managed`: create helper functions, enable/force RLS, and create deterministic named policies,
+  including on the ORM-managed tables listed under [ORM-managed tables](#orm-managed-tables).
 - `ValidateOnly`: validate table schema plus enabled/forced RLS flags and expected policies where feasible.
 - `PlanOnly`: preview table and RLS SQL, but reject application.
 - `ExternalReadOnly` and `ExternalWritable`: do not create, plan, or validate RLS policies.
 
 The table-only APIs, including `SchemaModel`, `TableModel`, `plan_migration_to_entities`, and
-`apply_migration`, remain unchanged.
+`apply_migration`, remain unchanged. `build_rls_policy_plan` still renders entity tables only;
+`plan_schema_target` uses `build_schema_target_rls_plan`, which also covers ORM-managed tables.
+
+## Enforcement Validation
+
+PostgreSQL skips every policy for a superuser or a `BYPASSRLS` role, and for the owner of a table
+without `FORCE ROW LEVEL SECURITY` (`force = false`). For a target with RLS entities,
+`validate_target` therefore reports `Error` diagnostics when the database handle's connection role
+would not be subject to RLS: one diagnostic for a superuser or `BYPASSRLS` role, otherwise one per
+RLS entity table, search document table or change journal where `row_security_active(table)` is
+false. Run it, or the narrower startup check, with the runtime pool and refuse to serve on errors:
+
+```rust
+let diagnostics = database.schema().validate_rls_enforcement(&target).await?;
+if diagnostics
+    .iter()
+    .any(|diagnostic| diagnostic.severity == SchemaDiagnosticSeverity::Error)
+{
+    return Err("runtime database role bypasses row-level security".into());
+}
+```
+
+`validate_rls_enforcement` applies under every schema policy, including the external ones, and
+returns nothing for targets without RLS entities. Validating with a superuser migration pool now
+reports these errors; validate the schema owner's work with the runtime role instead.
+
+## ORM-Managed Tables
+
+`build_schema_target_rls_plan` (used by `plan_schema_target`) secures the tables the ORM writes on
+behalf of RLS entities, and `validate_target` reports drift on them:
+
+- **Search documents.** For each RLS entity with a PostgreSQL search index, the
+  `__graphql_orm_search_<table>` table gets `ENABLE` and, when the entity forces RLS, `FORCE ROW
+  LEVEL SECURITY`, plus `SELECT`, `INSERT`, `UPDATE` and `DELETE` policies that expose a document
+  only while its base row is visible:
+  `EXISTS (SELECT 1 FROM <base> b WHERE b.<pk> = (<search>.entity_pk)::<pk type>)`. Binary
+  (`Vec<u8>`) keys compare against the ORM's `bin:<hex>` document key (search itself does not yet
+  match binary keys: [#560](https://github.com/Dastari/graphql-orm/issues/560)). A
+  `graphql_orm_search_delete` `BEFORE DELETE` trigger on the base table removes the document while
+  the base row is still visible, including for bulk, cascaded and raw SQL deletes. The plan
+  resolves the search table when it creates the trigger and records its schema and name in the
+  trigger arguments. `graphql_orm.delete_search_document()` runs as the invoker with
+  `search_path = pg_catalog`, so neither the deleting session's `search_path` nor a `pg_temp` table
+  of the same name can redirect it, and it raises instead of deleting the base row when the search
+  table is missing. Dropping or rebuilding the search index drops the trigger; re-applying the
+  schema target recreates it. The runtime role needs DML on the search table, as before.
+- **Change journal.** An existing `__graphql_orm_change_log` gets RLS enabled (not forced) with
+  a single `INSERT ... WITH CHECK (true)` policy. A role subject to RLS can append journal entries
+  but cannot read, update or delete them; only the table owner or a `BYPASSRLS` role can read it.
+  `ensure_change_journal_table` applies the same protection when it creates or opens the table.
+  Create the journal with the schema owner, not the runtime role, or the runtime role owns it and
+  validation reports it as not enforced.
+
+Validation reports a missing or altered policy, any additional policy on these tables (an extra
+permissive policy would widen access), and a trigger that is missing, does not fire in ordinary
+sessions (for example `ENABLE REPLICA`), has the wrong type or arguments, targets another table, or
+calls a modified `graphql_orm.delete_search_document()`. Dependent deletes accept only a trigger
+that passes the same checks.
+
+### Search performance
+
+PostgreSQL evaluates row-security quals before non-leakproof operators, and the full-text match
+operator `@@` is not leakproof. With the search document policy in place PostgreSQL can no longer
+use the GIN index for a search on an RLS entity: each search scans the search document table and
+probes the base primary key per document. In a disposable-container measurement with 200,000
+documents across ten tenants, a selective search went from about 8 ms to about 470 ms, and a broad
+one from about 85 ms to about 430 ms. Searches on entities without `#[graphql_rls]` are unchanged.
+Plan capacity accordingly for large RLS search tables. An index-preserving design is tracked in
+[#555](https://github.com/Dastari/graphql-orm/issues/555).
 
 Use a separate runtime database role without superuser, `BYPASSRLS`, or inherited
 table-owner privileges. The schema owner applies the plan; the runtime role needs
@@ -171,7 +240,50 @@ let request = request
 
 Generated resolvers look for this context. If it is present and the backend is PostgreSQL, list
 queries, single lookups, mutations, and relation preload queries run with transaction-local auth
-settings. If it is absent, existing behavior is preserved.
+settings.
+
+If it is absent, a generated resolver that reaches an entity with `#[graphql_rls]` fails closed
+with `AUTHORIZATION_MISCONFIGURED` before any database work, under the default
+`AuthorizationMode::DeclaredPoliciesRequired` and the stricter
+`ExplicitPolicyForAllExposedOperations`. The check covers every RLS entity a generated request
+reaches:
+
+- the root entity of queries, search, aggregates, mutations, subscriptions, and federation entity
+  and node lookups;
+- relation fields whose target is an RLS entity;
+- relation filters (`where: { children: [...] }`), including nested ones, and relation count
+  ordering (`order_aggregate`) whose target is an RLS entity, even from a non-RLS root;
+- every entity a static dependent delete reads or writes.
+
+Entities without `#[graphql_rls]` are unaffected. The check applies to generated static entities
+only; runtime GraphQL collections do not carry RLS metadata
+([#559](https://github.com/Dastari/graphql-orm/issues/559)). Two explicit exceptions remain:
+
+- `SystemAccess::new("<name>")` in the request data is the named trusted bypass for an internal
+  schema that deliberately runs without a principal. It only skips this ORM-side check. Under a
+  correctly validated runtime role the database still applies RLS, and the generated predicates,
+  which see no tenant or user, hide the rows. Use it with a pool whose role is meant to see them.
+- `AuthorizationMode::LegacyPermissive` keeps the earlier behaviour of running without settings.
+
+### Dependent deletes
+
+Static dependent deletes issue `SET LOCAL row_security = off`, so that PostgreSQL refuses rather
+than silently hides dependents. On a role subject to RLS, a dependent delete of an RLS entity
+therefore fails, and it succeeds only for a role that bypasses RLS. Such a role is exactly what
+[Enforcement Validation](#enforcement-validation) reports as an `Error`. Run dependent deletes
+through a separate `Database` whose pool connects as a dedicated `BYPASSRLS` role, used only by a
+host-controlled delete schema. On that path:
+
+- tenant isolation comes only from the ORM: authorize the root row with entity and row policies,
+  because the bypass role reads every tenant's rows;
+- attach `DbAuthContext` (or `SystemAccess`) to the request so the fail-closed check passes;
+- run `validate_rls_enforcement` against the runtime pool, not the delete pool, whose `BYPASSRLS`
+  error is expected.
+
+Repository and lower-level APIs (`find_by_key`, `fetch_rows_with_auth(..., None)`,
+`MutationContext::begin`) are trusted host paths and still run without settings. Without settings
+the generated predicates see no tenant or user and match no rows, which fails closed only when the
+pool's role is subject to RLS. See [Enforcement Validation](#enforcement-validation).
 
 Connection pooling safety depends on transaction-local `set_config(..., true)`: settings are visible
 inside the query or mutation transaction and are cleared on commit or rollback. Relation loaders add a
