@@ -10,6 +10,11 @@ supersedes: []
 
 # `graphql-orm-macros`
 
+Version 0.122.0 extends operation assurance to runtime GraphQL roots,
+unregistered mutations under a default policy, Federation entity resolvers and
+described custom roots. Upgrade ORM/macros together; see the
+[root migration guide](../../MIGRATION.md#01220-operation-assurance-on-runtime-custom-and-federation-roots).
+
 Version 0.121.0 makes schema stage application refuse destructive steps
 unless `allow_destructive` is set, matching planned migrations. Upgrade
 ORM/macros together; see the

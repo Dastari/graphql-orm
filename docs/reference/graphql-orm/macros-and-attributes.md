@@ -660,6 +660,14 @@ use the same explicit/doc/fallback rules and are emitted into SDL. Unknown attri
 unbounded descriptions, malformed GraphQL types, duplicate root coordinates,
 and stale fingerprints fail closed.
 
+Each described root, except `#[graphql(entity)]` resolvers, also gets
+`guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::…)"`, so it
+enforces an installed `AssuranceEnforcement`. A root with its own `guard` must
+compose that guard explicitly, for example
+`DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation).and(HostGuard)`.
+Otherwise it fails to compile. See
+[operation assurance](../../architecture/operation-assurance.md).
+
 Custom scalar and enum result leaves carry an explicit project-neutral
 `result_disclosure`. Without a declaration they default to
 `Secret`/`NeverExport` and are unavailable to generated AI capabilities while

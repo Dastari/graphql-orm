@@ -331,6 +331,7 @@ pub(crate) fn federation_entity_resolver_tokens(
     relation_preload_single: &proc_macro2::TokenStream,
     keys: &[ResolvedFederationKey],
     scope_enforcements: &[proc_macro2::TokenStream],
+    single_read_field: &str,
 ) -> proc_macro2::TokenStream {
     let resolvers = keys
         .iter()
@@ -382,9 +383,12 @@ pub(crate) fn federation_entity_resolver_tokens(
                 <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(),
             )?;
                     #scope_enforcement
-                    ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+                    // The context field is `_entities`; assurance uses the
+                    // entity's get-by-id root, which this resolver stands in for.
+                    ::graphql_orm::graphql::assurance::enforce_operation_assurance(
                         ctx,
                         ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                        #single_read_field,
                     )?;
                     let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
                     let pool = db.pool();
@@ -498,6 +502,7 @@ pub(crate) fn node_id_entity_resolver_tokens(
     relation_preload_single: &proc_macro2::TokenStream,
     parts: &[NodeIdPart],
     scope_enforcement: &proc_macro2::TokenStream,
+    single_read_field: &str,
 ) -> proc_macro2::TokenStream {
     let typename = struct_name.to_string();
     let part_count = parts.len();
@@ -564,9 +569,11 @@ pub(crate) fn node_id_entity_resolver_tokens(
                 return Ok(None);
             }
             #scope_enforcement
-            ::graphql_orm::graphql::assurance::enforce_resolver_assurance(
+            // The context field is `_entities`; use the get-by-id root's coordinate.
+            ::graphql_orm::graphql::assurance::enforce_operation_assurance(
                 ctx,
                 ::graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+                #single_read_field,
             )?;
             let db = ctx.data_unchecked::<::graphql_orm::db::Database<#backend_marker>>();
             let pool = db.pool();

@@ -115,11 +115,19 @@ pub(super) fn search_helpers() -> Vec<Type> {
 }
 
 pub(super) fn root_field(name: &str, object: &str, search: bool) -> Field {
+    let root = name.to_owned();
     let field = Field::new(
         name,
         TypeRef::named_nn(format!("{object}Connection")),
-        |ctx| {
+        move |ctx| {
+            let root = root.clone();
             FieldFuture::new(async move {
+                // Reads ran in the request guard; assurance withholds their result.
+                crate::graphql::assurance::enforce_operation_assurance(
+                    ctx.ctx,
+                    GraphqlOperationKind::Query,
+                    &root,
+                )?;
                 let results = ctx.data::<super::execution::Results>()?;
                 let selection = ctx.field();
                 let key = selection.alias().unwrap_or(selection.name());

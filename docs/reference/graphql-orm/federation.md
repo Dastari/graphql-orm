@@ -152,7 +152,9 @@ propagation:
 
 1. `enforce_resolver_auth` for the entity's `auth` mode;
 2. the entity's declared `single_read` scope enforcement;
-3. `enforce_resolver_assurance` for `GraphqlOperationKind::Query`;
+3. `enforce_operation_assurance` for `GraphqlOperationKind::Query` with the
+   entity's get-by-id root, such as `zone`. The resolver runs below `_entities`,
+   so the context field name would never match a registered coordinate;
 4. `ensure_entity_access(..., EntityAccessKind::Read, EntityAccessSurface::GraphqlQuery)`;
 5. the batched fetch, carrying the caller's `DbAuthContext`;
 6. `can_read_row` on the loaded row.

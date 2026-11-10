@@ -10,6 +10,60 @@ supersedes: []
 
 # Migration Guide
 
+## 0.122.0: operation assurance on runtime, custom and Federation roots
+
+**Upgrade warning: more mutations can now demand step-up.**
+Upgrade runtime and macros together. No data conversion is required.
+
+Behaviour changes when an `AssuranceEnforcement` is installed:
+
+- Runtime GraphQL roots enforce assurance with their own root coordinate.
+  This covers create, update, delete and `update<Object><Relation>Links`
+  mutations, `RuntimeHostField` query and mutation roots, collection roots,
+  `node` and live `…Changed` subscriptions. Mutations are checked before any
+  write. Collection roots and `node` read during request preparation, so for
+  those assurance withholds the result.
+- A mutation the registry does not contain is evaluated against
+  `default_interactive_mutation_policy`, as if it were registered as
+  interactive. Previously it was allowed. Strict classification still rejects
+  it as misconfigured. Without a default, non-strict schemas keep the old
+  behaviour.
+- Federation entity resolvers enforce the entity's get-by-id query root, for
+  example `Query.zone`, instead of `Query._entities`, which is never
+  registered. A requirement on that root now applies to `_entities` fetches too.
+- `#[graphql_orm_custom_operations]` adds
+  `guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::…)"` to every
+  described root. A root that already has a `guard` must include
+  `DeclaredAssuranceGuard` itself, for example
+  `guard = "DeclaredAssuranceGuard::new(GraphqlOperationKind::Mutation).and(HostGuard)"`.
+  Otherwise it no longer compiles.
+
+To upgrade:
+
+1. Register runtime roots before building the registry, then classify them:
+
+   ```rust
+   let mut builder = OperationAssuranceRegistryBuilder::new(config);
+   composer.register_assurance_operations(&mut builder)?;
+   builder.exempt(GraphqlOperationKind::Mutation, "syncInventory", "service job")?;
+   let enforcement = AssuranceEnforcement::new(Arc::new(builder.build()?), evaluator);
+   let schema = composer.data(enforcement).finish()?;
+   ```
+
+   Static schemas that also serve runtime roots can build the registry from
+   `graphql_orm_operation_catalog()` and call the same method. Coordinates
+   the builder already holds keep their registration.
+2. For static schemas, finish through `enforcement.finish_schema(builder)`, or
+   call `registry.ensure_schema_sdl(&schema.sdl())` in a schema test. Under
+   strict classification this fails with `UnregisteredMutations` for any
+   unregistered Mutation root field.
+3. Exempt machine, service and safety-teardown mutations that the default now
+   covers. Before relying on the default, check that custom mutations outside
+   `#[graphql_orm_custom_operations]` carry `DeclaredAssuranceGuard`.
+4. Exhaustive matches on `OperationAssuranceOrigin` or `AssuranceRegistryError`
+   need arms for `Runtime`, `UnregisteredMutations` and `InvalidSchema`.
+   Manifest entries for runtime module roots use the origin `"runtime"`.
+
 ## 0.121.0: schema stages refuse destructive steps by default
 
 **Behaviour change: stage applies that used to drop tables or columns are now refused.**

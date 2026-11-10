@@ -7571,6 +7571,7 @@ fn generate_graphql_operations_unfiltered(
         &relation_preload_single,
         &federation_keys,
         &federation_scope_enforcements,
+        &single_query_name,
     );
     let node_id_entity_resolver = match crate::federation::resolve_node_id_parts(
         struct_name,
@@ -7609,6 +7610,7 @@ fn generate_graphql_operations_unfiltered(
                 &relation_preload_single,
                 &parts,
                 &scope_enforcement,
+                &single_query_name,
             )
         }
         None => quote! {},

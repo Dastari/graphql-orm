@@ -78,6 +78,32 @@ construct them with `Default` and explicit setters/field updates.
 `RuntimeGraphqlOptions::default().with_cursor_profile(RuntimeCursorProfile::Unprotected)` is an explicit alternative for hosts accepting
 readable existing cursors; it must not be used for confidential hidden keys.
 
+## Operation assurance
+
+Every runtime root enforces an installed `AssuranceEnforcement` with its own
+coordinate. This covers collection roots, `node`, generated and link mutations,
+`RuntimeHostField` roots and live `…Changed` subscriptions. A mutation is
+checked before its write. A query root's read runs during request preparation,
+so for queries assurance withholds the result rather than the read. A
+host-owned `subscription_root` keeps its own guards.
+
+Register the roots before building the registry, so hosts can require or
+exempt them:
+
+```rust,ignore
+let mut builder = OperationAssuranceRegistryBuilder::new(config);
+composer.register_assurance_operations(&mut builder)?;
+let enforcement = AssuranceEnforcement::new(Arc::new(builder.build()?), evaluator);
+let api = composer.data(enforcement).finish()?;
+```
+
+Module roots register as `runtime` origin operations bound to the module schema
+fingerprint, and host fields as `custom` operations. All are interactive. An
+unregistered mutation still receives the default interactive mutation policy.
+Under strict classification, `finish` fails with `assurance_unclassified`
+unless the enforcement installed through `data` registers and classifies every
+mutation root. See [operation assurance](../../architecture/operation-assurance.md).
+
 ## Authorization, pagination and batching
 
 Each request must provide `RuntimeReadAuthority`. Its borrowed check contains the

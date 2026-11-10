@@ -373,3 +373,64 @@ async fn unauthenticated_callers_cannot_resolve_an_auth_required_entity() {
         authenticated.errors
     );
 }
+
+/// Denies every assurance requirement, recording the policy it was asked for.
+#[derive(Debug, Default)]
+struct StepUpRequired(Mutex<Vec<String>>);
+
+impl AssuranceRequirementEvaluator for StepUpRequired {
+    fn enforce(
+        &self,
+        _ctx: &async_graphql::Context<'_>,
+        _actor_class: AssuranceActorClass,
+        policy_id: &str,
+    ) -> async_graphql::Result<()> {
+        self.0.lock().unwrap().push(policy_id.to_owned());
+        Err(async_graphql::Error::new(
+            "additional authentication is required",
+        ))
+    }
+}
+
+/// Entity resolvers run below `_entities`, so the assurance lookup must use the
+/// entity's get-by-id root rather than the context field.
+#[tokio::test]
+async fn entity_resolvers_enforce_the_single_read_assurance_coordinate() {
+    let database =
+        graphql_orm::db::Database::with_entity_policy(zone_pool().await, allowing_policy());
+    let mut builder = OperationAssuranceRegistry::builder(
+        zones::graphql_orm_operation_catalog(),
+        AssuranceSchemaConfig::legacy(),
+    );
+    builder
+        .require(
+            graphql_orm::graphql::orm::GraphqlOperationKind::Query,
+            "zone",
+            "read.recent-auth",
+        )
+        .unwrap();
+    let evaluator = Arc::new(StepUpRequired::default());
+    let registry = Arc::new(builder.build().unwrap());
+    let schema = zones::schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .data(AssuranceEnforcement::new(
+            registry.clone(),
+            evaluator.clone(),
+        ))
+        .finish();
+    // The Federation SDL parses and every generated mutation root is registered.
+    registry.ensure_schema_sdl(&schema.sdl()).unwrap();
+
+    let response = schema.execute(entities_query(&["zone-1"], "id")).await;
+    assert_eq!(response.errors.len(), 1, "{:?}", response.data);
+    assert_eq!(
+        response.errors[0].message,
+        "additional authentication is required"
+    );
+    assert_eq!(evaluator.0.lock().unwrap().as_slice(), ["read.recent-auth"]);
+    let direct = schema
+        .execute("query { zone(id: \"zone-1\") { id } }")
+        .await;
+    assert_eq!(direct.errors.len(), 1, "{:?}", direct.data);
+    assert_eq!(evaluator.0.lock().unwrap().len(), 2);
+}

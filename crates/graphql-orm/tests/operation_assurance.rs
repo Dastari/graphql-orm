@@ -39,10 +39,24 @@ impl CustomAssuranceMutations {
     }
 }
 
+/// A described custom root: the attribute installs its assurance guard.
+#[derive(Default)]
+struct DescribedAssuranceMutations;
+
+#[graphql_orm_custom_operations(kind = "mutation")]
+#[graphql_orm::async_graphql::Object]
+impl DescribedAssuranceMutations {
+    /// Rotate the signing key.
+    async fn rotate_key(&self) -> bool {
+        true
+    }
+}
+
 schema_roots! {
     backend: "sqlite",
     entities: [AssuranceRecord],
     extra_mutation_types: [CustomAssuranceMutations],
+    described_mutation_types: [DescribedAssuranceMutations],
 }
 
 #[derive(Clone)]
@@ -75,6 +89,14 @@ impl AssuranceRequirementEvaluator for DenyingEvaluator {
     }
 }
 
+fn strict_builder() -> OperationAssuranceRegistryBuilder {
+    let config = AssuranceSchemaConfig::legacy()
+        .with_default_interactive_mutation_policy("interactive.recent-auth")
+        .unwrap()
+        .with_strict_mutation_classification(true);
+    OperationAssuranceRegistry::builder(graphql_orm_operation_catalog(), config)
+}
+
 fn registry() -> OperationAssuranceRegistry {
     let config = AssuranceSchemaConfig::legacy()
         .with_default_interactive_mutation_policy("interactive.recent-auth")
@@ -93,6 +115,14 @@ fn registry() -> OperationAssuranceRegistry {
             GraphqlOperationKind::Mutation,
             "serviceHeartbeat",
             "service operation uses a non-interactive principal",
+        )
+        .unwrap();
+    builder
+        .register_custom(
+            "custom:rotate-key:v1",
+            GraphqlOperationKind::Mutation,
+            "rotateKey",
+            AssuranceActorClass::Interactive,
         )
         .unwrap();
     builder.build().unwrap()
@@ -150,4 +180,103 @@ fn manifest_is_advisory_complete_and_deterministic() {
     assert!(first.contains("interactive.recent-auth"));
     assert!(first.contains("custom:service-heartbeat:v1"));
     assert!(first.contains("service operation uses a non-interactive principal"));
+}
+
+fn denying(calls: &Arc<AtomicUsize>) -> Arc<DenyingEvaluator> {
+    Arc::new(DenyingEvaluator {
+        calls: calls.clone(),
+    })
+}
+
+fn step_up(response: &graphql_orm::async_graphql::Response) -> bool {
+    response.errors.len() == 1
+        && response.errors[0]
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.get("code"))
+            .map(ToString::to_string)
+            .as_deref()
+            == Some("\"STEP_UP_REQUIRED\"")
+}
+
+/// A custom mutation missing from a non-strict registry receives the
+/// configured interactive default.
+#[tokio::test]
+async fn unregistered_custom_mutations_apply_the_default_interactive_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let config = AssuranceSchemaConfig::legacy()
+        .with_default_interactive_mutation_policy("interactive.recent-auth")
+        .unwrap();
+    let registry = OperationAssuranceRegistry::builder(graphql_orm_operation_catalog(), config)
+        .build()
+        .unwrap();
+    let schema = schema_builder(database)
+        .data(AuthSubject::new("user-1"))
+        .data(AssuranceEnforcement::new(
+            Arc::new(registry),
+            denying(&calls),
+        ))
+        .finish();
+
+    for mutation in ["mutation { serviceHeartbeat }", "mutation { rotateKey }"] {
+        let response = schema.execute(mutation).await;
+        assert!(step_up(&response), "{mutation}: {:?}", response.errors);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn described_custom_roots_enforce_their_registered_classification()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let schema = AssuranceEnforcement::new(Arc::new(registry()), denying(&calls))
+        .finish_schema(schema_builder(database).data(AuthSubject::new("user-1")))?;
+    let response = schema.execute("mutation { rotateKey }").await;
+    assert!(step_up(&response), "{:?}", response.errors);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn strict_schema_build_refuses_unregistered_mutation_roots()
+-> Result<(), Box<dyn std::error::Error>> {
+    let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:").await?;
+    // Only the generated catalogue: both custom roots are unregistered.
+    let mut builder = strict_builder();
+    builder
+        .register_custom(
+            "custom:service-heartbeat:v1",
+            GraphqlOperationKind::Mutation,
+            "serviceHeartbeat",
+            AssuranceActorClass::Service,
+        )
+        .unwrap()
+        .exempt(
+            GraphqlOperationKind::Mutation,
+            "serviceHeartbeat",
+            "service operation uses a non-interactive principal",
+        )
+        .unwrap();
+    let incomplete = builder.build().unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let error = AssuranceEnforcement::new(Arc::new(incomplete), denying(&calls))
+        .finish_schema(schema_builder(database.clone()))
+        .err()
+        .expect("an unregistered mutation root must fail the strict schema build");
+    let AssuranceRegistryError::UnregisteredMutations(missing) = error else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(
+        missing.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        ["Mutation.rotateKey"]
+    );
+
+    AssuranceEnforcement::new(Arc::new(registry()), denying(&calls))
+        .finish_schema(schema_builder(database))?;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    Ok(())
 }

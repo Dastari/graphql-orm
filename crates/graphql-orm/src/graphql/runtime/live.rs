@@ -194,6 +194,11 @@ fn node_key(module: &RuntimeGraphqlModule, c: &RuntimeCollection, id: &str) -> O
 pub(super) fn node_field() -> Field {
     Field::new("node", TypeRef::named("Node"), |ctx| {
         FieldFuture::new(async move {
+            crate::graphql::assurance::enforce_operation_assurance(
+                ctx.ctx,
+                GraphqlOperationKind::Query,
+                "node",
+            )?;
             let results = ctx.data::<super::execution::Results>()?;
             let field = ctx.field();
             let key = field.alias().unwrap_or(field.name());
@@ -537,6 +542,7 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
     } else {
         format!("{object}KeyInput")
     };
+    let root = changed_name(&module, &c);
     SubscriptionField::new(
         changed_name(&module, &c),
         TypeRef::named_nn(event_name),
@@ -545,7 +551,14 @@ pub(super) fn subscription_field<B: RuntimeReadBackend>(
             let module = module.clone();
             let c = c.clone();
             let protection = protection.clone();
+            let root = root.clone();
             SubscriptionFieldFuture::new(async move {
+                // Before registration, admission reads or any event delivery.
+                crate::graphql::assurance::enforce_operation_assurance(
+                    ctx.ctx,
+                    GraphqlOperationKind::Subscription,
+                    &root,
+                )?;
                 let request = ctx
                     .data_opt::<RuntimeGraphqlRequest<B>>()
                     .ok_or_else(|| wire_error("authorization_missing"))?;

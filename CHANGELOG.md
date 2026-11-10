@@ -16,6 +16,20 @@ for historical context.
 
 ## Unreleased
 
+## 0.122.0
+
+ORM runtime/macros **0.122.0**.
+
+- **Breaking:** operation assurance now covers every root it can see.
+  - Runtime create, update, delete and link mutations, `RuntimeHostField` roots, runtime collection roots, `node` and live subscriptions enforce the installed `AssuranceEnforcement` with their own coordinate. Mutations check before any write, and subscriptions before registration.
+  - A mutation missing from the registry is evaluated against the configured interactive mutation default instead of being allowed. Strict mode still refuses it.
+  - Federation entity resolvers enforce the entity's get-by-id root (for example `Query.zone`) instead of an unregistered `Query._entities`.
+  - `#[graphql_orm_custom_operations]` installs `DeclaredAssuranceGuard` on each described root. A resolver with its own guard must compose it explicitly or it fails to compile.
+- **API:** `RuntimeGraphqlComposer::register_assurance_operations`, `OperationAssuranceRegistryBuilder::{new, register_runtime, contains}`, `OperationAssuranceRegistry::{config, unregistered_mutation_roots, ensure_mutation_roots_registered, ensure_schema_sdl}` and `AssuranceEnforcement::finish_schema`.
+  - `OperationAssuranceOrigin` gains `Runtime`; `AssuranceRegistryError` gains `UnregisteredMutations` and `InvalidSchema`.
+  - Under strict classification, `RuntimeGraphqlComposer::finish` with enforcement installed through `data` fails with `assurance_unclassified` unless every mutation root is registered and classified. `finish_schema` does the same for static schemas.
+- **Upgrade warning:** with a default interactive mutation policy, runtime mutations, host mutation fields and unregistered custom mutations now demand step-up too. See the 0.122.0 migration guide.
+
 ## 0.121.0
 
 ORM runtime/macros **0.121.0**.

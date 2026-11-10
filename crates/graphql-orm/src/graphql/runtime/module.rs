@@ -543,10 +543,17 @@ impl RuntimeGraphqlModule {
     }
 }
 
+type HostResolver = Arc<dyn for<'a> Fn(ResolverContext<'a>) -> FieldFuture<'a> + Send + Sync>;
+
 /// Root field whose actual name is checked by the composer.
+///
+/// Its resolver runs only after the installed
+/// [`AssuranceEnforcement`](crate::graphql::assurance::AssuranceEnforcement)
+/// admits the field's own root coordinate.
 pub struct RuntimeHostField {
     pub(super) name: String,
-    field: Field,
+    ty: TypeRef,
+    resolver: HostResolver,
     arguments: Vec<(String, InputValue)>,
     semantic: Option<GraphqlSemanticOperationDescriptor>,
 }
@@ -555,10 +562,10 @@ impl RuntimeHostField {
     where
         F: for<'a> Fn(ResolverContext<'a>) -> FieldFuture<'a> + Send + Sync + 'static,
     {
-        let name = name.into();
         Self {
-            field: Field::new(&name, ty, resolver),
-            name,
+            name: name.into(),
+            ty,
+            resolver: Arc::new(resolver),
             arguments: Vec::new(),
             semantic: None,
         }
@@ -618,7 +625,16 @@ impl RuntimeHostField {
         if self.semantic.as_ref().is_some_and(|d| d.kind != kind) {
             return Err(RuntimeGraphqlError::new("invalid_semantic_catalog"));
         }
-        let mut field = self.field;
+        let resolver = self.resolver;
+        let root = self.name.clone();
+        let mut field = Field::new(&self.name, self.ty, move |ctx| {
+            match crate::graphql::assurance::enforce_operation_assurance(ctx.ctx, kind, &root) {
+                Ok(()) => resolver(ctx),
+                Err(error) => {
+                    FieldFuture::new(async move { Err::<Option<FieldValue<'static>>, _>(error) })
+                }
+            }
+        });
         if let Some(descriptor) = &self.semantic {
             field = field.description(&descriptor.description);
         }
@@ -672,6 +688,10 @@ pub struct RuntimeGraphqlComposer<B: RuntimeReadBackend> {
     protection: Option<super::execution::Protection>,
     projected_types: BTreeMap<String, super::RuntimeProjectedObject>,
     pub(super) semantic: SemanticParts,
+    /// Host-authored root fields, registered as custom assurance operations.
+    pub(super) host_roots: BTreeSet<(GraphqlOperationKind, String)>,
+    /// Enforcement installed through [`Self::data`], checked by [`Self::finish`].
+    assurance: Option<crate::graphql::assurance::AssuranceEnforcement>,
 }
 impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
     pub fn new(
@@ -713,13 +733,16 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
             protection: None,
             projected_types: BTreeMap::new(),
             semantic: SemanticParts::default(),
+            host_roots: BTreeSet::new(),
+            assurance: None,
         })
     }
     pub fn query_field(mut self, spec: RuntimeHostField) -> Result<Self, RuntimeGraphqlError> {
         let (name, field, semantic) = spec.into_parts(GraphqlOperationKind::Query)?;
-        if !valid_name(&name, false) || !self.roots.insert(name) {
+        if !valid_name(&name, false) || !self.roots.insert(name.clone()) {
             return Err(RuntimeGraphqlError::new("name_collision"));
         }
+        self.host_roots.insert((GraphqlOperationKind::Query, name));
         self.query = self.query.field(field);
         self.semantic.root(semantic);
         Ok(self)
@@ -975,7 +998,16 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         });
         Ok(self)
     }
+    /// Add schema data. Installing an
+    /// [`AssuranceEnforcement`](crate::graphql::assurance::AssuranceEnforcement)
+    /// here also lets [`Self::finish`] check, under strict mutation
+    /// classification, that its registry covers every mutation root.
     pub fn data<D: Send + Sync + 'static>(mut self, data: D) -> Self {
+        if let Some(enforcement) = (&data as &dyn std::any::Any)
+            .downcast_ref::<crate::graphql::assurance::AssuranceEnforcement>(
+        ) {
+            self.assurance = Some(enforcement.clone());
+        }
         self.actions
             .push(Box::new(move |builder| builder.data(data)));
         self
@@ -1060,7 +1092,121 @@ impl<B: RuntimeReadBackend> RuntimeGraphqlComposer<B> {
         Ok((self.finish()?, catalog))
     }
 
+    /// Register every root of this composition in an assurance registry.
+    ///
+    /// Module query, mutation, `node` and live subscription roots are
+    /// registered as [`OperationAssuranceOrigin::Runtime`] operations whose
+    /// identity binds the module schema fingerprint, and
+    /// [`RuntimeHostField`] roots as
+    /// [`OperationAssuranceOrigin::Custom`] operations. All are interactive.
+    /// Coordinates the builder already holds keep their registration, so a
+    /// host can register a root itself first. Fields of a host-owned
+    /// [`Self::subscription_root`] are host-authored and are not listed.
+    ///
+    /// [`OperationAssuranceOrigin::Runtime`]: crate::graphql::assurance::OperationAssuranceOrigin::Runtime
+    /// [`OperationAssuranceOrigin::Custom`]: crate::graphql::assurance::OperationAssuranceOrigin::Custom
+    pub fn register_assurance_operations(
+        &self,
+        builder: &mut crate::graphql::assurance::OperationAssuranceRegistryBuilder,
+    ) -> Result<(), crate::graphql::assurance::AssuranceRegistryError> {
+        use crate::graphql::assurance::AssuranceActorClass::Interactive;
+        let mut module_roots = Vec::new();
+        for module in &self.modules {
+            let fingerprint = module.schema.fingerprint().to_string();
+            for c in &module.schema.schema().collections {
+                module_roots.push((
+                    fingerprint.clone(),
+                    GraphqlOperationKind::Query,
+                    module.root_name(c),
+                ));
+                for root in super::mutation::roots(module, c) {
+                    module_roots.push((
+                        fingerprint.clone(),
+                        GraphqlOperationKind::Mutation,
+                        root.name,
+                    ));
+                }
+                if c.live_subscriptions.is_some() {
+                    module_roots.push((
+                        fingerprint.clone(),
+                        GraphqlOperationKind::Subscription,
+                        super::live::changed_name(module, c),
+                    ));
+                }
+            }
+        }
+        let mut fingerprints = Vec::new();
+        for module in &self.modules {
+            if module
+                .schema
+                .schema()
+                .collections
+                .iter()
+                .any(|c| c.node_identity.is_some())
+            {
+                fingerprints.push(module.schema.fingerprint().to_string());
+            }
+        }
+        if !fingerprints.is_empty() {
+            builder_register(
+                builder,
+                format!("runtime:{}:Query.node", fingerprints.join("+")),
+                GraphqlOperationKind::Query,
+                "node",
+                true,
+            )?;
+        }
+        for (fingerprint, kind, name) in module_roots {
+            // Mutation roots exist only when a mutation root was configured.
+            if kind == GraphqlOperationKind::Mutation && self.mutation_name.is_none() {
+                continue;
+            }
+            let coordinate = format!("runtime:{fingerprint}:{}.{name}", kind.root_type());
+            builder_register(builder, coordinate, kind, &name, true)?;
+        }
+        for (kind, name) in &self.host_roots {
+            builder_register(
+                builder,
+                format!("runtime-host:{}.{name}", kind.root_type()),
+                *kind,
+                name,
+                false,
+            )?;
+        }
+        fn builder_register(
+            builder: &mut crate::graphql::assurance::OperationAssuranceRegistryBuilder,
+            operation_id: String,
+            kind: GraphqlOperationKind,
+            name: &str,
+            runtime: bool,
+        ) -> Result<(), crate::graphql::assurance::AssuranceRegistryError> {
+            if builder.contains(kind, name) {
+                return Ok(());
+            }
+            if runtime {
+                builder.register_runtime(operation_id, kind, name, Interactive)?;
+            } else {
+                builder.register_custom(operation_id, kind, name, Interactive)?;
+            }
+            Ok(())
+        }
+        Ok(())
+    }
+
     pub fn finish(mut self) -> Result<Schema, RuntimeGraphqlError> {
+        if let Some(enforcement) = &self.assurance {
+            let registry = enforcement.registry();
+            if registry.config().strict_mutation_classification()
+                && (registry
+                    .ensure_mutation_roots_registered(
+                        self.mutation_roots.iter().map(String::as_str),
+                    )
+                    .is_err()
+                    || registry.ensure_complete().is_err())
+            {
+                return Err(RuntimeGraphqlError::new("assurance_unclassified"));
+            }
+        }
         if self.modules.iter().any(|m| {
             m.schema
                 .schema()

@@ -198,6 +198,23 @@ fn graphql_attribute_value(attrs: &[syn::Attribute], key: &str) -> syn::Result<O
     Ok(result)
 }
 
+/// The `guard` expression of a resolver's `#[graphql(...)]` attributes, as tokens.
+fn graphql_guard(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
+    let mut guard = None;
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
+        attr.parse_nested_meta(|nested| {
+            if nested.path.is_ident("guard") {
+                let value: syn::Expr = nested.value()?.parse()?;
+                guard = Some(value.to_token_stream().to_string());
+            } else if nested.input.peek(Token![=]) {
+                let _: syn::Expr = nested.value()?.parse()?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(guard)
+}
+
 fn has_graphql_flag(attrs: &[syn::Attribute], key: &str) -> syn::Result<bool> {
     let mut found = false;
     for attr in attrs.iter().filter(|attr| attr.path().is_ident("graphql")) {
@@ -430,6 +447,20 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
         Ok(item) => item,
         Err(error) => return error.to_compile_error().into(),
     };
+    let kind_variant = match args.kind.as_str() {
+        "query" => "Query",
+        "mutation" => "Mutation",
+        _ => "Subscription",
+    };
+    // Every described root enforces its own assurance coordinate. A resolver
+    // with its own guard must compose this one explicitly.
+    let assurance_guard = syn::LitStr::new(
+        &format!(
+            "::graphql_orm::graphql::assurance::DeclaredAssuranceGuard::new(\
+             ::graphql_orm::graphql::orm::GraphqlOperationKind::{kind_variant})"
+        ),
+        proc_macro2::Span::call_site(),
+    );
     let kind = match args.kind.as_str() {
         "query" => quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Query },
         "mutation" => quote! { ::graphql_orm::graphql::orm::GraphqlOperationKind::Mutation },
@@ -494,6 +525,54 @@ pub(crate) fn expand(args: TokenStream, input: TokenStream) -> TokenStream {
             Ok(options) => options,
             Err(error) => return error.to_compile_error().into(),
         };
+        let entity = match has_graphql_flag(&method.attrs, "entity") {
+            Ok(entity) => entity,
+            Err(error) => return error.to_compile_error().into(),
+        };
+        if !entity {
+            match graphql_guard(&method.attrs) {
+                // async-graphql reads one `#[graphql(...)]` per resolver, so
+                // the guard joins an existing attribute rather than adding one.
+                Ok(None) => match method
+                    .attrs
+                    .iter_mut()
+                    .find(|attr| attr.path().is_ident("graphql"))
+                    .map(|attr| &mut attr.meta)
+                {
+                    Some(Meta::List(list)) => {
+                        if !list.tokens.is_empty() {
+                            list.tokens.extend(quote! { , });
+                        }
+                        list.tokens.extend(quote! { guard = #assurance_guard });
+                    }
+                    Some(other) => {
+                        return syn::Error::new_spanned(
+                            other,
+                            "expected `#[graphql(...)]` on a described custom root",
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                    None => method
+                        .attrs
+                        .push(syn::parse_quote!(#[graphql(guard = #assurance_guard)])),
+                },
+                Ok(Some(guard)) if guard.contains("DeclaredAssuranceGuard") => {}
+                Ok(Some(_)) => {
+                    return syn::Error::new_spanned(
+                        &method.sig.ident,
+                        format!(
+                            "a described custom root with its own guard must compose operation \
+                             assurance explicitly, for example \
+                             `guard = \"DeclaredAssuranceGuard::new(GraphqlOperationKind::{kind_variant}).and(YourGuard)\"`"
+                        ),
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                Err(error) => return error.to_compile_error().into(),
+            }
+        }
         let explicit = semantic_options.description.clone();
         let method_name = method.sig.ident.to_string();
         let field_name = match graphql_attribute_value(&method.attrs, "name") {
