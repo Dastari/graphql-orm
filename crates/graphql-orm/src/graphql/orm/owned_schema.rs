@@ -1452,14 +1452,16 @@ impl OwnedMigrationStep {
     pub(super) fn into_legacy(self, current: &SchemaModel, target: &SchemaModel) -> MigrationStep {
         match self {
             Self::EnableExtension { name } => MigrationStep::EnableExtension { name },
-            Self::CreateTable(table) => MigrationStep::CreateTable(
-                target
+            Self::CreateTable(table) => {
+                let mut legacy = target
                     .tables
                     .iter()
                     .find(|t| t.table_name == table.table_name)
                     .expect("diff create table belongs to target")
-                    .clone(),
-            ),
+                    .clone();
+                legacy.foreign_keys = table.foreign_keys;
+                MigrationStep::CreateTable(legacy)
+            }
             Self::DropTable { table_name } => MigrationStep::DropTable { table_name },
             Self::AddColumn { table_name, column } => {
                 MigrationStep::AddColumn { table_name, column }

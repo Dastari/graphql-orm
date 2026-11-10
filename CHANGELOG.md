@@ -16,6 +16,12 @@ for historical context.
 
 ## Unreleased
 
+## 0.119.0
+
+ORM runtime/macros **0.119.0**.
+
+- **Fix:** PostgreSQL and MSSQL migration plans order foreign keys by the target dependency graph. Removed FKs, and retained FKs whose referenced key is removed or replaced (a dropped or replaced unique index, a removed UNIQUE constraint, or a changed primary key or column UNIQUE flag), are dropped before the structural steps. Added and detached FKs are attached after every table, primary key, unique constraint and unique index exists. MSSQL also detaches FKs whose referenced or source columns are altered or dropped, because SQL Server refuses `ALTER COLUMN` on them. PostgreSQL detaches an FK only for a paired type change, where one of its source columns and the corresponding referenced column both change type (such as uuid to text on both sides). The first `ALTER COLUMN TYPE` would otherwise fail with mismatched member types. Re-adding the FK forces a full revalidation of the referencing rows. Every other PostgreSQL column change keeps FKs attached: default and nullability changes, binary-coercible one-sided widenings such as `varchar(50)` to `varchar(100)` (which stay metadata-only), and incompatible one-sided changes, which fail either way. A new table keeps an inline FK when its referenced key already exists at `CREATE TABLE`. Cycles, self references to a separately created index, and references to keys established later in the plan become trailing `AddForeignKey` steps. PostgreSQL managed apply runs the plan in one transaction. Rendered MSSQL plans and migration files carry no transaction or `XACT_ABORT` wrapper, so MSSQL atomicity depends on the host's executor. SQLite keeps its per-table rebuild order, which installs FKs with enforcement suspended and checks them after the last statement. PostgreSQL introspection now treats an index as constraint-owned only for PK, UNIQUE and EXCLUDE constraints. An ordinary unique index that an FK references stays visible, so replans stay empty. Fixes #409.
+
 ## 0.118.0
 
 ORM runtime/macros **0.118.0**.

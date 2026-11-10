@@ -10,6 +10,30 @@ supersedes: []
 
 # Migration Guide
 
+## 0.119.0: foreign-key dependency ordering
+
+Upgrade runtime and macros together, then regenerate unapplied PostgreSQL and
+MSSQL plans. Regenerated plans drop dependent foreign keys before removing or
+replacing the key they rely on, and attach new or detached foreign keys after
+all target keys exist. On MSSQL, altering or dropping a column that a foreign
+key references or uses also detaches that foreign key. On PostgreSQL, only a
+paired type change detaches it: a source column and its referenced column both
+change type. Re-adding it revalidates the referencing rows. Default,
+nullability and one-sided type changes keep it attached. Plans that change a referenced key now contain extra
+`DropForeignKey`/`AddForeignKey` steps, and re-adding a foreign key revalidates
+the referencing rows.
+
+New tables keep inline foreign keys whose referenced key already exists.
+Cycles, self references to a separately created unique index, and references to
+keys added in the same plan become trailing `AddForeignKey` steps. Those steps
+are `Risky`, so `ApplyOptions::additive_only` refuses such plans; previously
+PostgreSQL rejected them outright. A deferred `AddForeignKey` on a table that
+the same plan creates is still classified `Risky`, although it cannot reject
+rows. PostgreSQL managed apply remains one transaction. MSSQL rendering does
+not add managed apply support. Rendered MSSQL plans and migration files contain
+no transaction or `XACT_ABORT` wrapper, so the host's executor must supply
+atomicity. SQLite plans are unchanged. No API or data conversion is required.
+
 ## 0.118.0: authorized relation count ordering
 
 Upgrade runtime and macros together. No data migration is needed.

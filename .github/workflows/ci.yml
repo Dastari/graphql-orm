@@ -181,10 +181,10 @@ jobs:
           for backend in postgres mssql; do
             cargo test -p graphql-orm --locked --no-default-features --features "$backend,router-protocol" --test composite_subscription_scopes
           done
-      - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions, keyed subscriptions and node ids
+      - name: Verify owned PostgreSQL lifetime, non-bypass RLS, managed versions, keyed subscriptions, node ids and FK/key migration order
         env:
           CARGO_BUILD_JOBS: "1"
-        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids -- --include-ignored --test-threads=1
+        run: cargo test -p graphql-orm --locked --no-default-features --features postgres --test owned_postgres_lifecycle --test postgres_rls --test managed_version --test empty_filter_semantics --test keyed_changed_subscriptions --test node_ids --test migration_composite_uniques -- --include-ignored --test-threads=1
       - name: Execute the global node lookup through the router on owned PostgreSQL
         env:
           CARGO_BUILD_JOBS: "2"
