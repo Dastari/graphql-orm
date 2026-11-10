@@ -219,23 +219,23 @@ async fn relation_count_ordering_executes_as_a_correlated_server_expression()
         child_count: Some(OrderDirection::Desc),
         ..Default::default()
     };
+    // Count ordering is authorized per request against the target's read
+    // visibility. Without that step the term counts nothing and every query
+    // builder refuses it (GHSA-f7xj-6695-ww2q).
     assert_eq!(
         order.to_sql_order().as_deref(),
         Some(
-            "(SELECT COUNT(*) FROM composed_children AS __graphql_orm_order_relation WHERE __graphql_orm_order_relation.parent_id = composed_parents.id) DESC"
+            "(SELECT COUNT(*) FROM composed_children AS __graphql_orm_order_relation WHERE __graphql_orm_order_relation.parent_id = composed_parents.id AND 1 = 0) DESC"
         )
     );
-
-    let loaded = EntityQuery::<ComposedParent, SqliteBackend>::new()
-        .order_by(&order)
-        .fetch_all(&database)
-        .await?;
-    assert_eq!(
-        loaded
-            .iter()
-            .map(|parent| parent.id.as_str())
-            .collect::<Vec<_>>(),
-        vec!["two", "one", "none"]
+    assert!(order.requires_context());
+    assert!(order.validate_order().is_err());
+    assert!(
+        EntityQuery::<ComposedParent, SqliteBackend>::new()
+            .order_by(&order)
+            .fetch_all(&database)
+            .await
+            .is_err()
     );
 
     let schema = schema_builder(database).finish();

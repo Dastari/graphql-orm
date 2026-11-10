@@ -831,6 +831,12 @@ pub(crate) fn generate_graphql_relations(
                             .validate()
                             .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
                     }
+                    // Relation count ordering on the target is authorized
+                    // against its own target's access and SQL visibility.
+                    let mut order_by = order_by;
+                    if let Some(order) = order_by.as_mut() {
+                        order.__gom_prepare_read(ctx).await?;
+                    }
 
                     // Use DataLoader whenever the relation key can be batched.
                     #source_binding_multiple

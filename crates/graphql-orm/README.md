@@ -10,6 +10,12 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.118.0 makes `order_aggregate` count ordering count only related
+rows the request may read, failing closed for policies SQL cannot express, and
+rejects `order_aggregate` on relations with a `read_policy`
+(GHSA-f7xj-6695-ww2q). See the
+[root migration guide](../../MIGRATION.md#01180-authorized-relation-count-ordering).
+
 Version 0.113.0 fixes SQLite internal-prefix introspection so user table
 lookalikes remain visible to migrations. Upgrade ORM/macros together; see the
 [root migration guide](../../MIGRATION.md#01130-sqlite-internal-name-introspection).

@@ -3743,6 +3743,10 @@ fn generate_entity_impl(
     let mut order_expression_parameter_arms = Vec::new();
     let mut order_expression_context_checks = Vec::new();
     let mut relation_order_match_arms = Vec::new();
+    let mut relation_order_value_arms = Vec::new();
+    let mut relation_order_validate = Vec::new();
+    let mut relation_order_present = Vec::new();
+    let mut relation_order_prepare = Vec::new();
     let mut order_by_graphql_names = std::collections::BTreeSet::new();
     let mut order_by_rust_names = std::collections::BTreeSet::new();
     let mut object_field_methods = Vec::new();
@@ -4192,6 +4196,16 @@ fn generate_entity_impl(
                             "relation order_aggregate requires a readable public relation",
                         ));
                     }
+                    // A field read policy is decided per parent record, but an
+                    // ORDER BY term ranks every parent in one SQL statement, so
+                    // the policy cannot be enforced on the count. Refuse rather
+                    // than order by counts the caller may not be allowed to read.
+                    if field_meta.read_policy.is_some() {
+                        return Err(syn::Error::new_spanned(
+                            field,
+                            "relation order_aggregate cannot be combined with a relation read_policy; per-record field policies cannot be enforced on an ORDER BY count",
+                        ));
+                    }
                     debug_assert_eq!(order_aggregate.aggregate, "count");
                     if !order_by_graphql_names.insert(order_aggregate.name.clone()) {
                         return Err(syn::Error::new_spanned(
@@ -4241,18 +4255,48 @@ fn generate_entity_impl(
                         })
                         .collect::<Vec<_>>()
                         .join(" AND ");
-                    let expression_format = format!(
-                        "(SELECT COUNT(*) FROM {{}} AS {relation_alias} WHERE {predicates}) {{}}"
+                    // Unprepared inputs render a count that matches no rows and
+                    // fail `validate_order`, so no builder executes them.
+                    let unauthorized_format = format!(
+                        "(SELECT COUNT(*) FROM {{}} AS {relation_alias} WHERE {predicates} AND 1 = 0) {{}}"
                     );
                     relation_order_match_arms.push(quote! {
                         if let Some(dir) = &self.#order_field_name {
-                            parts.push(format!(
-                                #expression_format,
-                                #dialect.render_identifier_path(
-                                    <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
-                                ),
-                                dir.to_sql(),
+                            match self.__gom_relation_counts.get(#aggregate_name) {
+                                Some((expression, _)) => parts.push(format!("{} {}", expression, dir.to_sql())),
+                                None => parts.push(format!(
+                                    #unauthorized_format,
+                                    #dialect.render_identifier_path(
+                                        <#target_type as ::graphql_orm::graphql::orm::DatabaseEntity>::TABLE_NAME,
+                                    ),
+                                    dir.to_sql(),
+                                )),
+                            }
+                        }
+                    });
+                    relation_order_value_arms.push(quote! {
+                        if self.#order_field_name.is_some() {
+                            if let Some((_, binds)) = self.__gom_relation_counts.get(#aggregate_name) {
+                                values.extend(binds.iter().cloned());
+                            }
+                        }
+                    });
+                    relation_order_validate.push(quote! {
+                        if self.#order_field_name.is_some() && !self.__gom_relation_counts.contains_key(#aggregate_name) {
+                            return Err(::graphql_orm::sqlx::Error::Protocol(
+                                "relation count ordering requires request authorization".into(),
                             ));
+                        }
+                    });
+                    relation_order_present.push(quote! { self.#order_field_name.is_some() });
+                    relation_order_prepare.push(quote! {
+                        if self.#order_field_name.is_some() {
+                            ctx.data::<::graphql_orm::db::Database<#backend_marker>>()?
+                                .ensure_readable_field(ctx, <#struct_name as ::graphql_orm::graphql::orm::Entity>::entity_name(), #graphql_name, None, None).await?;
+                            let prepared = ::graphql_orm::graphql::orm::prepare_relation_count_order::<
+                                #backend_marker, #target_type
+                            >(ctx, #relation_alias, #predicates).await?;
+                            self.__gom_relation_counts.insert(#aggregate_name.to_owned(), prepared);
                         }
                     });
                     order_by_fields.push(quote! {
@@ -5658,6 +5702,21 @@ fn generate_entity_impl(
     } else {
         quote! { self.__gom_related.clear(); }
     };
+    let relation_order_storage = if relation_order_prepare.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            /// Request-authorized relation count expressions. Internal to generated resolvers.
+            #[doc(hidden)]
+            #[graphql(skip)]
+            pub __gom_relation_counts: ::std::collections::BTreeMap<String, (String, Vec<::graphql_orm::graphql::orm::SqlValue>)>,
+        }
+    };
+    let relation_order_clear = if relation_order_prepare.is_empty() {
+        quote! {}
+    } else {
+        quote! { self.__gom_relation_counts.clear(); }
+    };
     // Repository-only entities strip the GraphQL derives from these helpers.
     // Keep their empty Rust order marker valid. GraphQL entities, however, must
     // supply a nonempty input: operation and cross-entity relation signatures
@@ -5715,6 +5774,23 @@ fn generate_entity_impl(
         #[graphql(name = #order_by_name_str, rename_fields = #field_case_rule)]
         pub struct #order_by_name {
             #(#order_by_fields)*
+            #relation_order_storage
+        }
+
+        impl #order_by_name {
+            /// Authorize relation count ordering under the current request.
+            /// Each count covers only target rows the request may read; callback
+            /// or residual target policies fail closed.
+            #[doc(hidden)]
+            pub async fn __gom_prepare_read(
+                &mut self,
+                ctx: &::graphql_orm::async_graphql::Context<'_>,
+            ) -> ::graphql_orm::async_graphql::Result<()> {
+                let _ = ctx;
+                #relation_order_clear
+                #(#relation_order_prepare)*
+                Ok(())
+            }
         }
 
         #object_impl
@@ -5732,7 +5808,20 @@ fn generate_entity_impl(
             }
 
             fn requires_context(&self) -> bool {
-                false #(|| #order_expression_context_checks)*
+                false #(|| #order_expression_context_checks)* #(|| #relation_order_present)*
+            }
+
+            fn validate_order(&self) -> ::graphql_orm::Result<()> {
+                #(#relation_order_validate)*
+                Ok(())
+            }
+
+            fn to_sort_expression(&self) -> Option<::graphql_orm::graphql::orm::SortExpression> {
+                let clause = self.to_sql_order()?;
+                #[allow(unused_mut)]
+                let mut values: Vec<::graphql_orm::graphql::orm::SqlValue> = Vec::new();
+                #(#relation_order_value_arms)*
+                Some(::graphql_orm::graphql::orm::SortExpression { clause, values })
             }
 
             fn to_sort_expression_with_context(
@@ -5744,8 +5833,12 @@ fn generate_entity_impl(
                 let Some(clause) = self.to_sql_order() else {
                     return Ok(None);
                 };
+                ::graphql_orm::graphql::orm::DatabaseOrderBy::validate_order(self)
+                    .map_err(::graphql_orm::graphql::errors::graphql_error_from_sqlx)?;
+                #[allow(unused_mut)]
                 let mut values = Vec::new();
                 #(#order_expression_parameter_arms)*
+                #(#relation_order_value_arms)*
                 Ok(Some(::graphql_orm::graphql::orm::SortExpression {
                     clause,
                     values,

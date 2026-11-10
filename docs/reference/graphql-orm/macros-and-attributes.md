@@ -3,7 +3,7 @@ title: GraphQL ORM macro and attribute reference
 kind: reference
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-06
+last_reviewed: 2026-11-10
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -258,7 +258,9 @@ SQL literals and identifiers, rejects raw backend placeholders, and fails the
 request if the provider omits a declared value. Generated GraphQL resolvers
 resolve providers from their server context. Programmatic callers with such an
 order use `EntityQuery::order_by_with_context`; parameter-free orders retain
-`order_by`. Entity and relation pagination append any missing primary-key
+`order_by`. Because the expression is trusted server SQL, a subquery it makes
+into another entity's table does not apply that entity's access or row
+visibility policy; use `order_aggregate` for related-row counts instead. Entity and relation pagination append any missing primary-key
 columns as ascending tie-breakers so equal computed values have stable
 limit/offset windows.
 
@@ -400,6 +402,25 @@ target table through `DatabaseEntity` and constructs the correlated aggregate
 from `from`/`to`. The relation must remain public and readable. Combining
 `order_aggregate` with `source_condition` or `target_condition` is rejected so
 conditional predicates continue to use their bound-value resolver path.
+
+The count includes only target rows the request may read. Generated list and
+relation resolvers authorize each requested count term before any SQL, using
+the same rules as `relation(filter)`: the relation field must be readable, the
+target entity's read access is checked, and the target's complete SQL row
+visibility is ANDed into the counted rows. A callback-only or prefilter
+(residual) target policy cannot be expressed in one SQL count, so the request
+fails closed with the sanitized `AUTHORIZATION_MISCONFIGURED` error; a denied
+target entity fails with `FORBIDDEN`. Combining `order_aggregate` with a
+relation `read_policy` is rejected at compile time, because a per-record field
+policy cannot be enforced on an `ORDER BY` term that ranks every parent at
+once.
+
+Outside generated resolvers, an order input with a count term set has not been
+authorized: `DatabaseOrderBy::validate_order` reports an error, its rendered
+term counts no rows, and `EntityQuery` and the repository, projection,
+write-hook and fallback search builders on it refuse to execute it. Native
+full-text search ranks by relevance and the entity default sort and never
+renders caller order terms.
 
 When an entity already has handwritten complex fields, opt into one composed
 `ComplexObject` implementation instead of applying async-graphql's attribute

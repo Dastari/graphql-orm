@@ -16,6 +16,16 @@ for historical context.
 
 ## Unreleased
 
+## 0.118.0
+
+ORM runtime/macros **0.118.0**.
+
+- **Security (GHSA-f7xj-6695-ww2q):** `order_aggregate` count ordering now counts only target rows the request may read. Generated list and relation resolvers authorize each requested count term before any SQL: the relation field must be readable, the target entity's read access is checked, and the target's complete SQL row visibility is ANDed into the correlated `COUNT(*)`, as for `relation(filter)`. Callback-only and prefilter (residual) target policies fail closed with the sanitized `AUTHORIZATION_MISCONFIGURED` error; a denied target fails with `FORBIDDEN`. Previously a caller who could list parents could order by the count and infer how many unreadable children each parent had. PostgreSQL RLS deployments covering the target were not affected.
+
+- **Breaking:** `order_aggregate` on a relation with a `read_policy` is now a compile error, because a per-record field policy cannot be enforced on an `ORDER BY` count. Generated order inputs with count terms gain a hidden `__gom_relation_counts` field, so construct them with `..Default::default()`. `DatabaseOrderBy` gains `validate_order` (default `Ok`). An unauthorized count term renders a count of no rows and every `EntityQuery`-based builder (repository, projection, write-hook and fallback search queries) refuses it, so programmatic use of a count order now fails instead of returning unfiltered counts. See the 0.118.0 migration guide.
+
+- **Audit:** relation `totalCount`, relation filters, grouped aggregates, search counts and runtime-IR relation predicates and counts already applied target visibility. The runtime IR has no relation-count ordering.
+
 ## 0.113.0
 
 ORM runtime/macros **0.113.0**.

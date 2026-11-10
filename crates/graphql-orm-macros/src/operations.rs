@@ -5258,6 +5258,16 @@ fn generate_graphql_operations_unfiltered(
             }
         }
     };
+    // Relation count ordering reveals related-row counts. Authorize each term
+    // against the target's entity access and SQL visibility before any SQL.
+    let order_read_authorization = quote! {
+        let mut order_by = order_by;
+        if let Some(orders) = order_by.as_mut() {
+            for order in orders.iter_mut() {
+                order.__gom_prepare_read(ctx).await?;
+            }
+        }
+    };
     let keyset_graphql_method = if keyset_parts.is_some() {
         quote! {
             #[doc = #keyset_operation_description]
@@ -8011,6 +8021,7 @@ fn generate_graphql_operations_unfiltered(
                     ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                     #filter_read_authorization
+                    #order_read_authorization
                     let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                     if let Some(ref filter) = where_input {
@@ -8413,6 +8424,7 @@ fn generate_graphql_operations_unfiltered(
                 ).await.map_err(::graphql_orm::graphql::errors::graphql_error_from_callback)?;
 
                 #filter_read_authorization
+                #order_read_authorization
                 let mut query = EntityQuery::<#struct_name, #backend_marker>::new();
 
                 if let Some(ref filter) = where_input {

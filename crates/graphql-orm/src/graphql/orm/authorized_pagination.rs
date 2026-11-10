@@ -295,6 +295,66 @@ where
     Ok((vec![clause], values))
 }
 
+/// Internal authorization bridge for generated `order_aggregate` count terms.
+///
+/// Returns the correlated `COUNT(*)` expression (without a direction) over the
+/// target rows the request may read, plus its anonymous bind values. The
+/// target's entity access is checked first, and its complete SQL row
+/// visibility is ANDed into the counted rows. Callback-only and prefilter
+/// (residual) policies cannot be expressed in one SQL count and fail closed
+/// with the sanitized authorization error, as relation filters do.
+///
+/// `join` is generated, identifier-quoted SQL that correlates `alias` with the
+/// source table; it must not contain bind placeholders.
+#[doc(hidden)]
+pub async fn prepare_relation_count_order<B, T>(
+    ctx: &async_graphql::Context<'_>,
+    alias: &str,
+    join: &str,
+) -> async_graphql::Result<(String, Vec<SqlValue>)>
+where
+    B: OrmBackend,
+    T: Entity + 'static,
+{
+    let db = ctx.data::<Database<B>>()?;
+    let surface = EntityAccessSurface::GraphqlRelation;
+    db.ensure_entity_access(
+        Some(ctx),
+        T::entity_name(),
+        T::metadata().read_policy,
+        EntityAccessKind::Read,
+        surface,
+    )
+    .await?;
+    let visibility = db.read_visibility::<T>(Some(ctx), surface).await?;
+    if visibility.requires_residual_checks() {
+        return Err(invalid());
+    }
+    let table = B::DIALECT.render_identifier_path(T::TABLE_NAME);
+    let Some(policy) = visibility.predicate_expression() else {
+        return Ok((
+            format!("(SELECT COUNT(*) FROM {table} AS {alias} WHERE {join})"),
+            Vec::new(),
+        ));
+    };
+    let mut values = Vec::new();
+    // Anonymous placeholders: the sort renderer renumbers them per dialect
+    // after the WHERE binds, as for contextual order expressions.
+    let predicate = render_filter_expression(DatabaseBackend::Sqlite, policy, &mut 1, &mut values);
+    if predicate.trim().is_empty() {
+        return Err(invalid());
+    }
+    if values.len() > 512 {
+        return Err(input_error());
+    }
+    Ok((
+        format!(
+            "(SELECT COUNT(*) FROM (SELECT * FROM {table} WHERE {predicate}) AS {alias} WHERE {join})"
+        ),
+        values,
+    ))
+}
+
 /// The policy's explicit read decision for one request/entity/surface.
 #[derive(Clone, Debug)]
 pub enum ReadVisibility {
