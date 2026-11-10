@@ -10,6 +10,10 @@ supersedes: []
 
 # `graphql-orm`
 
+Version 0.119.0 orders PostgreSQL and MSSQL migration foreign keys around the
+keys they reference, including cycles and self references. Upgrade runtime and
+macros together; regenerate unapplied plans. See the [migration guide](../../MIGRATION.md#01190-foreign-key-dependency-ordering).
+
 Version 0.118.0 makes `order_aggregate` count ordering count only related
 rows the request may read, failing closed for policies SQL cannot express, and
 rejects `order_aggregate` on relations with a `read_policy`

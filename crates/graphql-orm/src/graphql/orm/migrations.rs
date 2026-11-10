@@ -916,6 +916,13 @@ fn postgres_timestamptz_alias(sql_type: &str) -> bool {
         || sql_type.eq_ignore_ascii_case("timestamp with time zone")
 }
 
+/// Whether a PostgreSQL `AlterColumn` renders `ALTER COLUMN ... TYPE`.
+fn postgres_type_changed(before: &ColumnModel, after: &ColumnModel) -> bool {
+    !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
+        && !(postgres_timestamptz_alias(&before.sql_type)
+            && postgres_timestamptz_alias(&after.sql_type))
+}
+
 // Constraint-backed column flags are not implemented by ALTER TYPE/nullability.
 // A standalone unique index is separate metadata and never repairs these flags.
 pub(super) fn postgres_alter_metadata_supported(before: &ColumnModel, after: &ColumnModel) -> bool {
@@ -1257,6 +1264,8 @@ pub(super) fn diff_schema_views_with(
         .collect::<std::collections::BTreeMap<_, _>>();
 
     let mut steps = Vec::new();
+    let mut dropped_foreign_keys = Vec::new();
+    let mut added_foreign_keys = Vec::new();
 
     let current_extensions = current
         .extensions
@@ -1284,6 +1293,14 @@ pub(super) fn diff_schema_views_with(
     {
         let table_name = table.table_name;
         if !target_tables.contains_key(table_name) {
+            if backend != DatabaseBackend::Sqlite {
+                for foreign_key in table.foreign_keys {
+                    dropped_foreign_keys.push(OwnedMigrationStep::DropForeignKey {
+                        table_name: table_name.clone(),
+                        foreign_key: foreign_key.clone(),
+                    });
+                }
+            }
             for search_index in table.search_indexes {
                 steps.push(OwnedMigrationStep::DropSearchIndex {
                     table_name: table_name.clone(),
@@ -1447,9 +1464,11 @@ pub(super) fn diff_schema_views_with(
             .chain(target_foreign_keys.keys())
             .collect::<std::collections::BTreeSet<_>>();
         // A replaced foreign key (for example a changed delete policy) keeps its generated
-        // constraint name, so every drop of a table precedes every add: otherwise PostgreSQL
+        // constraint name, so every drop precedes every add: otherwise PostgreSQL
         // could add the new constraint while the old one still holds the name.
-        let mut added_foreign_keys = Vec::new();
+        // PostgreSQL and MSSQL use plan-wide phases (see `order_foreign_key_phases`);
+        // SQLite renders FK changes as table rebuilds, so it keeps per-table order.
+        let mut table_added_foreign_keys = Vec::new();
         for key in foreign_key_identities {
             let mut current = current_foreign_keys.get(key).cloned().unwrap_or_default();
             let mut target = target_foreign_keys.get(key).cloned().unwrap_or_default();
@@ -1457,19 +1476,28 @@ pub(super) fn diff_schema_views_with(
             target.sort_by_key(|foreign_key| &foreign_key.constraint_name);
             let common = current.len().min(target.len());
             for foreign_key in current.into_iter().skip(common) {
-                steps.push(OwnedMigrationStep::DropForeignKey {
+                let drop = OwnedMigrationStep::DropForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: foreign_key.clone(),
-                });
+                };
+                if backend == DatabaseBackend::Sqlite {
+                    steps.push(drop);
+                } else {
+                    dropped_foreign_keys.push(drop);
+                }
             }
             for foreign_key in target.into_iter().skip(common) {
-                added_foreign_keys.push(OwnedMigrationStep::AddForeignKey {
+                table_added_foreign_keys.push(OwnedMigrationStep::AddForeignKey {
                     table_name: table_name.clone(),
                     foreign_key: foreign_key.clone(),
                 });
             }
         }
-        steps.extend(added_foreign_keys);
+        if backend == DatabaseBackend::Sqlite {
+            steps.extend(table_added_foreign_keys);
+        } else {
+            added_foreign_keys.extend(table_added_foreign_keys);
+        }
         if table.append_only != target_table.append_only
             || table.retention_purge != target_table.retention_purge
         {
@@ -1512,7 +1540,316 @@ pub(super) fn diff_schema_views_with(
         }
     }
 
-    steps
+    if backend == DatabaseBackend::Sqlite {
+        // SQLite rebuilds install each table's complete target FK set while
+        // enforcement is suspended, and validate it once after the last
+        // statement, so FK placement cannot observe an incomplete key.
+        return steps;
+    }
+    order_foreign_key_phases(
+        backend,
+        &current_tables,
+        &target_tables,
+        steps,
+        dropped_foreign_keys,
+        added_foreign_keys,
+    )
+}
+
+/// Normalized referenced/unique key member, for dependency matching only.
+/// Over-matching is safe: it detaches or defers a foreign key needlessly.
+fn dependency_column(name: &str) -> String {
+    unique_identifier(name).0.to_ascii_lowercase()
+}
+
+fn dependency_key<'a>(
+    columns: impl IntoIterator<Item = &'a str>,
+) -> std::collections::BTreeSet<String> {
+    columns.into_iter().map(dependency_column).collect()
+}
+
+/// Every key a foreign key could reference: the primary key, single-column and
+/// composite UNIQUE constraints and, when requested, full unique indexes.
+fn referenceable_keys(
+    table: &TableRef<'_>,
+    include_indexes: bool,
+) -> Vec<std::collections::BTreeSet<String>> {
+    let mut keys = vec![dependency_key(
+        table.primary_keys().iter().map(String::as_str),
+    )];
+    keys.extend(
+        table
+            .columns
+            .iter()
+            // A composite primary key member is not unique on its own.
+            .filter(|column| column.is_unique)
+            .map(|column| dependency_key([column.name.as_str()])),
+    );
+    keys.extend(
+        table
+            .composite_unique_indexes
+            .iter()
+            .map(|key| dependency_key(key.iter().map(String::as_str))),
+    );
+    if include_indexes {
+        keys.extend(
+            table
+                .indexes
+                .iter()
+                .filter(|index| index.is_unique && index.predicate.is_none())
+                .map(|index| dependency_key(index.columns.iter().copied())),
+        );
+    }
+    keys
+}
+
+/// What the structural phase does to one table's FK dependencies.
+#[derive(Default)]
+struct KeyChanges {
+    /// Keys removed or replaced, on every backend.
+    removed_keys: Vec<std::collections::BTreeSet<String>>,
+    /// MSSQL: columns altered or dropped. Any FK using them is detached.
+    changed_columns: std::collections::BTreeSet<String>,
+    /// PostgreSQL: columns whose type changes. An FK is detached only when one
+    /// of its source columns and the corresponding referenced column both
+    /// change type.
+    retyped_columns: std::collections::BTreeSet<String>,
+}
+
+impl KeyChanges {
+    fn disturbs(&self, key: &std::collections::BTreeSet<String>) -> bool {
+        self.removed_keys.contains(key) || key.iter().any(|c| self.changed_columns.contains(c))
+    }
+}
+
+/// Order PostgreSQL and MSSQL foreign keys by the target dependency graph.
+///
+/// FK constraints require their referenced key to be unique when attached and
+/// prevent that key from being dropped or altered while attached. The plan
+/// therefore runs in three phases. PostgreSQL managed apply runs them in one
+/// transaction; MSSQL atomicity depends on the host's executor:
+///
+/// 1. drop removed FKs and detach retained FKs whose referenced key is removed
+///    or replaced (a dropped or replaced unique index, a removed UNIQUE
+///    constraint, or a changed primary key or column UNIQUE flag). MSSQL also
+///    detaches FKs whose referenced or source columns are altered or dropped,
+///    because SQL Server refuses `ALTER COLUMN` on a column an FK uses.
+///    PostgreSQL detaches an FK only for a paired type change: one of its source
+///    columns and the corresponding referenced column both change type (for
+///    example uuid to text). `ALTER COLUMN TYPE` re-adds an attached FK at
+///    once, so the first ALTER would fail on mismatched member types. The
+///    re-add in phase 3 revalidates every referencing row. Every other
+///    PostgreSQL column change keeps FKs attached: defaults and nullability do
+///    not interact with FKs, a binary-coercible one-sided widening (such as
+///    `varchar(50)` to `varchar(100)` or to `text`) stays metadata-only, and an
+///    incompatible one-sided change fails whether or not the FK is attached;
+/// 2. apply every structural step, so all target tables, primary keys, unique
+///    constraints and unique indexes exist;
+/// 3. attach added, detached and deferred FKs.
+///
+/// A new table keeps an inline FK only when the referenced key already exists
+/// at its `CREATE TABLE`, which keeps ordinary table creation additive.
+/// Cycles, self references to a separately created index, and references to
+/// keys established later in the plan are deferred to phase 3.
+fn order_foreign_key_phases(
+    backend: DatabaseBackend,
+    current_tables: &std::collections::BTreeMap<String, &TableRef<'_>>,
+    target_tables: &std::collections::BTreeMap<String, &TableRef<'_>>,
+    mut steps: Vec<OwnedMigrationStep>,
+    mut dropped_foreign_keys: Vec<OwnedMigrationStep>,
+    mut added_foreign_keys: Vec<OwnedMigrationStep>,
+) -> Vec<OwnedMigrationStep> {
+    let mut changes = std::collections::BTreeMap::<String, KeyChanges>::new();
+    for step in &steps {
+        match step {
+            OwnedMigrationStep::DropIndex {
+                table_name,
+                index_name,
+            } => {
+                if let Some(index) = current_tables.get(table_name).and_then(|table| {
+                    table
+                        .indexes
+                        .iter()
+                        .find(|index| index.name == index_name.as_str())
+                }) {
+                    if index.is_unique {
+                        changes
+                            .entry(table_name.clone())
+                            .or_default()
+                            .removed_keys
+                            .push(dependency_key(index.columns.iter().copied()));
+                    }
+                }
+            }
+            OwnedMigrationStep::SetCompositeUniques {
+                table_name,
+                before,
+                after,
+            } => {
+                let entry = changes.entry(table_name.clone()).or_default();
+                for key in before.iter().filter(|key| !after.contains(key)) {
+                    entry
+                        .removed_keys
+                        .push(dependency_key(key.iter().map(String::as_str)));
+                }
+            }
+            OwnedMigrationStep::AlterColumn {
+                table_name,
+                before,
+                after,
+            } => {
+                let entry = changes.entry(table_name.clone()).or_default();
+                if before.is_primary_key != after.is_primary_key {
+                    if let Some(table) = current_tables.get(table_name) {
+                        entry.removed_keys.push(dependency_key(
+                            table.primary_keys().iter().map(String::as_str),
+                        ));
+                    }
+                }
+                if before.is_unique && !after.is_unique {
+                    entry
+                        .removed_keys
+                        .push(dependency_key([before.name.as_str()]));
+                }
+                if backend == DatabaseBackend::Mssql {
+                    entry
+                        .changed_columns
+                        .insert(dependency_column(&before.name));
+                } else if postgres_type_changed(before, after) {
+                    entry
+                        .retyped_columns
+                        .insert(dependency_column(&before.name));
+                }
+            }
+            OwnedMigrationStep::DropColumn {
+                table_name,
+                column_name,
+            } => {
+                let entry = changes.entry(table_name.clone()).or_default();
+                if let Some(table) = current_tables.get(table_name) {
+                    let column = dependency_column(column_name);
+                    let primary = dependency_key(table.primary_keys().iter().map(String::as_str));
+                    if primary.contains(&column) {
+                        entry.removed_keys.push(primary);
+                    }
+                    if table
+                        .columns
+                        .iter()
+                        .any(|c| c.is_unique && dependency_column(&c.name) == column)
+                    {
+                        entry
+                            .removed_keys
+                            .push(dependency_key([column_name.as_str()]));
+                    }
+                }
+                if backend == DatabaseBackend::Mssql {
+                    entry.changed_columns.insert(dependency_column(column_name));
+                }
+            }
+            _ => {}
+        }
+    }
+    let unchanged = KeyChanges::default();
+    let changes_for = |table: &str| changes.get(table).unwrap_or(&unchanged);
+
+    // Detach retained FKs whose dependency is disturbed by the structural phase.
+    for (table_name, table) in current_tables {
+        if !target_tables.contains_key(table_name) {
+            continue;
+        }
+        for foreign_key in table.foreign_keys {
+            let source = dependency_key(foreign_key.source_columns());
+            let referenced = dependency_key(foreign_key.target_columns());
+            let target_changes = changes_for(&foreign_key.target_table);
+            let source_changes = changes_for(table_name);
+            // PostgreSQL's ALTER COLUMN TYPE re-adds an attached FK at once, so
+            // retyping both members of a pair fails on the first ALTER (42804).
+            // A one-sided change keeps the FK attached: a binary-coercible
+            // widening stays metadata-only, and an incompatible one fails
+            // either way.
+            let paired_retype = foreign_key.column_pairs.iter().any(|pair| {
+                source_changes
+                    .retyped_columns
+                    .contains(&dependency_column(&pair.source_column))
+                    && target_changes
+                        .retyped_columns
+                        .contains(&dependency_column(&pair.target_column))
+            });
+            let disturbed = target_changes.disturbs(&referenced)
+                || paired_retype
+                || source
+                    .iter()
+                    .any(|c| source_changes.changed_columns.contains(c));
+            let already_dropped = dropped_foreign_keys.iter().any(|step| {
+                matches!(step,
+                    OwnedMigrationStep::DropForeignKey { table_name: name, foreign_key: dropped }
+                    if name == table_name && dropped == foreign_key)
+            });
+            if disturbed && !already_dropped {
+                dropped_foreign_keys.push(OwnedMigrationStep::DropForeignKey {
+                    table_name: table_name.clone(),
+                    foreign_key: foreign_key.clone(),
+                });
+                added_foreign_keys.push(OwnedMigrationStep::AddForeignKey {
+                    table_name: table_name.clone(),
+                    foreign_key: foreign_key.clone(),
+                });
+            }
+        }
+    }
+
+    // Defer inline FKs of new tables whose referenced key is not yet in place.
+    let mut created = std::collections::BTreeSet::<String>::new();
+    for step in &mut steps {
+        let OwnedMigrationStep::CreateTable(table) = step else {
+            continue;
+        };
+        let foreign_keys = std::mem::take(&mut table.foreign_keys);
+        for foreign_key in foreign_keys {
+            let referenced = dependency_key(foreign_key.target_columns());
+            let target = &foreign_key.target_table;
+            let available = if *target == table.table_name {
+                // Constraints in the same CREATE TABLE exist for its FKs; its
+                // ordinary indexes are created by later statements.
+                target_tables
+                    .get(target)
+                    .is_some_and(|t| referenceable_keys(t, false).contains(&referenced))
+            } else if created.contains(target) {
+                target_tables
+                    .get(target)
+                    .is_some_and(|t| referenceable_keys(t, true).contains(&referenced))
+            } else if target_tables.contains_key(target) && !current_tables.contains_key(target) {
+                // Created later in the plan: a cycle among new tables.
+                false
+            } else if let Some(current) = current_tables.get(target) {
+                // A new table is created before existing tables are altered,
+                // so an inline FK would see a retyped key's old type. The new
+                // table is empty, so attaching it last costs nothing.
+                let target_changes = changes_for(target);
+                referenceable_keys(current, true).contains(&referenced)
+                    && !target_changes.disturbs(&referenced)
+                    && !referenced
+                        .iter()
+                        .any(|c| target_changes.retyped_columns.contains(c))
+            } else {
+                // Unmanaged reference: preserve the historical inline DDL.
+                true
+            };
+            if available {
+                table.foreign_keys.push(foreign_key);
+            } else {
+                added_foreign_keys.push(OwnedMigrationStep::AddForeignKey {
+                    table_name: table.table_name.clone(),
+                    foreign_key,
+                });
+            }
+        }
+        created.insert(table.table_name.clone());
+    }
+
+    dropped_foreign_keys.extend(steps);
+    dropped_foreign_keys.extend(added_foreign_keys);
+    dropped_foreign_keys
 }
 
 fn foreign_key_constraint_name(table_name: &str, foreign_key: &ForeignKeyModel) -> String {
@@ -2593,9 +2930,7 @@ pub(super) fn render_migration_step_view(
                 let table = backend.render_identifier_path(table_name);
                 let before_column = backend.render_identifier(&before.name);
                 let after_column = backend.render_identifier(&after.name);
-                let type_changed = !before.sql_type.eq_ignore_ascii_case(&after.sql_type)
-                    && !(postgres_timestamptz_alias(&before.sql_type)
-                        && postgres_timestamptz_alias(&after.sql_type));
+                let type_changed = postgres_type_changed(before, after);
                 // Reuse the planner's backend comparison, including narrow
                 // PostgreSQL deparse equivalences, without changing hash inputs.
                 let mut default_target = (**before).clone();
@@ -3727,6 +4062,9 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
             .cloned()
             .unwrap_or_else(|| "id".to_string());
 
+        // PK, UNIQUE and EXCLUDE constraints own their backing index, so it is
+        // not an ordinary index. An FK's `conindid` names the index it
+        // *references*, which stays an ordinary index of this table.
         let index_rows = sqlx::query(
             "SELECT i.relname AS indexname,
                     ix.indisunique AS is_unique,
@@ -3742,7 +4080,10 @@ pub(super) async fn introspect_owned_postgres_connection_with_internal(
              JOIN pg_index ix ON ix.indrelid = t.oid
              JOIN pg_class i ON i.oid = ix.indexrelid
              JOIN pg_am am ON am.oid = i.relam
-             LEFT JOIN pg_constraint con ON con.conindid = ix.indexrelid
+             LEFT JOIN pg_constraint con
+               ON con.conindid = ix.indexrelid
+              AND con.conrelid = t.oid
+              AND con.contype <> 'f'
              LEFT JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality)
                ON true
              LEFT JOIN pg_attribute a
