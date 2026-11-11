@@ -151,6 +151,53 @@ impl fmt::Debug for AiPrincipalProjection {
     }
 }
 
+/// Stable, safe reason code recorded when queued or waiting work carries a
+/// delegated or sessionless stored principal reference.
+pub(crate) const DELEGATED_REFERENCE_CODE: &str = "principal_reference_delegated";
+
+/// Whether a stored or request principal reference must not act as the user
+/// behind it.
+///
+/// This is the one predicate behind both request-root refusal and stored
+/// reference refusal. A user-session reference is refused when its grant kind
+/// is `Sessionless` or `SessionBoundDelegation`, or when it has no grant kind
+/// but still carries an actor subject or an exact operation binding. Current
+/// resolution maps such a reference to the parent user session, dropping its
+/// narrowing. A resource binding alone is not refused: ordinary user sessions
+/// carry one. API-token references are never refused here.
+pub(crate) fn is_delegated_reference(reference: &PrincipalReference) -> bool {
+    if reference.kind != PrincipalReferenceKind::UserSession {
+        return false;
+    }
+    match reference.grant_kind {
+        Some(
+            agql_auth::AccessTokenGrantKind::Sessionless
+            | agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
+        ) => true,
+        Some(agql_auth::AccessTokenGrantKind::UserSession) => false,
+        None => reference.actor_subject.is_some() || reference.operation.is_some(),
+    }
+}
+
+/// The only way the engine resolves a principal reference for authority.
+///
+/// Releases before 0.130.0 could persist a delegated or sessionless request
+/// credential's reference on a run or on session-title work. Workers resolve
+/// stored references to the user session behind them, so this refuses the
+/// delegated shape before the host resolver is called, with the same
+/// non-transient error an expired or revoked reference produces. Callers map
+/// the error exactly as they map any other resolution failure, so these rows
+/// fail through the expired-reference path.
+pub(crate) async fn resolve_current_reference(
+    resolver: &dyn agql_auth::CurrentPrincipalResolver,
+    reference: &PrincipalReference,
+) -> agql_auth::AuthResult<agql_auth::ResolvedPrincipal> {
+    if is_delegated_reference(reference) {
+        return Err(agql_auth::AuthError::Forbidden);
+    }
+    resolver.resolve(reference).await
+}
+
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 /// Refuses a request credential that must not act as the user behind it.
 ///
@@ -168,19 +215,8 @@ impl fmt::Debug for AiPrincipalProjection {
 /// binding alone is not refused: ordinary user sessions carry one. The refusal
 /// carries no reason.
 pub(crate) fn refuse_delegated_request(principal: &AuthPrincipal) -> Result<(), AiError> {
-    let AuthPrincipal::User(user) = principal else {
-        return Ok(());
-    };
-    let claims = &user.token_claims;
-    let refused = match claims.grant_kind {
-        Some(
-            agql_auth::AccessTokenGrantKind::Sessionless
-            | agql_auth::AccessTokenGrantKind::SessionBoundDelegation,
-        ) => true,
-        Some(agql_auth::AccessTokenGrantKind::UserSession) => false,
-        None => claims.actor.is_some() || claims.operation.is_some(),
-    };
-    if refused {
+    if matches!(principal, AuthPrincipal::User(_)) && is_delegated_reference(&principal.reference())
+    {
         return Err(AiError::ReauthorizationFailed);
     }
     Ok(())
@@ -227,8 +263,7 @@ pub(crate) async fn admit_stream(
         return Ok((principal.reference(), principal));
     };
     let reference = projection.project(&principal)?;
-    let resolved = resolver
-        .resolve(&reference)
+    let resolved = resolve_current_reference(resolver, &reference)
         .await
         .map_err(|_| AiError::ReauthorizationFailed)?;
     // Stream services carry no injected clock; the system clock bounds the
@@ -277,9 +312,7 @@ impl AiSubmissionAdmission {
 
     /// Requires the host resolver to return exactly this live reference.
     pub(crate) async fn admit(&self, reference: &PrincipalReference) -> Result<(), AiError> {
-        let resolved = self
-            .resolver
-            .resolve(reference)
+        let resolved = resolve_current_reference(self.resolver.as_ref(), reference)
             .await
             .map_err(|_| AiError::ReauthorizationFailed)?;
         let now = self.clock.now();
@@ -291,6 +324,28 @@ impl AiSubmissionAdmission {
         }
         Ok(())
     }
+}
+
+/// Legacy stored references a pre-0.130.0 release could persist, derived from
+/// an ordinary user-session reference: a session-bound delegation, a
+/// sessionless grant, and a reference with no grant kind but an actor.
+#[cfg(test)]
+pub(crate) fn test_delegated_references(
+    base: &PrincipalReference,
+) -> Vec<(&'static str, PrincipalReference)> {
+    let mut delegation = base.clone();
+    delegation.grant_kind = Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+    delegation.actor_subject = Some("delegated-agent".to_owned());
+    let mut sessionless = base.clone();
+    sessionless.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+    let mut actor_only = base.clone();
+    actor_only.grant_kind = None;
+    actor_only.actor_subject = Some("delegated-agent".to_owned());
+    vec![
+        ("session_bound_delegation", delegation),
+        ("sessionless", sessionless),
+        ("no_grant_kind_with_actor", actor_only),
+    ]
 }
 
 #[cfg(test)]
@@ -475,5 +530,68 @@ mod tests {
             claims.resource_type = Some("graphql_operation".into());
             claims.resource_id = Some("records_count".into());
         })));
+    }
+
+    #[test]
+    fn stored_reference_predicate_matches_the_request_refusal() {
+        let base = user("tenant").reference();
+        assert!(!is_delegated_reference(&base));
+        let mut unclassified = base.clone();
+        unclassified.grant_kind = None;
+        assert!(!is_delegated_reference(&unclassified));
+        unclassified.resource_type = Some("project".into());
+        unclassified.resource_id = Some("p1".into());
+        assert!(
+            !is_delegated_reference(&unclassified),
+            "a resource binding alone is an ordinary user session"
+        );
+        for (_, reference) in test_delegated_references(&base) {
+            assert!(is_delegated_reference(&reference));
+        }
+        let mut operation_only = base.clone();
+        operation_only.grant_kind = None;
+        operation_only.operation = Some(agql_auth::ExactOperationBinding::new(
+            "RecordsCount",
+            "sha256:reviewed-document",
+        ));
+        assert!(is_delegated_reference(&operation_only));
+        // API-token references carry no grant kind and are never refused here.
+        let token = AuthPrincipal::ApiToken(ApiTokenPrincipal {
+            token_id: Uuid::from_u128(9),
+            subject: "service".into(),
+            principal_kind: agql_auth::ApiTokenPrincipalKind::service(),
+            scopes: vec![],
+            audience: None,
+            resource_type: None,
+            resource_id: None,
+            expires_at: OffsetDateTime::UNIX_EPOCH + Duration::days(20_000),
+        });
+        assert!(!is_delegated_reference(&token.reference()));
+    }
+
+    #[tokio::test]
+    async fn stored_reference_resolution_refuses_before_the_host_resolver() {
+        struct Counting(std::sync::atomic::AtomicUsize);
+        #[async_trait::async_trait]
+        impl agql_auth::CurrentPrincipalResolver for Counting {
+            async fn resolve(
+                &self,
+                _: &PrincipalReference,
+            ) -> agql_auth::AuthResult<agql_auth::ResolvedPrincipal> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(agql_auth::AuthError::AuthServiceUnavailable)
+            }
+        }
+        let resolver = Counting(std::sync::atomic::AtomicUsize::new(0));
+        let base = user("tenant").reference();
+        for (_, reference) in test_delegated_references(&base) {
+            assert!(matches!(
+                resolve_current_reference(&resolver, &reference).await,
+                Err(agql_auth::AuthError::Forbidden)
+            ));
+        }
+        assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(resolve_current_reference(&resolver, &base).await.is_err());
+        assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

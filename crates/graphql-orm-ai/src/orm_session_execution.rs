@@ -49,11 +49,12 @@ impl AiRunExecutionSelectionReader for OrmAiRunExecutionSelectionReader {
         &self,
         lease: &AiRunLease,
     ) -> Result<AiSessionExecutionSelection, AiError> {
-        let current = self
-            .principal_resolver
-            .resolve(lease.principal_reference())
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let current = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            lease.principal_reference(),
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         let session = AiSessionRecord::find_by_id(&self.database, &lease.session_id().0)
             .await
             .map_err(|_| AiError::PersistenceFailed)?

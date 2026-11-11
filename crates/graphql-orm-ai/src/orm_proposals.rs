@@ -279,11 +279,12 @@ impl OrmAiProposalService {
         reference: &PrincipalReference,
         now: OffsetDateTime,
     ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
-        let resolved = self
-            .principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let resolved = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         if resolved.resolved_at() > now
             || now - resolved.resolved_at() > self.limits.maximum_principal_age
             || resolved.reference() != reference

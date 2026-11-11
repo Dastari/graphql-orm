@@ -386,10 +386,12 @@ impl AiRuntime {
         &self,
         reference: &PrincipalReference,
     ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
-        self.principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)
+        crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)
     }
 
     #[cfg(any(feature = "sqlite", feature = "postgres"))]
@@ -444,11 +446,12 @@ impl AiRuntime {
                 &principal_reference.subject,
             ));
         }
-        let principal = self
-            .principal_resolver
-            .resolve(principal_reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let principal = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            principal_reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         Ok(self.egress_policy.authorize(&principal, manifest).await)
     }
 
@@ -480,11 +483,12 @@ impl AiRuntime {
                 &principal_reference.subject,
             ));
         }
-        let principal = self
-            .principal_resolver
-            .resolve(principal_reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let principal = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            principal_reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         Ok(self
             .egress_policy
             .authorize_tool_sources(&principal, manifest, sources)

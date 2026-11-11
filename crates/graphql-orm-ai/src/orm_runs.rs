@@ -632,7 +632,10 @@ pub(crate) struct PreparedApprovalWaitReconciliation {
     pub outcome_code: String,
     pub policy_version: Option<String>,
     pub event_id: Uuid,
-    pub protected_event: serde_json::Value,
+    /// `None` only when the stored principal reference is delegated: no
+    /// content-protection policy is resolved for it, so the reconciled event
+    /// is omitted and the canonical metadata-only terminal event remains.
+    pub protected_event: Option<serde_json::Value>,
     pub worker_id: String,
 }
 
@@ -4375,76 +4378,88 @@ impl OrmAiRunService {
                             .is_none_or(|eligible_at| eligible_at <= now.unix_timestamp())
                     });
                     candidates.sort_by_key(|run| (run.created_at, run.id));
-                    let Some(current) = candidates.into_iter().next() else {
-                        return Ok(Ok(None));
-                    };
-                    if current.lease_generation < 0
-                        || current.retry_count < 0
-                        || current.attempt_id.is_some()
-                        || current.lease_owner.is_some()
-                        || current.lease_expires_at.is_some()
-                        || (current.error_code.as_deref() == Some("checkpoint_adoption_ready")
-                            && current.latest_checkpoint_id.is_none())
-                    {
-                        return Ok(Err(AiError::PersistenceFailed));
-                    }
-                    let generation = match current.lease_generation.checked_add(1) {
-                        Some(generation) => generation,
-                        None => return Ok(Err(AiError::PersistenceFailed)),
-                    };
-                    let expiry = match now.checked_add(limits.lease_ttl) {
-                        Some(expiry) => expiry,
-                        None => return Ok(Err(AiError::PersistenceFailed)),
-                    };
-                    let attempt = tx
-                        .insert::<AiRunAttemptRecord>(CreateAiRunAttemptRecordInput {
-                            run_id: current.id,
-                            lease_generation: generation,
-                            worker_id: worker_id.clone(),
-                            claimed_at: now.unix_timestamp(),
-                            finished_at: None,
-                            provider_response_id: None,
-                            outcome_code: None,
-                        })
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    let outcome = tx
-                        .compare_and_swap::<AiRunRecord>(
-                            &current.id,
-                            current.row_version,
-                            exact_state(&current.state),
-                            UpdateAiRunRecordInput {
-                                state: Some(AiRunState::Leased.as_str().to_owned()),
-                                attempt_id: Some(Some(attempt.id)),
-                                lease_owner: Some(Some(worker_id)),
-                                recovery_epoch_id: Some(Some(epoch)),
-                                lease_generation: Some(generation),
-                                lease_expires_at: Some(Some(expiry.unix_timestamp())),
-                                lease_heartbeat_at: Some(Some(now.unix_timestamp())),
-                                next_attempt_at: Some(None),
-                                error_code: Some(None),
-                                latest_checkpoint_id: Some(
-                                    (current.error_code.as_deref()
-                                        == Some("checkpoint_adoption_ready"))
-                                    .then_some(current.latest_checkpoint_id)
-                                    .flatten(),
-                                ),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    match outcome {
-                        ConditionalUpdateOutcome::Updated(updated) => {
-                            match lease_from_record(&updated) {
-                                Ok(lease) => Ok(Ok(Some(lease))),
-                                Err(_) => Ok(Err(AiError::PersistenceFailed)),
+                    for current in candidates {
+                        if current.lease_generation < 0
+                            || current.retry_count < 0
+                            || current.attempt_id.is_some()
+                            || current.lease_owner.is_some()
+                            || current.lease_expires_at.is_some()
+                            || (current.error_code.as_deref() == Some("checkpoint_adoption_ready")
+                                && current.latest_checkpoint_id.is_none())
+                        {
+                            return Ok(Err(AiError::PersistenceFailed));
+                        }
+                        let generation = match current.lease_generation.checked_add(1) {
+                            Some(generation) => generation,
+                            None => return Ok(Err(AiError::PersistenceFailed)),
+                        };
+                        let expiry = match now.checked_add(limits.lease_ttl) {
+                            Some(expiry) => expiry,
+                            None => return Ok(Err(AiError::PersistenceFailed)),
+                        };
+                        let delegated = match serde_json::from_value::<PrincipalReference>(
+                            current.principal_reference.clone(),
+                        ) {
+                            Ok(reference) => {
+                                crate::principal_projection::is_delegated_reference(&reference)
                             }
+                            Err(_) => return Ok(Err(AiError::PersistenceFailed)),
+                        };
+                        let attempt = tx
+                            .insert::<AiRunAttemptRecord>(CreateAiRunAttemptRecordInput {
+                                run_id: current.id,
+                                lease_generation: generation,
+                                worker_id: worker_id.clone(),
+                                claimed_at: now.unix_timestamp(),
+                                finished_at: None,
+                                provider_response_id: None,
+                                outcome_code: None,
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let outcome = tx
+                            .compare_and_swap::<AiRunRecord>(
+                                &current.id,
+                                current.row_version,
+                                exact_state(&current.state),
+                                UpdateAiRunRecordInput {
+                                    state: Some(AiRunState::Leased.as_str().to_owned()),
+                                    attempt_id: Some(Some(attempt.id)),
+                                    lease_owner: Some(Some(worker_id.clone())),
+                                    recovery_epoch_id: Some(Some(epoch)),
+                                    lease_generation: Some(generation),
+                                    lease_expires_at: Some(Some(expiry.unix_timestamp())),
+                                    lease_heartbeat_at: Some(Some(now.unix_timestamp())),
+                                    next_attempt_at: Some(None),
+                                    error_code: Some(None),
+                                    latest_checkpoint_id: Some(
+                                        (current.error_code.as_deref()
+                                            == Some("checkpoint_adoption_ready"))
+                                        .then_some(current.latest_checkpoint_id)
+                                        .flatten(),
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let updated = match outcome {
+                            ConditionalUpdateOutcome::Updated(updated) => updated,
+                            ConditionalUpdateOutcome::NotFound
+                            | ConditionalUpdateOutcome::Conflict => {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                        };
+                        let lease = match lease_from_record(&updated) {
+                            Ok(lease) => lease,
+                            Err(_) => return Ok(Err(AiError::PersistenceFailed)),
+                        };
+                        if !delegated {
+                            return Ok(Ok(Some(lease)));
                         }
-                        ConditionalUpdateOutcome::NotFound | ConditionalUpdateOutcome::Conflict => {
-                            Err(OrmPublicError::new(OrmErrorCode::Conflict))
-                        }
+                        refuse_delegated_claim(tx, &updated, &lease, now).await?;
                     }
+                    Ok(Ok(None))
                 })
             })
             .await
@@ -4544,6 +4559,53 @@ impl OrmAiRunService {
                             || call.lease_generation != run.lease_generation
                         {
                             return Err(OrmPublicError::new(OrmErrorCode::InternalError));
+                        }
+                        let reference: PrincipalReference =
+                            serde_json::from_value(run.principal_reference.clone())
+                                .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                        if crate::principal_projection::is_delegated_reference(&reference) {
+                            // A legacy run whose stored reference is delegated
+                            // or sessionless never resumes. Expire the approval
+                            // so it cannot be consumed; the approval-wait
+                            // reconciler then closes the run with the same
+                            // safe code, without resolving the reference.
+                            let expired = tx
+                                .compare_and_swap::<AiApprovalRecord>(
+                                    &approval.id,
+                                    approval.row_version,
+                                    AiApprovalRecordWhereInput {
+                                        state: Some(StringFilter {
+                                            eq: Some("approved".to_owned()),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    },
+                                    UpdateAiApprovalRecordInput {
+                                        state: Some("expired".to_owned()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(expired, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+                                actor_principal_kind: "ai_worker".to_owned(),
+                                actor_subject: worker_id.clone(),
+                                action: "ai.approval.expired".to_owned(),
+                                resource_kind: "ai_approval".to_owned(),
+                                resource_reference: approval.id.to_string(),
+                                outcome: "denied".to_owned(),
+                                reason_code: crate::principal_projection::DELEGATED_REFERENCE_CODE
+                                    .to_owned(),
+                                correlation_id: approval.id.to_string(),
+                                causation_id: Some(approval.tool_call_id.to_string()),
+                                policy_version: Some(approval.policy_version),
+                            })
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                            continue;
                         }
                         let parked_checkpoint =
                             if run.error_code.as_deref() == Some("approval_wait_parked") {
@@ -5286,26 +5348,32 @@ impl OrmAiRunService {
                         ),
                     };
 
-                    let event_sequence = session
-                        .stream_head
-                        .checked_add(1)
-                        .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
-                    let session_update = tx
-                        .compare_and_swap::<AiSessionRecord>(
-                            &session.id,
-                            session.row_version,
-                            AiSessionRecordWhereInput::default(),
-                            UpdateAiSessionRecordInput {
-                                stream_head: Some(event_sequence),
-                                last_activity_at: Some(now.unix_timestamp()),
-                                ..Default::default()
-                            },
-                        )
-                        .await
-                        .map_err(OrmPublicError::from)?;
-                    if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
-                        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
-                    }
+                    let reconciled_event = match reconciliation.protected_event {
+                        Some(protected_event) => {
+                            let event_sequence = session
+                                .stream_head
+                                .checked_add(1)
+                                .ok_or_else(|| OrmPublicError::new(OrmErrorCode::InternalError))?;
+                            let session_update = tx
+                                .compare_and_swap::<AiSessionRecord>(
+                                    &session.id,
+                                    session.row_version,
+                                    AiSessionRecordWhereInput::default(),
+                                    UpdateAiSessionRecordInput {
+                                        stream_head: Some(event_sequence),
+                                        last_activity_at: Some(now.unix_timestamp()),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(session_update, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
+                            Some((event_sequence, protected_event))
+                        }
+                        None => None,
+                    };
                     let run_update = tx
                         .compare_and_swap::<AiRunRecord>(
                             &current.id,
@@ -5326,18 +5394,20 @@ impl OrmAiRunService {
                     if !matches!(run_update, ConditionalUpdateOutcome::Updated(_)) {
                         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
                     }
-                    tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
-                        id: reconciliation.event_id,
-                        session_id: session.id,
-                        sequence: event_sequence,
-                        event_type: "approval_wait_reconciled".to_owned(),
-                        run_id: Some(current.id),
-                        causation_id: tool_call_id.or(approval_id).map(|id| id.to_string()),
-                        correlation_id: approval_id.unwrap_or(current.id).to_string(),
-                        protected_payload: reconciliation.protected_event,
-                    })
-                    .await
-                    .map_err(OrmPublicError::from)?;
+                    if let Some((event_sequence, protected_event)) = &reconciled_event {
+                        tx.insert::<AiSessionEventRecord>(CreateAiSessionEventRecordInput {
+                            id: reconciliation.event_id,
+                            session_id: session.id,
+                            sequence: *event_sequence,
+                            event_type: "approval_wait_reconciled".to_owned(),
+                            run_id: Some(current.id),
+                            causation_id: tool_call_id.or(approval_id).map(|id| id.to_string()),
+                            correlation_id: approval_id.unwrap_or(current.id).to_string(),
+                            protected_payload: protected_event.clone(),
+                        })
+                        .await
+                        .map_err(OrmPublicError::from)?;
+                    }
                     tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
                         actor_principal_kind: "ai_worker".to_owned(),
                         actor_subject: reconciliation.worker_id,
@@ -5371,10 +5441,12 @@ impl OrmAiRunService {
                         now,
                     )
                     .await?;
-                    tx.queue_event(AiSessionWakeup {
-                        session_id: session.id,
-                        sequence: event_sequence,
-                    });
+                    if let Some((event_sequence, _)) = reconciled_event {
+                        tx.queue_event(AiSessionWakeup {
+                            session_id: session.id,
+                            sequence: event_sequence,
+                        });
+                    }
                     Ok(())
                 })
             })
@@ -5654,6 +5726,60 @@ pub(crate) async fn require_current_lease_epoch(
         return Err(OrmPublicError::new(OrmErrorCode::Conflict));
     }
     Ok(())
+}
+
+/// Closes a freshly leased run whose stored principal reference is delegated
+/// or sessionless, in the claim transaction that leased it.
+///
+/// Releases before 0.130.0 could queue such a run. Its worker would resolve
+/// the reference to the user session behind it and act with the full user's
+/// authority, so the run never reaches a worker: the lease is finished as
+/// `Failed` with [`crate::principal_projection::DELEGATED_REFERENCE_CODE`],
+/// which retry admission refuses, exactly as an ordinary fenced completion
+/// would record it. Nothing is resolved, decrypted, or sent anywhere.
+async fn refuse_delegated_claim(
+    tx: &mut MutationContext<'_, DefaultWriteBackend>,
+    leased: &AiRunRecord,
+    lease: &AiRunLease,
+    now: OffsetDateTime,
+) -> Result<(), OrmPublicError> {
+    let code = crate::principal_projection::DELEGATED_REFERENCE_CODE;
+    let outcome = tx
+        .compare_and_swap::<AiRunRecord>(
+            &leased.id,
+            leased.row_version,
+            exact_state(AiRunState::Leased.as_str()),
+            UpdateAiRunRecordInput {
+                state: Some(AiRunState::Failed.as_str().to_owned()),
+                lease_owner: Some(None),
+                lease_expires_at: Some(None),
+                lease_heartbeat_at: Some(None),
+                next_attempt_at: Some(None),
+                error_code: Some(Some(code.to_owned())),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(OrmPublicError::from)?;
+    if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+        return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+    }
+    append_attempt_outcome(tx, lease, AiRunState::Failed, code.to_owned(), None, now).await?;
+    tx.insert::<AiAuditEventRecord>(CreateAiAuditEventRecordInput {
+        actor_principal_kind: "ai_worker".to_owned(),
+        actor_subject: lease.worker_id().to_owned(),
+        action: "ai.run.principal_refused".to_owned(),
+        resource_kind: "ai_run".to_owned(),
+        resource_reference: leased.id.to_string(),
+        outcome: "denied".to_owned(),
+        reason_code: code.to_owned(),
+        correlation_id: leased.id.to_string(),
+        causation_id: leased.attempt_id.map(|attempt_id| attempt_id.to_string()),
+        policy_version: None,
+    })
+    .await
+    .map_err(OrmPublicError::from)?;
+    append_terminal_run_event(tx, leased, AiRunState::Failed, Some(code), now).await
 }
 
 pub(crate) async fn load_and_validate_active_lease(
@@ -8146,6 +8272,155 @@ mod tests {
             fixture.service.append_ui_intent_event(&lease, ui()).await,
             Err(AiError::RuntimeNotReady)
         ));
+    }
+
+    #[tokio::test]
+    async fn legacy_delegated_queued_runs_fail_closed_at_claim() {
+        let mut fixture = fixture().await;
+        let ordinary = fixture.principal_reference.clone();
+        let mut legacy = Vec::new();
+        for (index, (kind, reference)) in
+            crate::principal_projection::test_delegated_references(&ordinary)
+                .into_iter()
+                .enumerate()
+        {
+            // Legacy rows, inserted directly, as a pre-0.130.0 release
+            // persisted them. One is a scheduled retry.
+            fixture.principal_reference = reference;
+            let run_id = seed_queued(&fixture).await;
+            if index == 1 {
+                let run = run_record(&fixture, run_id).await;
+                AiRunRecord::update_by_id(
+                    &fixture.database,
+                    &run.id,
+                    UpdateAiRunRecordInput {
+                        state: Some(AiRunState::RetryScheduled.as_str().to_owned()),
+                        retry_count: Some(1),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("legacy retry should update");
+            }
+            legacy.push((kind, run_id));
+            fixture.clock.advance_seconds(1);
+        }
+        fixture.principal_reference = ordinary.clone();
+        let current = seed_queued(&fixture).await;
+
+        // Rows created in the same second are ordered by ID, so claim until
+        // empty: exactly one lease is ever issued, for the ordinary run.
+        let mut leases = Vec::new();
+        for _ in 0..8 {
+            match fixture
+                .service
+                .claim_next("claim-worker")
+                .await
+                .expect("claim should succeed")
+            {
+                Some(lease) => leases.push(lease),
+                None => break,
+            }
+        }
+        assert_eq!(leases.len(), 1);
+        let lease = leases.remove(0);
+        assert_eq!(lease.run_id(), current);
+        assert_eq!(lease.principal_reference(), &ordinary);
+
+        let outcomes = attempt_outcomes(&fixture).await;
+        let events = session_events(&fixture).await;
+        let inbox = inbox_events(&fixture).await;
+        let audits = fixture
+            .database
+            .transaction(TransactionMode::Default, |tx| {
+                Box::pin(async move {
+                    tx.query::<AiAuditEventRecord>()
+                        .limit(32)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .expect("audits should query");
+        let code = crate::principal_projection::DELEGATED_REFERENCE_CODE;
+        for (kind, run_id) in legacy {
+            let run = run_record(&fixture, run_id).await;
+            assert_eq!(run.state, AiRunState::Failed.as_str(), "{kind}");
+            assert_eq!(run.error_code.as_deref(), Some(code), "{kind}");
+            assert!(run.lease_owner.is_none() && run.lease_expires_at.is_none());
+            assert!(run.next_attempt_at.is_none(), "{kind} is not rescheduled");
+            assert!(
+                !provider_dispatch_possible(&fixture, run_id).await,
+                "{kind} reserved no provider budget"
+            );
+            let outcome = outcomes
+                .iter()
+                .find(|outcome| outcome.run_id == run_id.0)
+                .expect("the refused attempt has one outcome");
+            assert_eq!(outcome.final_state, AiRunState::Failed.as_str());
+            assert_eq!(outcome.outcome_code, code);
+            assert!(outcome.provider_response_id.is_none());
+            let terminal = events
+                .iter()
+                .find(|event| event.run_id == Some(run_id.0))
+                .expect("a canonical terminal event is written");
+            assert_eq!(terminal.event_type, "run_failed", "{kind}");
+            let metadata =
+                open_terminal_event_metadata(&terminal.event_type, &terminal.protected_payload)
+                    .expect("terminal metadata should open")
+                    .expect("terminal metadata is content-free");
+            assert_eq!(metadata["failure"]["code"], code);
+            assert_eq!(metadata["failure"]["retryable"], false);
+            assert_eq!(metadata["failure"]["admission"], "refused_uncertain");
+            assert_eq!(
+                inbox
+                    .iter()
+                    .filter(|event| event.event_type == "run_failed"
+                        && event.session_id == Some(run.session_id))
+                    .count(),
+                1
+            );
+            assert!(audits.iter().any(|audit| {
+                audit.action == "ai.run.principal_refused"
+                    && audit.resource_reference == run_id.0.to_string()
+                    && audit.reason_code == code
+            }));
+            let (tool_calls, approvals) = fixture
+                .database
+                .transaction(TransactionMode::Default, move |tx| {
+                    Box::pin(async move {
+                        let calls = tx
+                            .query::<AiToolCallRecord>()
+                            .filter(AiToolCallRecordWhereInput {
+                                run_id: Some(UuidFilter {
+                                    eq: Some(run_id.0),
+                                    ..Default::default()
+                                }),
+                                ..Default::default()
+                            })
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        let approvals = tx
+                            .query::<AiApprovalRecord>()
+                            .limit(1)
+                            .fetch_all()
+                            .await
+                            .map_err(OrmPublicError::from)?;
+                        Ok((calls, approvals))
+                    })
+                })
+                .await
+                .expect("tool and approval rows should query");
+            assert!(tool_calls.is_empty() && approvals.is_empty(), "{kind}");
+        }
+        fixture
+            .service
+            .heartbeat(&lease)
+            .await
+            .expect("the ordinary lease remains current");
     }
 }
 

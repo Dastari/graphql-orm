@@ -345,7 +345,8 @@ the compiled test-backed recipe and the missing reusable bootstrap API.
   revocations and consumption. Preview details have a 2 MiB serialized JSON
   ceiling. Approval never replaces current resolver authorization. Session,
   message submission, attachment, inbox, approval, proposal and run-control
-  roots refuse delegated and sessionless request credentials.
+  roots refuse delegated and sessionless request credentials, and workers
+  refuse to resolve such a stored reference on work queued before 0.130.0.
 - Backend-neutral automatic query capabilities compiled from the finished SDL
   and canonical semantic catalogue into closed typed plans. Nested
   relationships and opt-in aggregate roots remain explicitly bounded, and

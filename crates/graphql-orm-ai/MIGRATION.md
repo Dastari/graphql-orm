@@ -10,6 +10,49 @@ supersedes: []
 
 # Migration Guide
 
+## 0.130.0 to 0.131.0: legacy delegated stored principal references
+
+0.130.0 stopped new submissions from persisting a delegated or sessionless
+credential's reference, but work queued before that upgrade kept it. 0.131.0
+now enforces the 0.130.0 manual cleanup automatically. A stored reference is
+refused when its `grant_kind` is `session_bound_delegation` or `sessionless`,
+or when it has no `grant_kind` and an `actor_subject` or `operation`.
+
+- Every resolution of a principal reference refuses that shape before the host
+  `CurrentPrincipalResolver` is called, with the same `ReauthorizationFailed`
+  an expired or revoked reference produces. Work already in flight therefore
+  fails through the same path as an expired reference.
+- `OrmAiRunService::claim_next` finishes a queued or retry-scheduled run with
+  that shape as `Failed`, error code `principal_reference_delegated`, in the
+  claim transaction. It records an attempt outcome, an
+  `ai.run.principal_refused` audit event and the canonical `run_failed` event,
+  and returns the next eligible run instead. No lease reaches a worker.
+- `OrmAiRunService::claim_next_approved` never resumes such a run. It expires
+  the approval and audits it as `ai.approval.expired` with the same reason
+  code. `OrmAiApprovalWaitReconciliationService::reconcile_waits` then cancels
+  the wait with `principal_reference_delegated`. It does not resolve the
+  reference or call the wait-policy or content-protection hooks, so it writes
+  no `approval_wait_reconciled` event, only the content-free `run_cancelled`
+  event. The new `AiApprovalWaitReconciliationReport::cancelled_delegated`
+  field counts these waits. Run the reconciler as before; a host that does not
+  run it leaves these waits parked with an expired approval, and they never
+  resume.
+- `OrmAiSessionTitleWorkService::claim_next` fails queued, retry-scheduled and
+  expired-lease title work with that shape, error code
+  `principal_reference_delegated`, and leaves the default title in place.
+- `classify_run_retry` refuses a run closed with `principal_reference_delegated`
+  in any terminal state, so the terminal event reports it as not retryable
+  (`refused_uncertain`). The owner can send the message again with their own
+  session credential.
+
+No host action is required. The 0.130.0 queries for finding and closing these
+rows remain valid if you want to close them before upgrading workers; rows
+already closed that way, for example with `principal_refused`, are not touched
+again. If a host matches error codes, add `principal_reference_delegated`.
+
+No GraphQL SDL, persistent schema or data migration change.
+`AI_SCHEMA_MODULE_VERSION` is unchanged.
+
 ## 0.129.0 to 0.130.0: delegated and sessionless session credentials
 
 Message submission now refuses a request credential whose

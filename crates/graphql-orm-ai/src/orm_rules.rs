@@ -66,10 +66,12 @@ async fn resolve_current_rule_principal(
     limits: AiCurrentRuleResolverLimits,
     lease: &AiRunLease,
 ) -> Result<ResolvedPrincipal, AiError> {
-    let principal = principal_resolver
-        .resolve(lease.principal_reference())
-        .await
-        .map_err(|_| AiError::ReauthorizationFailed)?;
+    let principal = crate::principal_projection::resolve_current_reference(
+        principal_resolver,
+        lease.principal_reference(),
+    )
+    .await
+    .map_err(|_| AiError::ReauthorizationFailed)?;
     let now = clock.now();
     if principal.reference() != lease.principal_reference()
         || principal.resolved_at() > now

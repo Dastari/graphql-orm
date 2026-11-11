@@ -164,11 +164,12 @@ impl OrmAiSessionTitleWorkService {
         &self,
         reference: &PrincipalReference,
     ) -> Result<ResolvedPrincipal, AiError> {
-        let resolved = self
-            .principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let resolved = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         let now = self.clock.now();
         if resolved.reference() != reference
             || resolved.resolved_at() > now
@@ -334,6 +335,35 @@ impl OrmAiSessionTitleWorkService {
                     for candidate in candidates {
                         validate_work_record(&candidate)?;
                         if !work_is_eligible(&candidate, now.unix_timestamp()) {
+                            continue;
+                        }
+                        if stored_reference_is_delegated(&candidate)? {
+                            // Legacy title work queued with a delegated or
+                            // sessionless reference is closed before any
+                            // lease, resolution, decryption or generation.
+                            let outcome = tx
+                                .compare_and_swap::<AiSessionTitleWorkRecord>(
+                                    &candidate.id,
+                                    candidate.row_version,
+                                    AiSessionTitleWorkRecordWhereInput::default(),
+                                    UpdateAiSessionTitleWorkRecordInput {
+                                        state: Some("failed".to_owned()),
+                                        lease_owner: Some(None),
+                                        lease_expires_at: Some(None),
+                                        next_attempt_at: Some(None),
+                                        error_code: Some(Some(
+                                            crate::principal_projection::DELEGATED_REFERENCE_CODE
+                                                .to_owned(),
+                                        )),
+                                        completed_at: Some(Some(now.unix_timestamp())),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await
+                                .map_err(OrmPublicError::from)?;
+                            if !matches!(outcome, ConditionalUpdateOutcome::Updated(_)) {
+                                return Err(OrmPublicError::new(OrmErrorCode::Conflict));
+                            }
                             continue;
                         }
                         let session = tx
@@ -1075,6 +1105,16 @@ fn validate_work_record(record: &AiSessionTitleWorkRecord) -> Result<(), OrmPubl
     Ok(())
 }
 
+fn stored_reference_is_delegated(
+    record: &AiSessionTitleWorkRecord,
+) -> Result<bool, OrmPublicError> {
+    let reference: PrincipalReference = serde_json::from_value(record.principal_reference.clone())
+        .map_err(|_| OrmPublicError::new(OrmErrorCode::InternalError))?;
+    Ok(crate::principal_projection::is_delegated_reference(
+        &reference,
+    ))
+}
+
 fn work_is_eligible(record: &AiSessionTitleWorkRecord, now: i64) -> bool {
     match record.state.as_str() {
         "queued" | "retry_scheduled" => record.next_attempt_at.is_some_and(|value| value <= now),
@@ -1095,4 +1135,269 @@ fn validate_safe_error_code(value: &str) -> Result<(), AiError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod delegated_reference_tests {
+    use super::*;
+    use agql_auth::{AccessTokenMetadata, AuthUser, FixedClock, SessionContext};
+    use graphql_orm::graphql::orm::{ApplyOptions, OrmSchemaModule};
+    use graphql_orm::prelude::SqliteBackend;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct Calls {
+        resolutions: AtomicUsize,
+        protection: AtomicUsize,
+    }
+
+    struct Resolver(Arc<Calls>, AuthPrincipal, FixedClock);
+
+    #[async_trait]
+    impl CurrentPrincipalResolver for Resolver {
+        async fn resolve(
+            &self,
+            reference: &PrincipalReference,
+        ) -> agql_auth::AuthResult<ResolvedPrincipal> {
+            self.0.resolutions.fetch_add(1, Ordering::SeqCst);
+            ResolvedPrincipal::new(reference.clone(), self.1.clone(), self.2.now())
+        }
+    }
+
+    struct Policy(Arc<Calls>);
+
+    #[async_trait]
+    impl AiContentProtectionPolicyResolver for Policy {
+        async fn resolve(
+            &self,
+            _: &AuthPrincipal,
+            scope: &crate::AiScope,
+        ) -> Result<AiContentProtectionPolicy, AiError> {
+            self.0.protection.fetch_add(1, Ordering::SeqCst);
+            Ok(AiContentProtectionPolicy {
+                scope: scope.clone(),
+                mode: crate::AiContentProtectionMode::DatabaseManaged,
+                key_policy_reference: None,
+                version: 1,
+                ready: true,
+            })
+        }
+    }
+
+    struct Allow;
+
+    #[async_trait]
+    impl AiAccessPolicy for Allow {
+        async fn can_access_scope(
+            &self,
+            _: &AuthPrincipal,
+            _: &crate::AiScope,
+            _: AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::allow("title-test", "title-test-v1")
+        }
+
+        async fn can_access_session(
+            &self,
+            _: &AuthPrincipal,
+            _: AiSessionId,
+            _: AiSessionAction,
+        ) -> crate::AiAccessDecision {
+            crate::AiAccessDecision::allow("title-test", "title-test-v1")
+        }
+    }
+
+    async fn seed(
+        database: &Database<SqliteBackend>,
+        reference: &PrincipalReference,
+        created_at: i64,
+    ) -> Uuid {
+        let session_id = Uuid::new_v4();
+        AiSessionRecord::insert(
+            database,
+            CreateAiSessionRecordInput {
+                execution_selection: None,
+                id: session_id,
+                owner_principal_kind: "user".to_owned(),
+                owner_subject: reference.subject.clone(),
+                tenant_id: Some("tenant-title".to_owned()),
+                scope_kind: "workspace".to_owned(),
+                scope_id: "workspace-title".to_owned(),
+                title: "New conversation".to_owned(),
+                title_revision: 0,
+                title_source: "default".to_owned(),
+                state: "active".to_owned(),
+                stream_head: 0,
+                message_head: 1,
+                last_activity_at: created_at,
+                archived_at: None,
+                deleted_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        // A legacy row written before 0.130.0, inserted directly.
+        AiSessionTitleWorkRecord::insert(
+            database,
+            CreateAiSessionTitleWorkRecordInput {
+                id: session_id,
+                session_id,
+                input_message_id: Uuid::new_v4(),
+                principal_reference: serde_json::to_value(reference).unwrap(),
+                expected_title_revision: 0,
+                state: "queued".to_owned(),
+                lease_owner: None,
+                lease_generation: 0,
+                lease_expires_at: None,
+                retry_count: 0,
+                next_attempt_at: Some(created_at),
+                error_code: None,
+                result_title_hash: None,
+                completed_at: None,
+            },
+        )
+        .await
+        .unwrap();
+        session_id
+    }
+
+    #[tokio::test]
+    async fn legacy_delegated_title_work_fails_closed_at_claim() {
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap();
+        let plan = database
+            .schema()
+            .plan_migration_to_entities(
+                "ai-title-delegated-v1",
+                "AI delegated title work",
+                crate::AiSchemaModule.entities(),
+            )
+            .await
+            .unwrap();
+        database
+            .schema()
+            .apply_migration(&plan, ApplyOptions::default())
+            .await
+            .unwrap();
+        crate::orm_runtime_recovery::open_test_epoch(&database).await;
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let clock = FixedClock::new(now);
+        let owner = AuthPrincipal::User(AuthUser {
+            user_id: "title-owner".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec![],
+            scopes: vec![],
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata {
+                tenant_id: Some("tenant-title".to_owned()),
+                ..AccessTokenMetadata::default()
+            },
+        });
+        let calls = Arc::new(Calls::default());
+        let service = OrmAiSessionTitleWorkService::new(
+            database.clone(),
+            Arc::new(Allow),
+            Arc::new(Policy(calls.clone())),
+            Arc::new(crate::DatabaseManagedContentProtector),
+            Arc::new(Resolver(calls.clone(), owner.clone(), clock.clone())),
+            Arc::new(clock.clone()),
+            AiSessionTitleWorkLimits::default(),
+        );
+
+        let ordinary = owner.reference();
+        let mut legacy = Vec::new();
+        for (offset, (kind, reference)) in
+            crate::principal_projection::test_delegated_references(&ordinary)
+                .into_iter()
+                .enumerate()
+        {
+            let created_at = now.unix_timestamp() - 100 + offset as i64;
+            legacy.push((kind, seed(&database, &reference, created_at).await));
+        }
+        let current = seed(&database, &ordinary, now.unix_timestamp() - 10).await;
+
+        // Rows created in the same second are ordered by ID, so claim until
+        // empty: exactly one claim is ever issued, for the ordinary work.
+        let mut claims = Vec::new();
+        for _ in 0..8 {
+            match service.claim_next("title-worker").await.unwrap() {
+                Some(claim) => claims.push(claim),
+                None => break,
+            }
+        }
+        assert_eq!(claims.len(), 1);
+        let claim = claims.remove(0);
+        assert_eq!(claim.work_id, current);
+        assert_eq!(claim.principal_reference(), &ordinary);
+        assert_eq!(calls.resolutions.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.protection.load(Ordering::SeqCst), 0);
+
+        for (kind, work_id) in legacy {
+            let record = AiSessionTitleWorkRecord::find_by_id(&database, &work_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(record.state, "failed", "{kind}");
+            assert_eq!(
+                record.error_code.as_deref(),
+                Some(crate::principal_projection::DELEGATED_REFERENCE_CODE),
+                "{kind}"
+            );
+            assert_eq!(record.lease_generation, 0, "{kind} was never leased");
+            assert!(record.lease_owner.is_none() && record.lease_expires_at.is_none());
+            assert!(record.next_attempt_at.is_none(), "{kind} is not retried");
+            assert!(record.completed_at.is_some() && record.result_title_hash.is_none());
+            let session = AiSessionRecord::find_by_id(&database, &work_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(session.title_source, "default", "{kind} title untouched");
+            assert_eq!(session.title_revision, 0);
+        }
+
+        service
+            .heartbeat(&claim)
+            .await
+            .expect("the ordinary claim is still current");
+    }
+
+    #[tokio::test]
+    async fn in_flight_delegated_title_work_cannot_resolve_its_reference() {
+        let now = OffsetDateTime::from_unix_timestamp(1_800_000_000).unwrap();
+        let owner = AuthPrincipal::User(AuthUser {
+            user_id: "title-owner".to_owned(),
+            session_id: Uuid::new_v4(),
+            roles: vec![],
+            scopes: vec![],
+            session: SessionContext::default(),
+            token_claims: AccessTokenMetadata::default(),
+        });
+        let calls = Arc::new(Calls::default());
+        let clock = FixedClock::new(now);
+        let database = Database::<SqliteBackend>::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap();
+        let service = OrmAiSessionTitleWorkService::new(
+            database,
+            Arc::new(Allow),
+            Arc::new(Policy(calls.clone())),
+            Arc::new(crate::DatabaseManagedContentProtector),
+            Arc::new(Resolver(calls.clone(), owner.clone(), clock.clone())),
+            Arc::new(clock),
+            AiSessionTitleWorkLimits::default(),
+        );
+        for (kind, reference) in
+            crate::principal_projection::test_delegated_references(&owner.reference())
+        {
+            assert!(
+                matches!(
+                    service.resolve_current(&reference).await,
+                    Err(AiError::ReauthorizationFailed)
+                ),
+                "{kind}"
+            );
+        }
+        assert_eq!(calls.resolutions.load(Ordering::SeqCst), 0);
+    }
 }

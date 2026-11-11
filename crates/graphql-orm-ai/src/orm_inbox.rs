@@ -870,8 +870,7 @@ impl AiInboxService for OrmAiInboxService {
                     }
                 };
                 if should_reauthorize {
-                    let resolved = resolver
-                        .resolve(&principal_reference)
+                    let resolved = crate::principal_projection::resolve_current_reference(resolver.as_ref(), &principal_reference)
                         .await
                         .map_err(|_| AiError::ReauthorizationFailed)?;
                     if !crate::principal_projection::resolved_identity_matches(

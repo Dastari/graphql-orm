@@ -247,11 +247,12 @@ mod service {
             &self,
             reference: &PrincipalReference,
         ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
-            let current = self
-                .principal_resolver
-                .resolve(reference)
-                .await
-                .map_err(|_| AiError::ReauthorizationFailed)?;
+            let current = crate::principal_projection::resolve_current_reference(
+                self.principal_resolver.as_ref(),
+                reference,
+            )
+            .await
+            .map_err(|_| AiError::ReauthorizationFailed)?;
             let now = self.clock.now();
             if current.reference() != reference
                 || current.resolved_at() > now

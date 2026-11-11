@@ -264,6 +264,9 @@ pub struct AiApprovalWaitReconciliationReport {
     pub cancelled_expired: usize,
     /// Runs cancelled by current deployment policy.
     pub cancelled_policy: usize,
+    /// Runs cancelled because their stored principal reference is a legacy
+    /// delegated or sessionless credential's, without resolving it.
+    pub cancelled_delegated: usize,
     /// Malformed waits closed for operator recovery.
     pub recovery_required: usize,
     /// Current valid waits left parked.
@@ -980,11 +983,12 @@ impl OrmAiApprovalService {
         &self,
         reference: &PrincipalReference,
     ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
-        let resolved = self
-            .principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let resolved = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         let checked_at = self.clock.now();
         if resolved.resolved_at() > checked_at
             || checked_at - resolved.resolved_at() > self.limits.maximum_principal_age
@@ -1623,8 +1627,19 @@ impl OrmAiApprovalWaitReconciliationService {
             let reference: PrincipalReference =
                 serde_json::from_value(snapshot.run.principal_reference.clone())
                     .map_err(|_| AiError::PersistenceFailed)?;
-            let resolved = self.resolve_current(&reference).await?;
-            let (owner_kind, owner_subject) = principal_identity(resolved.principal());
+            // A legacy run whose stored reference is delegated or sessionless
+            // is closed without resolving it: resolution would yield the user
+            // session behind it. No host policy, protection or wait-policy
+            // callback runs for it.
+            let resolved = if crate::principal_projection::is_delegated_reference(&reference) {
+                None
+            } else {
+                Some(self.resolve_current(&reference).await?)
+            };
+            let (owner_kind, owner_subject) = match resolved.as_ref() {
+                Some(resolved) => principal_identity(resolved.principal()),
+                None => ("user".to_owned(), reference.subject.as_str()),
+            };
             if session.id != snapshot.run.session_id
                 || session.owner_principal_kind != owner_kind
                 || session.owner_subject != owner_subject
@@ -1632,9 +1647,13 @@ impl OrmAiApprovalWaitReconciliationService {
                 return Err(AiError::PersistenceFailed);
             }
             let scope = record_scope(session);
-            let protection = self
-                .current_protection_policy(resolved.principal(), &scope)
-                .await?;
+            let protection = match resolved.as_ref() {
+                Some(resolved) => Some(
+                    self.current_protection_policy(resolved.principal(), &scope)
+                        .await?,
+                ),
+                None => None,
+            };
             let linkage_valid = approval_wait_linkage_is_valid(&snapshot, &reference);
             let approval_state = snapshot
                 .approval
@@ -1642,168 +1661,159 @@ impl OrmAiApprovalWaitReconciliationService {
                 .and_then(|approval| parse_state(&approval.state).ok());
 
             let (outcome, outcome_code, policy_version, report_kind) =
-                if !linkage_valid || approval_state.is_none() {
-                    (
-                        PreparedApprovalWaitOutcome::RecoveryRequired {
-                            approval_id: snapshot.approval.as_ref().map(|approval| approval.id),
-                            tool_call_id: snapshot.call.as_ref().map(|call| call.id),
-                        },
-                        "approval_wait_linkage_invalid",
-                        None,
-                        ApprovalWaitReportKind::RecoveryRequired,
-                    )
-                } else {
-                    let approval = snapshot
-                        .approval
-                        .as_ref()
-                        .expect("valid approval linkage has an approval");
-                    let state = approval_state.unwrap_or(AiApprovalState::Consumed);
-                    let (reason, call_state, next_approval_state, policy_version, report_kind) =
-                        match state {
-                            AiApprovalState::Denied => (
-                                "approval_denied",
-                                "approval_denied",
-                                None,
-                                None,
-                                ApprovalWaitReportKind::Denied,
-                            ),
-                            AiApprovalState::Revoked => (
-                                "approval_revoked",
-                                "approval_revoked",
-                                None,
-                                None,
-                                ApprovalWaitReportKind::Revoked,
-                            ),
-                            AiApprovalState::Expired => (
-                                "approval_expired",
-                                "approval_expired",
-                                None,
-                                None,
-                                ApprovalWaitReportKind::Expired,
-                            ),
-                            AiApprovalState::Pending | AiApprovalState::Approved
-                                if session.state != "active" || session.deleted_at.is_some() =>
-                            {
-                                (
-                                    "approval_wait_session_unavailable",
-                                    "approval_expired",
-                                    Some("expired".to_owned()),
-                                    None,
-                                    ApprovalWaitReportKind::Expired,
-                                )
-                            }
-                            AiApprovalState::Pending | AiApprovalState::Approved
-                                if approval.expires_at <= now.unix_timestamp() =>
-                            {
-                                (
-                                    "approval_expired",
-                                    "approval_expired",
-                                    Some("expired".to_owned()),
-                                    None,
-                                    ApprovalWaitReportKind::Expired,
-                                )
-                            }
-                            AiApprovalState::Pending | AiApprovalState::Approved
-                                if approval_wait_cutoff_reached(
-                                    approval.created_at,
-                                    now,
-                                    self.limits.maximum_pending_duration,
-                                ) =>
-                            {
-                                (
-                                    "approval_wait_cutoff",
-                                    "approval_expired",
-                                    Some("expired".to_owned()),
-                                    None,
-                                    ApprovalWaitReportKind::Expired,
-                                )
-                            }
-                            AiApprovalState::Pending | AiApprovalState::Approved => {
-                                let context = AiApprovalWaitPolicyContext {
-                                    scope: scope.clone(),
-                                    session_id: AiSessionId(session.id),
-                                    run_id: AiRunId(snapshot.run.id),
-                                    approval_id: AiApprovalId(approval.id),
-                                    approval_state: state,
-                                };
-                                let decision = self
-                                    .wait_policy
-                                    .evaluate_wait(resolved.principal(), &context)
-                                    .await?;
-                                if decision.may_continue() {
-                                    report.still_waiting += 1;
-                                    continue;
-                                }
-                                (
-                                    "approval_wait_policy_cancelled",
-                                    "approval_expired",
-                                    Some("expired".to_owned()),
-                                    Some(decision.policy_version().to_owned()),
-                                    ApprovalWaitReportKind::Policy,
-                                )
-                            }
-                            AiApprovalState::ResumeClaimed | AiApprovalState::Consumed => (
-                                "approval_wait_linkage_invalid",
-                                "approval_expired",
-                                None,
-                                None,
-                                ApprovalWaitReportKind::RecoveryRequired,
-                            ),
-                        };
-                    if report_kind == ApprovalWaitReportKind::RecoveryRequired {
+                if let Some(resolved) = resolved.as_ref() {
+                    if !linkage_valid || approval_state.is_none() {
                         (
                             PreparedApprovalWaitOutcome::RecoveryRequired {
-                                approval_id: Some(approval.id),
+                                approval_id: snapshot.approval.as_ref().map(|approval| approval.id),
                                 tool_call_id: snapshot.call.as_ref().map(|call| call.id),
                             },
-                            reason,
-                            policy_version,
-                            report_kind,
+                            "approval_wait_linkage_invalid",
+                            None,
+                            ApprovalWaitReportKind::RecoveryRequired,
                         )
                     } else {
-                        (
-                            PreparedApprovalWaitOutcome::Cancelled(Box::new(
-                                PreparedApprovalWaitCancellation {
-                                    call: snapshot
-                                        .call
-                                        .clone()
-                                        .expect("valid approval linkage has a tool call"),
-                                    step: snapshot
-                                        .step
-                                        .clone()
-                                        .expect("valid approval linkage has a run step"),
-                                    approval: approval.clone(),
-                                    checkpoint: snapshot
-                                        .checkpoint
-                                        .clone()
-                                        .expect("valid approval linkage has a checkpoint"),
-                                    parked_checkpoint: snapshot.parked_checkpoint.clone(),
-                                    attempt_outcome: snapshot.attempt_outcome.clone(),
-                                    next_approval_state,
-                                    call_state: call_state.to_owned(),
+                        let approval = snapshot
+                            .approval
+                            .as_ref()
+                            .expect("valid approval linkage has an approval");
+                        let state = approval_state.unwrap_or(AiApprovalState::Consumed);
+                        let (reason, call_state, next_approval_state, policy_version, report_kind) =
+                            match state {
+                                AiApprovalState::Denied => (
+                                    "approval_denied",
+                                    "approval_denied",
+                                    None,
+                                    None,
+                                    ApprovalWaitReportKind::Denied,
+                                ),
+                                AiApprovalState::Revoked => (
+                                    "approval_revoked",
+                                    "approval_revoked",
+                                    None,
+                                    None,
+                                    ApprovalWaitReportKind::Revoked,
+                                ),
+                                AiApprovalState::Expired => (
+                                    "approval_expired",
+                                    "approval_expired",
+                                    None,
+                                    None,
+                                    ApprovalWaitReportKind::Expired,
+                                ),
+                                AiApprovalState::Pending | AiApprovalState::Approved
+                                    if session.state != "active"
+                                        || session.deleted_at.is_some() =>
+                                {
+                                    (
+                                        "approval_wait_session_unavailable",
+                                        "approval_expired",
+                                        Some("expired".to_owned()),
+                                        None,
+                                        ApprovalWaitReportKind::Expired,
+                                    )
+                                }
+                                AiApprovalState::Pending | AiApprovalState::Approved
+                                    if approval.expires_at <= now.unix_timestamp() =>
+                                {
+                                    (
+                                        "approval_expired",
+                                        "approval_expired",
+                                        Some("expired".to_owned()),
+                                        None,
+                                        ApprovalWaitReportKind::Expired,
+                                    )
+                                }
+                                AiApprovalState::Pending | AiApprovalState::Approved
+                                    if approval_wait_cutoff_reached(
+                                        approval.created_at,
+                                        now,
+                                        self.limits.maximum_pending_duration,
+                                    ) =>
+                                {
+                                    (
+                                        "approval_wait_cutoff",
+                                        "approval_expired",
+                                        Some("expired".to_owned()),
+                                        None,
+                                        ApprovalWaitReportKind::Expired,
+                                    )
+                                }
+                                AiApprovalState::Pending | AiApprovalState::Approved => {
+                                    let context = AiApprovalWaitPolicyContext {
+                                        scope: scope.clone(),
+                                        session_id: AiSessionId(session.id),
+                                        run_id: AiRunId(snapshot.run.id),
+                                        approval_id: AiApprovalId(approval.id),
+                                        approval_state: state,
+                                    };
+                                    let decision = self
+                                        .wait_policy
+                                        .evaluate_wait(resolved.principal(), &context)
+                                        .await?;
+                                    if decision.may_continue() {
+                                        report.still_waiting += 1;
+                                        continue;
+                                    }
+                                    (
+                                        "approval_wait_policy_cancelled",
+                                        "approval_expired",
+                                        Some("expired".to_owned()),
+                                        Some(decision.policy_version().to_owned()),
+                                        ApprovalWaitReportKind::Policy,
+                                    )
+                                }
+                                AiApprovalState::ResumeClaimed | AiApprovalState::Consumed => (
+                                    "approval_wait_linkage_invalid",
+                                    "approval_expired",
+                                    None,
+                                    None,
+                                    ApprovalWaitReportKind::RecoveryRequired,
+                                ),
+                            };
+                        if report_kind == ApprovalWaitReportKind::RecoveryRequired {
+                            (
+                                PreparedApprovalWaitOutcome::RecoveryRequired {
+                                    approval_id: Some(approval.id),
+                                    tool_call_id: snapshot.call.as_ref().map(|call| call.id),
                                 },
-                            )),
-                            reason,
-                            policy_version,
-                            report_kind,
-                        )
+                                reason,
+                                policy_version,
+                                report_kind,
+                            )
+                        } else {
+                            (
+                                PreparedApprovalWaitOutcome::Cancelled(Box::new(
+                                    wait_cancellation(&snapshot, next_approval_state, call_state),
+                                )),
+                                reason,
+                                policy_version,
+                                report_kind,
+                            )
+                        }
                     }
+                } else {
+                    delegated_wait_outcome(&snapshot, linkage_valid, approval_state)
                 };
 
             let event_id = Uuid::new_v4();
-            let protected_event = self
-                .protect_event(
-                    &protection,
-                    event_id,
-                    &scope,
-                    serde_json::json!({
-                        "runId": snapshot.run.id,
-                        "approvalId": snapshot.approval.as_ref().map(|approval| approval.id),
-                        "toolCallId": snapshot.call.as_ref().map(|call| call.id),
-                        "outcomeCode": outcome_code
-                    }),
-                )
-                .await?;
+            let protected_event = match protection.as_ref() {
+                Some(protection) => Some(
+                    self.protect_event(
+                        protection,
+                        event_id,
+                        &scope,
+                        serde_json::json!({
+                            "runId": snapshot.run.id,
+                            "approvalId": snapshot.approval.as_ref().map(|approval| approval.id),
+                            "toolCallId": snapshot.call.as_ref().map(|call| call.id),
+                            "outcomeCode": outcome_code
+                        }),
+                    )
+                    .await?,
+                ),
+                None => None,
+            };
             let prepared = PreparedApprovalWaitReconciliation {
                 expected_run: snapshot.run,
                 expected_owner_principal_kind: owner_kind,
@@ -2042,11 +2052,12 @@ impl OrmAiApprovalWaitReconciliationService {
         &self,
         reference: &PrincipalReference,
     ) -> Result<agql_auth::ResolvedPrincipal, AiError> {
-        let resolved = self
-            .principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let resolved = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         let checked_at = self.clock.now();
         if resolved.resolved_at() > checked_at
             || checked_at - resolved.resolved_at() > self.limits.maximum_principal_age
@@ -2115,6 +2126,7 @@ enum ApprovalWaitReportKind {
     Revoked,
     Expired,
     Policy,
+    Delegated,
     RecoveryRequired,
 }
 
@@ -2125,9 +2137,85 @@ impl AiApprovalWaitReconciliationReport {
             ApprovalWaitReportKind::Revoked => self.cancelled_revoked += 1,
             ApprovalWaitReportKind::Expired => self.cancelled_expired += 1,
             ApprovalWaitReportKind::Policy => self.cancelled_policy += 1,
+            ApprovalWaitReportKind::Delegated => self.cancelled_delegated += 1,
             ApprovalWaitReportKind::RecoveryRequired => self.recovery_required += 1,
         }
     }
+}
+
+fn wait_cancellation(
+    snapshot: &ApprovalWaitSnapshot,
+    next_approval_state: Option<String>,
+    call_state: &str,
+) -> PreparedApprovalWaitCancellation {
+    PreparedApprovalWaitCancellation {
+        call: snapshot
+            .call
+            .clone()
+            .expect("valid approval linkage has a tool call"),
+        step: snapshot
+            .step
+            .clone()
+            .expect("valid approval linkage has a run step"),
+        approval: snapshot
+            .approval
+            .clone()
+            .expect("valid approval linkage has an approval"),
+        checkpoint: snapshot
+            .checkpoint
+            .clone()
+            .expect("valid approval linkage has a checkpoint"),
+        parked_checkpoint: snapshot.parked_checkpoint.clone(),
+        attempt_outcome: snapshot.attempt_outcome.clone(),
+        next_approval_state,
+        call_state: call_state.to_owned(),
+    }
+}
+
+/// Closes a wait whose stored principal reference is delegated or sessionless
+/// with [`crate::principal_projection::DELEGATED_REFERENCE_CODE`]. A live
+/// approval is expired so it can never be consumed; a malformed or already
+/// claimed graph is closed for operator recovery as usual.
+fn delegated_wait_outcome(
+    snapshot: &ApprovalWaitSnapshot,
+    linkage_valid: bool,
+    approval_state: Option<AiApprovalState>,
+) -> (
+    PreparedApprovalWaitOutcome,
+    &'static str,
+    Option<String>,
+    ApprovalWaitReportKind,
+) {
+    let code = crate::principal_projection::DELEGATED_REFERENCE_CODE;
+    let (call_state, next_approval_state) = match approval_state {
+        Some(AiApprovalState::Denied) if linkage_valid => ("approval_denied", None),
+        Some(AiApprovalState::Revoked) if linkage_valid => ("approval_revoked", None),
+        Some(AiApprovalState::Expired) if linkage_valid => ("approval_expired", None),
+        Some(AiApprovalState::Pending | AiApprovalState::Approved) if linkage_valid => {
+            ("approval_expired", Some("expired".to_owned()))
+        }
+        _ => {
+            return (
+                PreparedApprovalWaitOutcome::RecoveryRequired {
+                    approval_id: snapshot.approval.as_ref().map(|approval| approval.id),
+                    tool_call_id: snapshot.call.as_ref().map(|call| call.id),
+                },
+                code,
+                None,
+                ApprovalWaitReportKind::RecoveryRequired,
+            );
+        }
+    };
+    (
+        PreparedApprovalWaitOutcome::Cancelled(Box::new(wait_cancellation(
+            snapshot,
+            next_approval_state,
+            call_state,
+        ))),
+        code,
+        None,
+        ApprovalWaitReportKind::Delegated,
+    )
 }
 
 fn approval_wait_linkage_is_valid(
@@ -4292,6 +4380,193 @@ mod tests {
                 .await
                 .expect_err("a delegated or sessionless credential must not list approvals");
             assert!(matches!(error, AiError::ReauthorizationFailed), "{error:?}");
+        }
+    }
+
+    /// Rewrites a parked wait as a pre-0.130.0 release would have stored it
+    /// for a delegated or sessionless credential: the run and its approval are
+    /// bound to that credential's reference.
+    async fn store_legacy_delegated_wait(
+        fixture: &Fixture,
+        run_id: AiRunId,
+        approval_id: AiApprovalId,
+        reference: &PrincipalReference,
+    ) {
+        let encoded = serde_json::to_value(reference).unwrap();
+        let fingerprint = AiApprovalBinding::principal_fingerprint(reference);
+        fixture
+            .database
+            .transaction(TransactionMode::StateMachine, move |tx| {
+                Box::pin(async move {
+                    tx.update_by_id::<AiRunRecord>(
+                        &run_id.0,
+                        UpdateAiRunRecordInput {
+                            principal_reference: Some(encoded),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    tx.update_by_id::<AiApprovalRecord>(
+                        &approval_id.0,
+                        UpdateAiApprovalRecordInput {
+                            principal_reference_fingerprint: Some(fingerprint),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .map_err(OrmPublicError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn assert_delegated_wait_closed(
+        fixture: &Fixture,
+        kind: &str,
+        run_id: AiRunId,
+        approval_id: AiApprovalId,
+        tool_call_id: Uuid,
+    ) {
+        let code = crate::principal_projection::DELEGATED_REFERENCE_CODE;
+        let run = AiRunRecord::find_by_id(&fixture.database, &run_id.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state, "cancelled", "{kind}");
+        assert_eq!(run.error_code.as_deref(), Some(code), "{kind}");
+        assert!(run.lease_owner.is_none() && run.lease_expires_at.is_none());
+        let approval = AiApprovalRecord::find_by_id(&fixture.database, &approval_id.0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(approval.state, "expired", "{kind}");
+        assert_eq!(approval.consumed_uses, 0, "{kind} approval never consumed");
+        assert!(approval.consumed_at.is_none());
+        let call = AiToolCallRecord::find_by_id(&fixture.database, &tool_call_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(call.state, "approval_expired", "{kind}");
+        assert!(call.protected_result.is_none(), "{kind} tool never ran");
+        let events = fixture
+            .database
+            .transaction(TransactionMode::Default, move |tx| {
+                Box::pin(async move {
+                    tx.query::<AiSessionEventRecord>()
+                        .filter(AiSessionEventRecordWhereInput {
+                            session_id: Some(UuidFilter {
+                                eq: Some(run.session_id),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                        .limit(100)
+                        .fetch_all()
+                        .await
+                        .map_err(OrmPublicError::from)
+                })
+            })
+            .await
+            .unwrap();
+        // No content-protection policy is resolved for the delegated wait,
+        // so only the content-free canonical terminal event is written.
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == "approval_wait_reconciled"),
+            "{kind}"
+        );
+        let terminal = events
+            .iter()
+            .find(|event| event.event_type == "run_cancelled")
+            .expect("canonical terminal event");
+        let metadata = crate::orm_runs::open_terminal_event_metadata(
+            &terminal.event_type,
+            &terminal.protected_payload,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(metadata["failure"]["code"], code, "{kind}");
+        assert_eq!(metadata["failure"]["retryable"], false, "{kind}");
+        assert!(
+            fixture
+                .run_service
+                .claim_next_approved("delegated-resume-probe")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_delegated_approved_wait_is_never_resumed() {
+        let base = fixture().await.principal.reference();
+        for (kind, reference) in crate::principal_projection::test_delegated_references(&base) {
+            let fixture = fixture().await;
+            let (_, requested, _, _) = approved_wait(&fixture).await;
+            let run_id = requested.lease().run_id();
+            let approval_id = requested.approval_id();
+            let tool_call = AiApprovalRecord::find_by_id(&fixture.database, &approval_id.0)
+                .await
+                .unwrap()
+                .unwrap()
+                .tool_call_id;
+            store_legacy_delegated_wait(&fixture, run_id, approval_id, &reference).await;
+
+            assert!(
+                fixture
+                    .run_service
+                    .claim_next_approved("delegated-resume-worker")
+                    .await
+                    .expect("the claim pass stays safe")
+                    .is_none(),
+                "{kind} must not be handed to a worker"
+            );
+            let approval = AiApprovalRecord::find_by_id(&fixture.database, &approval_id.0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(approval.state, "expired", "{kind}");
+            let run = AiRunRecord::find_by_id(&fixture.database, &run_id.0)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(run.state, "waiting_approval", "{kind}");
+
+            let report = fixture
+                .reconciliation_service
+                .reconcile_waits("delegated-wait-reconciler")
+                .await
+                .expect("reconciliation closes the delegated wait");
+            assert_eq!(report.cancelled_delegated, 1, "{kind}: {report:?}");
+            assert_eq!(report.still_waiting, 0, "{kind}: {report:?}");
+            assert_delegated_wait_closed(&fixture, kind, run_id, approval_id, tool_call).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_delegated_pending_wait_is_closed_without_resolution() {
+        let base = fixture().await.principal.reference();
+        for (kind, reference) in crate::principal_projection::test_delegated_references(&base) {
+            // The wait policy would keep a current wait parked; it is never
+            // consulted for a delegated reference.
+            let fixture = fixture_with_wait_policy(true).await;
+            let (requested, tool_call_id) =
+                request_wait(&fixture, fixture.now + Duration::hours(2)).await;
+            let run_id = requested.lease().run_id();
+            let approval_id = requested.approval_id();
+            store_legacy_delegated_wait(&fixture, run_id, approval_id, &reference).await;
+            let report = fixture
+                .reconciliation_service
+                .reconcile_waits("delegated-wait-reconciler")
+                .await
+                .expect("reconciliation closes the delegated wait");
+            assert_eq!(report.cancelled_delegated, 1, "{kind}: {report:?}");
+            assert_eq!(report.still_waiting, 0, "{kind}: {report:?}");
+            assert_delegated_wait_closed(&fixture, kind, run_id, approval_id, tool_call_id.0).await;
         }
     }
 }

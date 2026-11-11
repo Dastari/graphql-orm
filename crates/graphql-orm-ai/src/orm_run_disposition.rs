@@ -128,11 +128,12 @@ impl OrmAiRunDispositionService {
         &self,
         reference: &PrincipalReference,
     ) -> Result<ResolvedPrincipal, AiError> {
-        let resolved = self
-            .principal_resolver
-            .resolve(reference)
-            .await
-            .map_err(|_| AiError::ReauthorizationFailed)?;
+        let resolved = crate::principal_projection::resolve_current_reference(
+            self.principal_resolver.as_ref(),
+            reference,
+        )
+        .await
+        .map_err(|_| AiError::ReauthorizationFailed)?;
         let now = self.clock.now();
         if resolved.reference() != reference
             || resolved.resolved_at() > now
