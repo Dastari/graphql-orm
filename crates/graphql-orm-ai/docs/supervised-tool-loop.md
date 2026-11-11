@@ -106,8 +106,10 @@ and operation narrowing. Reads refuse too, so a delegated credential can see
 neither previews nor the approval list. The same rule applies to proposal
 listing, reads, review and applied-outcome linking, run cancellation, failure
 retry and acknowledgement, tool-result previews, and the session-event and
-inbox streams. Approval and review clients must use the user's own session
-credential.
+inbox streams. Message submission, the other session roots and inbox pages
+refuse them too, so a delegated credential can neither queue a run that
+workers resolve to the full user nor read what it cannot stream. Approval and
+review clients must use the user's own session credential.
 
 ## Proved refusals and uncertain execution
 

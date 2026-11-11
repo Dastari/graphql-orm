@@ -763,3 +763,57 @@ async fn delegated_request_principal_cannot_open_an_inbox_stream() {
         ));
     }
 }
+
+/// The inbox page refuses the same credentials as the inbox stream, before it
+/// reads the inbox, so a delegated or sessionless credential sees none of the
+/// owner's activity.
+#[tokio::test]
+async fn delegated_request_principal_cannot_read_an_inbox_page() {
+    let (sessions, inbox, _pruning, _retention, owner, _active) =
+        services(Duration::from_secs(60)).await;
+    let session = create_session(&sessions, &owner).await;
+    sessions
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "bounded message".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("message commits with its inbox event");
+    // Both grant kinds, and no grant kind with an actor binding.
+    for grant_kind in [
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation),
+        Some(agql_auth::AccessTokenGrantKind::Sessionless),
+        None,
+    ] {
+        let AuthPrincipal::User(mut refused) = owner.clone() else {
+            unreachable!("inbox fixture owner is a user session")
+        };
+        refused.token_claims.grant_kind = grant_kind;
+        if grant_kind.is_none() {
+            refused.token_claims.actor = Some(agql_auth::ActorIdentity {
+                sub: "ai-coordinator".to_owned(),
+                amr: vec!["service".to_owned()],
+            });
+        }
+        // Refused even when the window itself is invalid: the credential is
+        // checked first.
+        for (after, first) in [(0, 100), (-1, 0)] {
+            assert!(matches!(
+                inbox
+                    .inbox_event_page(&AuthPrincipal::User(refused.clone()), after, first)
+                    .await,
+                Err(AiError::ReauthorizationFailed)
+            ));
+        }
+    }
+    let page = inbox
+        .inbox_event_page(&owner, 0, 100)
+        .await
+        .expect("the owner's own session still reads its inbox");
+    assert_eq!(page.events.len(), 2);
+}

@@ -3,7 +3,7 @@ title: "Durable Principal Inbox"
 kind: reference
 status: active
 owner: graphql-orm-ai-maintainers
-last_reviewed: 2026-08-12
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -48,6 +48,14 @@ wakeup receiver before replay, pages durable rows to a captured watermark, and
 then follows wakeups. A wakeup is only a hint: delivery always re-reads ORM
 state and repeats principal/session/scope authorization plus protected-content
 opening. Broadcast lag triggers durable replay rather than event loss.
+
+The page and the subscription accept only the user's own session or an API
+token. A session-bound delegation, a sessionless grant, or a credential with no
+grant kind that carries an actor or exact operation binding is refused with
+`AI_REAUTHORIZATION_FAILED` before any inbox read. Session windows, message
+submission, session mutations and attachment roots refuse the same credentials.
+Receiver admission accepts only session-bound delegations, so these roots
+cannot be receiver-admission targets.
 
 Current event types are server-authored and bounded:
 

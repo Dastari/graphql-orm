@@ -1566,3 +1566,317 @@ async fn run_session_lookup_rechecks_policy_and_preserves_archive_delete_visibil
         .unwrap();
     assert!(reader.session_for_run(&owner, run).await.unwrap().is_none());
 }
+
+/// Counts every host policy and content-protection call so a refusal can be
+/// shown to happen before any read, decryption or write.
+#[derive(Default)]
+struct Calls {
+    access: std::sync::atomic::AtomicUsize,
+    protection: std::sync::atomic::AtomicUsize,
+}
+
+impl Calls {
+    fn total(&self) -> usize {
+        self.access.load(std::sync::atomic::Ordering::SeqCst)
+            + self.protection.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn reset(&self) {
+        self.access.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.protection
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn access(&self) {
+        self.access
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn protection(&self) {
+        self.protection
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct CountingAccess(Arc<Calls>);
+
+#[async_trait]
+impl AiAccessPolicy for CountingAccess {
+    async fn can_access_scope(
+        &self,
+        _principal: &AuthPrincipal,
+        _scope: &AiScope,
+        _action: AiSessionAction,
+    ) -> AiAccessDecision {
+        self.0.access();
+        AiAccessDecision::allow("test", "test-v1")
+    }
+
+    async fn can_access_session(
+        &self,
+        _principal: &AuthPrincipal,
+        _session_id: AiSessionId,
+        _action: AiSessionAction,
+    ) -> AiAccessDecision {
+        self.0.access();
+        AiAccessDecision::allow("test", "test-v1")
+    }
+}
+
+struct CountingProtectionPolicy(Arc<Calls>);
+
+#[async_trait]
+impl AiContentProtectionPolicyResolver for CountingProtectionPolicy {
+    async fn resolve(
+        &self,
+        principal: &AuthPrincipal,
+        scope: &AiScope,
+    ) -> Result<AiContentProtectionPolicy, AiError> {
+        self.0.protection();
+        ProtectionPolicy.resolve(principal, scope).await
+    }
+}
+
+struct CountingProtector(Arc<Calls>);
+
+#[async_trait]
+impl AiContentProtector for CountingProtector {
+    async fn protect(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        value: serde_json::Value,
+    ) -> Result<ProtectedContentEnvelope, ContentProtectionError> {
+        self.0.protection();
+        DatabaseManagedContentProtector
+            .protect(policy, context, value)
+            .await
+    }
+
+    async fn open(
+        &self,
+        policy: &AiContentProtectionPolicy,
+        context: &ContentProtectionContext,
+        envelope: &ProtectedContentEnvelope,
+    ) -> Result<serde_json::Value, ContentProtectionError> {
+        self.0.protection();
+        DatabaseManagedContentProtector
+            .open(policy, context, envelope)
+            .await
+    }
+}
+
+/// Request credentials that must never act as the user they were derived from:
+/// a session-bound delegation, a sessionless grant, and a credential with no
+/// grant kind that still carries an actor and an exact operation binding.
+fn refused_request_principals(owner: &AuthPrincipal) -> Vec<AuthPrincipal> {
+    let AuthPrincipal::User(user) = owner.clone() else {
+        unreachable!("session fixture owner is a user session")
+    };
+    let actor = || agql_auth::ActorIdentity {
+        sub: "ai-coordinator".to_owned(),
+        amr: vec!["service".to_owned()],
+    };
+    let operation =
+        || agql_auth::ExactOperationBinding::new("RecordsCount", "sha256:reviewed-document");
+    let mut delegated = user.clone();
+    delegated.token_claims.grant_kind =
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+    delegated.token_claims.actor = Some(actor());
+    delegated.token_claims.operation = Some(operation());
+    let mut bare_delegated = user.clone();
+    bare_delegated.token_claims.grant_kind =
+        Some(agql_auth::AccessTokenGrantKind::SessionBoundDelegation);
+    let mut sessionless = user.clone();
+    sessionless.token_claims.grant_kind = Some(agql_auth::AccessTokenGrantKind::Sessionless);
+    let mut narrowed = user;
+    narrowed.token_claims.grant_kind = None;
+    narrowed.token_claims.actor = Some(actor());
+    narrowed.token_claims.operation = Some(operation());
+    vec![
+        AuthPrincipal::User(delegated),
+        AuthPrincipal::User(bare_delegated),
+        AuthPrincipal::User(sessionless),
+        AuthPrincipal::User(narrowed),
+    ]
+}
+
+fn last_twenty() -> graphql_orm::graphql::pagination::ValidatedKeysetConnection {
+    KeysetConnectionInput {
+        last: Some(20),
+        ..Default::default()
+    }
+    .validate(20, 100)
+    .expect("page should validate")
+}
+
+/// A delegated or sessionless credential used to submit a message would be
+/// persisted as the run's principal reference. Workers resolve that reference
+/// to the parent user session, so the run would act with the full user's
+/// authority. Every session root refuses such a credential before any policy
+/// call, decryption, read or write, whether or not run authorization is
+/// configured.
+#[tokio::test]
+async fn delegated_request_principals_are_refused_on_every_session_root() {
+    let calls = Arc::new(Calls::default());
+    let base = service().await;
+    let service = OrmAiSessionService::new(
+        base.database().clone(),
+        Arc::new(CountingAccess(calls.clone())),
+        Arc::new(CountingProtectionPolicy(calls.clone())),
+        Arc::new(CountingProtector(calls.clone())),
+    );
+    let runs = run_service(&service);
+    let owner = principal("owner");
+    let session = service
+        .create_session(
+            &owner,
+            CreateAiSessionInput {
+                execution_selection: None,
+                scope: scope_input(),
+                title: Some("Research".to_owned()),
+            },
+        )
+        .await
+        .expect("owner creates a session");
+    let sent = service
+        .send_message(
+            &owner,
+            SendAiMessageInput {
+                session_id: session.id,
+                text: "Find records containing the example term".to_owned(),
+                attachment_ids: vec![],
+                client_message_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("the owner's own session credential submits");
+    let head = service
+        .session(&owner, AiSessionId(session.id))
+        .await
+        .expect("owner reads the session")
+        .expect("session exists")
+        .stream_head;
+
+    for refused in refused_request_principals(&owner) {
+        calls.reset();
+        let id = AiSessionId(session.id);
+        let refusals = [
+            service
+                .send_message(
+                    &refused,
+                    SendAiMessageInput {
+                        session_id: session.id,
+                        text: "Delete every record".to_owned(),
+                        attachment_ids: vec![],
+                        client_message_id: Uuid::new_v4(),
+                    },
+                )
+                .await
+                .err(),
+            service
+                .conversation_bootstrap(&refused, id, 20, 20, 20)
+                .await
+                .err(),
+            service.sessions(&refused, last_twenty()).await.err(),
+            service.session(&refused, id).await.err(),
+            service
+                .session_for_run(&refused, AiRunId(sent.run_id))
+                .await
+                .err(),
+            service.session_stream_head(&refused, id).await.err(),
+            service.messages(&refused, id, last_twenty()).await.err(),
+            service
+                .message_blocks(&refused, sent.message_id, None, 10)
+                .await
+                .err(),
+            service.session_event_page(&refused, id, 0, 10).await.err(),
+            service
+                .create_session(
+                    &refused,
+                    CreateAiSessionInput {
+                        execution_selection: None,
+                        scope: scope_input(),
+                        title: Some("Delegated".to_owned()),
+                    },
+                )
+                .await
+                .err(),
+            service
+                .pin_execution_selection(
+                    &refused,
+                    PinAiSessionExecutionSelectionInput {
+                        session_id: session.id,
+                        execution_selection: AiSessionExecutionSelectionInput {
+                            provider: AiSessionProviderKind::OpenAi,
+                            profile_id: "profile".to_owned(),
+                            model: "model".to_owned(),
+                            reasoning_effort: ModelReasoningEffort::Low,
+                        },
+                    },
+                )
+                .await
+                .err(),
+            service
+                .rename_session(
+                    &refused,
+                    RenameAiSessionInput {
+                        session_id: session.id,
+                        title: "Renamed".to_owned(),
+                        client_mutation_id: Uuid::new_v4(),
+                        expected_title_revision: None,
+                    },
+                )
+                .await
+                .err(),
+            service.archive_session(&refused, id).await.err(),
+            service.restore_session(&refused, id).await.err(),
+            service.delete_session(&refused, id).await.err(),
+        ];
+        for (root, refusal) in refusals.into_iter().enumerate() {
+            assert!(
+                matches!(refusal, Some(AiError::ReauthorizationFailed)),
+                "root {root} must refuse a delegated credential: {refusal:?}"
+            );
+        }
+        assert_eq!(
+            calls.total(),
+            0,
+            "a refused credential must reach no host policy or content protection"
+        );
+    }
+
+    // Nothing was persisted: one session, one message, one queued run, and the
+    // durable stream head is unchanged.
+    let current = service
+        .session(&owner, AiSessionId(session.id))
+        .await
+        .expect("owner reads the session")
+        .expect("session still exists");
+    assert_eq!(current.stream_head, head);
+    assert_eq!(current.state, "active");
+    assert_eq!(current.title, "Research");
+    assert_eq!(
+        service
+            .sessions(&owner, last_twenty())
+            .await
+            .expect("owner lists sessions")
+            .edges
+            .len(),
+        1
+    );
+    let messages = service
+        .messages(&owner, AiSessionId(session.id), last_twenty())
+        .await
+        .expect("owner reads messages");
+    assert_eq!(messages.edges.len(), 1);
+    assert_eq!(messages.edges[0].node.id, sent.message_id);
+    let claimed = runs
+        .claim_next("worker")
+        .await
+        .expect("claim succeeds")
+        .expect("the owner's run is queued");
+    assert_eq!(claimed.run_id().0, sent.run_id);
+    assert_eq!(claimed.principal_reference(), &owner.reference());
+    assert!(runs.claim_next("worker-2").await.unwrap().is_none());
+}

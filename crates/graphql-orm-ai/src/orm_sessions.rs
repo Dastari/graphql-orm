@@ -61,6 +61,15 @@ impl Default for AiSessionServiceLimits {
 
 /// Concrete owner-isolated session service using generated ORM repository and
 /// transaction APIs only. It never executes backend-specific SQL.
+///
+/// Every root, including message submission, refuses a sessionless or
+/// session-bound delegated credential, and one with no grant kind that carries
+/// an actor or exact operation binding, with [`AiError::ReauthorizationFailed`]
+/// before any policy call, read or write. Submission persists the caller's
+/// reference as the new run's principal, and workers resolve it to the user
+/// behind it, so such a credential would otherwise queue a run acting with the
+/// full user's authority. The refusal applies whether or not run authorization
+/// or submission admission is installed; neither admits these credentials.
 pub struct OrmAiSessionService {
     database: Database<DefaultWriteBackend>,
     access_policy: Arc<dyn AiAccessPolicy>,
@@ -144,6 +153,8 @@ impl OrmAiSessionService {
 
     /// Opts new runs into the host's explicit, bounded run-authorization policy.
     /// Existing runs and ordinary session reads retain their original authority.
+    /// Delegated and sessionless credentials are refused before issuance with
+    /// or without it; run authorization is not an opt-in for them.
     #[must_use]
     pub fn with_run_authorization(mut self, authorization: Arc<crate::AiRunAuthorization>) -> Self {
         self.run_authorization = Some(authorization);
@@ -168,7 +179,9 @@ impl OrmAiSessionService {
     /// be live; otherwise submission fails with
     /// [`AiError::ReauthorizationFailed`] and nothing is stored. Under a strict
     /// host resolver this also refuses a missing projection, because the
-    /// unprojected reference does not resolve.
+    /// unprojected reference does not resolve. A resolver that returns the
+    /// reference it was given proves nothing about delegation, so delegated
+    /// and sessionless credentials are refused before admission runs.
     #[must_use]
     pub fn with_submission_admission(
         mut self,
@@ -267,6 +280,7 @@ impl OrmAiSessionService {
         principal: &AuthPrincipal,
         session_id: AiSessionId,
     ) -> Result<Option<i64>, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         Ok(self
             .visible_session(principal, session_id, AiSessionAction::Read)
             .await?
@@ -324,6 +338,7 @@ impl AiSessionService for OrmAiSessionService {
         terminal_run_limit: i64,
         tool_call_limit: i64,
     ) -> Result<AiConversationBootstrap, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         if !(1..=200).contains(&message_limit)
             || !(1..=100).contains(&terminal_run_limit)
             || !(1..=500).contains(&tool_call_limit)
@@ -554,6 +569,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         page: ValidatedKeysetConnection,
     ) -> Result<AiSessionConnection, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let (kind, subject) = principal_identity(principal);
         if !(1..=200).contains(&page.limit) {
             return Err(AiError::InvalidInput(
@@ -629,6 +645,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         run_id: crate::AiRunId,
     ) -> Result<Option<AiSessionView>, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let Some(run) = AiRunRecord::find_by_id(&self.database, &run_id.0)
             .await
             .map_err(|error| map_orm(OrmPublicError::from(error)))?
@@ -643,6 +660,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         session_id: AiSessionId,
     ) -> Result<Option<AiSessionView>, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         self.visible_session(principal, session_id, AiSessionAction::Read)
             .await?
             .as_ref()
@@ -656,6 +674,7 @@ impl AiSessionService for OrmAiSessionService {
         session_id: AiSessionId,
         page: ValidatedKeysetConnection,
     ) -> Result<AiMessageConnection, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let session = self
             .visible_session(principal, session_id, AiSessionAction::Read)
             .await?
@@ -722,6 +741,7 @@ impl AiSessionService for OrmAiSessionService {
         after_block_index: Option<i64>,
         first: i64,
     ) -> Result<Vec<AiMessageBlockView>, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         if !(1..=100).contains(&first)
             || after_block_index.is_some_and(|value| value < 0 || value > i64::from(i32::MAX))
         {
@@ -813,6 +833,7 @@ impl AiSessionService for OrmAiSessionService {
         after_sequence: i64,
         first: i64,
     ) -> Result<AiSessionEventPage, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         if after_sequence < 0 || after_sequence > i64::from(i32::MAX) || !(1..=500).contains(&first)
         {
             return Err(AiError::InvalidInput("invalid event window".to_owned()));
@@ -925,6 +946,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         input: CreateAiSessionInput,
     ) -> Result<AiSessionView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let scope: AiScope = input.scope.into();
         validate_scope(&scope)?;
         self.require_scope(principal, &scope, AiSessionAction::Create)
@@ -1035,6 +1057,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         input: crate::PinAiSessionExecutionSelectionInput,
     ) -> Result<AiSessionView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         let session = self
             .visible_session(
                 principal,
@@ -1204,6 +1227,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         input: RenameAiSessionInput,
     ) -> Result<AiSessionView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         if input.client_mutation_id.is_nil() {
             return Err(AiError::InvalidInput(
                 "invalid client mutation ID".to_owned(),
@@ -1399,6 +1423,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         session_id: AiSessionId,
     ) -> Result<AiSessionView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         self.transition_session(principal, session_id, "active", "archived", true)
             .await
     }
@@ -1408,6 +1433,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         session_id: AiSessionId,
     ) -> Result<AiSessionView, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         self.transition_session(principal, session_id, "archived", "active", false)
             .await
     }
@@ -1417,6 +1443,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         session_id: AiSessionId,
     ) -> Result<bool, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         self.require_session_policy(principal, session_id, AiSessionAction::Delete)
             .await?;
         let existing = AiSessionRecord::find_by_id(&self.database, &session_id.0)
@@ -1513,6 +1540,7 @@ impl AiSessionService for OrmAiSessionService {
         principal: &AuthPrincipal,
         input: SendAiMessageInput,
     ) -> Result<SendAiMessagePayload, AiError> {
+        crate::principal_projection::refuse_delegated_request(principal)?;
         if input.text.trim().is_empty()
             || input.text.len() > self.limits.maximum_message_bytes
             || input.attachment_ids.len() > self.limits.maximum_attachments
@@ -1621,7 +1649,7 @@ impl AiSessionService for OrmAiSessionService {
                 json!({"sessionId": input.session_id, "messageId": message_id, "runId": run_id}),
             )
             .await?;
-        let admitted = crate::principal_projection::admission_reference(
+        let admitted = crate::principal_projection::request_admission_reference(
             self.principal_projection.as_deref(),
             principal,
         )?;
