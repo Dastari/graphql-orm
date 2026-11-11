@@ -701,6 +701,16 @@ async fn check_postgres_change_journal_recorder<B>(
 where
     B: super::WriteBackend,
 {
+    // The main check names the registry directly. Probe the schema and the
+    // registry first, each in its own statement, so a deployment that has
+    // not applied the plan yet, or a role without `USAGE` on the schema,
+    // gets a guided error rather than a raw lookup failure.
+    if let Some(message) = probe_postgres_change_journal_registry(hook_ctx).await? {
+        return Err(sqlx::Error::Protocol(format!(
+            "{message}; writes to {} would not be journaled",
+            metadata.table_name
+        )));
+    }
     let key = metadata
         .primary_keys
         .first()
@@ -799,6 +809,42 @@ where
     ))
 }
 
+/// Describe why the registry cannot be read by this transaction, if it cannot.
+async fn probe_postgres_change_journal_registry<B>(
+    hook_ctx: &mut super::MutationContext<'_, B>,
+) -> crate::Result<Option<String>>
+where
+    B: super::WriteBackend,
+{
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 WHERE pg_catalog.to_regnamespace('graphql_orm') IS NOT NULL
+               AND pg_catalog.has_schema_privilege(pg_catalog.to_regnamespace('graphql_orm')::pg_catalog.oid, 'USAGE')",
+            &[],
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(Some(
+            "the current role has no USAGE on schema graphql_orm, or it does not exist; apply the schema target or Database::ensure_change_journal_recorder as the schema owner, which grants USAGE to PUBLIC".to_string(),
+        ));
+    }
+    if hook_ctx
+        .fetch_rows(
+            "SELECT 1 WHERE pg_catalog.to_regclass('graphql_orm.change_journal_tables') IS NOT NULL",
+            &[],
+        )
+        .await?
+        .is_empty()
+    {
+        return Ok(Some(format!(
+            "the change journal registry {} does not exist; apply the schema target or Database::ensure_change_journal_recorder as the schema owner",
+            super::rls::CHANGE_JOURNAL_REGISTRY
+        )));
+    }
+    Ok(None)
+}
+
 /// Name the first reason the recorder check failed for `table_name`.
 async fn diagnose_postgres_change_journal_recorder<B>(
     hook_ctx: &mut super::MutationContext<'_, B>,
@@ -869,6 +915,21 @@ where
         return Ok(format!(
             "the current role holds a privilege other than SELECT on the change journal, or EXECUTE on graphql_orm.{}(); revoke it before journaling writes to {table_name}",
             super::rls::CHANGE_JOURNAL_FUNCTION
+        ));
+    }
+    let registry_integrity = format!(
+        "SELECT 1 FROM pg_catalog.pg_proc p
+         WHERE p.oid = pg_catalog.to_regprocedure(pg_catalog.format('graphql_orm.%I()', ?::pg_catalog.text))
+           AND {REGISTRY_INTACT}"
+    );
+    if hook_ctx
+        .fetch_rows(&registry_integrity, &journal[1..])
+        .await?
+        .is_empty()
+    {
+        return Ok(format!(
+            "the change journal registry {} is not owned by the recorder's owner, or a role other than its owner holds a privilege on it beyond SELECT; revoke it, or apply the schema target, before journaling writes to {table_name}",
+            super::rls::CHANGE_JOURNAL_REGISTRY
         ));
     }
     let registry = vec![SqlValue::String(table_name.to_string())];

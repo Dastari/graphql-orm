@@ -67,19 +67,27 @@ writes fail. Cut over in this order:
    target (`plan_schema_target` and `apply_schema_target` with the
    `change-journal` feature), or call
    `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
-   Either one creates the journal and the registry if they are missing,
-   binds each single-key table in the registry, drops the `INSERT` policy
-   that 0.120.0 added, and revokes every table or column privilege other than
-   `SELECT` that a role other than its owner holds on the journal. It also
-   creates `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on
-   it from every role other than its owner, drops any trigger calling it
-   under another name, and installs the `graphql_orm_change_journal` trigger
-   on every single-key table. `ensure_change_journal_table` alone does not
-   install the recorder.
+   Either one:
+   - creates the journal and the registry `graphql_orm.change_journal_tables`
+     if they are missing, and binds each single-key table in the registry;
+   - drops the `INSERT` policy that 0.120.0 added;
+   - revokes every table or column privilege other than `SELECT` that a role
+     other than its owner holds on the journal, and on the registry;
+   - grants `SELECT` on the registry, and `USAGE` on schema `graphql_orm`, to
+     `PUBLIC`, so every runtime role can run the pre-write check;
+   - creates `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on
+     it from every role other than its owner, and drops any trigger calling it
+     under another name;
+   - installs the `graphql_orm_change_journal` trigger on every single-key
+     table.
 
-   If a journal grant survives the revoke, for example one made by another
-   grantor, the plan raises and rolls back without applying anything. Revoke
-   that grant as its grantor, then apply the plan again.
+   `ensure_change_journal_table` alone does not install the recorder, and a
+   0.125.0 writer that starts before this step fails every journaled write
+   with an error naming the missing registry.
+
+   If a journal or registry grant survives the revoke, for example one made
+   by another grantor, the plan raises and rolls back without applying
+   anything. Revoke that grant as its grantor, then apply the plan again.
 3. Revoke what the plan does not manage: any `TRIGGER` privilege that
    runtime roles hold on entity tables, and any recorder trigger that
    validation reports which the applying role could not drop. Nothing drops a
@@ -89,7 +97,9 @@ writes fail. Cut over in this order:
    grants on the journal are kept and survive re-applying the plan; with no
    policies they read nothing unless the role also has `BYPASSRLS`, so grant
    `SELECT` to a dedicated `BYPASSRLS` export role if one reads the journal,
-   and revoke it from runtime roles. Do not grant `EXECUTE` on the
+   and revoke it from runtime roles. Runtime roles need `USAGE` on schema
+   `graphql_orm`, which the plan grants to `PUBLIC`; if you revoke that,
+   grant `USAGE` to each runtime role instead. Do not grant `EXECUTE` on the
    recorder: a blanket `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm`
    includes it, and journaled writes by that role then fail.
 4. Run `validate_target` with the runtime pool and refuse to serve on errors.
@@ -99,8 +109,13 @@ writes fail. Cut over in this order:
      recorder;
    - a trigger or rule on the journal;
    - a missing or modified recorder function;
-   - a missing, altered or differently named recorder trigger, or one on a
-     table outside the target;
+   - a missing registry, one not owned by the recorder's owner, and registry
+     table or column privileges beyond `SELECT` held by other roles;
+   - for each single-key table of the target, a missing registry binding, one
+     whose table no longer exists, one bound to another table than the ORM's
+     writes reach, or one with another entity or key column;
+   - a missing, altered or differently named recorder trigger, one recording
+     into another journal, or one on a table outside the target;
    - a runtime role that acts as the journal owner.
 5. Start the 0.125.0 processes.
 

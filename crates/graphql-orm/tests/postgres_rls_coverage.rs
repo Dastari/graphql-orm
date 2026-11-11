@@ -2206,3 +2206,184 @@ async fn key_changes_and_inactive_recording_are_reported() -> Result<(), Box<dyn
     assert_eq!(recorder_check(&owner_database, &[]).await?, Ok(()));
     Ok(())
 }
+
+/// The registry that binds declared tables to the recorder can only be
+/// changed by its owner. A grant, a foreign owner, a changed binding or a
+/// missing registry each fail journaled writes closed, make the recorder
+/// raise, and are reported; re-applying the target repairs them.
+#[cfg(feature = "change-journal")]
+#[tokio::test]
+#[ignore = "requires test-owned PostgreSQL container"]
+async fn change_journal_registry_protections_are_enforced() -> Result<(), Box<dyn std::error::Error>>
+{
+    const REGISTRY: &str = "graphql_orm.change_journal_tables";
+    let Provisioned { owner } = provision().await?;
+    let (role, runtime) = role_pool(&owner, "journal_registry", "NOSUPERUSER NOBYPASSRLS").await?;
+    let runtime_database = graphql_orm::db::Database::builder(runtime.clone())
+        .change_journal_enabled(true)
+        .build();
+    let raw_insert =
+        |key: &str| format!("INSERT INTO rls_cov_plain (id, label) VALUES ('{key}', 'x')");
+    let all_messages = |report: &graphql_orm::graphql::orm::SchemaTargetValidationReport| {
+        report
+            .rls_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == SchemaDiagnosticSeverity::Error)
+            .map(|diagnostic| diagnostic.message.clone())
+            .collect::<Vec<_>>()
+    };
+    let validate = || async {
+        graphql_orm::db::Database::new(owner.clone())
+            .schema()
+            .validate_target(&graphql_orm_schema_target())
+            .await
+    };
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+
+    // Writes to the registry by another role, at table or column level.
+    for (step, grant, held) in [
+        (
+            "registry-insert",
+            format!("GRANT INSERT ON {REGISTRY} TO {role}"),
+            format!("has_table_privilege('{role}', '{REGISTRY}', 'INSERT')"),
+        ),
+        (
+            "registry-update-column",
+            format!("GRANT UPDATE (relid) ON {REGISTRY} TO {role}"),
+            format!("has_column_privilege('{role}', '{REGISTRY}', 'relid', 'UPDATE')"),
+        ),
+        (
+            "registry-trigger",
+            format!("GRANT TRIGGER ON {REGISTRY} TO {role}"),
+            format!("has_table_privilege('{role}', '{REGISTRY}', 'TRIGGER')"),
+        ),
+    ] {
+        sqlx::query(&grant).execute(&owner).await?;
+        let refused = recorder_check(&runtime_database, &[]).await?;
+        assert!(
+            matches!(&refused, Err(message) if message.contains("registry")),
+            "{step}: {refused:?}"
+        );
+        let raised = record_as(&owner, &[&raw_insert(step)]).await;
+        assert!(
+            matches!(&raised, Err(error) if error.to_string().contains("registry is missing, not owned")),
+            "{step}: {raised:?}"
+        );
+        assert!(journal_entries(&owner, step).await?.is_empty());
+        let reported = all_messages(&validate().await?);
+        assert!(
+            reported.iter().any(|message| message.contains(&role)
+                && message.contains("other than SELECT on graphql_orm.change_journal_tables")),
+            "{step}: {reported:?}"
+        );
+        reapply_target(&owner, step).await?;
+        let still: bool = sqlx::query_scalar(&format!("SELECT {held}"))
+            .fetch_one(&owner)
+            .await?;
+        assert!(!still, "{step}: the plan revokes the grant");
+        assert_eq!(
+            recorder_check(&runtime_database, &[]).await?,
+            Ok(()),
+            "{step}"
+        );
+    }
+
+    // A registry owned by another role than the recorder's owner.
+    sqlx::raw_sql(&format!(
+        "CREATE ROLE journal_registry_owner_{role}; ALTER TABLE {REGISTRY} OWNER TO journal_registry_owner_{role}"
+    ))
+    .execute(&owner)
+    .await?;
+    let foreign = recorder_check(&runtime_database, &[]).await?;
+    assert!(
+        matches!(&foreign, Err(message) if message.contains("not owned by the recorder's owner")),
+        "{foreign:?}"
+    );
+    let raised = record_as(&owner, &[&raw_insert("registry-owner")]).await;
+    assert!(
+        matches!(&raised, Err(error) if error.to_string().contains("registry is missing, not owned")),
+        "{raised:?}"
+    );
+    let reported = all_messages(&validate().await?);
+    assert!(
+        reported
+            .iter()
+            .any(|message| message.contains("is not owned by the owner of graphql_orm.")),
+        "{reported:?}"
+    );
+    sqlx::query(&format!("ALTER TABLE {REGISTRY} OWNER TO CURRENT_USER"))
+        .execute(&owner)
+        .await?;
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+
+    // A binding with another entity or key column.
+    for (column, value, message) in [
+        ("entity_name", "RlsCovDoc", "to entity RlsCovDoc by key id"),
+        ("key_column", "label", "to entity RlsCovPlain by key label"),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE {REGISTRY} SET {column} = '{value}' WHERE declared_table = 'rls_cov_plain'"
+        ))
+        .execute(&owner)
+        .await?;
+        let refused = recorder_check(&runtime_database, &[]).await?;
+        assert!(
+            matches!(&refused, Err(text) if text.contains("registry binding")),
+            "{column}: {refused:?}"
+        );
+        let key = format!("binding-{column}");
+        let raised = record_as(&owner, &[&raw_insert(&key)]).await;
+        assert!(
+            matches!(&raised, Err(error) if error.to_string().contains("does not match the table")),
+            "{column}: {raised:?}"
+        );
+        assert!(journal_entries(&owner, &key).await?.is_empty());
+        let reported = all_messages(&validate().await?);
+        assert!(
+            reported.iter().any(|text| text.contains(message)),
+            "{column}: {reported:?}"
+        );
+        reapply_target(&owner, &format!("registry-{column}")).await?;
+        assert_eq!(
+            recorder_check(&runtime_database, &[]).await?,
+            Ok(()),
+            "{column}"
+        );
+    }
+
+    // Without USAGE on the schema the check says so, instead of failing on a
+    // raw lookup.
+    sqlx::raw_sql(&format!(
+        "REVOKE USAGE ON SCHEMA graphql_orm FROM PUBLIC; REVOKE USAGE ON SCHEMA graphql_orm FROM {role}"
+    ))
+    .execute(&owner)
+    .await?;
+    let no_usage = recorder_check(&runtime_database, &[]).await?;
+    assert!(
+        matches!(&no_usage, Err(message) if message.contains("no USAGE on schema graphql_orm")),
+        "{no_usage:?}"
+    );
+    // Re-applying grants USAGE to PUBLIC, which is all the runtime role needs.
+    reapply_target(&owner, "registry-usage").await?;
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+
+    // A missing registry, as before the plan is applied.
+    sqlx::query(&format!("DROP TABLE {REGISTRY}"))
+        .execute(&owner)
+        .await?;
+    let missing = recorder_check(&runtime_database, &[]).await?;
+    assert!(
+        matches!(&missing, Err(message) if message.contains("registry graphql_orm.change_journal_tables does not exist")),
+        "{missing:?}"
+    );
+    let reported = all_messages(&validate().await?);
+    assert!(
+        reported
+            .iter()
+            .any(|message| message.contains("Missing change journal registry")),
+        "{reported:?}"
+    );
+    reapply_target(&owner, "registry-missing").await?;
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+    Ok(())
+}

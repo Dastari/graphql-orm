@@ -614,12 +614,20 @@ fn render_secure_relation(regclass_literal: &str, before: &str, what: &str) -> S
 /// named `graphql_orm_change_journal`. Each binding resolves the declared path
 /// exactly as the ORM's writes render it.
 ///
+/// They also grant `USAGE` on schema `graphql_orm` to `PUBLIC`, so every
+/// journaling role can read the registry.
+///
 /// Run them as the role that owns the journal and the tables. The recorder
 /// runs as that owner, so the runtime role needs no privilege on the journal.
 pub(crate) fn postgres_change_journal_recorder_sql(tables: &[ChangeJournalTable]) -> Vec<String> {
     let registry_literal = sql_string_literal(CHANGE_JOURNAL_REGISTRY);
     let mut statements = vec![
         "CREATE SCHEMA IF NOT EXISTS graphql_orm".to_string(),
+        // Every journaling role reads the registry and calls the helpers here.
+        // Nothing in the schema is writable or callable through this grant:
+        // the recorder's EXECUTE and the registry's and journal's ACLs are
+        // enforced separately.
+        "GRANT USAGE ON SCHEMA graphql_orm TO PUBLIC".to_string(),
         postgres_change_journal_table_sql(),
         postgres_change_log_rls_sql(),
         format!(
@@ -1732,6 +1740,181 @@ mod change_journal_tests {
             }),
             ..Default::default()
         }
+    }
+
+    fn journal_table() -> LiveRlsTable {
+        LiveRlsTable {
+            table_name: CHANGE_LOG_TABLE.to_string(),
+            enabled: true,
+            forced: false,
+            policies: Vec::new(),
+        }
+    }
+
+    fn messages(live: &LiveRlsEnforcement) -> Vec<String> {
+        validate_change_journal(
+            DatabaseBackend::Postgres,
+            SchemaPolicy::Managed,
+            &[journal_table()],
+            Some(live),
+            &SchemaTarget::from_entities(&[], &[]),
+        )
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect()
+    }
+
+    #[test]
+    fn registry_integrity_is_reported() {
+        assert!(messages(&live(false)).is_empty());
+        let missing = LiveRlsEnforcement {
+            change_journal_registry_present: false,
+            ..live(false)
+        };
+        assert!(
+            messages(&missing)
+                .iter()
+                .any(|message| message.contains("Missing change journal registry"))
+        );
+        let foreign = LiveRlsEnforcement {
+            change_journal_registry_owned_by_recorder_owner: false,
+            ..live(false)
+        };
+        assert!(
+            messages(&foreign)
+                .iter()
+                .any(|message| message.contains("is not owned by the owner"))
+        );
+        let writable = LiveRlsEnforcement {
+            change_journal_registry_writers: vec!["app_runtime".to_string()],
+            ..live(false)
+        };
+        assert!(messages(&writable).iter().any(|message| {
+            message.contains("Role app_runtime holds a privilege other than SELECT")
+                && message.contains(CHANGE_JOURNAL_REGISTRY)
+        }));
+    }
+
+    fn users() -> ChangeJournalTable {
+        ChangeJournalTable {
+            entity_name: "User".to_string(),
+            table_name: "Users".to_string(),
+            bare: true,
+            primary_key: "id".to_string(),
+            encoding: "text",
+        }
+    }
+
+    fn binding() -> LiveChangeJournalBinding {
+        LiveChangeJournalBinding {
+            journal_schema: "public".to_string(),
+            declared_table: "Users".to_string(),
+            entity_name: "User".to_string(),
+            key_column: "id".to_string(),
+            relation: Some(("public".to_string(), "users".to_string())),
+            orm_relation: Some(("public".to_string(), "users".to_string())),
+        }
+    }
+
+    fn bound_live() -> LiveRlsEnforcement {
+        let mut live = live(false);
+        live.change_journal_schema = Some("public".to_string());
+        live.change_journal_triggers.insert(
+            change_journal_table_key("public", "users"),
+            LiveChangeJournalTrigger {
+                enabled: "O".to_string(),
+                trigger_type: CHANGE_JOURNAL_TRIGGER_TYPE,
+                conditional: false,
+                calls_orm_function: true,
+                function_owns_table: true,
+                arguments: ["public", "public", "users", "User", "Users", "id", "text"]
+                    .map(str::to_string)
+                    .to_vec(),
+                relation_schema: "public".to_string(),
+                relation_name: "users".to_string(),
+                journal_owned_by_function_owner: true,
+            },
+        );
+        live
+    }
+
+    #[test]
+    fn binding_problems_are_reported() {
+        let live = bound_live();
+        let problem = |binding: Option<&LiveChangeJournalBinding>, live: &LiveRlsEnforcement| {
+            change_journal_binding_problem(live, &users(), binding)
+        };
+        assert_eq!(problem(Some(&binding()), &live), None);
+        let expect = |outcome: Option<String>, text: &str| {
+            assert!(
+                outcome
+                    .as_deref()
+                    .is_some_and(|message| message.contains(text)),
+                "{text}: {outcome:?}"
+            );
+        };
+        expect(
+            problem(None, &live),
+            "Missing change journal registry binding",
+        );
+        expect(
+            problem(
+                Some(&LiveChangeJournalBinding {
+                    relation: None,
+                    ..binding()
+                }),
+                &live,
+            ),
+            "no longer exists",
+        );
+        expect(
+            problem(
+                Some(&LiveChangeJournalBinding {
+                    relation: Some(("public".to_string(), "Users".to_string())),
+                    ..binding()
+                }),
+                &live,
+            ),
+            "the ORM's writes resolve it to \"public\".\"users\"",
+        );
+        expect(
+            problem(
+                Some(&LiveChangeJournalBinding {
+                    entity_name: "Admin".to_string(),
+                    ..binding()
+                }),
+                &live,
+            ),
+            "to entity Admin by key id, not User by key id",
+        );
+        expect(
+            problem(
+                Some(&LiveChangeJournalBinding {
+                    key_column: "email".to_string(),
+                    ..binding()
+                }),
+                &live,
+            ),
+            "to entity User by key email",
+        );
+        let mut untriggered = live.clone();
+        untriggered.change_journal_triggers.clear();
+        expect(
+            problem(Some(&binding()), &untriggered),
+            "Missing change journal trigger",
+        );
+        let mut elsewhere = live.clone();
+        elsewhere.change_journal_schema = Some("other".to_string());
+        expect(
+            problem(
+                Some(&LiveChangeJournalBinding {
+                    journal_schema: "other".to_string(),
+                    ..binding()
+                }),
+                &elsewhere,
+            ),
+            "into this target's",
+        );
     }
 
     #[test]

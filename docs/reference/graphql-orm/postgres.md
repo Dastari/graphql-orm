@@ -225,7 +225,7 @@ and before the lock. The `TRIGGER` refusal narrows this to triggers added by a r
 `TRIGGER` at that moment and no longer does, or by the owner.
 
 Because the registry fixes the entity name, key column and table for each declared table, a
-trigger that carries any other combination records nothing.
+trigger that carries any other combination raises instead of recording.
 
 A trigger on the journal would run as the journal owner whenever the recorder appends, which is
 why the journal must carry none and why no other role may hold `TRIGGER` on it. A role with
@@ -292,7 +292,11 @@ dependent row still goes through the ORM check above, and the recorder's own che
 row.
 
 Apply the plan as the role that owns the entity tables and the journal. The runtime role needs no
-privilege on the journal and no `EXECUTE` on the recorder.
+privilege on the journal and no `EXECUTE` on the recorder. It does need `USAGE` on schema
+`graphql_orm`, to read the registry during the pre-write check, and the plan grants that to
+`PUBLIC`. This holds even when no entity uses `#[graphql_rls]`. If you revoke the grant from
+`PUBLIC`, grant `USAGE` to each runtime role instead. Without it, or before the plan creates the
+registry, journaled writes fail with an error that says so.
 
 ### Search performance
 
