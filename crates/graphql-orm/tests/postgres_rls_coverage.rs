@@ -1389,6 +1389,9 @@ async fn journal_errors_on(
                 || message.to_ascii_lowercase().contains("change journal")
                 || message.contains("record_change_journal_entry")
         })
+        // Validating with the owner pool always reports the owner itself;
+        // `journal_privileges_beyond_select_are_refused` asserts that.
+        .filter(|message| !message.contains("acts as the journal owner"))
         .collect())
 }
 
@@ -1798,6 +1801,55 @@ async fn journal_privileges_beyond_select_are_refused() -> Result<(), Box<dyn st
         .execute(&owner)
         .await?;
 
+    // Column-level grants count too.
+    sqlx::query(&format!(
+        "GRANT INSERT (id, entity_name, table_name, primary_key, action, changed_at), UPDATE (action) ON {CHANGE_LOG_TABLE} TO {role}"
+    ))
+    .execute(&owner)
+    .await?;
+    let column = recorder_check(&runtime_database, &[]).await?;
+    assert!(
+        matches!(&column, Err(message) if message.contains("privilege other than SELECT")),
+        "{column:?}"
+    );
+    let column_writers = journal_errors_on(&owner, CHANGE_LOG_TABLE).await?;
+    assert!(
+        column_writers
+            .iter()
+            .any(|message| message.contains(&role) && message.contains("other than SELECT")),
+        "{column_writers:?}"
+    );
+    reapply_target(&owner, "journal-column-grants").await?;
+    let column_held: bool = sqlx::query_scalar(&format!(
+        "SELECT has_any_column_privilege('{role}', '{CHANGE_LOG_TABLE}', 'INSERT, UPDATE')"
+    ))
+    .fetch_one(&owner)
+    .await?;
+    assert!(!column_held);
+    assert_eq!(recorder_check(&runtime_database, &[]).await?, Ok(()));
+
+    // A role acting as the journal owner passes the privilege check, so
+    // validation reports it; the runtime role is not reported.
+    let as_owner = errors_on(&owner, CHANGE_LOG_TABLE).await?;
+    assert!(
+        as_owner
+            .iter()
+            .any(|message| message.contains("acts as the journal owner")),
+        "{as_owner:?}"
+    );
+    let as_runtime = runtime_database
+        .schema()
+        .validate_target(&graphql_orm_schema_target())
+        .await?;
+    assert!(
+        !as_runtime
+            .rls_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("acts as the journal owner")),
+        "{:#?}",
+        as_runtime.rls_diagnostics
+    );
+
     // TRIGGER on the journal: a trigger whose function lives in the role's
     // own temporary schema is refused before it can run as the owner.
     sqlx::query(&format!("GRANT TRIGGER ON {CHANGE_LOG_TABLE} TO {role}"))
@@ -1967,9 +2019,6 @@ async fn recorder_refuses_triggers_that_do_not_match_their_table()
 
     // Under the ORM's name, the recorded table and the key column must match
     // the table the trigger fires on.
-    sqlx::query("DROP TRIGGER journal_copy ON rls_cov_plain")
-        .execute(&owner)
-        .await?;
     for arguments in [
         "'public', 'public', 'rls_cov_docs', 'RlsCovDoc', 'rls_cov_docs', 'id', 'text'",
         "'public', 'public', 'rls_cov_plain', 'RlsCovPlain', 'rls_cov_plain', 'label', 'text'",
@@ -1994,8 +2043,61 @@ async fn recorder_refuses_triggers_that_do_not_match_their_table()
         assert!(!drift.is_empty(), "{arguments}");
     }
 
-    // Re-applying the target restores the trigger and revokes EXECUTE.
+    // Under the ORM's name on an owner-owned table outside the target, the
+    // declared table must still be the table the trigger fires on.
+    sqlx::raw_sql(&format!(
+        "CREATE SCHEMA journal_aux; CREATE TABLE journal_aux.side (id text PRIMARY KEY, note text); \
+         GRANT USAGE ON SCHEMA journal_aux TO {role}; \
+         GRANT INSERT, DELETE, TRIGGER ON journal_aux.side TO {role}"
+    ))
+    .execute(&owner)
+    .await?;
+    script_as(
+        &runtime,
+        &[&format!(
+            "CREATE TRIGGER graphql_orm_change_journal AFTER INSERT OR UPDATE OR DELETE ON journal_aux.side FOR EACH ROW EXECUTE FUNCTION {recorder}('public', 'journal_aux', 'side', 'RlsCovDoc', 'rls_cov_docs', 'id', 'text')"
+        )],
+        Some(&tenant_a),
+    )
+    .await?;
+    let side = script_as(
+        &runtime,
+        &[
+            "SET LOCAL graphql_orm.change_journal = 'on'",
+            "INSERT INTO journal_aux.side (id) VALUES ('side-key')",
+            "DELETE FROM journal_aux.side WHERE id = 'side-key'",
+        ],
+        Some(&tenant_a),
+    )
+    .await;
+    assert!(
+        matches!(&side, Err(error) if error.to_string().contains("does not match the table")),
+        "{side:?}"
+    );
+    assert!(journal_entries(&owner, "side-key").await?.is_empty());
+
+    // Re-applying the target restores the trigger and revokes EXECUTE. The
+    // trigger it does not manage stays, and validation keeps reporting it.
     reapply_target(&owner, "journal-trigger").await?;
+    let copies: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pg_trigger WHERE tgrelid = 'rls_cov_plain'::regclass AND tgname = 'journal_copy'",
+    )
+    .fetch_one(&owner)
+    .await?;
+    assert_eq!(
+        copies, 0,
+        "the plan drops recorder triggers under other names"
+    );
+    let stray = journal_errors_on(&owner, "journal_aux_side").await?;
+    assert!(
+        stray
+            .iter()
+            .any(|message| message.contains("not a single-key table of this target")),
+        "{stray:?}"
+    );
+    sqlx::query("DROP SCHEMA journal_aux CASCADE")
+        .execute(&owner)
+        .await?;
     for table in [CHANGE_LOG_TABLE, "rls_cov_plain"] {
         let errors = journal_errors_on(&owner, table).await?;
         assert!(errors.is_empty(), "{table}: {errors:?}");

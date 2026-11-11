@@ -153,7 +153,7 @@ journal.
 
 On PostgreSQL only privileged roles can read or write the journal. It has RLS enabled and no
 policies, so a role subject to RLS can neither read nor write entries; the recorder runs as the
-journal owner, so plans revoke every privilege beyond `SELECT` that other roles hold on the journal,
+journal owner, so plans revoke every table or column privilege beyond `SELECT` that other roles hold on the journal,
 and `EXECUTE` on the recorder. Create the journal, the tables and the recorder as the schema owner,
 grant the runtime role nothing on the journal, and grant `SELECT` to a dedicated `BYPASSRLS`
 export role if one reads it; that grant survives re-applying the plan. `export_changes` runs with `SET LOCAL row_security = off`, so

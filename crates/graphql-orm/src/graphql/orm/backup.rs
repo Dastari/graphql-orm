@@ -603,6 +603,12 @@ where
     /// Journaled ORM writes run this check once per table before they rely on
     /// the recorder. Hosts can call it to fail fast at startup. It returns the
     /// specific reason on failure. On SQLite it always succeeds.
+    ///
+    /// A current role that acts as the journal owner (is a member of the
+    /// owning role, as a superuser always is) passes the privilege part of the
+    /// check, because it can already do anything the checked privileges would
+    /// allow. `validate_target` reports such a role; run it with the runtime
+    /// pool.
     #[doc(hidden)]
     pub async fn check_change_journal_recorder(
         &mut self,
@@ -638,17 +644,30 @@ where
 }
 
 /// Privilege condition shared by the recorder check and its diagnosis: the
-/// current role either acts as the journal owner, or holds nothing on the
-/// journal beyond `SELECT` and no `EXECUTE` on the recorder. A role with
-/// `TRIGGER` on the journal could run code as its owner, and a role with
+/// current role either acts as the journal owner (is a member of it), or
+/// holds no table or column privilege on the journal beyond `SELECT` and no
+/// `EXECUTE` on the recorder, directly, through `PUBLIC`, or through any role
+/// it is a member of, including `NOINHERIT` memberships it can `SET ROLE` to.
+/// A role with `TRIGGER` on the journal could run code as its owner, one with
+/// `INSERT` or `UPDATE` could write entries if it bypasses RLS, and one with
 /// `EXECUTE` on the recorder could attach it to other triggers.
-const RECORDER_PRIVILEGES_CLEAN: &str = "(pg_catalog.pg_has_role(CURRENT_USER, j.relowner, 'USAGE')
+const RECORDER_PRIVILEGES_CLEAN: &str = "(pg_catalog.pg_has_role(CURRENT_USER, j.relowner, 'MEMBER')
           OR (NOT EXISTS (
-                  SELECT 1 FROM pg_catalog.aclexplode(j.relacl) acl
-                  WHERE acl.privilege_type <> 'SELECT'
+                  SELECT 1
+                  FROM (SELECT j.relacl AS acl
+                        UNION ALL
+                        SELECT att.attacl FROM pg_catalog.pg_attribute att
+                        WHERE att.attrelid = j.oid AND att.attnum > 0 AND NOT att.attisdropped) acls
+                  CROSS JOIN LATERAL pg_catalog.aclexplode(acls.acl) acl
+                  WHERE acl.privilege_type <> 'SELECT' AND acl.grantee <> j.relowner
                     AND CASE WHEN acl.grantee = 0 THEN true
-                             ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'USAGE') END)
-              AND NOT pg_catalog.has_function_privilege(CURRENT_USER, p.oid, 'EXECUTE')))";
+                             ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_catalog.aclexplode(COALESCE(p.proacl, pg_catalog.acldefault('f', p.proowner))) acl
+                  WHERE acl.privilege_type = 'EXECUTE' AND acl.grantee <> p.proowner
+                    AND CASE WHEN acl.grantee = 0 THEN true
+                             ELSE pg_catalog.pg_has_role(CURRENT_USER, acl.grantee, 'MEMBER') END)))";
 
 /// The recorder check for one table.
 ///

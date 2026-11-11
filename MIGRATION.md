@@ -68,14 +68,20 @@ writes fail. Cut over in this order:
    `change-journal` feature), or call
    `database.ensure_change_journal_recorder(&graphql_orm_entity_metadata())`.
    Either one creates the journal if it is missing, drops the `INSERT` policy
-   that 0.120.0 added, and revokes every privilege other than `SELECT` that a
-   role other than its owner holds on the journal. It also creates
-   `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on it from
-   every role other than its owner, and installs the
-   `graphql_orm_change_journal` trigger on every single-key table.
-   `ensure_change_journal_table` alone does not install the recorder.
-3. Revoke anything the plan could not: grants made by another grantor, and
-   any `TRIGGER` privilege on entity tables held by runtime roles. `SELECT`
+   that 0.120.0 added, and revokes every table or column privilege other than
+   `SELECT` that a role other than its owner holds on the journal. It also
+   creates `graphql_orm.record_change_journal_entry()`, revokes `EXECUTE` on
+   it from every role other than its owner, drops any trigger calling it
+   under another name, and installs the `graphql_orm_change_journal` trigger
+   on every single-key table. `ensure_change_journal_table` alone does not
+   install the recorder.
+
+   If a journal grant survives the revoke, for example one made by another
+   grantor, the plan raises and rolls back without applying anything. Revoke
+   that grant as its grantor, then apply the plan again.
+3. Revoke what the plan does not manage: any `TRIGGER` privilege that
+   runtime roles hold on entity tables, and any correctly named recorder
+   trigger that validation reports on a table outside every schema target. `SELECT`
    grants on the journal are kept and survive re-applying the plan; with no
    policies they read nothing unless the role also has `BYPASSRLS`, so grant
    `SELECT` to a dedicated `BYPASSRLS` export role if one reads the journal,
@@ -83,10 +89,15 @@ writes fail. Cut over in this order:
    recorder: a blanket `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA graphql_orm`
    includes it, and journaled writes by that role then fail.
 4. Run `validate_target` with the runtime pool and refuse to serve on errors.
-   It reports a remaining journal policy, journal privileges beyond `SELECT`,
-   `EXECUTE` on the recorder, a trigger or rule on the journal, a missing or
-   modified recorder function, and a missing, altered or differently named
-   recorder trigger.
+   It reports:
+   - a remaining journal policy;
+   - journal table or column privileges beyond `SELECT`, and `EXECUTE` on the
+     recorder;
+   - a trigger or rule on the journal;
+   - a missing or modified recorder function;
+   - a missing, altered or differently named recorder trigger, or one on a
+     table outside the target;
+   - a runtime role that acts as the journal owner.
 5. Start the 0.125.0 processes.
 
 Re-apply the schema target whenever entity tables are added, so new tables
@@ -104,6 +115,8 @@ Behaviour changes:
 - Tables owned by a different role than the recorder function fail journaled
   writes. Keep the journal, the entity tables and the recorder under one
   schema-owner role.
+- Partitioned tables are not supported for the journal: a partitioned
+  journal, or a partitioned entity table, makes journaled writes fail.
 
 ## 0.124.0: assurance evaluators take a request check
 

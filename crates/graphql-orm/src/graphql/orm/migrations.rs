@@ -4614,21 +4614,19 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
                 },
             );
         }
-        let other_triggers = sqlx::query(
+        let recorder_triggers = sqlx::query(
             "SELECT n.nspname AS schema_name, c.relname AS table_name, t.tgname::text AS trigger_name
              FROM pg_trigger t
              JOIN pg_class c ON c.oid = t.tgrelid
              JOIN pg_namespace n ON n.oid = c.relnamespace
-             WHERE t.tgfoid = to_regprocedure(format('graphql_orm.%I()', $2::text))
-               AND t.tgname <> $1
+             WHERE t.tgfoid = to_regprocedure(format('graphql_orm.%I()', $1::text))
              ORDER BY 1, 2, 3",
         )
-        .bind(super::rls::CHANGE_JOURNAL_TRIGGER)
         .bind(super::rls::CHANGE_JOURNAL_FUNCTION)
         .fetch_all(&mut *conn)
         .await?;
-        for row in other_triggers {
-            live.change_journal_other_triggers.push((
+        for row in recorder_triggers {
+            live.change_journal_recorder_triggers.push((
                 table_key(row.try_get("schema_name")?, row.try_get("table_name")?),
                 row.try_get("trigger_name")?,
             ));
@@ -4647,9 +4645,23 @@ impl RlsIntrospectionBackend for super::PostgresBackend {
         .bind(&journal_regclass)
         .fetch_all(&mut *conn)
         .await?;
+        live.change_journal_owned_by_current_role = sqlx::query_scalar(
+            "SELECT COALESCE((SELECT pg_has_role(current_user, c.relowner, 'MEMBER')
+                              FROM pg_class c WHERE c.oid = to_regclass($1)), false)",
+        )
+        .bind(&journal_regclass)
+        .fetch_one(&mut *conn)
+        .await?;
         live.change_journal_writers = sqlx::query_scalar(
             "SELECT DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee)::text END
-             FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+             FROM pg_class c
+             CROSS JOIN LATERAL (
+                 SELECT c.relacl AS acl
+                 UNION ALL
+                 SELECT att.attacl FROM pg_attribute att
+                 WHERE att.attrelid = c.oid AND att.attnum > 0 AND NOT att.attisdropped
+             ) acls
+             CROSS JOIN LATERAL aclexplode(acls.acl) a
              WHERE c.oid = to_regclass($1) AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
              ORDER BY 1",
         )
