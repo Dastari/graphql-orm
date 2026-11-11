@@ -3,7 +3,7 @@ title: "Operation Assurance And Step-Up Classification"
 kind: architecture
 status: active
 owner: graphql-orm-maintainers
-last_reviewed: 2026-11-10
+last_reviewed: 2026-11-11
 review_by: 2027-02-01
 supersedes: []
 ---
@@ -21,6 +21,15 @@ session rotation remain outside the ORM. Enable `auth-agql` to use the optional
 one-way evaluator backed by `agql-auth`, or implement
 `AssuranceRequirementEvaluator` for another authoritative authentication
 runtime.
+
+An evaluator decides from an `AssuranceCheck`: the root's kind and field name,
+and the data of the current request. It receives no field context, so the same
+decision can be made before any resolver runs. In a resolver the check also
+sees data an extension passed to `run_with_data`; the runtime pre-pass sees
+only request, session and schema data, so install `AssuranceEnforcement` and
+evaluator inputs there. The evaluator must have no side effects, because
+runtime GraphQL evaluates each query and mutation root twice and runs it only
+if both evaluations admit it.
 
 ## Compatibility Default
 
@@ -129,8 +138,12 @@ dependent deletes use their own delete root.
 
 Runtime collection roots, `node`, generated and link mutations,
 `RuntimeHostField` roots and live subscriptions enforce their own coordinate.
-Mutations are checked before their write, and subscriptions before
-registration. `RuntimeGraphqlComposer::register_assurance_operations` adds
+For query and mutation operations the runtime request guard first evaluates
+every root the operation executes, after alias, fragment and
+`@skip`/`@include` expansion. It does so before request preparation, so a
+refused root causes no database read and no host read-authority, write-authority
+or resolver callback. The resolver repeats the check as defence in depth and
+returns the pre-pass refusal. Subscriptions are checked before registration. `RuntimeGraphqlComposer::register_assurance_operations` adds
 module roots as `runtime` origin operations and host fields as `custom`
 operations. Coordinates the builder already holds keep their registration.
 See [runtime GraphQL](../reference/graphql-orm/runtime-graphql.md#operation-assurance).

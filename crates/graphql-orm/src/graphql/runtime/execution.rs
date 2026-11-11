@@ -207,10 +207,46 @@ pub(super) struct Protection {
     pub audience: RuntimeCursorAudience,
     pub limits: RuntimeCursorProtectionLimits,
 }
+/// Assurance refusals of the request pre-pass, by response key.
+pub(super) type Denials = BTreeMap<String, async_graphql::Error>;
 pub(super) struct Results(
     pub BTreeMap<String, Value>,
     pub BTreeMap<String, super::mutation::Prepared>,
+    pub Denials,
 );
+impl Results {
+    /// A root's resolver returns the pre-pass refusal for its response key, so
+    /// the pre-pass decision binds even if a later evaluation would admit it.
+    pub(super) fn admit(&self, key: &str) -> async_graphql::Result<()> {
+        match self.2.get(key) {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+}
+/// Evaluate every executed root's assurance before request preparation reads
+/// the database or calls any host authority. A refused root is not prepared.
+fn assurance_denials(
+    ctx: &ExtensionContext<'_>,
+    planner: &Planner<'_>,
+    selections: &async_graphql::parser::types::SelectionSet,
+    kind: GraphqlOperationKind,
+) -> Result<Denials, RuntimeGraphqlError> {
+    use crate::graphql::assurance::{AssuranceCheck, AssuranceEnforcement, enforce_check};
+    let mut denied = Denials::new();
+    if ctx.data_opt::<AssuranceEnforcement>().is_none() {
+        return Ok(denied);
+    }
+    for root in planner.root_occurrences(selections)? {
+        if denied.contains_key(&root.key) {
+            continue;
+        }
+        if let Err(error) = enforce_check(&AssuranceCheck::from_extension(ctx, kind, &root.name)) {
+            denied.insert(root.key, error);
+        }
+    }
+    Ok(denied)
+}
 pub(super) struct GuardFactory<B: RuntimeReadBackend> {
     pub database: Database<B>,
     pub modules: Vec<RuntimeGraphqlModule>,
@@ -481,6 +517,15 @@ impl<B: RuntimeReadBackend> Guard<B> {
             cost: Default::default(),
             relation_filters: 0,
         };
+        let kind = match operation.node.ty {
+            async_graphql::parser::types::OperationType::Query => GraphqlOperationKind::Query,
+            async_graphql::parser::types::OperationType::Mutation => GraphqlOperationKind::Mutation,
+            async_graphql::parser::types::OperationType::Subscription => {
+                GraphqlOperationKind::Subscription
+            }
+        };
+        // Before any root is planned, read or authorized by the host.
+        let denied = assurance_denials(ctx, &planner, &operation.node.selection_set.node, kind)?;
         if operation.node.ty == async_graphql::parser::types::OperationType::Mutation {
             let root = ctx
                 .schema_env
@@ -496,6 +541,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 &operation.node.selection_set.node,
                 root,
                 &ctx.schema_env.registry,
+                denied,
             )
             .await;
         }
@@ -506,6 +552,9 @@ impl<B: RuntimeReadBackend> Guard<B> {
         let mut nodes = Vec::new();
         let mut values = BTreeMap::new();
         for field in selected {
+            if denied.contains_key(field.response_key().node.as_str()) {
+                continue;
+            }
             if field.name.node == "node"
                 && self.modules.iter().any(|m| {
                     m.schema
@@ -569,7 +618,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
             for (key, value) in &values {
                 output_shapes[key].measure(value, &mut bytes, limits.max_response_bytes)?;
             }
-            return Ok(Results(values, BTreeMap::new()));
+            return Ok(Results(values, BTreeMap::new(), denied));
         }
         let request = request.ok_or_else(|| RuntimeGraphqlError::new("authorization_missing"))?;
         // Complete all layers' grants and cursor framing checks before any ORM I/O.
@@ -653,7 +702,7 @@ impl<B: RuntimeReadBackend> Guard<B> {
                 limits.max_response_bytes,
             )?;
         }
-        Ok(Results(values, BTreeMap::new()))
+        Ok(Results(values, BTreeMap::new(), denied))
     }
 }
 pub(super) fn authorize<'a, B: RuntimeReadBackend>(

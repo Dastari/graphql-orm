@@ -621,12 +621,101 @@ impl From<&RegisteredOperation> for OperationAssuranceManifestEntry {
     }
 }
 
+/// Request data an evaluator decides a requirement from.
+///
+/// A resolver-level check searches the data its field context sees: data an
+/// extension passed to `NextExecute::run_with_data`, then request data
+/// (`Request::data`), session data and schema data, in that order, as
+/// `Context::data_opt` does.
+///
+/// The runtime GraphQL request pre-pass runs in an extension hook, before any
+/// resolver, and sees only request, session and schema data. Install
+/// [`AssuranceEnforcement`] and every evaluator input there: whatever exists
+/// only in `run_with_data` data is enforced by the resolver alone, after
+/// request preparation has read. A refusal from either check still stands.
+#[derive(Clone, Copy)]
+pub struct AssuranceCheck<'a> {
+    execute_data: Option<&'a async_graphql::Data>,
+    query_data: Option<&'a async_graphql::Data>,
+    session_data: &'a async_graphql::Data,
+    schema_data: &'a async_graphql::Data,
+    kind: GraphqlOperationKind,
+    field_name: &'a str,
+}
+
+impl<'a> AssuranceCheck<'a> {
+    pub(crate) fn from_field(
+        ctx: &'a async_graphql::Context<'_>,
+        kind: GraphqlOperationKind,
+        field_name: &'a str,
+    ) -> Self {
+        Self {
+            execute_data: ctx.execute_data,
+            query_data: Some(&ctx.query_env.query_data),
+            session_data: &ctx.query_env.session_data,
+            schema_data: &ctx.schema_env.data,
+            kind,
+            field_name,
+        }
+    }
+
+    #[cfg(feature = "runtime-graphql")]
+    pub(crate) fn from_extension(
+        ctx: &'a async_graphql::extensions::ExtensionContext<'_>,
+        kind: GraphqlOperationKind,
+        field_name: &'a str,
+    ) -> Self {
+        Self {
+            execute_data: None,
+            query_data: ctx.query_data,
+            session_data: ctx.session_data,
+            schema_data: &ctx.schema_env.data,
+            kind,
+            field_name,
+        }
+    }
+
+    /// Returns data of type `D`, searched in the order the type documents.
+    pub fn data_opt<D: std::any::Any + Send + Sync>(&self) -> Option<&'a D> {
+        let id = std::any::TypeId::of::<D>();
+        self.execute_data
+            .and_then(|data| data.get(&id))
+            .or_else(|| self.query_data.and_then(|data| data.get(&id)))
+            .or_else(|| self.session_data.get(&id))
+            .or_else(|| self.schema_data.get(&id))
+            .and_then(|data| data.downcast_ref::<D>())
+    }
+
+    /// Kind of the root field being checked.
+    pub fn kind(&self) -> GraphqlOperationKind {
+        self.kind
+    }
+
+    /// Name of the root field being checked, the coordinate's field part.
+    pub fn field_name(&self) -> &'a str {
+        self.field_name
+    }
+}
+
+impl fmt::Debug for AssuranceCheck<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssuranceCheck")
+            .field("kind", &self.kind)
+            .field("field_name", &self.field_name)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Generic server-side evaluator installed by an integration crate or host.
+///
+/// Runtime GraphQL calls the evaluator before request preparation and again in
+/// the resolver, so it must decide from the [`AssuranceCheck`] alone and
+/// without side effects. A root runs only if both evaluations admit it.
 pub trait AssuranceRequirementEvaluator: Send + Sync + fmt::Debug {
-    /// Enforces the requirement against current request context before execution.
+    /// Enforces the requirement against the current request before execution.
     fn enforce(
         &self,
-        ctx: &async_graphql::Context<'_>,
+        check: &AssuranceCheck<'_>,
         actor_class: AssuranceActorClass,
         policy_id: &str,
     ) -> async_graphql::Result<()>;
@@ -714,7 +803,13 @@ pub fn enforce_operation_assurance(
     kind: GraphqlOperationKind,
     field_name: &str,
 ) -> async_graphql::Result<()> {
-    let Some(enforcement) = ctx.data_opt::<AssuranceEnforcement>() else {
+    enforce_check(&AssuranceCheck::from_field(ctx, kind, field_name))
+}
+
+/// The one decision shared by resolver-level checks and the runtime pre-pass.
+pub(crate) fn enforce_check(check: &AssuranceCheck<'_>) -> async_graphql::Result<()> {
+    let (kind, field_name) = (check.kind, check.field_name);
+    let Some(enforcement) = check.data_opt::<AssuranceEnforcement>() else {
         return Ok(());
     };
     let config = &enforcement.registry.config;
@@ -734,7 +829,7 @@ pub fn enforce_operation_assurance(
             Some(policy_id) => {
                 enforcement
                     .evaluator
-                    .enforce(ctx, AssuranceActorClass::Interactive, policy_id)
+                    .enforce(check, AssuranceActorClass::Interactive, policy_id)
             }
             None => Ok(()),
         };
@@ -743,7 +838,7 @@ pub fn enforce_operation_assurance(
         OperationAssuranceClassification::Required { policy_id } => {
             enforcement
                 .evaluator
-                .enforce(ctx, operation.actor_class, policy_id)
+                .enforce(check, operation.actor_class, policy_id)
         }
         OperationAssuranceClassification::Exempt { .. } => Ok(()),
         OperationAssuranceClassification::Unclassified => {

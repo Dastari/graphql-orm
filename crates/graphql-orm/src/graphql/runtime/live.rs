@@ -202,6 +202,7 @@ pub(super) fn node_field() -> Field {
             let results = ctx.data::<super::execution::Results>()?;
             let field = ctx.field();
             let key = field.alias().unwrap_or(field.name());
+            results.admit(key)?;
             let value = results
                 .0
                 .get(key)

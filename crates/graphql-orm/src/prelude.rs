@@ -1,6 +1,6 @@
 pub use crate::db::Database;
 pub use crate::graphql::assurance::{
-    ASSURANCE_DIRECTIVE_DEFINITIONS, AssuranceActorClass, AssuranceEnforcement,
+    ASSURANCE_DIRECTIVE_DEFINITIONS, AssuranceActorClass, AssuranceCheck, AssuranceEnforcement,
     AssuranceRegistryError, AssuranceRequirementEvaluator, AssuranceSchemaConfig,
     DeclaredAssuranceGuard, OPERATION_ASSURANCE_MANIFEST_VERSION, OperationAssuranceAudit,
     OperationAssuranceClassification, OperationAssuranceCoordinate, OperationAssuranceManifest,

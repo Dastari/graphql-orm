@@ -10,6 +10,62 @@ supersedes: []
 
 # Migration Guide
 
+## 0.124.0: assurance evaluators take a request check
+
+Upgrade runtime and macros together. No data conversion is required.
+
+`AssuranceRequirementEvaluator::enforce` now receives an `AssuranceCheck`
+instead of an `async_graphql::Context`. Runtime GraphQL calls it before request
+preparation, where no field context exists, and again in the resolver:
+
+```rust
+impl AssuranceRequirementEvaluator for HostEvaluator {
+    fn enforce(
+        &self,
+        check: &AssuranceCheck<'_>,
+        actor_class: AssuranceActorClass,
+        policy_id: &str,
+    ) -> async_graphql::Result<()> {
+        let principal = check.data_opt::<HostPrincipal>();
+        // ...
+    }
+}
+```
+
+To upgrade:
+
+1. Replace the `ctx: &async_graphql::Context<'_>` parameter with
+   `check: &AssuranceCheck<'_>`, and `ctx.data_opt::<T>()` with
+   `check.data_opt::<T>()`. `check.kind()` and `check.field_name()` name the
+   root being checked. `AssuranceCheck` is in `graphql::assurance` and the
+   prelude.
+2. Install `AssuranceEnforcement` itself in schema data (`SchemaBuilder::data`,
+   `RuntimeGraphqlComposer::data` or `finish_schema`), request data
+   (`Request::data`) or session data. Do not pass it only through
+   `NextExecute::run_with_data`. Resolver checks still find it there and
+   refuse, but the runtime pre-pass cannot, so request preparation would read
+   before the refusal.
+3. Put the evaluator's inputs in the same places. A resolver check also sees
+   `run_with_data` data, as `Context::data_opt` does, but the runtime pre-pass
+   does not. Neither sees field arguments or the selection. The pre-pass
+   decides from what it can see, and a refusal it returns stands.
+4. Remove side effects from the evaluator, such as counting attempts or
+   consuming a one-time grant. Runtime GraphQL evaluates each query and
+   mutation root twice, and the root runs only if both evaluations admit it.
+   If the pre-pass admits and the resolver then refuses, for example because
+   step-up expired in between, the root is refused after its preparation reads
+   and host read-authority callbacks have run. Nothing is written or returned.
+
+Behaviour changes when an `AssuranceEnforcement` is installed on a runtime
+GraphQL composition:
+
+- A query or mutation root the evaluator refuses is no longer prepared: no
+  database read, host `RuntimeReadAuthority::authorize`, payload or child-layer
+  authorization, write authorization or host resolver call happens for it.
+  Hosts that counted those callbacks for refused callers will see fewer.
+- The refusal keeps its code, message and location. Other roots of the same
+  operation are prepared and run as before.
+
 ## 0.123.0: runtime date-time and JSON input must be readable
 
 **Behaviour change: some runtime GraphQL inputs that used to be accepted are rejected.**

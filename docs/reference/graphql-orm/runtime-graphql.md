@@ -82,10 +82,39 @@ readable existing cursors; it must not be used for confidential hidden keys.
 
 Every runtime root enforces an installed `AssuranceEnforcement` with its own
 coordinate. This covers collection roots, `node`, generated and link mutations,
-`RuntimeHostField` roots and live `…Changed` subscriptions. A mutation is
-checked before its write. A query root's read runs during request preparation,
-so for queries assurance withholds the result rather than the read. A
-host-owned `subscription_root` keeps its own guards.
+`RuntimeHostField` roots and live `…Changed` subscriptions. A host-owned
+`subscription_root` keeps its own guards.
+
+Query and mutation operations are checked before request preparation. The
+request guard expands the operation's root selection, including aliases,
+named and inline fragments and evaluated `@skip`/`@include`, and evaluates
+every root the operation will execute with the same requirement, evaluator and
+strict or default rules as the resolver. A root the evaluator refuses is not
+prepared. It gets no planning, database read, host `RuntimeReadAuthority`
+callback, payload or child-layer authorization, write authorization or host
+resolver call, and its resolver returns the refusal with the resolver-level
+error code and shape. Other roots in the same operation run as before. Each
+root's resolver then checks again, as defence in depth. Live subscriptions
+are checked by their resolver before registration.
+
+The evaluator therefore runs twice for a query or mutation root, and a root
+runs only if both evaluations admit it:
+
+- A refusal from the pre-pass stands even if the resolver's check would admit
+  the root.
+- A refusal from the resolver's check also stands. If the pre-pass admits a
+  root and the resolver then refuses it, for example because step-up expired in
+  between, the root returns the refusal and nothing is written or returned. Its
+  request-preparation reads and host read-authority callbacks have already run.
+
+An evaluator must decide from its `AssuranceCheck` without side effects.
+
+Install `AssuranceEnforcement` and every evaluator input in schema data
+(`composer.data`), request data or session data. The pre-pass runs in an
+extension hook and sees only those. Data another extension passes to
+`NextExecute::run_with_data` is visible to the resolver's check alone. A root
+whose enforcement arrives that way is still refused by its resolver, but only
+after request preparation has read.
 
 Register the roots before building the registry, so hosts can require or
 exempt them:
@@ -114,8 +143,9 @@ returns a validated structural row predicate, or an explicit unrestricted grant.
 No provider, denial, invalid grant or stale schema fingerprint fails closed.
 
 A mandatory per-execution extension expands aliases/fragments and evaluated
-`@skip`/`@include`, resolves variables/defaults and obtains every selected runtime
-layer's grant before the first ORM statement. Row predicates are ANDed with client
+`@skip`/`@include`, resolves variables/defaults and, after the operation assurance
+pre-pass admits a root, obtains every selected runtime layer's grant before the
+first ORM statement. Row predicates are ANDed with client
 filters before reads, pagination and counts. Hidden key acquisition is internal to
 the granted operation and does not expose those keys as loaded output fields.
 Filter/order authorization remains independent of projection authorization.

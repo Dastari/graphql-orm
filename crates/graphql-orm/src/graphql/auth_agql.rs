@@ -21,12 +21,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use agql_auth::{
-    AssuranceEvaluationState, AssurancePolicyId, AssurancePolicySet, AssuranceRequirement,
-    AuthPrincipal, Clock, MfaAcceptance,
+    ApiTokenPrincipal, AssuranceEvaluationState, AssurancePolicyId, AssurancePolicySet,
+    AssuranceRequirement, AuthPrincipal, AuthUser, Clock, MfaAcceptance,
 };
 use async_graphql::ErrorExtensions;
 
-use crate::graphql::assurance::{AssuranceActorClass, AssuranceRequirementEvaluator};
+use crate::graphql::assurance::{
+    AssuranceActorClass, AssuranceCheck, AssuranceRequirementEvaluator,
+};
 use crate::graphql::auth::{AuthAssurance, AuthSubject};
 use crate::graphql::orm::DbAuthContext;
 
@@ -264,14 +266,14 @@ impl fmt::Debug for AgqlAssuranceEvaluator {
 impl AssuranceRequirementEvaluator for AgqlAssuranceEvaluator {
     fn enforce(
         &self,
-        ctx: &async_graphql::Context<'_>,
+        check: &AssuranceCheck<'_>,
         _actor_class: AssuranceActorClass,
         policy_id: &str,
     ) -> async_graphql::Result<()> {
         let policy_id = AssurancePolicyId::new(policy_id)
             .map_err(|_| assurance_graphql_error("forbidden", "FORBIDDEN"))?;
         let requirement = AssuranceRequirement::new(policy_id);
-        let principal = agql_auth::principal_from_ctx_opt(ctx);
+        let principal = principal_from_check(check);
         let evaluation = match principal.as_ref() {
             None => self
                 .policies
@@ -302,6 +304,20 @@ impl AssuranceRequirementEvaluator for AgqlAssuranceEvaluator {
             }
         }
     }
+}
+
+/// The request principal, read exactly as `agql_auth::principal_from_ctx_opt`
+/// reads it, from data the runtime pre-pass can also see.
+fn principal_from_check(check: &AssuranceCheck<'_>) -> Option<AuthPrincipal> {
+    if let Some(principal) = check.data_opt::<AuthPrincipal>() {
+        return Some(principal.clone());
+    }
+    if let Some(user) = check.data_opt::<AuthUser>() {
+        return Some(AuthPrincipal::User(user.clone()));
+    }
+    check
+        .data_opt::<ApiTokenPrincipal>()
+        .map(|principal| AuthPrincipal::ApiToken(principal.clone()))
 }
 
 fn assurance_graphql_error(message: &'static str, code: &'static str) -> async_graphql::Error {
